@@ -804,6 +804,8 @@ I can help you analyze Perfetto traces. Here are some things you can ask:
 * \`/analyze\` - Analyze current selection
 * \`/anr\` - Find ANRs
 * \`/jank\` - Find janky frames
+* \`/slow\` - Analyze slow operations (backend)
+* \`/memory\` - Analyze memory usage (backend)
 * \`/pins\` - View pinned query results
 * \`/clear\` - Clear chat history
 * \`/help\` - Show this help
@@ -922,6 +924,12 @@ Click ⚙️ to change settings.`;
           content: this.getHelpMessage(),
           timestamp: Date.now(),
         });
+        break;
+      case '/slow':
+        await this.handleSlowCommand();
+        break;
+      case '/memory':
+        await this.handleMemoryCommand();
         break;
       case '/settings':
         this.openSettings();
@@ -1416,6 +1424,182 @@ Keep your analysis concise and actionable.`;
     m.redraw();
   }
 
+  private async handleSlowCommand() {
+    // Check if trace is uploaded to backend
+    if (!this.state.backendTraceId) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: '⚠️ **Trace not uploaded to backend.**\n\nClick the 📤 button to upload this trace to the backend first. The `/slow` command requires backend analysis.',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    this.state.isLoading = true;
+    m.redraw();
+
+    try {
+      // Call backend slow analysis endpoint
+      const apiUrl = `${this.state.settings.backendUrl}/api/trace-analysis/analyze/slow`;
+      console.log('[AIPanel] Calling slow analysis API:', apiUrl, 'with traceId:', this.state.backendTraceId);
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          traceId: this.state.backendTraceId,
+        }),
+      });
+
+      console.log('[AIPanel] Slow analysis API response status:', response.status);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (errorData.code === 'TRACE_NOT_UPLOADED') {
+          this.addMessage({
+            id: this.generateId(),
+            role: 'system',
+            content: '⚠️ **Trace not found in backend.**\n\nPlease upload the trace again using the 📤 button.',
+            timestamp: Date.now(),
+          });
+          this.state.backendTraceId = null;
+          return;
+        }
+        throw new Error(`API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('[AIPanel] Slow analysis API response data:', data);
+
+      if (!data.success) {
+        throw new Error(data.error || 'Slow analysis failed');
+      }
+
+      // Display results with SQL result table if available
+      if (data.data?.result) {
+        const result = data.data.result;
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: data.data.summary || `**Slow operations analysis complete.** Found **${result.rowCount}** slow operations.`,
+          timestamp: Date.now(),
+          sqlResult: {
+            columns: result.columns || [],
+            rows: result.rows || [],
+            rowCount: result.rowCount || 0,
+            query: result.query || '',
+          },
+        });
+      } else {
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: data.data?.summary || '**Slow operations analysis complete.** No slow operations detected.',
+          timestamp: Date.now(),
+        });
+      }
+    } catch (e: any) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `**Error:** ${e.message || 'Failed to analyze slow operations'}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    this.state.isLoading = false;
+    m.redraw();
+  }
+
+  private async handleMemoryCommand() {
+    // Check if trace is uploaded to backend
+    if (!this.state.backendTraceId) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: '⚠️ **Trace not uploaded to backend.**\n\nClick the 📤 button to upload this trace to the backend first. The `/memory` command requires backend analysis.',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    this.state.isLoading = true;
+    m.redraw();
+
+    try {
+      // Call backend memory analysis endpoint
+      const apiUrl = `${this.state.settings.backendUrl}/api/trace-analysis/analyze/memory`;
+      console.log('[AIPanel] Calling memory analysis API:', apiUrl, 'with traceId:', this.state.backendTraceId);
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          traceId: this.state.backendTraceId,
+        }),
+      });
+
+      console.log('[AIPanel] Memory analysis API response status:', response.status);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (errorData.code === 'TRACE_NOT_UPLOADED') {
+          this.addMessage({
+            id: this.generateId(),
+            role: 'system',
+            content: '⚠️ **Trace not found in backend.**\n\nPlease upload the trace again using the 📤 button.',
+            timestamp: Date.now(),
+          });
+          this.state.backendTraceId = null;
+          return;
+        }
+        throw new Error(`API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('[AIPanel] Memory analysis API response data:', data);
+
+      if (!data.success) {
+        throw new Error(data.error || 'Memory analysis failed');
+      }
+
+      // Display results with SQL result table if available
+      if (data.data?.result) {
+        const result = data.data.result;
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: data.data.summary || `**Memory analysis complete.** Found **${result.rowCount}** memory allocations.`,
+          timestamp: Date.now(),
+          sqlResult: {
+            columns: result.columns || [],
+            rows: result.rows || [],
+            rowCount: result.rowCount || 0,
+            query: result.query || '',
+          },
+        });
+      } else {
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: data.data?.summary || '**Memory analysis complete.** No memory data detected.',
+          timestamp: Date.now(),
+        });
+      }
+    } catch (e: any) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `**Error:** ${e.message || 'Failed to analyze memory'}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    this.state.isLoading = false;
+    m.redraw();
+  }
+
   private async handleChatMessage(message: string) {
     console.log('[AIPanel] handleChatMessage called with:', message);
     console.log('[AIPanel] backendTraceId:', this.state.backendTraceId);
@@ -1672,6 +1856,8 @@ Keep your analysis concise and actionable.`;
 | \`/analyze\` | Analyze current selection |
 | \`/anr\` | Find ANRs |
 | \`/jank\` | Find janky frames |
+| \`/slow\` | Analyze slow operations (backend) |
+| \`/memory\` | Analyze memory usage (backend) |
 | \`/export [csv|json]\` | Export session results |
 | \`/pins\` | View pinned query results |
 | \`/clear\` | Clear chat history |
@@ -1802,6 +1988,9 @@ Keep your analysis concise and actionable.`;
    * Export SQL result to CSV or JSON
    */
   private async exportResult(result: SqlQueryResult, format: 'csv' | 'json'): Promise<void> {
+    this.state.isLoading = true;
+    m.redraw();
+
     try {
       const response = await fetch(`${this.state.settings.backendUrl}/api/export/result`, {
         method: 'POST',
@@ -1851,6 +2040,9 @@ Keep your analysis concise and actionable.`;
         content: `**Export failed:** ${e.message}`,
         timestamp: Date.now(),
       });
+    } finally {
+      this.state.isLoading = false;
+      m.redraw();
     }
   }
 
@@ -1875,6 +2067,9 @@ Keep your analysis concise and actionable.`;
       });
       return;
     }
+
+    this.state.isLoading = true;
+    m.redraw();
 
     try {
       const response = await fetch(`${this.state.settings.backendUrl}/api/export/session`, {
@@ -1918,6 +2113,9 @@ Keep your analysis concise and actionable.`;
         content: `**Export failed:** ${e.message}`,
         timestamp: Date.now(),
       });
+    } finally {
+      this.state.isLoading = false;
+      m.redraw();
     }
   }
 
