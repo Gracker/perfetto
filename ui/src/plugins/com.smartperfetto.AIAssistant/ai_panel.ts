@@ -84,7 +84,7 @@ const DEFAULT_SETTINGS: AISettings = {
   openaiModel: 'gpt-4o',
   openaiApiKey: '',
   deepseekModel: 'deepseek-chat',
-  deepseekApiKey: 'sk-e65934c671e543619c7232abd232b431',
+  deepseekApiKey: '',  // Set your API key in settings
   backendUrl: 'http://localhost:3000',
   maxHistory: 10,
 };
