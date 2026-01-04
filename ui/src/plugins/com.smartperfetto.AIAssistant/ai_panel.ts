@@ -16,8 +16,13 @@ import m from 'mithril';
 import {AIService, OllamaService, OpenAIService, BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
 import {SqlResultTable} from './sql_result_table';
+import {NavigationBookmarkBar, NavigationBookmark} from './navigation_bookmark_bar';
 import {Engine} from '../../trace_processor/engine';
 import {Trace} from '../../public/trace';
+import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
+import {AppImpl} from '../../core/app_impl';
+import {getBackendUploader} from '../../core/backend_uploader';
+import {TraceSource} from '../../core/trace_source';
 
 export interface AIPanelAttrs {
   engine: Engine;
@@ -31,6 +36,7 @@ export interface Message {
   timestamp: number;
   sqlResult?: SqlQueryResult;
   query?: string;
+  reportUrl?: string;  // HTML 报告链接
 }
 
 export interface SqlQueryResult {
@@ -38,6 +44,21 @@ export interface SqlQueryResult {
   rows: any[][];
   rowCount: number;
   query?: string;
+  sectionTitle?: string;  // For skill_section messages - shows title in table header
+  // 可展开行数据（用于 iterator 类型的结果）
+  expandableData?: Array<{
+    item: Record<string, any>;
+    result: {
+      success: boolean;
+      sections?: Record<string, any>;
+      error?: string;
+    };
+  }>;
+  // 汇总报告
+  summary?: {
+    title: string;
+    content: string;
+  };
 }
 
 interface AIPanelState {
@@ -52,7 +73,12 @@ interface AIPanelState {
   lastQuery: string;
   pinnedResults: PinnedResult[];
   backendTraceId: string | null;
-  isUploading: boolean;
+  // isUploading removed - auto-upload now happens in load_trace.ts
+  bookmarks: NavigationBookmark[];  // 新增：导航书签
+  currentTraceFingerprint: string | null;  // 当前 Trace 指纹，用于检测 Trace 变化
+  currentSessionId: string | null;  // 当前 Session ID
+  isRetryingBackend: boolean;  // 正在重试连接后端
+  retryError: string | null;  // 重试连接的错误信息
 }
 
 interface PinnedResult {
@@ -92,320 +118,32 @@ const DEFAULT_SETTINGS: AISettings = {
 // Storage key for settings
 const SETTINGS_KEY = 'smartperfetto-ai-settings';
 const HISTORY_KEY = 'smartperfetto-ai-history';
+const SESSIONS_KEY = 'smartperfetto-ai-sessions';
+// Temporary storage for backendTraceId during trace reload
+const PENDING_BACKEND_TRACE_KEY = 'smartperfetto-pending-backend-trace';
 
-// Theme colors
-const THEME = {
-  primary: '#6366f1',
-  primaryHover: '#4f46e5',
-  primaryLight: 'rgba(99, 102, 241, 0.1)',
-  success: '#10b981',
-  warning: '#f59e0b',
-  error: '#ef4444',
-  surface: '#1e1e2e',
-  surfaceLight: '#2a2a3e',
-  border: '#3a3a4e',
-  text: '#e0e0e0',
-  textSecondary: '#a0a0b0',
-  textMuted: '#707080',
-};
+// Session 数据结构
+export interface AISession {
+  sessionId: string;
+  traceFingerprint: string;
+  traceName: string;              // 显示名（如文件名）
+  backendTraceId?: string;        // 后端 session ID
+  createdAt: number;
+  lastActiveAt: number;
+  messages: Message[];
+  summary?: string;               // AI 生成的对话摘要
+  pinnedResults?: PinnedResult[]; // 固定的查询结果
+  bookmarks?: NavigationBookmark[]; // 导航书签
+}
 
-// Animation keyframes
-const ANIMATIONS = {
-  fadeIn: 'ai-fade-in 0.2s ease-out',
-  slideIn: 'ai-slide-in 0.3s ease-out',
-  slideUp: 'ai-slide-up 0.3s ease-out',
-  pulse: 'ai-pulse 2s infinite',
-};
+// Sessions 存储结构
+interface SessionsStorage {
+  // 按 trace fingerprint 索引的 sessions
+  byTrace: Record<string, AISession[]>;
+}
 
-// Inline styles - completely redesigned
-const STYLES = {
-  panel: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    height: '100%',
-    overflow: 'hidden' as const,
-    backgroundColor: 'var(--background)',
-    color: 'var(--text)',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif',
-  },
-
-  // Header - compact
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between' as const,
-    alignItems: 'center' as const,
-    padding: '8px 12px',
-    minHeight: '36px',
-    borderBottom: '1px solid var(--border)',
-    background: 'var(--background2)',
-  },
-  headerLeft: {
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '8px',
-  },
-  headerIcon: {
-    fontSize: '16px',
-  },
-  titleText: {
-    fontSize: '13px',
-    fontWeight: '600',
-    color: 'var(--text)',
-    margin: '0',
-  },
-  statusDot: {
-    width: '6px',
-    height: '6px',
-    borderRadius: '50%',
-    background: THEME.success,
-    display: 'inline-block',
-  },
-  statusText: {
-    fontSize: '11px',
-    color: 'var(--text-secondary)',
-  },
-  headerRight: {
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '2px',
-  },
-  iconBtn: {
-    width: '28px',
-    height: '28px',
-    borderRadius: '6px',
-    background: 'transparent',
-    border: 'none',
-    color: 'var(--text-secondary)',
-    fontSize: '14px',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    transition: 'all 0.15s ease',
-  },
-
-  // Messages area
-  messages: {
-    flex: 1,
-    overflowY: 'auto' as const,
-    padding: '12px',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '12px',
-  },
-
-  // Message containers
-  messageUser: {
-    alignSelf: 'flex-end' as const,
-    display: 'flex',
-    gap: '12px',
-    flexDirection: 'row-reverse' as const,
-    maxWidth: '75%',
-    animation: ANIMATIONS.slideIn,
-  },
-  messageAssistant: {
-    alignSelf: 'flex-start' as const,
-    display: 'flex',
-    gap: '12px',
-    maxWidth: '85%',
-    animation: ANIMATIONS.slideIn,
-  },
-
-  // Avatar
-  avatar: {
-    width: '28px',
-    height: '28px',
-    borderRadius: '8px',
-    display: 'flex',
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    fontSize: '14px',
-    flexShrink: 0,
-  },
-  avatarUser: {
-    background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-  },
-  avatarAssistant: {
-    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-  },
-
-  // Message content
-  messageContentUser: {
-    padding: '10px 14px',
-    background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-    color: '#ffffff',
-    borderRadius: '14px 14px 4px 14px',
-    wordWrap: 'break-word' as const,
-    fontSize: '13px',
-    lineHeight: '1.4',
-  },
-  messageContentAssistant: {
-    padding: '10px 14px',
-    backgroundColor: 'var(--background2)',
-    border: '1px solid var(--border)',
-    borderRadius: '14px 14px 14px 4px',
-    wordWrap: 'break-word' as const,
-    fontSize: '13px',
-    lineHeight: '1.4',
-  },
-
-  // Message meta
-  messageMeta: {
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '8px',
-    marginTop: '8px',
-    paddingTop: '8px',
-    borderTop: '1px solid rgba(255, 255, 255, 0.1)',
-  },
-  messageMetaText: {
-    fontSize: '12px',
-    color: 'var(--text-secondary)',
-  },
-  messageActionBtn: {
-    padding: '4px 10px',
-    borderRadius: '6px',
-    background: 'transparent',
-    border: '1px solid var(--border)',
-    color: 'var(--text-secondary)',
-    fontSize: '12px',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '4px',
-    transition: 'all 0.2s ease',
-  },
-
-  // Typing indicator
-  loading: {
-    display: 'flex',
-    gap: '6px',
-    padding: '12px 16px',
-  },
-  typing: {
-    width: '10px',
-    height: '10px',
-    borderRadius: '50%',
-    backgroundColor: 'var(--primary)',
-    animation: 'ai-typing 1.4s infinite ease-in-out',
-    boxShadow: '0 0 8px rgba(99, 102, 241, 0.5)',
-  },
-
-  // Input area
-  inputArea: {
-    padding: '10px 12px',
-    borderTop: '1px solid var(--border)',
-    background: 'var(--background2)',
-  },
-  inputWrapper: {
-    display: 'flex',
-    gap: '8px',
-    alignItems: 'flex-end',
-  },
-  input: {
-    flex: 1,
-    minHeight: '38px',
-    maxHeight: '100px',
-    padding: '10px 14px',
-    border: '1px solid var(--border)',
-    borderRadius: '10px',
-    backgroundColor: 'var(--background)',
-    color: 'var(--text)',
-    fontFamily: 'inherit',
-    fontSize: '13px',
-    lineHeight: '1.4',
-    resize: 'none' as const,
-    transition: 'all 0.15s ease',
-  },
-  inputFocus: {
-    borderColor: 'var(--primary)',
-  },
-  sendBtn: {
-    width: '38px',
-    height: '38px',
-    borderRadius: '14px',
-    border: 'none',
-    backgroundColor: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-    color: '#ffffff',
-    fontSize: '18px',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    transition: 'all 0.2s ease',
-    boxShadow: '0 4px 14px rgba(99, 102, 241, 0.3)',
-  },
-  sendBtnDisabled: {
-    opacity: '0.5',
-    cursor: 'not-allowed',
-  },
-
-  // Warning
-  warning: {
-    padding: '12px 16px',
-    background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.15) 0%, rgba(239, 68, 68, 0.1) 100%)',
-    border: '1px solid rgba(245, 158, 11, 0.3)',
-    borderRadius: '10px',
-    fontSize: '13px',
-    color: THEME.warning,
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '8px',
-  },
-
-  // SQL result card
-  sqlResultCard: {
-    marginTop: '16px',
-    borderRadius: '12px',
-    border: '1px solid var(--border)',
-    overflow: 'hidden',
-    background: 'var(--background2)',
-    boxShadow: '0 4px 16px rgba(0, 0, 0, 0.08)',
-  },
-  sqlResultHeader: {
-    display: 'flex',
-    justifyContent: 'space-between' as const,
-    alignItems: 'center' as const,
-    padding: '14px 18px',
-    background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(139, 92, 246, 0.04) 100%)',
-    borderBottom: '1px solid var(--border)',
-  },
-  sqlResultTitle: {
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '8px',
-    fontSize: '13px',
-    fontWeight: '600',
-    color: 'var(--text)',
-  },
-  sqlResultActions: {
-    display: 'flex',
-    gap: '6px',
-  },
-  sqlResultActionBtn: {
-    padding: '6px 12px',
-    borderRadius: '6px',
-    background: 'transparent',
-    border: '1px solid var(--border)',
-    color: 'var(--text-secondary)',
-    fontSize: '12px',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center' as const,
-    gap: '4px',
-    transition: 'all 0.2s ease',
-  },
-  sqlResultQuery: {
-    padding: '12px 18px',
-    background: 'rgba(0, 0, 0, 0.2)',
-    borderBottom: '1px solid var(--border)',
-    fontFamily: 'monospace',
-    fontSize: '12px',
-    color: '#a5b4fc',
-    overflowX: 'auto' as const,
-    whiteSpace: 'pre-wrap' as const,
-  },
-};
+// All styles are now in styles.scss using CSS classes
+// Removed inline STYLES, THEME, ANIMATIONS objects for better maintainability
 
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
@@ -422,7 +160,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     lastQuery: '',
     pinnedResults: [],
     backendTraceId: null,
-    isUploading: false,
+    bookmarks: [],  // 初始化为空数组
+    currentTraceFingerprint: null,  // 当前 Trace 指纹
+    currentSessionId: null,  // 当前 Session ID
+    isRetryingBackend: false,  // 正在重试连接后端
+    retryError: null,  // 重试连接的错误信息
   };
 
   private onClearChat?: () => void;
@@ -430,56 +172,347 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
 
-  oncreate(vnode: m.VnodeDOM<AIPanelAttrs>) {
+  // oninit is called before view(), so AI service is initialized before first render
+  oninit(vnode: m.Vnode<AIPanelAttrs>) {
     this.engine = vnode.attrs.engine;
     this.trace = vnode.attrs.trace;
 
     // Load settings from localStorage
     this.loadSettings();
 
-    // Load chat history from localStorage
-    this.loadHistory();
-
-    // Load pinned results from localStorage
-    this.loadPinnedResults();
-
-    // Initialize AI service
+    // Initialize AI service - must happen before first render
     this.initAIService();
 
-    // Listen for custom events
+    // 检测 Trace 变化并加载对应的历史
+    this.handleTraceChange();
+  }
+
+  /**
+   * 生成 Trace 指纹，用于识别唯一的 Trace
+   * 基于 traceInfo 的 start/end 和 traceTitle
+   */
+  private getTraceFingerprint(): string | null {
+    if (!this.trace) return null;
+    const info = this.trace.traceInfo;
+    // 使用 start + end + title 生成指纹
+    return `${info.start}_${info.end}_${info.traceTitle || 'untitled'}`;
+  }
+
+  /**
+   * 检测 Trace 变化，如果变化则重置状态
+   */
+  private handleTraceChange(): void {
+    const newFingerprint = this.getTraceFingerprint();
+    const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
+
+    // Auto-RPC: Try to get backendTraceId from AppImpl (set by auto-upload in load_trace.ts)
+    const appBackendTraceId = (AppImpl.instance as unknown as {backendTraceId?: string}).backendTraceId;
+
+    console.log('[AIPanel] Trace fingerprint check:', {
+      new: newFingerprint,
+      current: this.state.currentTraceFingerprint,
+      backendTraceId: this.state.backendTraceId,
+      appBackendTraceId,
+      engineMode: this.engine?.mode,
+      engineInRpcMode,
+    });
+
+    // If we have a backendTraceId from AppImpl, use it
+    if (appBackendTraceId && !this.state.backendTraceId) {
+      console.log('[AIPanel] Using backendTraceId from auto-upload:', appBackendTraceId);
+      this.state.backendTraceId = appBackendTraceId;
+    }
+
+    // 如果指纹没变且已经有 session，不需要重新加载
+    if (newFingerprint && newFingerprint === this.state.currentTraceFingerprint && this.state.currentSessionId) {
+      console.log('[AIPanel] Same trace, keeping current session');
+      // 如果在 RPC 模式但没有 backendTraceId，尝试自动注册
+      if (engineInRpcMode && !this.state.backendTraceId) {
+        this.autoRegisterWithBackend();
+      }
+      return;
+    }
+
+    // 更新当前指纹
+    this.state.currentTraceFingerprint = newFingerprint;
+
+    if (!newFingerprint) {
+      // 没有 trace，重置状态
+      this.resetStateForNewTrace();
+      return;
+    }
+
+    // 尝试迁移旧格式数据
+    this.migrateOldHistoryToSession();
+
+    // 总是创建新 Session（不自动恢复历史）
+    // 用户可以通过侧边栏点击历史 Session 来恢复
+    console.log('[AIPanel] Creating new session for trace');
+    this.createNewSession();
+
+    // 显示欢迎消息
+    if (engineInRpcMode) {
+      if (this.state.backendTraceId) {
+        // Auto-upload succeeded, show welcome message
+        this.addRpcModeWelcomeMessage();
+      } else {
+        // Try to register with backend
+        this.autoRegisterWithBackend();
+      }
+    } else {
+      // Not in RPC mode, show backend unavailable message
+      this.addBackendUnavailableMessage();
+    }
+  }
+
+  /**
+   * 当已经在 HTTP RPC 模式时，自动向后端注册当前 trace
+   * 这样后端可以执行 SQL 查询
+   */
+  private async autoRegisterWithBackend(): Promise<void> {
+    const rpcPort = HttpRpcEngine.rpcPort;
+    console.log('[AIPanel] Auto-registering with backend, RPC port:', rpcPort);
+
+    // First, check if there's a pending backendTraceId from a recent upload
+    const pendingTraceId = this.recoverPendingBackendTrace(parseInt(rpcPort, 10));
+    if (pendingTraceId) {
+      console.log('[AIPanel] Recovered pending backend traceId:', pendingTraceId);
+      this.state.backendTraceId = pendingTraceId;
+
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `✅ **已进入 RPC 模式**\n\nTrace 已成功上传并通过 HTTP RPC (端口 ${rpcPort}) 加载。\nAI 助手已就绪，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+        timestamp: Date.now(),
+      });
+
+      this.saveCurrentSession();
+      m.redraw();
+      return;
+    }
+
+    try {
+      // 调用后端 API 注册当前 RPC 连接
+      const response = await fetch(`${this.state.settings.backendUrl}/api/traces/register-rpc`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          port: parseInt(rpcPort, 10),
+          traceName: this.trace?.traceInfo?.traceTitle || 'External RPC Trace',
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.traceId) {
+          this.state.backendTraceId = data.traceId;
+          console.log('[AIPanel] Auto-registered with backend, traceId:', data.traceId);
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `✅ **已连接到 RPC 模式**\n\n检测到当前 Trace 已通过 HTTP RPC (端口 ${rpcPort}) 加载。\nAI 助手现在可以分析这份 Trace 数据了。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+            timestamp: Date.now(),
+          });
+
+          this.saveCurrentSession();
+          m.redraw();
+          return;
+        }
+      }
+
+      // 注册失败时，显示基本欢迎消息
+      console.log('[AIPanel] Auto-registration failed, showing welcome message');
+      this.addRpcModeWelcomeMessage();
+    } catch (error) {
+      console.log('[AIPanel] Auto-registration error:', error);
+      this.addRpcModeWelcomeMessage();
+    }
+  }
+
+  /**
+   * 手动重试连接后端 - 用于从 cache 加载的 Trace
+   * 当后端启动后，用户可以点击"重试连接"按钮来上传 Trace 并切换到 RPC 模式
+   */
+  private async retryBackendConnection(): Promise<void> {
+    if (!this.trace || this.state.isRetryingBackend) {
+      return;
+    }
+
+    console.log('[AIPanel] Manually retrying backend connection...');
+    this.state.isRetryingBackend = true;
+    this.state.retryError = null;
+    m.redraw();
+
+    try {
+      const uploader = getBackendUploader(this.state.settings.backendUrl);
+
+      // 首先检查后端是否可用
+      const backendAvailable = await uploader.checkAvailable();
+      if (!backendAvailable) {
+        throw new Error('AI 后端服务未启动。请先运行 `cd backend && npm run dev` 启动后端服务。');
+      }
+
+      // 获取当前 Trace 的 source
+      const traceInfo = this.trace.traceInfo as unknown as {source: TraceSource};
+      const traceSource = traceInfo.source;
+      console.log('[AIPanel] Retrying with trace source type:', traceSource.type);
+
+      // 尝试上传 Trace
+      const uploadResult = await uploader.upload(traceSource);
+
+      if (!uploadResult.success || !uploadResult.port) {
+        throw new Error(uploadResult.error || '上传 Trace 失败');
+      }
+
+      console.log('[AIPanel] Upload successful, port:', uploadResult.port);
+
+      // 上传成功，需要重新加载 Trace 以使用新的 RPC 端口
+      // 显示提示信息
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: '🔄 正在切换到 RPC 模式...',
+        timestamp: Date.now(),
+      });
+
+      // 设置 RPC 端口并重新加载 Trace
+      HttpRpcEngine.rpcPort = String(uploadResult.port);
+
+      // 存储 traceId 用于后续注册
+      if (uploadResult.traceId) {
+        this.state.backendTraceId = uploadResult.traceId;
+        // 存储到 localStorage 以便在 reload 后恢复
+        try {
+          localStorage.setItem(
+            PENDING_BACKEND_TRACE_KEY,
+            JSON.stringify({
+              traceId: uploadResult.traceId,
+              port: uploadResult.port,
+              timestamp: Date.now(),
+            }),
+          );
+        } catch (e) {
+          console.log('[AIPanel] Failed to store pending trace:', e);
+        }
+      }
+
+      // 使用 AppImpl 重新打开 Trace（会使用新的 RPC 端口）
+      AppImpl.instance.openTraceFromBuffer({
+        buffer: (traceSource as any).buffer,
+        title: this.trace.traceInfo.traceTitle,
+        fileName: (traceSource as any).fileName,
+        url: (traceSource as any).url,
+      });
+
+      // 重置重试状态
+      this.state.isRetryingBackend = false;
+      m.redraw();
+
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('[AIPanel] Retry backend connection failed:', errorMsg);
+      this.state.retryError = errorMsg;
+      this.state.isRetryingBackend = false;
+      m.redraw();
+    }
+  }
+
+  /**
+   * 从临时存储中恢复 pending backendTraceId
+   * 用于在 trace reload 后恢复上传时设置的 traceId
+   */
+  private recoverPendingBackendTrace(currentPort: number): string | null {
+    try {
+      const stored = localStorage.getItem(PENDING_BACKEND_TRACE_KEY);
+      if (!stored) return null;
+
+      const data = JSON.parse(stored);
+
+      // Check if the stored data matches current port and is recent (within 60 seconds)
+      if (data.port === currentPort && (Date.now() - data.timestamp) < 60000) {
+        // Clear the pending data after recovery
+        localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
+        console.log('[AIPanel] Recovered and cleared pending backend trace');
+        return data.traceId;
+      }
+
+      // If too old or port mismatch, clear it
+      if ((Date.now() - data.timestamp) > 60000) {
+        localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
+        console.log('[AIPanel] Cleared stale pending backend trace');
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * RPC 模式欢迎消息（无需上传）
+   */
+  private addRpcModeWelcomeMessage(): void {
+    const rpcPort = HttpRpcEngine.rpcPort;
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: `✅ **AI 助手已就绪**\n\nTrace 已通过 HTTP RPC (端口 ${rpcPort}) 加载。\n前后端共享同一个 trace_processor，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+      timestamp: Date.now(),
+    });
+    m.redraw();
+  }
+
+  /**
+   * 后端不可用时的提示消息
+   */
+  private addBackendUnavailableMessage(): void {
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: `⚠️ **AI 后端未连接**\n\n无法连接到 AI 分析后端 (${this.state.settings.backendUrl})。\n\n**可能的原因：**\n- 后端服务未启动\n- 网络连接问题\n\n**解决方法：**\n1. 确保后端服务正在运行：\n   \`\`\`bash\n   cd backend && npm run dev\n   \`\`\`\n2. 重新打开 Trace 文件\n\nTrace 已加载到 WASM 引擎，但 AI 分析功能不可用。`,
+      timestamp: Date.now(),
+    });
+    m.redraw();
+  }
+
+  /**
+   * 重置状态，准备迎接新 Trace
+   */
+  private resetStateForNewTrace(): void {
+    this.state.messages = [];
+    this.state.commandHistory = [];
+    this.state.historyIndex = -1;
+    this.state.backendTraceId = null;
+    this.state.pinnedResults = [];
+    this.state.bookmarks = [];
+    this.state.lastQuery = '';
+    this.state.currentSessionId = null;
+
+    // 如果有有效的 trace 指纹，创建新 session
+    if (this.state.currentTraceFingerprint) {
+      this.createNewSession();
+    }
+
+    // 保存到旧的 history 存储（向后兼容）
+    this.saveHistory();
+    // 显示欢迎消息（进入 RPC 模式界面）
+    this.addWelcomeMessage();
+  }
+
+  oncreate(_vnode: m.VnodeDOM<AIPanelAttrs>) {
+    // Listen for custom events (requires DOM)
     this.onClearChat = () => this.clearChat();
     this.onOpenSettings = () => this.openSettings();
     window.addEventListener('ai-assistant:clear-chat', this.onClearChat);
     window.addEventListener('ai-assistant:open-settings', this.onOpenSettings);
 
-    // Add welcome message if no history
-    if (this.state.messages.length === 0) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: this.getWelcomeMessage(),
-        timestamp: Date.now(),
-      });
-    }
-
-    // Focus input
+    // Focus input (requires DOM)
     setTimeout(() => {
       const textarea = document.getElementById('ai-input') as HTMLTextAreaElement;
       if (textarea) textarea.focus();
     }, 100);
-
-    // Add animation keyframes
-    if (!document.getElementById('ai-animations')) {
-      const style = document.createElement('style');
-      style.id = 'ai-animations';
-      style.textContent = `
-        @keyframes ai-typing {
-          0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
-          40% { transform: scale(1); opacity: 1; }
-        }
-      `;
-      document.head.appendChild(style);
-    }
+    // Animation keyframes are now defined in styles.scss
   }
 
   onremove() {
@@ -491,13 +524,22 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
   }
 
-  view() {
+  view(vnode: m.Vnode<AIPanelAttrs>) {
     const providerLabel = this.state.settings.provider.charAt(0).toUpperCase() + this.state.settings.provider.slice(1);
     const isConnected = this.state.aiService !== null;
+    // Check RPC mode: engine must be in HTTP_RPC mode
+    // backendTraceId alone is not sufficient - it could be stale from an old session
+    const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
+    // We're only in RPC mode if the engine is actually using HTTP RPC
+    // This prevents showing chat UI when loading a new trace that isn't in RPC mode yet
+    const isInRpcMode = engineInRpcMode;
+
+    // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
+    const sessions = isInRpcMode ? this.getCurrentTraceSessions() : [];
+    const currentIndex = sessions.findIndex(s => s.sessionId === this.state.currentSessionId);
 
     return m(
-      'div',
-      {style: STYLES.panel},
+      'div.ai-panel',
       [
         // Settings Modal
         this.state.showSettings
@@ -510,53 +552,104 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           : null,
 
         // Header - compact
-        m('div', {style: STYLES.header}, [
-          m('div', {style: STYLES.headerLeft}, [
-            m('span', {style: STYLES.headerIcon}, '🤖'),
-            m('span', {style: STYLES.titleText}, 'AI'),
-            m('span', {style: {...STYLES.statusDot, background: isConnected ? THEME.success : THEME.warning}}),
-            m('span', {style: STYLES.statusText}, providerLabel),
+        m('div.ai-header', [
+          m('div.ai-header-left', [
+            m('i.pf-icon.ai-header-icon', 'auto_awesome'),
+            m('span.ai-header-title', 'AI Assistant'),
+            m('span.ai-status-dot', {
+              class: isConnected ? 'connected' : 'disconnected',
+            }),
+            m('span.ai-status-text', providerLabel),
             // Backend trace status
-            this.state.backendTraceId
-              ? m('span', {
-                  style: {...STYLES.statusDot, background: THEME.success, marginLeft: '8px'},
-                  title: `Trace uploaded to backend: ${this.state.backendTraceId}`,
-                }, '●')
+            isInRpcMode
+              ? m('span.ai-status-dot.backend', {
+                  title: `Trace uploaded: ${this.state.backendTraceId}`,
+                })
               : null,
-            this.state.backendTraceId
-              ? m('span', {style: {...STYLES.statusText, fontSize: '10px', color: THEME.success}}, 'Backend')
+            isInRpcMode
+              ? m('span.ai-status-text.backend', 'RPC')
               : null,
           ]),
-          m('div', {style: STYLES.headerRight}, [
-            // Upload to backend button
-            m('button', {
-              style: {
-                ...STYLES.iconBtn,
-                opacity: this.state.isUploading ? 0.5 : 1,
-                cursor: this.state.isUploading ? 'wait' : 'pointer',
-              },
-              onclick: () => this.uploadTraceToBackend(),
-              title: this.state.backendTraceId
-                ? 'Trace uploaded to backend ✓'
-                : 'Upload trace to backend for AI analysis',
-              disabled: this.state.isUploading,
-            }, this.state.isUploading ? '⏳' : (this.state.backendTraceId ? '☁️' : '📤')),
-            m('button', {
-              style: STYLES.iconBtn,
+          m('div.ai-header-right', [
+            // Connection status indicator (read-only, no upload button in auto-RPC mode)
+            m('span.ai-icon-btn', {
+              title: isInRpcMode
+                ? 'Connected to AI backend'
+                : 'AI backend not connected',
+              style: 'cursor: default;',
+            }, m('i.pf-icon', isInRpcMode ? 'cloud_done' : 'cloud_off')),
+            m('button.ai-icon-btn', {
               onclick: () => this.clearChat(),
               title: 'New Chat',
-            }, '✕'),
-            m('button', {
-              style: STYLES.iconBtn,
+            }, m('i.pf-icon', 'add_comment')),
+            m('button.ai-icon-btn', {
               onclick: () => this.openSettings(),
               title: 'Settings',
-            }, '⚙'),
+            }, m('i.pf-icon', 'settings')),
           ]),
         ]),
 
-        // Messages with auto-scroll
-        m('div', {
-          style: STYLES.messages,
+        // Main content area with optional sidebar
+        m('div.ai-content-wrapper', {
+          class: isInRpcMode ? 'with-sidebar' : '',  // 总是显示侧边栏（RPC 模式下）
+        }, [
+          // Left: Main content area
+          m('div.ai-main-content', [
+            // Navigation Bookmark Bar (显示AI识别的关键时间点)
+            this.state.bookmarks.length > 0 && this.trace
+              ? m(NavigationBookmarkBar, {
+                  bookmarks: this.state.bookmarks,
+                  trace: this.trace,
+                  onBookmarkClick: (bookmark, index) => {
+                    console.log(`Jumped to bookmark ${index}: ${bookmark.label}`);
+                  },
+                })
+              : null,
+
+            // Backend Unavailable Dialog - Show when trace is loaded but not in RPC mode
+            // In the new auto-RPC architecture, this means the backend was unavailable during trace load
+            !isInRpcMode
+              ? m('div.ai-rpc-dialog', [
+                  this.state.isRetryingBackend
+                    ? m('div.ai-rpc-dialog-icon.uploading', m('i.pf-icon', 'cloud_upload'))
+                    : m('div.ai-rpc-dialog-icon', m('i.pf-icon', 'cloud_off')),
+                  m('h3.ai-rpc-dialog-title',
+                    this.state.isRetryingBackend ? '正在连接后端...' : 'AI 后端未连接'
+                  ),
+                  m('p.ai-rpc-dialog-desc', [
+                    'Trace 已加载到 WASM 引擎，但无法连接到 AI 后端。',
+                    m('br'),
+                    'AI 分析��能需要后端服务支持。',
+                  ]),
+                  this.state.retryError
+                    ? m('p.ai-rpc-dialog-desc', {style: 'color: var(--chat-error);'}, [
+                        m('i.pf-icon', 'error'),
+                        ' ' + this.state.retryError,
+                      ])
+                    : null,
+                  m('p.ai-rpc-dialog-hint', [
+                    '请确保后端服务正在运行：',
+                    m('br'),
+                    m('code', 'cd backend && npm run dev'),
+                    m('br'),
+                    m('br'),
+                    '然后点击下方按钮重试连接。',
+                  ]),
+                  this.state.isRetryingBackend
+                    ? m('div.ai-upload-progress')
+                    : m('div.ai-rpc-dialog-actions', [
+                        m('button.ai-rpc-dialog-btn.primary', {
+                          onclick: () => this.retryBackendConnection(),
+                        }, [
+                          m('i.pf-icon', 'refresh'),
+                          '重试连接',
+                        ]),
+                      ]),
+                ])
+              : null,
+
+            // Messages with auto-scroll - only show when connected to backend
+            isInRpcMode ? m('div.ai-messages', {
           oncreate: (vnode) => {
             this.messagesContainer = vnode.dom as HTMLElement;
             this.scrollToBottom();
@@ -569,59 +662,97 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           },
         },
           this.state.messages.map((msg) =>
-            m('div', {
-              style: msg.role === 'user' ? STYLES.messageUser : STYLES.messageAssistant,
+            m('div.ai-message', {
+              class: msg.role === 'user' ? 'ai-message-user' : 'ai-message-assistant',
             }, [
               // Avatar
-              m('div', {
-                style: {...STYLES.avatar, ...(msg.role === 'user' ? STYLES.avatarUser : STYLES.avatarAssistant)},
-              }, msg.role === 'user' ? '👤' : '🤖'),
+              m('div.ai-avatar', {
+                class: msg.role === 'user' ? 'ai-avatar-user' : 'ai-avatar-assistant',
+              }, msg.role === 'user'
+                ? 'U'  // User initial
+                : m('i.pf-icon', 'auto_awesome')),
 
               // Message Content
-              m('div', {
-                style: msg.role === 'user' ? STYLES.messageContentUser : STYLES.messageContentAssistant,
+              m('div.ai-bubble', {
+                class: msg.role === 'user' ? 'ai-bubble-user' : 'ai-bubble-assistant',
               }, [
-                m('div', {style: {lineHeight: '1.6'}}, m.trust(this.formatMessage(msg.content))),
+                m('div.ai-message-content', m.trust(this.formatMessage(msg.content))),
+
+                // HTML Report Link (问题1修复)
+                msg.reportUrl ? m('div.ai-report-link', [
+                  m('i.pf-icon', 'description'),
+                  m('a', {
+                    href: msg.reportUrl,
+                    target: '_blank',
+                    rel: 'noopener noreferrer',
+                  }, '查看详细分析报告 (HTML)'),
+                ]) : null,
 
                 // SQL Result
                 (() => {
                   const sqlResult = msg.sqlResult;
                   if (!sqlResult) return null;
                   const query = sqlResult.query || msg.query || '';
-                  return m('div', {style: STYLES.sqlResultCard}, [
-                    m('div', {style: STYLES.sqlResultHeader}, [
-                      m('div', {style: STYLES.sqlResultTitle}, [
-                        m('span', '📊'),
+
+                  // For skill_section messages with sectionTitle, render compact table only
+                  if (sqlResult.sectionTitle) {
+                    return m(SqlResultTable, {
+                      columns: sqlResult.columns,
+                      rows: sqlResult.rows,
+                      rowCount: sqlResult.rowCount,
+                      query: '',  // No SQL display
+                      title: sqlResult.sectionTitle,  // Pass title to table
+                      trace: vnode.attrs.trace,
+                      onPin: (data) => this.handlePin(data),
+                      expandableData: sqlResult.expandableData,
+                      summary: sqlResult.summary,
+                    });
+                  }
+
+                  // Regular SQL result with outer header
+                  return m('div.ai-sql-card', [
+                    m('div.ai-sql-header', [
+                      m('div.ai-sql-title', [
+                        m('i.pf-icon', 'table_chart'),
                         m('span', `${sqlResult.rowCount.toLocaleString()} rows`),
                       ]),
-                      m('div', {style: STYLES.sqlResultActions}, [
-                        m('button', {
-                          style: STYLES.sqlResultActionBtn,
+                      m('div.ai-sql-actions', [
+                        m('button.ai-sql-action-btn', {
                           onclick: () => this.copyToClipboard(query),
-                        }, '📋 Copy'),
+                          title: 'Copy SQL',
+                        }, [
+                          m('i.pf-icon', 'content_copy'),
+                          m('span', 'Copy'),
+                        ]),
                         query
-                          ? m('button', {
-                              style: STYLES.sqlResultActionBtn,
+                          ? m('button.ai-sql-action-btn', {
                               onclick: () => this.handlePin({
                                 query,
                                 columns: sqlResult.columns,
                                 rows: sqlResult.rows.slice(0, 100),
                                 timestamp: Date.now(),
                               }),
-                            }, '📌 Pin')
+                              title: 'Pin result',
+                            }, [
+                              m('i.pf-icon', 'push_pin'),
+                              m('span', 'Pin'),
+                            ])
                           : null,
                       ]),
                     ]),
                     query
-                      ? m('div', {style: STYLES.sqlResultQuery}, query.trim())
+                      ? m('div.ai-sql-query', query.trim())
                       : null,
                     m(SqlResultTable, {
                       columns: sqlResult.columns,
                       rows: sqlResult.rows,
                       rowCount: sqlResult.rowCount,
                       query,
+                      trace: vnode.attrs.trace,  // 传入 trace 对象以支持时间戳跳转
                       onPin: (data) => this.handlePin(data),
                       onExport: (format) => this.exportResult(sqlResult, format),
+                      expandableData: sqlResult.expandableData,
+                      summary: sqlResult.summary,
                     }),
                   ]);
                 })(),
@@ -631,46 +762,57 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
           // Loading Indicator
           this.state.isLoading
-            ? m('div', {style: STYLES.messageAssistant}, [
-                m('div', {style: {...STYLES.avatar, ...STYLES.avatarAssistant}}, '🤖'),
-                m('div', {style: {...STYLES.messageContentAssistant, padding: '16px 20px'}}, [
-                  m('div', {style: STYLES.loading}, [
-                    m('span', {style: STYLES.typing}),
-                    m('span', {style: {...STYLES.typing, animationDelay: '0.16s'}}),
-                    m('span', {style: {...STYLES.typing, animationDelay: '0.32s'}}),
+            ? m('div.ai-message.ai-message-assistant', [
+                m('div.ai-avatar.ai-avatar-assistant', [
+                  m('i.pf-icon', 'auto_awesome'),
+                ]),
+                m('div.ai-bubble.ai-bubble-assistant', [
+                  m('div.ai-typing-indicator', [
+                    m('span.ai-typing-dot'),
+                    m('span.ai-typing-dot'),
+                    m('span.ai-typing-dot'),
                   ]),
                 ]),
               ])
             : null,
-        ),
+        ) : null,
 
-        // Input Area
-        m('div', {style: STYLES.inputArea}, [
-          m('div', {style: STYLES.inputWrapper}, [
-            m('textarea#ai-input', {
-              style: {...STYLES.input, ...(this.state.isLoading || !this.state.aiService ? {opacity: 0.6} : {})},
-              placeholder: 'Ask anything about your trace... (Shift+Enter for new line)',
-              value: this.state.input,
-              oninput: (e: Event) => {
-                this.state.input = (e.target as HTMLTextAreaElement).value;
-                this.state.historyIndex = -1;
-              },
-              onkeydown: (e: KeyboardEvent) => this.handleKeyDown(e),
-              disabled: this.state.isLoading || !this.state.aiService,
-            }),
-            m('button', {
-              style: {...STYLES.sendBtn, ...(this.state.isLoading || !this.state.aiService ? STYLES.sendBtnDisabled : {})},
-              onclick: () => this.sendMessage(),
-              disabled: this.state.isLoading || !this.state.aiService,
-            }, this.state.isLoading ? '⋯' : '➤'),
-          ]),
-          !this.state.aiService
-            ? m('div', {style: STYLES.warning}, [
-                m('span', '⚠️'),
-                m('span', 'AI service not configured. Click ⚙️ to set up.'),
-              ])
+        // Input Area - only show when connected to backend
+            isInRpcMode ? m('div.ai-input-area', [
+              m('div.ai-input-wrapper', [
+                m('textarea#ai-input.ai-input', {
+                  class: this.state.isLoading || !this.state.aiService ? 'disabled' : '',
+                  placeholder: 'Ask anything about your trace...',
+                  value: this.state.input,
+                  oninput: (e: Event) => {
+                    this.state.input = (e.target as HTMLTextAreaElement).value;
+                    this.state.historyIndex = -1;
+                  },
+                  onkeydown: (e: KeyboardEvent) => this.handleKeyDown(e),
+                  disabled: this.state.isLoading || !this.state.aiService,
+                }),
+                m('button.ai-send-btn', {
+                  class: this.state.isLoading || !this.state.aiService ? 'disabled' : '',
+                  onclick: () => this.sendMessage(),
+                  disabled: this.state.isLoading || !this.state.aiService,
+                  title: 'Send (Enter)',
+                }, m('i.pf-icon', this.state.isLoading ? 'more_horiz' : 'send')),
+              ]),
+              m('div.ai-input-hint', 'Press Enter to send, Shift+Enter for new line'),
+              !this.state.aiService
+                ? m('div.ai-warning', [
+                    m('i.pf-icon', 'warning'),
+                    m('span', 'AI service not configured. Click settings to set up.'),
+                  ])
+                : null,
+            ]) : null,
+          ]),  // End of ai-main-content
+
+          // Right: Session History Sidebar (总是显示，RPC 模式下)
+          isInRpcMode
+            ? this.renderSessionSidebar(sessions, currentIndex)
             : null,
-        ]),
+        ]),  // End of ai-content-wrapper
       ]
     );
   }
@@ -703,39 +845,101 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
   }
 
-  private loadHistory() {
+  /**
+   * 从旧的 HISTORY_KEY 迁移数据到新的 Session 格式
+   * 仅在首次加载时调用，用于向后兼容
+   */
+  private migrateOldHistoryToSession(): boolean {
     try {
       const stored = localStorage.getItem(HISTORY_KEY);
-      if (stored) {
-        this.state.messages = JSON.parse(stored);
-        // Restore command history
-        this.state.commandHistory = this.state.messages
-          .filter((m) => m.role === 'user')
-          .map((m) => m.content);
+      if (!stored) return false;
+
+      const parsed = JSON.parse(stored);
+      const messages = Array.isArray(parsed) ? parsed : (parsed.messages || []);
+      const fingerprint = parsed.traceFingerprint || this.state.currentTraceFingerprint;
+
+      // 如果没有消息或没有指纹，不迁移
+      if (messages.length === 0 || !fingerprint) return false;
+
+      // 检查是否已经有这个 trace 的 sessions
+      const existingSessions = this.getSessionsForTrace(fingerprint);
+      if (existingSessions.length > 0) {
+        // 已经有 sessions，不需要迁移
+        return false;
       }
+
+      // 创建迁移的 session
+      console.log('[AIPanel] Migrating old history to new session format');
+      const session: AISession = {
+        sessionId: this.generateId(),
+        traceFingerprint: fingerprint,
+        traceName: this.trace?.traceInfo?.traceTitle || 'Migrated Trace',
+        backendTraceId: parsed.backendTraceId,
+        createdAt: messages[0]?.timestamp || Date.now(),
+        lastActiveAt: messages[messages.length - 1]?.timestamp || Date.now(),
+        messages: messages,
+      };
+
+      // 保存到新格式
+      const storage = this.loadSessionsStorage();
+      if (!storage.byTrace[fingerprint]) {
+        storage.byTrace[fingerprint] = [];
+      }
+      storage.byTrace[fingerprint].push(session);
+      this.saveSessionsStorage(storage);
+
+      console.log('[AIPanel] Migration complete, session:', session.sessionId);
+      return true;
     } catch {
-      // Ignore errors
+      return false;
+    }
+  }
+
+  private addWelcomeMessage() {
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: this.getWelcomeMessage(),
+      timestamp: Date.now(),
+    });
+  }
+
+  private async verifyBackendTrace() {
+    if (!this.state.backendTraceId) return;
+
+    try {
+      const response = await fetch(
+        `${this.state.settings.backendUrl}/api/traces/${this.state.backendTraceId}`
+      );
+      if (!response.ok) {
+        console.log(`[AIPanel] Backend trace ${this.state.backendTraceId} no longer valid, clearing`);
+        this.state.backendTraceId = null;
+        this.saveHistory();
+        m.redraw();
+      }
+    } catch (error) {
+      console.log('[AIPanel] Failed to verify backend trace, clearing:', error);
+      this.state.backendTraceId = null;
+      this.saveHistory();
+      m.redraw();
     }
   }
 
   private saveHistory() {
     try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(this.state.messages));
+      // Save messages, backendTraceId, and trace fingerprint
+      const data = {
+        messages: this.state.messages,
+        backendTraceId: this.state.backendTraceId,
+        traceFingerprint: this.state.currentTraceFingerprint,
+      };
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(data));
     } catch {
       // Ignore errors
     }
   }
 
-  private loadPinnedResults() {
-    try {
-      const stored = localStorage.getItem('smartperfetto-pinned-results');
-      if (stored) {
-        this.state.pinnedResults = JSON.parse(stored);
-      }
-    } catch {
-      // Ignore errors
-    }
-  }
+  // loadPinnedResults 已移至 Session 中管理
 
   private savePinnedResults() {
     try {
@@ -744,6 +948,199 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       // Ignore errors
     }
   }
+
+  // ============ Session 管理方法 ============
+
+  /**
+   * 加载所有 Sessions 存储
+   */
+  private loadSessionsStorage(): SessionsStorage {
+    try {
+      const stored = localStorage.getItem(SESSIONS_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch {
+      // Ignore errors
+    }
+    return { byTrace: {} };
+  }
+
+  /**
+   * 保存所有 Sessions 存储
+   */
+  private saveSessionsStorage(storage: SessionsStorage): void {
+    try {
+      localStorage.setItem(SESSIONS_KEY, JSON.stringify(storage));
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  /**
+   * 获取指定 Trace 的所有 Sessions
+   */
+  getSessionsForTrace(fingerprint: string): AISession[] {
+    const storage = this.loadSessionsStorage();
+    return storage.byTrace[fingerprint] || [];
+  }
+
+  /**
+   * 获取当前 Trace 的所有 Sessions
+   */
+  getCurrentTraceSessions(): AISession[] {
+    if (!this.state.currentTraceFingerprint) return [];
+    return this.getSessionsForTrace(this.state.currentTraceFingerprint);
+  }
+
+  /**
+   * 创建新 Session
+   */
+  private createNewSession(): AISession {
+    const fingerprint = this.state.currentTraceFingerprint || 'unknown';
+    const traceName = this.trace?.traceInfo?.traceTitle || 'Untitled Trace';
+
+    const session: AISession = {
+      sessionId: this.generateId(),
+      traceFingerprint: fingerprint,
+      traceName: traceName,
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      messages: [],
+      pinnedResults: [],
+      bookmarks: [],
+    };
+
+    // 保存到存储
+    const storage = this.loadSessionsStorage();
+    if (!storage.byTrace[fingerprint]) {
+      storage.byTrace[fingerprint] = [];
+    }
+    storage.byTrace[fingerprint].push(session);
+    this.saveSessionsStorage(storage);
+
+    // 更新当前 session ID
+    this.state.currentSessionId = session.sessionId;
+
+    console.log('[AIPanel] Created new session:', session.sessionId);
+    return session;
+  }
+
+  /**
+   * 保存当前 Session
+   */
+  saveCurrentSession(): void {
+    if (!this.state.currentSessionId || !this.state.currentTraceFingerprint) {
+      return;
+    }
+
+    const storage = this.loadSessionsStorage();
+    const sessions = storage.byTrace[this.state.currentTraceFingerprint];
+    if (!sessions) return;
+
+    const sessionIndex = sessions.findIndex(s => s.sessionId === this.state.currentSessionId);
+    if (sessionIndex === -1) return;
+
+    // 更新 session 数据
+    sessions[sessionIndex] = {
+      ...sessions[sessionIndex],
+      messages: this.state.messages,
+      pinnedResults: this.state.pinnedResults,
+      bookmarks: this.state.bookmarks,
+      backendTraceId: this.state.backendTraceId || undefined,
+      lastActiveAt: Date.now(),
+    };
+
+    this.saveSessionsStorage(storage);
+    console.log('[AIPanel] Saved session:', this.state.currentSessionId);
+  }
+
+  /**
+   * 加载指定 Session
+   */
+  loadSession(sessionId: string): boolean {
+    const storage = this.loadSessionsStorage();
+
+    // 在所有 traces 中查找 session
+    for (const fingerprint in storage.byTrace) {
+      const sessions = storage.byTrace[fingerprint];
+      const session = sessions.find(s => s.sessionId === sessionId);
+      if (session) {
+        this.state.currentSessionId = session.sessionId;
+        this.state.currentTraceFingerprint = session.traceFingerprint;
+        this.state.messages = session.messages;
+        this.state.pinnedResults = session.pinnedResults || [];
+        this.state.bookmarks = session.bookmarks || [];
+
+        // Only restore backendTraceId if we're currently in RPC mode
+        // If not in RPC mode, the old backendTraceId is stale and invalid
+        const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
+        if (engineInRpcMode && session.backendTraceId) {
+          this.state.backendTraceId = session.backendTraceId;
+          // 验证 backend trace 是否仍然有效
+          this.verifyBackendTrace();
+        } else {
+          // Not in RPC mode or no backendTraceId - clear it
+          this.state.backendTraceId = null;
+        }
+
+        // 恢复命令历史
+        this.state.commandHistory = this.state.messages
+          .filter((m) => m.role === 'user')
+          .map((m) => m.content);
+
+        console.log('[AIPanel] Loaded session:', sessionId, {
+          engineInRpcMode,
+          backendTraceId: this.state.backendTraceId,
+        });
+        m.redraw();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * 获取当前 Session
+   */
+  getCurrentSession(): AISession | null {
+    if (!this.state.currentSessionId || !this.state.currentTraceFingerprint) {
+      return null;
+    }
+
+    const sessions = this.getSessionsForTrace(this.state.currentTraceFingerprint);
+    return sessions.find(s => s.sessionId === this.state.currentSessionId) || null;
+  }
+
+  /**
+   * 删除指定 Session
+   */
+  deleteSession(sessionId: string): boolean {
+    const storage = this.loadSessionsStorage();
+
+    for (const fingerprint in storage.byTrace) {
+      const sessions = storage.byTrace[fingerprint];
+      const index = sessions.findIndex(s => s.sessionId === sessionId);
+      if (index !== -1) {
+        sessions.splice(index, 1);
+        this.saveSessionsStorage(storage);
+
+        // 如果删除的是当前 session，重置状态
+        if (sessionId === this.state.currentSessionId) {
+          this.state.currentSessionId = null;
+          this.resetStateForNewTrace();
+        }
+
+        console.log('[AIPanel] Deleted session:', sessionId);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // ============ Session 管理方法结束 ============
 
   private handlePin(data: {query: string, columns: string[], rows: any[][], timestamp: number}) {
     const pinnedResult: PinnedResult = {
@@ -775,9 +1172,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.aiService = new OllamaService(ollamaUrl, ollamaModel);
     } else if (provider === 'openai') {
       this.state.aiService = new OpenAIService(openaiUrl, openaiModel, openaiApiKey);
-    } else if (provider === 'deepseek') {
-      // Use backend proxy to avoid CORS issues
-      this.state.aiService = new BackendProxyService(backendUrl, deepseekModel);
+    } else {
+      // Default to deepseek (backend proxy) for any other provider value
+      // This includes 'deepseek' and any unexpected/corrupted values
+      this.state.aiService = new BackendProxyService(backendUrl, deepseekModel || 'deepseek-chat');
     }
   }
 
@@ -884,6 +1282,8 @@ Click ⚙️ to change settings.`;
       this.state.messages = this.state.messages.slice(-maxMsgs);
     }
     this.saveHistory();
+    // 同时保存到 Session
+    this.saveCurrentSession();
     this.scrollToBottom();
   }
 
@@ -1011,6 +1411,9 @@ Click ⚙️ to change settings.`;
           timestamp: Date.now(),
           sqlResult: {columns, rows, rowCount: rows.length, query},
         });
+
+        // 尝试从查询结果中提取导航书签
+        this.extractBookmarksFromQueryResult(query, columns, rows);
       }
     } catch (e: any) {
       this.addMessage({
@@ -1793,6 +2196,8 @@ Keep your analysis concise and actionable.`;
               rows: data.data.result.rows || [],
               rowCount,
               query: data.data.sql || '',
+              expandableData: data.data.result.expandableData,
+              summary: data.data.result.summary,
             },
           });
         }
@@ -1805,8 +2210,81 @@ Keep your analysis concise and actionable.`;
         }
         break;
 
+      case 'skill_section':
+        // Skill section data - display as a table
+        if (data?.data) {
+          const section = data.data;
+          // Remove previous progress message
+          const lastMsg = this.state.messages[this.state.messages.length - 1];
+          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+          // Show progress for this section - use sectionTitle for compact display
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: '',  // No message content, title is in table header
+            timestamp: Date.now(),
+            sqlResult: section.rowCount > 0 ? {
+              columns: section.columns,
+              rows: section.rows,
+              rowCount: section.rowCount,
+              query: '',  // No SQL display
+              sectionTitle: `${section.sectionTitle} (${section.sectionIndex}/${section.totalSections})`,
+              expandableData: section.expandableData,
+              summary: section.summary,
+            } : undefined,
+          });
+        }
+        break;
+
+      case 'skill_diagnostics':
+        // Skill diagnostics - display as a warning/info message
+        if (data?.data?.diagnostics && data.data.diagnostics.length > 0) {
+          const diagnostics = data.data.diagnostics;
+          const criticalItems = diagnostics.filter((d: any) => d.severity === 'critical');
+          const warningItems = diagnostics.filter((d: any) => d.severity === 'warning');
+          const infoItems = diagnostics.filter((d: any) => d.severity === 'info');
+
+          let content = '**🔍 诊断结果**\n\n';
+          if (criticalItems.length > 0) {
+            content += '🔴 **严重问题:**\n';
+            criticalItems.forEach((d: any) => {
+              content += `- ${d.message}\n`;
+              if (d.suggestions && d.suggestions.length > 0) {
+                content += `  *建议: ${d.suggestions.join('; ')}*\n`;
+              }
+            });
+            content += '\n';
+          }
+          if (warningItems.length > 0) {
+            content += '🟡 **警告:**\n';
+            warningItems.forEach((d: any) => {
+              content += `- ${d.message}\n`;
+            });
+            content += '\n';
+          }
+          if (infoItems.length > 0) {
+            content += '🔵 **提示:**\n';
+            infoItems.forEach((d: any) => {
+              content += `- ${d.message}\n`;
+            });
+          }
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: content.trim(),
+            timestamp: Date.now(),
+          });
+        }
+        break;
+
       case 'analysis_completed':
         // Analysis is complete - show final answer
+        console.log('[AIPanel] analysis_completed - full data:', JSON.stringify(data, null, 2));
+        console.log('[AIPanel] answer exists?', !!data?.data?.answer);
+        console.log('[AIPanel] answer value:', data?.data?.answer);
         this.state.isLoading = false;
         if (data?.data?.answer) {
           // Remove any remaining progress message
@@ -1814,12 +2292,19 @@ Keep your analysis concise and actionable.`;
           if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
             this.state.messages.pop();
           }
+          console.log('[AIPanel] Adding final answer message');
+          // 构建消息内容，包含 HTML 报告链接
+          let content = data.data.answer;
+          const reportUrl = data.data.reportUrl;
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: data.data.answer,
+            content: content,
             timestamp: Date.now(),
+            reportUrl: reportUrl ? `${this.state.settings.backendUrl}${reportUrl}` : undefined,
           });
+        } else {
+          console.warn('[AIPanel] No answer in analysis_completed event!');
         }
         break;
 
@@ -1871,6 +2356,122 @@ Keep your analysis concise and actionable.`;
 - Click 📌 Pin to save query results for later`;
   }
 
+  /**
+   * 渲染 Session 历史侧边栏（分区显示：当前对话 + 历史对话）
+   */
+  private renderSessionSidebar(sessions: AISession[], _currentIndex: number): m.Children {
+    // 找到当前 Session
+    const currentSession = sessions.find(s => s.sessionId === this.state.currentSessionId);
+
+    // 历史 Sessions（排除当前，按最后活动时间倒序）
+    const historySessions = sessions
+      .filter(s => s.sessionId !== this.state.currentSessionId)
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+
+    // 渲染单个 Session 项
+    const renderSessionItem = (session: AISession, isCurrent: boolean) => {
+      const messageCount = session.messages.length;
+      const lastActive = this.formatRelativeTime(session.lastActiveAt);
+
+      // 获取 session 摘要（取第一条用户消息或自动生成）
+      const userMessages = session.messages.filter(m => m.role === 'user');
+      const summary = isCurrent
+        ? '当前对话'
+        : (session.summary || (userMessages.length > 0 ? userMessages[0].content.slice(0, 30) : '新对话'));
+
+      return m('div.ai-session-sidebar-item', {
+        class: isCurrent ? 'current' : '',
+        onclick: () => {
+          if (!isCurrent) {
+            this.loadSession(session.sessionId);
+          }
+        },
+        title: isCurrent ? '当前对话' : summary,
+      }, [
+        m('div.ai-session-sidebar-item-indicator', isCurrent ? '●' : '○'),
+        m('div.ai-session-sidebar-item-content', [
+          m('div.ai-session-sidebar-item-summary', summary + (!isCurrent && summary.length >= 30 ? '...' : '')),
+          m('div.ai-session-sidebar-item-meta', [
+            m('span', `${messageCount} 条`),
+            m('span', '·'),
+            m('span', lastActive),
+          ]),
+        ]),
+        // 删除按钮（只对历史 session 显示）
+        !isCurrent
+          ? m('button.ai-session-sidebar-item-delete', {
+              onclick: (e: MouseEvent) => {
+                e.stopPropagation();
+                if (confirm('确定删除这个对话？')) {
+                  this.deleteSession(session.sessionId);
+                }
+              },
+              title: '删除对话',
+            }, m('i.pf-icon', 'close'))
+          : null,
+      ]);
+    };
+
+    return m('div.ai-session-sidebar', [
+      // 标题栏
+      m('div.ai-session-sidebar-header', [
+        m('i.pf-icon', 'chat'),
+        m('span', '对话'),
+      ]),
+
+      // Session 列表
+      m('div.ai-session-sidebar-items', [
+        // 当前对话（固定在顶部）
+        currentSession ? renderSessionItem(currentSession, true) : null,
+
+        // 历史对话分隔线（只在有历史时显示）
+        historySessions.length > 0
+          ? m('div.ai-session-sidebar-divider', '历史对话')
+          : null,
+
+        // 历史对话列表
+        historySessions.map(session => renderSessionItem(session, false)),
+      ]),
+
+      // 新建对话按钮
+      m('button.ai-session-sidebar-new', {
+        onclick: () => {
+          // 保存当前 session 再创建新的
+          this.saveCurrentSession();
+          this.createNewSession();
+          this.state.messages = [];
+          if (this.engine?.mode === 'HTTP_RPC') {
+            this.addRpcModeWelcomeMessage();
+          } else {
+            this.addBackendUnavailableMessage();
+          }
+          m.redraw();
+        },
+        title: '新建对话',
+      }, [
+        m('i.pf-icon', 'add'),
+      ]),
+    ]);
+  }
+
+  /**
+   * 格式化相对时间
+   */
+  private formatRelativeTime(timestamp: number): string {
+    const now = Date.now();
+    const diff = now - timestamp;
+
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) return `${days} 天前`;
+    if (hours > 0) return `${hours} 小时前`;
+    if (minutes > 0) return `${minutes} 分钟前`;
+    return '刚刚';
+  }
+
   private formatMessage(content: string): string {
     // Simple markdown-like formatting
     return content
@@ -1880,11 +2481,31 @@ Keep your analysis concise and actionable.`;
       .replace(/\n/g, '<br>');
   }
 
-  private clearChat() {
+  private async clearChat() {
+    // First, cleanup backend resources if a trace was uploaded
+    if (this.state.backendTraceId) {
+      try {
+        const response = await fetch(
+          `${this.state.settings.backendUrl}/api/traces/${this.state.backendTraceId}`,
+          { method: 'DELETE' }
+        );
+        if (response.ok) {
+          console.log(`[AIPanel] Backend trace ${this.state.backendTraceId} deleted`);
+        }
+      } catch (error) {
+        console.error('[AIPanel] Failed to cleanup backend trace:', error);
+      }
+    }
+
+    // Clear frontend state
     this.state.messages = [];
     this.state.commandHistory = [];
     this.state.historyIndex = -1;
+    this.state.backendTraceId = null;  // Clear backend trace ID
+    this.state.pinnedResults = [];  // Clear pinned results
     this.saveHistory();
+
+    // Show welcome message
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
@@ -1904,85 +2525,7 @@ Keep your analysis concise and actionable.`;
     m.redraw();
   }
 
-  /**
-   * Upload the current trace to the backend for AI analysis
-   * This enables the backend to execute SQL queries on the trace
-   */
-  private async uploadTraceToBackend(): Promise<void> {
-    if (this.state.backendTraceId) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: `✅ Trace already uploaded to backend (${this.state.backendTraceId}). AI can now analyze the trace with full SQL capabilities.`,
-        timestamp: Date.now(),
-      });
-      return;
-    }
-
-    if (this.state.isUploading) return;
-
-    this.state.isUploading = true;
-    m.redraw();
-
-    try {
-      // Get the current trace file directly from Perfetto UI
-      if (!this.trace) {
-        throw new Error('No trace loaded. Please open a trace file first.');
-      }
-
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: `⏳ Getting current trace file...`,
-        timestamp: Date.now(),
-      });
-
-      const traceBlob = await this.trace.getTraceFile();
-      const traceFile = new File([traceBlob], `trace_${Date.now()}.pftrace`, { type: 'application/octet-stream' });
-
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: `⏳ Uploading trace to backend (${(traceFile.size / 1024 / 1024).toFixed(2)} MB)...`,
-        timestamp: Date.now(),
-      });
-
-      const formData = new FormData();
-      formData.append('file', traceFile);
-
-      const response = await fetch(`${this.state.settings.backendUrl}/api/traces/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      if (data.success && data.trace?.id) {
-        this.state.backendTraceId = data.trace.id;
-        this.addMessage({
-          id: this.generateId(),
-          role: 'system',
-          content: `✅ **Trace uploaded to backend successfully!**\n\nSize: ${(traceFile.size / 1024 / 1024).toFixed(2)} MB\nBackend ID: ${data.trace.id}\n\nYou can now ask AI questions about this trace. The backend will execute SQL queries and provide detailed analysis.`,
-          timestamp: Date.now(),
-        });
-      } else {
-        throw new Error(data.error || 'Upload failed');
-      }
-    } catch (error: any) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: `❌ **Failed to upload trace:** ${error.message}\n\nMake sure the backend is running at ${this.state.settings.backendUrl}`,
-        timestamp: Date.now(),
-      });
-    } finally {
-      this.state.isUploading = false;
-      m.redraw();
-    }
-  }
+  // NOTE: uploadTraceToBackend() method removed - auto-upload now happens in load_trace.ts
 
   /**
    * Export SQL result to CSV or JSON
@@ -2129,6 +2672,84 @@ Keep your analysis concise and actionable.`;
 
   private generateId(): string {
     return `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  /**
+   * 从SQL查询结果中提取关键时间点作为导航书签
+   * 根据查询内容和结果自动识别掉帧、ANR、慢函数等关键点
+   */
+  private extractBookmarksFromQueryResult(
+    query: string,
+    columns: string[],
+    rows: any[][]
+  ): void {
+    // 只处理包含时间戳的查询结果
+    const tsColumnIndex = columns.findIndex(col =>
+      /^ts$|^timestamp$|^start_ts$|_ts$/i.test(col)
+    );
+
+    if (tsColumnIndex === -1 || rows.length === 0) {
+      return; // 没有时间戳列，不提取书签
+    }
+
+    const bookmarks: NavigationBookmark[] = [];
+    const queryLower = query.toLowerCase();
+
+    // 根据查询类型确定书签类型
+    let bookmarkType: NavigationBookmark['type'] = 'custom';
+    let labelPrefix = '关键点';
+
+    if (queryLower.includes('jank') || queryLower.includes('掉帧') || queryLower.includes('frame')) {
+      bookmarkType = 'jank';
+      labelPrefix = '掉帧';
+    } else if (queryLower.includes('anr')) {
+      bookmarkType = 'anr';
+      labelPrefix = 'ANR';
+    } else if (queryLower.includes('slow') || queryLower.includes('慢') || queryLower.includes('dur')) {
+      bookmarkType = 'slow_function';
+      labelPrefix = '慢函数';
+    } else if (queryLower.includes('binder')) {
+      bookmarkType = 'binder_slow';
+      labelPrefix = 'Binder';
+    }
+
+    // 限制书签数量，避免太多
+    const maxBookmarks = 20;
+    const rowsToProcess = rows.slice(0, maxBookmarks);
+
+    rowsToProcess.forEach((row, index) => {
+      const timestamp = row[tsColumnIndex];
+      if (typeof timestamp === 'number' && timestamp > 0) {
+        // 尝试获取更多上下文信息
+        const nameColumnIndex = columns.findIndex(col =>
+          /name|slice|function/i.test(col)
+        );
+        const durColumnIndex = columns.findIndex(col => /^dur$/i.test(col));
+
+        let description = `${labelPrefix} #${index + 1}`;
+        if (nameColumnIndex >= 0 && row[nameColumnIndex]) {
+          description += ` - ${row[nameColumnIndex]}`;
+        }
+        if (durColumnIndex >= 0 && row[durColumnIndex]) {
+          const durMs = (row[durColumnIndex] as number) / 1000000;
+          description += ` (${durMs.toFixed(2)}ms)`;
+        }
+
+        bookmarks.push({
+          id: `bookmark-${Date.now()}-${index}`,
+          timestamp,
+          label: `${labelPrefix} #${index + 1}`,
+          type: bookmarkType,
+          description,
+        });
+      }
+    });
+
+    // 更新书签列表
+    if (bookmarks.length > 0) {
+      this.state.bookmarks = bookmarks;
+      console.log(`Extracted ${bookmarks.length} bookmarks from query result`);
+    }
   }
 
   private scrollToBottom(): void {

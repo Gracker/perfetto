@@ -51,6 +51,7 @@ import {base64Decode} from '../base/string_utils';
 import {parseUrlCommands} from './command_manager';
 import {isStartupCommandAllowed} from './startup_command_allowlist';
 import {HighPrecisionTimeSpan} from '../base/high_precision_time_span';
+import {getBackendUploader} from './backend_uploader';
 
 const ENABLE_CHROME_RELIABLE_RANGE_ZOOM_FLAG = featureFlags.register({
   id: 'enableChromeReliableRangeZoom',
@@ -130,14 +131,53 @@ export async function loadTrace(
 ): Promise<TraceImpl> {
   updateStatus(app, 'Opening trace');
   const engineId = `${++lastEngineId}`;
-  const engine = await createEngine(app, engineId);
+  const engine = await createEngine(app, engineId, traceSource);
   return await loadTraceIntoEngine(app, traceSource, engine);
 }
 
 async function createEngine(
   app: AppImpl,
   engineId: string,
+  traceSource: TraceSource,
 ): Promise<EngineBase> {
+  // === Auto-upload to AI backend ===
+  // Try to upload trace to backend first for AI analysis capabilities.
+  // If successful, the backend starts a trace_processor_shell in HTTP RPC mode
+  // and we connect to it, sharing the same trace processor with the backend.
+  const uploader = getBackendUploader();
+
+  if (traceSource.type !== 'HTTP_RPC') {
+    try {
+      const backendAvailable = await uploader.checkAvailable();
+      if (backendAvailable) {
+        updateStatus(app, 'Connecting to AI backend...');
+        const result = await uploader.upload(traceSource);
+
+        if (result.success && result.port) {
+          console.log(`[AutoRPC] Backend upload successful, using port ${result.port}`);
+          HttpRpcEngine.rpcPort = String(result.port);
+
+          // Store traceId for AI Assistant plugin to use
+          (app as unknown as {backendTraceId: string}).backendTraceId = result.traceId ?? '';
+
+          const engine = new HttpRpcEngine(engineId);
+          engine.onResponseReceived = () => raf.scheduleFullRedraw();
+
+          if (isMetatracingEnabled()) {
+            engine.enableMetatrace(assertExists(getEnabledMetatracingCategories()));
+          }
+
+          return engine;
+        } else if (result.error) {
+          console.warn('[AutoRPC] Backend upload failed:', result.error);
+        }
+      }
+    } catch (error) {
+      console.warn('[AutoRPC] Backend connection failed, falling back to WASM:', error);
+    }
+  }
+
+  // === Fallback to original logic ===
   // Check if there is any instance of the trace_processor_shell running in
   // HTTP RPC mode (i.e. trace_processor_shell -D).
   let useRpc = false;

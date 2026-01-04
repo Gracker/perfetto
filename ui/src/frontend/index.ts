@@ -139,10 +139,15 @@ function routeChange(route: Route) {
 function setupContentSecurityPolicy() {
   // Note: self and sha-xxx must be quoted, urls data: and blob: must not.
 
+  // SmartPerfetto uses ports 9100-9900 for trace_processor instances
+  // We need to allow connections to these ports for HTTP RPC mode
   let rpcPolicy = [
-    'http://127.0.0.1:9001', // For trace_processor_shell --httpd.
+    'http://127.0.0.1:9001', // For trace_processor_shell --httpd (default).
     'ws://127.0.0.1:9001', // Ditto, for the websocket RPC.
     'ws://127.0.0.1:9167', // For Web Device Proxy.
+    // SmartPerfetto backend port pool (9100-9199 should be enough)
+    ...Array.from({length: 100}, (_, i) => `http://127.0.0.1:${9100 + i}`),
+    ...Array.from({length: 100}, (_, i) => `ws://127.0.0.1:${9100 + i}`),
   ];
   if (CSP_WS_PERMISSIVE_PORT.get()) {
     const route = Router.parseUrl(window.location.href);
@@ -173,6 +178,8 @@ function setupContentSecurityPolicy() {
     'connect-src': [
       `'self'`,
       'ws://127.0.0.1:8037', // For the adb websocket server.
+      'http://localhost:3000', // For SmartPerfetto AI backend.
+      'http://127.0.0.1:3000', // For SmartPerfetto AI backend.
       'https://*.google-analytics.com',
       'https://*.googleapis.com', // For Google Cloud Storage fetches.
       'blob:',
