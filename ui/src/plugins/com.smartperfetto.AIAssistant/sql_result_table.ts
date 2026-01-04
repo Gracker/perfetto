@@ -13,371 +13,465 @@
 // limitations under the License.
 
 import m from 'mithril';
+import {Trace} from '../../public/trace';
+import {Time} from '../../base/time';
+import {ChartVisualizer, ChartData} from './chart_visualizer';
 
 export interface SqlResultTableAttrs {
   columns: string[];
   rows: any[][];
   rowCount: number;
   query?: string;
+  title?: string;  // Optional title to display in header (e.g., section title)
+  trace?: Trace;  // 新增：用于跳转到时间线
   onPin?: (data: {query: string, columns: string[], rows: any[][], timestamp: number}) => void;
   onExport?: (format: 'csv' | 'json') => void;
+  // 可展开行数据：每行的详细分析结果（用于 iterator 类型结果）
+  expandableData?: Array<{
+    item: Record<string, any>;
+    result: {
+      success: boolean;
+      sections?: Record<string, any>;
+      error?: string;
+    };
+  }>;
+  // 汇总报告（在表格上方显示）
+  summary?: {
+    title: string;
+    content: string;
+  };
 }
 
-// Modern color scheme
-const COLORS = {
-  primary: '#6366f1',
-  primaryHover: '#4f46e5',
-  primaryLight: 'rgba(99, 102, 241, 0.1)',
-  success: '#10b981',
-  warning: '#f59e0b',
-  border: 'var(--border)',
-  bgHover: 'var(--chip-bg)',
-  text: 'var(--text)',
-  textSecondary: 'var(--text-secondary)',
-  textMuted: 'var(--text-muted)',
+// 时间戳列信息
+interface TimestampColumn {
+  columnIndex: number;
+  columnName: string;
+  unit: 'ns' | 'us' | 'ms' | 's';
+  // 关联的 duration 列（用于时间范围跳转）
+  durationColumnIndex?: number;
+  durationColumnName?: string;
+}
+
+// 单位转换为纳秒的乘数
+const UNIT_TO_NS: Record<string, number> = {
+  'ns': 1,
+  'us': 1e3,
+  'ms': 1e6,
+  's': 1e9,
 };
 
-// Professional styles for SQL result table
-const STYLES = {
-  container: {
-    background: 'var(--background)',
-    border: '1px solid var(--border)',
-    borderRadius: '8px',
-    overflow: 'hidden',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '12px 16px',
-    background: 'var(--background2)',
-    borderBottom: '1px solid var(--border)',
-    flexWrap: 'wrap' as const,
-    gap: '8px',
-  },
-  headerLeft: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-  },
-  headerRight: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-  },
-  rowCount: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    fontSize: '13px',
-    fontWeight: '500',
-    color: 'var(--text)',
-    padding: '4px 10px',
-    background: COLORS.primaryLight,
-    borderRadius: '6px',
-  },
-  statsToggle: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    padding: '6px 12px',
-    fontSize: '12px',
-    fontWeight: '500',
-    color: 'var(--text-secondary)',
-    background: 'transparent',
-    border: '1px solid var(--border)',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    transition: 'all 0.15s ease',
-  },
-  copyBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    padding: '6px 12px',
-    fontSize: '12px',
-    fontWeight: '500',
-    color: 'var(--text)',
-    background: 'var(--background)',
-    border: '1px solid var(--border)',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    transition: 'all 0.15s ease',
-  },
-  expandBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    padding: '6px 12px',
-    fontSize: '12px',
-    fontWeight: '500',
-    color: COLORS.primary,
-    background: COLORS.primaryLight,
-    border: 'none',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    transition: 'all 0.15s ease',
-  },
-  pinBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    padding: '6px 12px',
-    fontSize: '12px',
-    fontWeight: '500',
-    color: 'var(--text)',
-    background: 'var(--background)',
-    border: '1px solid var(--border)',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    transition: 'all 0.15s ease',
-  },
-  pinSuccess: {
-    background: `${COLORS.success}20`,
-    borderColor: COLORS.success,
-    color: COLORS.success,
-  },
-  stats: {
-    padding: '12px 16px',
-    background: 'var(--background2)',
-    borderBottom: '1px solid var(--border)',
-  },
-  statsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-    gap: '12px',
-  },
-  statItem: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px',
-    padding: '8px',
-    background: 'var(--background)',
-    borderRadius: '6px',
-    border: '1px solid var(--border)',
-  },
-  statLabel: {
-    fontSize: '11px',
-    fontWeight: '500',
-    color: 'var(--text-secondary)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-  },
-  statValue: {
-    fontSize: '14px',
-    fontWeight: '600',
-    color: 'var(--text)',
-  },
-  tableWrapper: {
-    overflowX: 'auto' as const,
-    maxHeight: '320px',
-    overflowY: 'auto' as const,
-  },
-  table: {
-    width: '100%',
-    borderCollapse: 'collapse' as const,
-    fontSize: '13px',
-    background: 'var(--background)',
-  },
-  th: {
-    position: 'sticky' as const,
-    top: 0,
-    backgroundColor: 'var(--background2)',
-    padding: '12px 14px',
-    textAlign: 'left' as const,
-    borderBottom: '2px solid var(--border)',
-    fontWeight: '600',
-    color: 'var(--text-secondary)',
-    whiteSpace: 'nowrap' as const,
-    fontSize: '12px',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-    cursor: 'pointer',
-    transition: 'background 0.15s ease',
-  },
-  thHover: {
-    background: COLORS.bgHover,
-  },
-  td: {
-    padding: '12px 14px',
-    borderBottom: '1px solid var(--border)',
-    whiteSpace: 'nowrap' as const,
-    fontSize: '13px',
-    transition: 'background 0.15s ease',
-  },
-  tr: {
-    transition: 'background 0.15s ease',
-  },
-  trHover: {
-    background: COLORS.bgHover,
-  },
-  trClickable: {
-    cursor: 'pointer',
-  },
-  cellValue: {
-    display: 'block',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    maxWidth: '300px',
-    fontFamily: 'monospace',
-    fontSize: '12px',
-  },
-  cellNumber: {
-    color: '#a5b4fc',
-    fontWeight: '500',
-  },
-  cellNull: {
-    color: 'var(--text-muted)',
-    fontStyle: 'italic' as const,
-  },
-  exportActions: {
-    display: 'flex',
-    gap: '8px',
-    padding: '12px 18px',
-    borderBottom: '1px solid var(--border)',
-    background: 'var(--background2)',
-  },
-  exportBtn: {
-    padding: '6px 14px',
-    borderRadius: '6px',
-    background: 'transparent',
-    border: '1px solid var(--border)',
-    color: 'var(--text-secondary)',
-    fontSize: '12px',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    transition: 'all 0.2s ease',
-  },
-};
+// Colors are now defined in CSS variables (styles.scss)
+// This file uses CSS class names instead of inline styles
+
+// 显示限制常量
+const COLLAPSED_ROW_LIMIT = 10;  // 折叠时显示的行数
+const EXPANDED_ROW_LIMIT = 50;   // 展开时最大显示的行数
 
 export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private expanded = false;
   private showStats = false;
+  private showChart = false;  // 新增：控制图表显示
   private copySuccess = false;
   private copiedTimeout: any = null;
   private pinSuccess = false;
   private pinTimeout: any = null;
+  private timestampColumns: TimestampColumn[] = [];  // 存储检测到的时间戳列
+  // 可展开行状态：记录哪些行处于展开状态
+  private expandedRows = new Set<number>();
 
   view(vnode: m.Vnode<SqlResultTableAttrs>) {
-    const {columns, rows, rowCount, query, onPin, onExport} = vnode.attrs;
+    const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary} = vnode.attrs;
 
-    // Limit displayed rows when collapsed
-    const displayRows = this.expanded ? rows : rows.slice(0, 10);
-    const hasMore = rows.length > 10;
-
-    // Calculate statistics
-    const stats = this.calculateStats(columns, rows);
-
-    // Build pin button style
-    const pinBtnStyle = {...STYLES.pinBtn};
-    if (this.pinSuccess) {
-      Object.assign(pinBtnStyle, STYLES.pinSuccess);
+    // 检测时间戳列（只在第一次或列变化时执行）
+    if (this.timestampColumns.length === 0 ||
+        this.timestampColumns.some((tc) => columns[tc.columnIndex] !== tc.columnName)) {
+      this.timestampColumns = this.detectTimestampColumns(columns);
     }
 
-    return m('div', {style: STYLES.container}, [
-      // Header
-      m('div', {style: STYLES.header}, [
-        m('div', {style: STYLES.headerLeft}, [
-          m('span', {style: STYLES.rowCount}, `📊 ${rowCount.toLocaleString()} rows`),
-          m('button', {
-            style: STYLES.statsToggle,
-            onclick: () => {
-              this.showStats = !this.showStats;
-              m.redraw();
-            },
-          }, this.showStats ? '▼ Hide Stats' : '▶ Stats'),
+    // Classify columns for styling
+    const columnClasses = this.classifyColumns(columns);
+
+    // Limit displayed rows: collapsed shows 10, expanded shows up to 50
+    const displayLimit = this.expanded ? EXPANDED_ROW_LIMIT : COLLAPSED_ROW_LIMIT;
+    const displayRows = rows.slice(0, displayLimit);
+    const hasMore = rows.length > COLLAPSED_ROW_LIMIT;
+
+    // Calculate statistics (only when needed)
+    const stats = this.showStats ? this.calculateStats(columns, rows) : {};
+
+    return m('div.sql-result.compact', [
+      // 汇总报告（如果有且有关键发现）
+      summary && summary.content.includes('关键发现') ? m('.sql-result-summary', [
+        m('div.summary-content', m.trust(this.formatMarkdown(summary.content))),
+      ]) : null,
+
+      // Compact single-row header with title (if provided), row count, and actions
+      m('.sql-result-header.compact-header', [
+        m('.sql-result-title', [
+          m('span.pf-icon', title ? 'folder' : 'table_chart'),
+          title
+            ? m('span.section-title', title)
+            : null,
+          m('span.row-count', `${rowCount} 条`),
         ]),
-        m('div', {style: STYLES.headerRight}, [
-          // Pin button (if callback provided)
-          onPin && query ? m('button', {
-            style: pinBtnStyle,
-            onclick: () => this.pinResults(query, columns, rows, onPin),
-            title: 'Pin results to notes',
-          }, [
-            m('span', this.pinSuccess ? '✓' : '📌'),
-            m('span', this.pinSuccess ? 'Pinned!' : 'Pin'),
-          ]) : null,
-          m('button', {
-            style: STYLES.copyBtn,
+        m('.sql-result-actions', [
+          // Copy button (icon only)
+          m('button.sql-result-action.icon-only', {
+            class: this.copySuccess ? 'active' : '',
             onclick: () => this.copyResults(columns, rows),
-            title: 'Copy all results as TSV',
-          }, [
-            m('span', this.copySuccess ? '✓' : '📋'),
-            m('span', this.copySuccess ? 'Copied!' : 'Copy'),
-          ]),
-          hasMore ? m('button', {
-            style: STYLES.expandBtn,
-            onclick: () => {
-              this.expanded = !this.expanded;
-              m.redraw();
-            },
-          }, this.expanded ? `▲ Show less` : `▼ Show all (${rowCount})`) : null,
+            title: 'Copy to clipboard',
+          }, m('span.pf-icon', this.copySuccess ? 'check' : 'content_copy')),
+          // Pin button (icon only) - only show if query exists
+          onPin && query ? m('button.sql-result-action.icon-only', {
+            class: this.pinSuccess ? 'active' : '',
+            onclick: () => this.pinResults(query, columns, rows, onPin),
+            title: 'Pin results',
+          }, m('span.pf-icon', this.pinSuccess ? 'check' : 'push_pin')) : null,
+          // Stats toggle (icon only)
+          m('button.sql-result-action.icon-only', {
+            class: this.showStats ? 'active' : '',
+            onclick: () => { this.showStats = !this.showStats; m.redraw(); },
+            title: 'Show statistics',
+          }, m('span.pf-icon', 'analytics')),
+          // Chart button (icon only, if data is visualizable)
+          this.canVisualize(columns, rows) ? m('button.sql-result-action.icon-only', {
+            class: this.showChart ? 'active' : '',
+            onclick: () => { this.showChart = !this.showChart; m.redraw(); },
+            title: 'Show chart',
+          }, m('span.pf-icon', 'bar_chart')) : null,
         ]),
       ]),
 
-      // Statistics section (collapsible)
-      this.showStats ? m('div', {style: STYLES.stats}, [
-        m('div', {style: STYLES.statsGrid},
-          Object.entries(stats).map(([key, value]) =>
-            m('div', {style: STYLES.statItem}, [
-              m('span', {style: STYLES.statLabel}, key),
-              m('span', {style: STYLES.statValue}, String(value)),
+      // Statistics section (collapsible, compact)
+      this.showStats ? m('.sql-result-stats.compact-stats', [
+        m('.stats-grid',
+          Object.entries(stats).slice(0, 6).map(([key, value]) =>
+            m('.stat-item', [
+              m('.stat-label', key),
+              m('.stat-value', String(value)),
             ])
           )
         ),
       ]) : null,
 
-      // Export buttons
-      onExport ? m('div', {style: STYLES.exportActions}, [
-        m('button', {
-          style: STYLES.exportBtn,
-          onclick: () => onExport('csv'),
-          title: 'Export as CSV',
-        }, '📄 CSV'),
-        m('button', {
-          style: STYLES.exportBtn,
-          onclick: () => onExport('json'),
-          title: 'Export as JSON',
-        }, '📋 JSON'),
-      ]) : null,
-
-      // Table
-      m('div', {style: STYLES.tableWrapper},
-        m('table', {style: STYLES.table}, [
+      // Table - Perfetto style, full width
+      m('.sql-result-table-wrapper',
+        m('table.sql-result-table', [
           m('thead',
-            m('tr',
-              columns.map((col) =>
+            m('tr', [
+              // 可展开按钮列表头（如果有可展开数据）
+              expandableData && expandableData.length > 0 ? m('th.col-expand', '') : null,
+              ...columns.map((col, idx) =>
                 m('th', {
-                  style: STYLES.th,
+                  class: columnClasses[idx] || '',
                   title: col,
-                  onclick: () => this.copyColumn(rows, columns.indexOf(col)),
+                  onclick: () => this.copyColumn(rows, idx),
                 }, col)
-              )
-            )
+              ),
+              // Navigation arrow column header
+              trace ? m('th.col-action', '') : null,
+            ])
           ),
           m('tbody',
-            displayRows.map((row, rowIndex) =>
-              m('tr', {
-                style: STYLES.tr,
-                key: rowIndex,
-                onclick: () => this.copyRow(row),
-                title: 'Click to copy row',
-              },
-                row.map((cell, cellIndex) =>
-                  m('td', {
-                    style: STYLES.td,
-                    key: cellIndex,
-                    title: this.formatCellValue(cell),
-                  }, this.formatCellValue(cell))
-                )
-              )
-            )
+            displayRows.flatMap((row, rowIndex) => {
+              const hasExpandableData = expandableData && expandableData[rowIndex];
+              const isExpanded = this.expandedRows.has(rowIndex);
+
+              // 主行
+              const mainRow = m('tr', {
+                key: `row-${rowIndex}`,
+                class: trace ? 'clickable' : '',
+              }, [
+                // 可展开按钮列（如果有可展开数据）
+                hasExpandableData ? m('td.col-expand', {
+                  onclick: (e: MouseEvent) => {
+                    e.stopPropagation();
+                    if (isExpanded) {
+                      this.expandedRows.delete(rowIndex);
+                    } else {
+                      this.expandedRows.add(rowIndex);
+                    }
+                    m.redraw();
+                  },
+                }, m('span.expand-icon', isExpanded ? '▼' : '▶')) : null,
+                // 数据列
+                ...row.map((cell, cellIndex) =>
+                  this.renderCellPerfetto(cell, cellIndex, columnClasses[cellIndex], trace, row)
+                ),
+                // Navigation arrow
+                trace ? m('td.col-action', {
+                  onclick: () => this.jumpToFirstTimestamp(row, trace),
+                  title: 'Jump to timeline',
+                }, '→') : null,
+              ]);
+
+              // 展开的详细内容行
+              const detailRow = hasExpandableData && isExpanded
+                ? m('tr.expanded-row', { key: `detail-${rowIndex}` },
+                    m('td', {
+                      colSpan: columns.length + (trace ? 2 : 1) + (hasExpandableData ? 1 : 0),
+                    }, m('div.expanded-content',
+                      this.renderExpandableContent(expandableData![rowIndex])
+                    ))
+                  )
+                : null;
+
+              return detailRow ? [mainRow, detailRow] : mainRow;
+            })
           ),
         ])
       ),
+
+      // Expand/collapse (compact)
+      hasMore ? m('.sql-result-expand.compact-expand', [
+        m('button', {
+          onclick: () => { this.expanded = !this.expanded; m.redraw(); },
+        }, [
+          m('span.pf-icon', this.expanded ? 'expand_less' : 'expand_more'),
+          this.expanded ? '收起' : `展开 (${rowCount})`,
+        ]),
+      ]) : null,
+
+      // Chart visualization (collapsible)
+      this.showChart && this.canVisualize(columns, rows)
+        ? m(ChartVisualizer, {
+            chartData: this.generateChartData(columns, rows),
+            width: 400,
+            height: 200,
+          })
+        : null,
     ]);
+  }
+
+  /**
+   * Classify columns for proper styling (number, duration, name, etc.)
+   */
+  private classifyColumns(columns: string[]): string[] {
+    return columns.map((col) => {
+      const lowerCol = col.toLowerCase();
+
+      // 绝对时间戳列 - 只有 ts, ts_str 等明确的绝对时间列才显示为可点击
+      // 排除 relative_*, dur_* 等相对时间列
+      if (!(/relative|dur|duration|latency|elapsed/i.test(lowerCol)) &&
+          (/^ts$/i.test(col) || /^ts_str$/i.test(col) || /^timestamp$/i.test(col) ||
+           /^start_ts$/i.test(col) || /^end_ts$/i.test(col) || /^ts_end$/i.test(col) ||
+           /^client_ts$/i.test(col) || /^server_ts$/i.test(col))) {
+        return 'col-timestamp';
+      }
+
+      // Duration/relative time columns - numeric style, not clickable
+      if (/dur|duration|latency|relative|elapsed|_ms$|_us$|_ns$/i.test(lowerCol)) {
+        return 'col-duration';
+      }
+
+      // Count/number columns
+      if (/count|cnt|num|total|sum|avg|min|max|^id$|_id$|percent|ratio|depth/i.test(lowerCol)) {
+        return 'col-number';
+      }
+
+      // Name columns
+      if (/name|label|title|desc|package|process|thread|function/i.test(lowerCol)) {
+        return 'col-name';
+      }
+
+      // Category columns
+      if (/type|category|kind|class|status|state/i.test(lowerCol)) {
+        return 'col-category';
+      }
+
+      return '';
+    });
+  }
+
+  /**
+   * Render cell with Perfetto styling
+   */
+  private renderCellPerfetto(
+    value: any,
+    columnIndex: number,
+    columnClass: string,
+    trace?: Trace,
+    row?: any[]  // 完整行数据，用于获取 dur_str
+  ): m.Children {
+    const isTimestamp = columnClass === 'col-timestamp';
+    const isNumber = columnClass === 'col-duration' || columnClass === 'col-number';
+
+    // 获取该列的时间戳信息（如果有）
+    const tsColumn = this.timestampColumns.find(tc => tc.columnIndex === columnIndex);
+
+    // Format the display value
+    // 支持 number、bigint 和字符串类型的时间戳
+    // 对于字符串时间戳，使用 BigInt 保持精度
+    let numericValue: number | null = null;
+    let bigintValue: bigint | null = null;
+
+    if (typeof value === 'bigint') {
+      bigintValue = value;
+      numericValue = Number(value);
+    } else if (typeof value === 'number') {
+      numericValue = value;
+    } else if (typeof value === 'string' && /^\d+$/.test(value)) {
+      // 纯数字字符串（如 ts_str）- 使用 BigInt 保持精度
+      try {
+        bigintValue = BigInt(value);
+        numericValue = Number(bigintValue);
+      } catch {
+        numericValue = parseFloat(value);
+      }
+    }
+
+    const isValueNumeric = numericValue !== null && !isNaN(numericValue);
+
+    let displayValue: string;
+    if (value === null || value === undefined) {
+      displayValue = 'NULL';
+    } else if (isNumber && isValueNumeric) {
+      displayValue = this.formatDuration(numericValue!);
+    } else if (isTimestamp && isValueNumeric) {
+      // 根据检测到的单位格式化时间戳
+      if (tsColumn) {
+        displayValue = this.formatTimestampWithUnit(numericValue!, tsColumn.unit);
+      } else {
+        displayValue = this.formatTimestamp(numericValue!);
+      }
+    } else {
+      displayValue = this.formatCellValue(value);
+    }
+
+    // Timestamp cell with click handler
+    // 使用 ts_str + dur_str 进行时间范围跳转
+    if (isTimestamp && isValueNumeric && trace && tsColumn && bigintValue !== null) {
+      // 获取 dur_str 值（如果有）
+      const durValue = (tsColumn.durationColumnIndex !== undefined && row)
+        ? row[tsColumn.durationColumnIndex]
+        : undefined;
+
+      return m('td', {
+        class: `${columnClass} timestamp-cell`,
+        onclick: (e: MouseEvent) => {
+          e.stopPropagation();
+          // 如果有 dur_str，跳转到时间范围
+          if (durValue && typeof durValue === 'string' && /^\d+$/.test(durValue)) {
+            try {
+              const durNs = BigInt(durValue);
+              this.jumpToTimeRange(bigintValue!, durNs, trace);
+            } catch {
+              this.jumpToTimestampBigInt(bigintValue!, tsColumn.unit, trace);
+            }
+          } else {
+            this.jumpToTimestampBigInt(bigintValue!, tsColumn.unit, trace);
+          }
+        },
+        title: durValue ? `Click to jump to time range` : `Click to jump (${tsColumn.unit}: ${value})`,
+      }, displayValue);
+    }
+
+    // Regular cell
+    return m('td', {
+      class: columnClass + (value === null ? ' null-cell' : ''),
+      title: String(value),
+    }, displayValue);
+  }
+
+  /**
+   * Format duration values with appropriate units
+   */
+  private formatDuration(value: number): string {
+    if (value === 0) return '0';
+
+    // Auto-detect unit based on value magnitude
+    const absValue = Math.abs(value);
+
+    // If value looks like nanoseconds (very large)
+    if (absValue > 1_000_000_000) {
+      return (value / 1_000_000_000).toFixed(2) + 's';
+    }
+    if (absValue > 1_000_000) {
+      return (value / 1_000_000).toFixed(2) + 'ms';
+    }
+    if (absValue > 1000) {
+      return (value / 1000).toFixed(2) + 'µs';
+    }
+
+    // Small values - show as-is with appropriate precision
+    if (Number.isInteger(value)) {
+      return value.toLocaleString();
+    }
+    return value.toFixed(2);
+  }
+
+  /**
+   * Jump to first timestamp in the row
+   * 如果有 dur_str 列，跳转到时间范围（start 到 start+dur）
+   */
+  private jumpToFirstTimestamp(row: any[], trace: Trace): void {
+    for (const tc of this.timestampColumns) {
+      const tsValue = row[tc.columnIndex];
+      // 获取 duration 值（如果有）
+      const durValue = tc.durationColumnIndex !== undefined
+        ? row[tc.durationColumnIndex]
+        : undefined;
+
+      // 解析 ts_str（纯数字字符串）
+      if (typeof tsValue === 'string' && /^\d+$/.test(tsValue)) {
+        try {
+          const startNs = BigInt(tsValue);
+          // 如果有 dur_str，跳转到时间范围
+          if (durValue && typeof durValue === 'string' && /^\d+$/.test(durValue)) {
+            const durNs = BigInt(durValue);
+            this.jumpToTimeRange(startNs, durNs, trace);
+          } else {
+            this.jumpToTimestampBigInt(startNs, tc.unit, trace);
+          }
+          return;
+        } catch {
+          // BigInt 解析失败，继续尝试其他方法
+        }
+      }
+
+      // 支持 number、bigint 类型
+      if (typeof tsValue === 'number') {
+        this.jumpToTimestamp(tsValue, tc.unit, trace);
+        return;
+      } else if (typeof tsValue === 'bigint') {
+        if (durValue && typeof durValue === 'bigint') {
+          this.jumpToTimeRange(tsValue, durValue, trace);
+        } else {
+          this.jumpToTimestampBigInt(tsValue, tc.unit, trace);
+        }
+        return;
+      }
+    }
+  }
+
+  /**
+   * 跳转到时间范围（start 到 start+dur）
+   * @param startNs 开始时间（纳秒）
+   * @param durNs 持续时间（纳秒）
+   * @param trace Perfetto trace 对象
+   */
+  private jumpToTimeRange(startNs: bigint, durNs: bigint, trace: Trace): void {
+    try {
+      const endNs = startNs + durNs;
+      // 在前后各留出 5% 的边距，便于查看上下文
+      const margin = durNs / BigInt(20);
+      const viewStart = startNs - margin;
+      const viewEnd = endNs + margin;
+
+      console.log(`[SqlResultTable] Jumping to time range: start=${startNs}, dur=${durNs}, end=${endNs}`);
+
+      trace.scrollTo({
+        time: {
+          start: Time.fromRaw(viewStart > BigInt(0) ? viewStart : BigInt(0)),
+          end: Time.fromRaw(viewEnd),
+          behavior: 'focus',
+        },
+      });
+
+      console.log(`[SqlResultTable] Jumped to time range: ${this.formatTimestamp(Number(startNs))} - ${this.formatTimestamp(Number(endNs))}`);
+    } catch (error) {
+      console.error('[SqlResultTable] Failed to jump to time range:', error);
+    }
   }
 
   private calculateStats(columns: string[], rows: any[][]): Record<string, string | number> {
@@ -432,6 +526,17 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       return String(value);
     }
     if (typeof value === 'bigint') {
+      // 大整数也按时间格式化（假设是纳秒）
+      const num = Number(value);
+      if (num > 1_000_000_000) {
+        return (num / 1_000_000_000).toFixed(2) + 's';
+      }
+      if (num > 1_000_000) {
+        return (num / 1_000_000).toFixed(2) + 'ms';
+      }
+      if (num > 1000) {
+        return (num / 1000).toFixed(2) + 'µs';
+      }
       return value.toString();
     }
     if (typeof value === 'object') {
@@ -450,22 +555,6 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     try {
       await navigator.clipboard.writeText(tsv);
-      this.copySuccess = true;
-      if (this.copiedTimeout) clearTimeout(this.copiedTimeout);
-      this.copiedTimeout = setTimeout(() => {
-        this.copySuccess = false;
-        m.redraw();
-      }, 2000);
-      m.redraw();
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
-  }
-
-  private async copyRow(row: any[]) {
-    const text = row.map((cell) => this.formatCellValue(cell)).join('\t');
-    try {
-      await navigator.clipboard.writeText(text);
       this.copySuccess = true;
       if (this.copiedTimeout) clearTimeout(this.copiedTimeout);
       this.copiedTimeout = setTimeout(() => {
@@ -516,5 +605,302 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       m.redraw();
     }, 2000);
     m.redraw();
+  }
+
+  /**
+   * 检测时间戳列
+   * 只检测可用于跳转的【绝对时间戳】列，排除相对时间和持续时间列
+   * 同时检测关联的 dur_str 列用于时间范围跳转
+   */
+  private detectTimestampColumns(columns: string[]): TimestampColumn[] {
+    const detected: TimestampColumn[] = [];
+
+    // 先找到 dur_str 列的索引（用于时间范围跳转）
+    const durStrIndex = columns.findIndex((col) => /^dur_str$/i.test(col));
+
+    columns.forEach((col, idx) => {
+      const lowerCol = col.toLowerCase();
+
+      // 排除相对时间和持续时间列（这些不能用于跳转）
+      if (/relative|dur|duration|latency|elapsed|delta|diff|offset/i.test(lowerCol)) {
+        return;  // 跳过此列
+      }
+
+      // 检测单位：根据列名后缀判断
+      let unit: 'ns' | 'us' | 'ms' | 's' = 'ns';  // 默认纳秒（Perfetto Raw格式）
+
+      if (/_s$|_sec$/.test(lowerCol) || /\btime\s*\(s\)/.test(lowerCol)) {
+        unit = 's';
+      } else if (/_ms$|_millis$/.test(lowerCol) || /\btime\s*\(ms\)/.test(lowerCol)) {
+        unit = 'ms';
+      } else if (/_us$|_micros$/.test(lowerCol) || /\btime\s*\(us\)|time\s*\(µs\)/.test(lowerCol)) {
+        unit = 'us';
+      } else if (/_ns$/.test(lowerCol) || /\btime\s*\(ns\)/.test(lowerCol)) {
+        unit = 'ns';
+      }
+      // 没有后缀的 ts/time 列默认是纳秒（Perfetto 原始 Raw 格式）
+
+      // 检测是否是【绝对时间戳】列（可用于跳转到 Perfetto 时间线）
+      // 必须是 ts, ts_str, timestamp 等明确的绝对时间列
+      const isAbsoluteTimestamp =
+        /^ts$/i.test(col) ||              // 标准的 ts 列（纳秒）
+        /^ts_str$/i.test(col) ||          // 字符串形式的 ts（纳秒）
+        /^timestamp$/i.test(col) ||       // timestamp
+        /^start_ts$/i.test(col) ||        // start_ts（绝对开始时间）
+        /^end_ts$/i.test(col) ||          // end_ts（绝对结束时间）
+        /^ts_end$/i.test(col) ||          // ts_end（绝对结束时间）
+        /^client_ts$/i.test(col) ||       // Binder client_ts
+        /^server_ts$/i.test(col);         // Binder server_ts
+
+      if (isAbsoluteTimestamp) {
+        const tsColumn: TimestampColumn = {
+          columnIndex: idx,
+          columnName: col,
+          unit,
+        };
+
+        // 如果有 dur_str 列，关联起来用于时间范围跳转
+        if (durStrIndex !== -1) {
+          tsColumn.durationColumnIndex = durStrIndex;
+          tsColumn.durationColumnName = columns[durStrIndex];
+        }
+
+        detected.push(tsColumn);
+      }
+    });
+
+    return detected;
+  }
+
+  /**
+   * 格式化时间戳显示（假设输入是纳秒）
+   */
+  private formatTimestamp(ns: number): string {
+    if (ns < 1000) {
+      return `${ns}ns`;
+    }
+    const us = ns / 1000;
+    if (us < 1000) {
+      return `${us.toFixed(2)}µs`;
+    }
+    const ms = us / 1000;
+    if (ms < 1000) {
+      return `${ms.toFixed(2)}ms`;
+    }
+    const sec = ms / 1000;
+    return `${sec.toFixed(2)}s`;
+  }
+
+  /**
+   * 根据单位格式化时间戳显示
+   * 先转换为纳秒，再格式化
+   */
+  private formatTimestampWithUnit(value: number, unit: 'ns' | 'us' | 'ms' | 's'): string {
+    const multiplier = UNIT_TO_NS[unit] || 1;
+    const ns = value * multiplier;
+    return this.formatTimestamp(ns);
+  }
+
+  /**
+   * 跳转到Perfetto时间线
+   * @param value 时间戳值
+   * @param unit 时间单位（ns/us/ms/s）
+   * @param trace Perfetto trace 对象
+   */
+  private jumpToTimestamp(value: number, unit: 'ns' | 'us' | 'ms' | 's', trace: Trace): void {
+    try {
+      // 根据单位转换为纳秒
+      const multiplier = UNIT_TO_NS[unit] || 1;
+      const timestampNs = Math.floor(value * multiplier);
+
+      console.log(`[SqlResultTable] Jumping to timestamp: value=${value}, unit=${unit}, ns=${timestampNs}`);
+
+      // 使用 Perfetto 的 scrollTo API
+      trace.scrollTo({
+        time: {
+          start: Time.fromRaw(BigInt(timestampNs)),
+          end: Time.fromRaw(BigInt(timestampNs + 10000000)), // 结束时间为开始时间+10ms（更宽的视野）
+          behavior: 'focus', // 智能缩放以聚焦到该时间点
+        },
+      });
+
+      console.log(`[SqlResultTable] Jumped to timestamp: ${this.formatTimestamp(timestampNs)}`);
+    } catch (error) {
+      console.error('[SqlResultTable] Failed to jump to timestamp:', error);
+    }
+  }
+
+  /**
+   * 使用 BigInt 跳转到Perfetto时间线（保持精度）
+   * @param value 时间戳值（BigInt）
+   * @param unit 时间单位（ns/us/ms/s）
+   * @param trace Perfetto trace 对象
+   */
+  private jumpToTimestampBigInt(value: bigint, unit: 'ns' | 'us' | 'ms' | 's', trace: Trace): void {
+    try {
+      // 根据单位转换为纳秒
+      const multiplier = BigInt(UNIT_TO_NS[unit] || 1);
+      const timestampNs = value * multiplier;
+
+      console.log(`[SqlResultTable] Jumping to timestamp (BigInt): value=${value}, unit=${unit}, ns=${timestampNs}`);
+
+      // 使用 Perfetto 的 scrollTo API
+      trace.scrollTo({
+        time: {
+          start: Time.fromRaw(timestampNs),
+          end: Time.fromRaw(timestampNs + BigInt(10000000)), // 结束时间为开始时间+10ms
+          behavior: 'focus',
+        },
+      });
+
+      console.log(`[SqlResultTable] Jumped to timestamp: ${this.formatTimestamp(Number(timestampNs))}`);
+    } catch (error) {
+      console.error('[SqlResultTable] Failed to jump to timestamp:', error);
+    }
+  }
+
+  /**
+   * 检查数据是否可以可视化
+   * 要求：有至少一个数值列，并且行数不超过20（避免图表过于复杂）
+   */
+  private canVisualize(columns: string[], rows: any[][]): boolean {
+    if (rows.length === 0 || rows.length > 20) {
+      return false;
+    }
+
+    // 检查是否有数值列
+    const hasNumericColumn = columns.some((_col, idx) => {
+      const sampleValues = rows.slice(0, 5).map(row => row[idx]);
+      return sampleValues.some(v => typeof v === 'number' && isFinite(v) && v > 0);
+    });
+
+    return hasNumericColumn;
+  }
+
+  /**
+   * 生成图表数据
+   * 自动检测最佳的可视化方式
+   */
+  private generateChartData(columns: string[], rows: any[][]): ChartData {
+    // 查找标签列（通常是字符串列）和数值列
+    const labelColumnIndex = columns.findIndex((_col, idx) => {
+      const sampleValue = rows[0]?.[idx];
+      return typeof sampleValue === 'string';
+    });
+
+    const valueColumnIndex = columns.findIndex((_col, idx) => {
+      const sampleValue = rows[0]?.[idx];
+      return typeof sampleValue === 'number' && isFinite(sampleValue) && sampleValue > 0;
+    });
+
+    if (labelColumnIndex === -1 || valueColumnIndex === -1) {
+      // 降级：使用行索引作为标签
+      return {
+        type: 'bar',
+        title: 'Data Distribution',
+        data: rows.map((row, idx) => ({
+          label: `Row ${idx + 1}`,
+          value: parseFloat(row[valueColumnIndex] || row[0]) || 0,
+        })),
+      };
+    }
+
+    // 判断使用饼图还是柱状图
+    // 如果是百分比数据或者总和接近100，使用饼图
+    const values = rows.map(row => parseFloat(row[valueColumnIndex]) || 0);
+    const total = values.reduce((sum, v) => sum + v, 0);
+    const usePieChart = rows.length <= 10 && total > 50 && total < 150;
+
+    return {
+      type: usePieChart ? 'pie' : 'bar',
+      title: `${columns[valueColumnIndex]} by ${columns[labelColumnIndex]}`,
+      data: rows.map(row => {
+        const value = parseFloat(row[valueColumnIndex]) || 0;
+        return {
+          label: String(row[labelColumnIndex] || 'Unknown'),
+          value,
+          percentage: usePieChart ? (value / total) * 100 : undefined,
+        };
+      }),
+    };
+  }
+
+  /**
+   * 渲染可展开行的详细内容
+   */
+  private renderExpandableContent(data: {
+    item: Record<string, any>;
+    result: {
+      success: boolean;
+      sections?: Record<string, any>;
+      error?: string;
+    };
+  }): m.Children {
+    if (!data.result.success) {
+      return m('div.expanded-error', [
+        m('span.error-icon', '✗'),
+        m('span', `分析失败: ${data.result.error || '未知错误'}`),
+      ]);
+    }
+
+    if (!data.result.sections) {
+      return m('div.expanded-empty', '无详细分析数据');
+    }
+
+    const sections: m.Children[] = [];
+
+    for (const [sectionId, sectionData] of Object.entries(data.result.sections)) {
+      if (!sectionData || typeof sectionData !== 'object') continue;
+
+      const section = sectionData as any;
+      const title = section.title || sectionId;
+      const dataRows = section.data || [];
+
+      if (dataRows.length === 0) continue;
+
+      sections.push(m('div.expanded-section', [
+        m('div.section-title', title),
+        m('table.section-table', [
+          m('thead',
+            m('tr',
+              Object.keys(dataRows[0]).map(key =>
+                m('th', key)
+              )
+            )
+          ),
+          m('tbody',
+            dataRows.slice(0, 20).map((row: any) =>
+              m('tr',
+                Object.values(row).map((value: any) =>
+                  m('td', this.formatCellValue(value))
+                )
+              )
+            )
+          ),
+        ]),
+        dataRows.length > 20
+          ? m('div.section-more', `... 还有 ${dataRows.length - 20} 条`)
+          : null,
+      ]));
+    }
+
+    return sections.length > 0 ? sections : m('div.expanded-empty', '无详细数据');
+  }
+
+  /**
+   * 格式化 Markdown 内容为 HTML
+   */
+  private formatMarkdown(content: string): string {
+    if (!content) return '';
+
+    return content
+      // 粗体
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      // 斜体
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      // 代码
+      .replace(/`(.+?)`/g, '<code>$1</code>')
+      // 换行
+      .replace(/\n/g, '<br>');
   }
 }

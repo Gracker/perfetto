@@ -19,58 +19,58 @@ import '../base/static_initializers';
 import NON_CORE_PLUGINS from '../gen/all_plugins';
 import CORE_PLUGINS from '../gen/all_core_plugins';
 import m from 'mithril';
-import {defer} from '../base/deferred';
-import {addErrorHandler, reportError} from '../base/logging';
-import {featureFlags} from '../core/feature_flags';
-import {initLiveReload} from '../core/live_reload';
-import {raf} from '../core/raf_scheduler';
-import {warmupWasmWorker} from '../trace_processor/wasm_engine_proxy';
-import {UiMain} from './ui_main';
-import {registerDebugGlobals} from './debug';
-import {maybeShowErrorDialog} from './error_dialog';
-import {installFileDropHandler} from './file_drop_handler';
-import {tryLoadIsInternalUserScript} from './is_internal_user_script_loader';
-import {HomePage} from './home_page';
-import {postMessageHandler} from './post_message_handler';
-import {Route, Router} from '../core/router';
-import {checkHttpRpcConnection} from './rpc_http_dialog';
-import {maybeOpenTraceFromRoute} from './trace_url_handler';
+import { defer } from '../base/deferred';
+import { addErrorHandler, reportError } from '../base/logging';
+import { featureFlags } from '../core/feature_flags';
+import { initLiveReload } from '../core/live_reload';
+import { raf } from '../core/raf_scheduler';
+import { warmupWasmWorker } from '../trace_processor/wasm_engine_proxy';
+import { UiMain } from './ui_main';
+import { registerDebugGlobals } from './debug';
+import { maybeShowErrorDialog } from './error_dialog';
+import { installFileDropHandler } from './file_drop_handler';
+import { tryLoadIsInternalUserScript } from './is_internal_user_script_loader';
+import { HomePage } from './home_page';
+import { postMessageHandler } from './post_message_handler';
+import { Route, Router } from '../core/router';
+import { checkHttpRpcConnection } from './rpc_http_dialog';
+import { maybeOpenTraceFromRoute } from './trace_url_handler';
 import {
   DEFAULT_TRACK_MIN_HEIGHT_PX,
   MINIMUM_TRACK_MIN_HEIGHT_PX,
   TRACK_MIN_HEIGHT_SETTING,
 } from './timeline_page/track_view';
-import {renderTimelinePage} from './timeline_page/timeline_page';
-import {HttpRpcEngine} from '../trace_processor/http_rpc_engine';
-import {showModal} from '../widgets/modal';
-import {IdleDetector} from './idle_detector';
-import {IdleDetectorWindow} from './idle_detector_interface';
-import {AppImpl} from '../core/app_impl';
-import {addLegacyTableTab} from '../components/details/sql_table_tab';
-import {configureExtensions} from '../components/extensions';
+import { renderTimelinePage } from './timeline_page/timeline_page';
+import { HttpRpcEngine } from '../trace_processor/http_rpc_engine';
+import { showModal } from '../widgets/modal';
+import { IdleDetector } from './idle_detector';
+import { IdleDetectorWindow } from './idle_detector_interface';
+import { AppImpl } from '../core/app_impl';
+import { addLegacyTableTab } from '../components/details/sql_table_tab';
+import { configureExtensions } from '../components/extensions';
 import {
   addDebugCounterTrack,
   addDebugSliceTrack,
 } from '../components/tracks/debug_tracks';
-import {addVisualizedArgTracks} from '../components/tracks/visualized_args_tracks';
-import {addQueryResultsTab} from '../components/query_table/query_result_tab';
-import {assetSrc, initAssets} from '../base/assets';
+import { addVisualizedArgTracks } from '../components/tracks/visualized_args_tracks';
+import { addQueryResultsTab } from '../components/query_table/query_result_tab';
+import { assetSrc, initAssets } from '../base/assets';
 import {
   PERFETTO_SETTINGS_STORAGE_KEY,
   SettingsManagerImpl,
 } from '../core/settings_manager';
-import {LocalStorage} from '../core/local_storage';
-import {DurationPrecision, TimestampFormat} from '../public/timeline';
-import {timezoneOffsetMap} from '../base/time';
-import {ThemeProvider} from './theme_provider';
-import {OverlayContainer} from '../widgets/overlay_container';
-import {JsonSettingsEditor} from '../components/json_settings_editor';
+import { LocalStorage } from '../core/local_storage';
+import { DurationPrecision, TimestampFormat } from '../public/timeline';
+import { timezoneOffsetMap } from '../base/time';
+import { ThemeProvider } from './theme_provider';
+import { OverlayContainer } from '../widgets/overlay_container';
+import { JsonSettingsEditor } from '../components/json_settings_editor';
 import {
   CommandInvocation,
   commandInvocationArraySchema,
 } from '../core/command_manager';
-import {HotkeyConfig, HotkeyContext} from '../widgets/hotkey_context';
-import {sleepMs} from '../base/utils';
+import { HotkeyConfig, HotkeyContext } from '../widgets/hotkey_context';
+import { sleepMs } from '../base/utils';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -139,10 +139,15 @@ function routeChange(route: Route) {
 function setupContentSecurityPolicy() {
   // Note: self and sha-xxx must be quoted, urls data: and blob: must not.
 
+  // SmartPerfetto uses ports 9100-9900 for trace_processor instances
+  // We need to allow connections to these ports for HTTP RPC mode
   let rpcPolicy = [
-    'http://127.0.0.1:9001', // For trace_processor_shell --httpd.
+    'http://127.0.0.1:9001', // For trace_processor_shell --httpd (default).
     'ws://127.0.0.1:9001', // Ditto, for the websocket RPC.
     'ws://127.0.0.1:9167', // For Web Device Proxy.
+    // SmartPerfetto backend port pool (9100-9199 should be enough)
+    ...Array.from({ length: 100 }, (_, i) => `http://127.0.0.1:${9100 + i}`),
+    ...Array.from({ length: 100 }, (_, i) => `ws://127.0.0.1:${9100 + i}`),
   ];
   if (CSP_WS_PERMISSIVE_PORT.get()) {
     const route = Router.parseUrl(window.location.href);
@@ -174,6 +179,10 @@ function setupContentSecurityPolicy() {
       `'self'`,
       'ws://127.0.0.1:8037', // For the adb websocket server.
       'https:', // Allow any HTTPS; service worker firewall adds granular filtering.
+      'http://localhost:3000', // For SmartPerfetto AI backend.
+      'http://127.0.0.1:3000', // For SmartPerfetto AI backend.
+      'https://*.google-analytics.com',
+      'https://*.googleapis.com', // For Google Cloud Storage fetches.
       'blob:',
       'data:',
     ].concat(rpcPolicy),
@@ -348,7 +357,7 @@ function main() {
     (e: MouseEvent) => {
       if (e.ctrlKey) e.preventDefault();
     },
-    {passive: false},
+    { passive: false },
   );
 
   cssLoadPromise.then(() => onCssLoaded());
@@ -371,8 +380,8 @@ function onCssLoaded() {
   document.body.innerHTML = '';
 
   const pages = AppImpl.instance.pages;
-  pages.registerPage({route: '/', render: () => m(HomePage)});
-  pages.registerPage({route: '/viewer', render: () => renderTimelinePage()});
+  pages.registerPage({ route: '/', render: () => m(HomePage) });
+  pages.registerPage({ route: '/viewer', render: () => renderTimelinePage() });
   const router = new Router();
   router.onRouteChanged = routeChange;
 
@@ -409,7 +418,7 @@ function onCssLoaded() {
       const app = AppImpl.instance;
       const commands = app.commands;
       const hotkeys: HotkeyConfig[] = [];
-      for (const {id, defaultHotkey} of commands.commands) {
+      for (const { id, defaultHotkey } of commands.commands) {
         if (defaultHotkey) {
           hotkeys.push({
             callback: () => commands.runCommand(id),
@@ -425,7 +434,7 @@ function onCssLoaded() {
       // print dialog.
       hotkeys.push({
         hotkey: 'Mod+P',
-        callback: () => {},
+        callback: () => { },
       });
 
       const currentTraceId = app.trace?.engine.engineId ?? 'no-trace';
@@ -438,7 +447,7 @@ function onCssLoaded() {
       // forces a remount.
       const uiMainKey = `${currentTraceId}-${themeSetting.get()}`;
 
-      return m(ThemeProvider, {theme: themeSetting.get()}, [
+      return m(ThemeProvider, { theme: themeSetting.get() }, [
         m(
           HotkeyContext,
           {
@@ -450,7 +459,7 @@ function onCssLoaded() {
             // behavior).
             focusable: false,
           },
-          m(OverlayContainer, {fillHeight: true}, m(UiMain, {key: uiMainKey})),
+          m(OverlayContainer, { fillHeight: true }, m(UiMain, { key: uiMainKey })),
         ),
       ]);
     },
@@ -486,7 +495,7 @@ function onCssLoaded() {
     }
 
     // Add support for opening traces from postMessage().
-    window.addEventListener('message', postMessageHandler, {passive: true});
+    window.addEventListener('message', postMessageHandler, { passive: true });
 
     // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
     // cases.
@@ -524,8 +533,8 @@ function maybeChangeRpcPortFromFragment() {
           m(
             'span',
             'For security reasons before connecting to a non-standard ' +
-              'TraceProcessor port you need to manually enable the flag to ' +
-              'relax the Content Security Policy and restart the UI.',
+            'TraceProcessor port you need to manually enable the flag to ' +
+            'relax the Content Security Policy and restart the UI.',
           ),
         ),
         buttons: [

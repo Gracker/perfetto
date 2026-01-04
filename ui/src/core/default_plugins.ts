@@ -45,6 +45,7 @@ export const defaultPlugins = [
   'com.google.PixelMemory',
   'dev.perfetto.AutoPinAndExpandTracks',
   'dev.perfetto.BookmarkletApi',
+  'com.smartperfetto.AIAssistant',
   'dev.perfetto.CoreCommands',
   'dev.perfetto.CpuFreq',
   'dev.perfetto.CpuidleTimeInState',
