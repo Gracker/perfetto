@@ -2280,6 +2280,179 @@ Keep your analysis concise and actionable.`;
         }
         break;
 
+      case 'skill_layered_result':
+        // Layered skill result - display L1/L2/L4 data as tables
+        // Support both formats:
+        // 1. PerfettoAnalysisOrchestrator: { result: { layers, metadata }, summary }
+        // 2. MasterOrchestrator/AnalysisWorker: { skillId, skillName, layers, diagnostics }
+        const layeredResult = data?.data?.result?.layers || data?.data?.layers;
+        if (layeredResult) {
+          console.log('[AIPanel] skill_layered_result received:', data.data);
+          const layers = layeredResult;
+          // Support both metadata locations
+          const metadata = data.data.result?.metadata || {
+            skillName: data.data.skillName || data.data.skillId,
+          };
+
+          // Remove previous progress message
+          const lastProgressMsg = this.state.messages[this.state.messages.length - 1];
+          if (lastProgressMsg && lastProgressMsg.role === 'assistant' && lastProgressMsg.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+
+          // Process overview layer (L1) - metrics summary
+          const overview = layers.overview || layers.L1;
+          if (overview && Object.keys(overview).length > 0) {
+            // Separate simple values from nested objects
+            const simpleMetrics: Record<string, any> = {};
+            const nestedObjects: Record<string, any> = {};
+
+            for (const [key, val] of Object.entries(overview)) {
+              if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+                nestedObjects[key] = val;
+              } else {
+                simpleMetrics[key] = val;
+              }
+            }
+
+            // Display simple metrics as a single-row table
+            if (Object.keys(simpleMetrics).length > 0) {
+              const columns = Object.keys(simpleMetrics);
+              const row = columns.map(col => this.formatDisplayValue(simpleMetrics[col], col));
+
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                sqlResult: {
+                  columns,
+                  rows: [row],
+                  rowCount: 1,
+                  sectionTitle: `📊 ${metadata.skillName || '分析'} - 概览指标`,
+                },
+              });
+            }
+
+            // Display nested objects as separate tables (e.g., performance_summary, jank_type_stats)
+            for (const [key, obj] of Object.entries(nestedObjects)) {
+              const objColumns = Object.keys(obj);
+              const objRow = objColumns.map(col => this.formatDisplayValue(obj[col], col));
+
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                sqlResult: {
+                  columns: objColumns,
+                  rows: [objRow],
+                  rowCount: 1,
+                  sectionTitle: `📈 ${this.formatLayerName(key)}`,
+                },
+              });
+            }
+          }
+
+          // Process list layer (L2) - array data tables
+          const list = layers.list || layers.L2;
+          if (list && typeof list === 'object') {
+            for (const [key, items] of Object.entries(list)) {
+              if (!Array.isArray(items) || items.length === 0) continue;
+
+              const columns = Object.keys(items[0] || {});
+              const rows = items.map((item: any) => columns.map(col => {
+                return this.formatDisplayValue(item[col], col);
+              }));
+
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                sqlResult: {
+                  columns,
+                  rows,
+                  rowCount: rows.length,
+                  sectionTitle: `📋 ${this.formatLayerName(key)} (${rows.length}条)`,
+                },
+              });
+            }
+          }
+
+          // Process deep layer (L4) - detailed frame data
+          const deep = layers.deep || layers.L4;
+          if (deep && typeof deep === 'object') {
+            for (const [key, items] of Object.entries(deep)) {
+              if (!Array.isArray(items) || items.length === 0) continue;
+
+              const columns = Object.keys(items[0] || {});
+              const rows = items.slice(0, 50).map((item: any) => columns.map(col => {
+                return this.formatDisplayValue(item[col], col);
+              }));
+
+              const totalCount = items.length;
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                sqlResult: {
+                  columns,
+                  rows,
+                  rowCount: rows.length,
+                  sectionTitle: `🔍 ${this.formatLayerName(key)} (${totalCount > 50 ? `显示前50条/共${totalCount}条` : `${totalCount}条`})`,
+                },
+              });
+            }
+          }
+
+          // Show conclusion card if available (Phase 4: Root Cause Classification)
+          const conclusion = data.data.result?.conclusion || this.extractConclusionFromOverview(overview);
+          if (conclusion && conclusion.category && conclusion.category !== 'UNKNOWN') {
+            const categoryEmoji = conclusion.category === 'APP' ? '📱' :
+                                  conclusion.category === 'SYSTEM' ? '⚙️' :
+                                  conclusion.category === 'MIXED' ? '🔄' : '❓';
+            const confidencePercent = Math.round((conclusion.confidence || 0.5) * 100);
+            const confidenceBar = '█'.repeat(Math.floor(confidencePercent / 10)) + '░'.repeat(10 - Math.floor(confidencePercent / 10));
+
+            let conclusionContent = `## 🎯 分析结论\n\n`;
+            conclusionContent += `**问题分类:** ${categoryEmoji} **${this.translateCategory(conclusion.category)}**\n`;
+            conclusionContent += `**问题组件:** \`${this.translateComponent(conclusion.component)}\`\n`;
+            conclusionContent += `**置信度:** ${confidenceBar} ${confidencePercent}%\n\n`;
+            conclusionContent += `### 📋 根因分析\n${conclusion.summary}\n\n`;
+
+            if (conclusion.suggestion) {
+              conclusionContent += `### 💡 优化建议\n${conclusion.suggestion}\n\n`;
+            }
+
+            if (conclusion.evidence && Array.isArray(conclusion.evidence) && conclusion.evidence.length > 0) {
+              conclusionContent += `### 📊 证据\n`;
+              conclusion.evidence.forEach((e: string) => {
+                conclusionContent += `- ${e}\n`;
+              });
+            }
+
+            this.addMessage({
+              id: this.generateId(),
+              role: 'assistant',
+              content: conclusionContent,
+              timestamp: Date.now(),
+            });
+          }
+
+          // Show summary if available
+          if (data.data.summary) {
+            this.addMessage({
+              id: this.generateId(),
+              role: 'assistant',
+              content: `**📝 分析摘要:** ${data.data.summary}`,
+              timestamp: Date.now(),
+            });
+          }
+        }
+        break;
+
       case 'analysis_completed':
         // Analysis is complete - show final answer
         console.log('[AIPanel] analysis_completed - full data:', JSON.stringify(data, null, 2));
@@ -2672,6 +2845,224 @@ Keep your analysis concise and actionable.`;
 
   private generateId(): string {
     return `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  /**
+   * Universal value formatter for displaying any data type in tables.
+   * Handles: null, undefined, numbers, bigints, objects, arrays, strings.
+   *
+   * @param val - The value to format
+   * @param columnName - Optional column name for context-aware formatting
+   * @returns Formatted string representation
+   */
+  private formatDisplayValue(val: any, columnName?: string): string {
+    // Handle null/undefined
+    if (val === null || val === undefined) {
+      return '';
+    }
+
+    // Handle numbers with smart formatting
+    if (typeof val === 'number') {
+      const col = (columnName || '').toLowerCase();
+
+      // Percentage fields
+      if (col.includes('rate') || col.includes('percent')) {
+        // If value is already in percentage form (e.g., 6.07), don't multiply
+        if (val > 1) {
+          return `${val.toFixed(2)}%`;
+        }
+        return `${(val * 100).toFixed(1)}%`;
+      }
+
+      // Duration/time fields in nanoseconds
+      if (col.includes('ns') || col.includes('_ns')) {
+        if (val > 1_000_000_000) return `${(val / 1_000_000_000).toFixed(2)}s`;
+        if (val > 1_000_000) return `${(val / 1_000_000).toFixed(2)}ms`;
+        if (val > 1000) return `${(val / 1000).toFixed(2)}µs`;
+        return `${val}ns`;
+      }
+
+      // Duration/time fields in milliseconds
+      if (col.includes('duration') || col.includes('time') || col.includes('ms') || col.includes('_ms')) {
+        if (val > 1000) return `${(val / 1000).toFixed(2)}s`;
+        return `${val.toFixed(1)}ms`;
+      }
+
+      // Large numbers get locale formatting
+      if (Math.abs(val) >= 1000) {
+        return val.toLocaleString();
+      }
+
+      // Small decimals
+      if (!Number.isInteger(val)) {
+        return val.toFixed(2);
+      }
+
+      return String(val);
+    }
+
+    // Handle bigint
+    if (typeof val === 'bigint') {
+      const num = Number(val);
+      if (num > 1_000_000_000) return `${(num / 1_000_000_000).toFixed(2)}s`;
+      if (num > 1_000_000) return `${(num / 1_000_000).toFixed(2)}ms`;
+      if (num > 1000) return `${(num / 1000).toFixed(2)}µs`;
+      return val.toString();
+    }
+
+    // Handle arrays
+    if (Array.isArray(val)) {
+      if (val.length === 0) return '[]';
+      // For short arrays, show inline
+      if (val.length <= 3) {
+        return `[${val.map(v => this.formatDisplayValue(v)).join(', ')}]`;
+      }
+      return `[${val.length} items]`;
+    }
+
+    // Handle objects (nested data)
+    if (typeof val === 'object') {
+      const keys = Object.keys(val);
+      if (keys.length === 0) return '{}';
+      // For small objects, try to show key-value pairs
+      if (keys.length <= 3) {
+        const pairs = keys.map(k => `${k}: ${this.formatDisplayValue(val[k])}`);
+        return `{${pairs.join(', ')}}`;
+      }
+      // For larger objects, use JSON
+      try {
+        return JSON.stringify(val);
+      } catch {
+        return `{${keys.length} fields}`;
+      }
+    }
+
+    // Handle boolean
+    if (typeof val === 'boolean') {
+      return val ? '✓' : '✗';
+    }
+
+    // Default: convert to string
+    return String(val);
+  }
+
+  /**
+   * Format layer data key name to human-readable label
+   */
+  private formatLayerName(key: string): string {
+    // Common layer name mappings
+    const nameMap: Record<string, string> = {
+      'jank_frames': '卡顿帧',
+      'scrolling_sessions': '滑动会话',
+      'frame_details': '帧详情',
+      'frame_analysis': '帧分析',
+      'slow_frames': '慢帧',
+      'blocked_frames': '阻塞帧',
+      'sessions': '会话',
+      'frames': '帧数据',
+      'metrics': '指标',
+      'overview': '概览',
+      'summary': '摘要',
+    };
+
+    // Check for exact match
+    const lowerKey = key.toLowerCase();
+    if (nameMap[lowerKey]) {
+      return nameMap[lowerKey];
+    }
+
+    // Format snake_case to readable string
+    return key
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  /**
+   * Extract conclusion from overview layer data (Phase 4)
+   * Maps the root_cause_classification step output to conclusion format
+   */
+  private extractConclusionFromOverview(overview: Record<string, any> | undefined): any {
+    if (!overview) return null;
+
+    // Check for conclusion data in various locations
+    const conclusion = overview.conclusion || overview.root_cause_classification;
+    if (conclusion && typeof conclusion === 'object') {
+      // Direct conclusion object
+      if (conclusion.problem_category || conclusion.category) {
+        return {
+          category: conclusion.problem_category || conclusion.category,
+          component: conclusion.problem_component || conclusion.component,
+          confidence: conclusion.confidence || 0.5,
+          summary: conclusion.root_cause_summary || conclusion.summary || '',
+          evidence: this.parseEvidence(conclusion.evidence),
+          suggestion: conclusion.suggestion,
+        };
+      }
+    }
+
+    // Check if conclusion fields are at the top level of overview
+    if (overview.problem_category) {
+      return {
+        category: overview.problem_category,
+        component: overview.problem_component,
+        confidence: overview.confidence || 0.5,
+        summary: overview.root_cause_summary || '',
+        evidence: this.parseEvidence(overview.evidence),
+        suggestion: overview.suggestion,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Parse evidence field which may be JSON string or array
+   */
+  private parseEvidence(evidence: any): string[] {
+    if (!evidence) return [];
+    if (Array.isArray(evidence)) return evidence;
+    if (typeof evidence === 'string') {
+      try {
+        const parsed = JSON.parse(evidence);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [evidence];
+      }
+    }
+    return [];
+  }
+
+  /**
+   * Translate problem category to Chinese (Phase 4)
+   */
+  private translateCategory(category: string): string {
+    const translations: Record<string, string> = {
+      'APP': '应用问题',
+      'SYSTEM': '系统问题',
+      'MIXED': '混合问题',
+      'UNKNOWN': '未知',
+    };
+    return translations[category] || category;
+  }
+
+  /**
+   * Translate problem component to Chinese (Phase 4)
+   */
+  private translateComponent(component: string): string {
+    const translations: Record<string, string> = {
+      'MAIN_THREAD': '主线程',
+      'RENDER_THREAD': '渲染线程',
+      'SURFACE_FLINGER': 'SurfaceFlinger',
+      'BINDER': 'Binder 跨进程调用',
+      'CPU_SCHEDULING': 'CPU 调度',
+      'CPU_AFFINITY': 'CPU 亲和性',
+      'GPU': 'GPU',
+      'MEMORY': '内存',
+      'IO': 'IO',
+      'MAIN_THREAD_BLOCKING': '主线程阻塞',
+      'UNKNOWN': '未知',
+    };
+    return translations[component] || component;
   }
 
   /**
