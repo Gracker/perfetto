@@ -23,6 +23,12 @@ import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
 import {AppImpl} from '../../core/app_impl';
 import {getBackendUploader} from '../../core/backend_uploader';
 import {TraceSource} from '../../core/trace_source';
+import {Time} from '../../base/time';
+import {
+  FullAnalysis,
+  ExpandableSections,
+  isFrameDetailData,
+} from './generated';
 
 export interface AIPanelAttrs {
   engine: Engine;
@@ -79,6 +85,9 @@ interface AIPanelState {
   currentSessionId: string | null;  // 当前 Session ID
   isRetryingBackend: boolean;  // 正在重试连接后端
   retryError: string | null;  // 重试连接的错误信息
+  agentSessionId: string | null;  // Agent 多轮对话 Session ID
+  displayedSkillProgress: Set<string>;  // 已显示的 skill 进度 (skillId:step)，用于去重
+  completionHandled: boolean;  // 是否已处理分析完成事件（防止 conclusion + analysis_completed 重复处理）
 }
 
 interface PinnedResult {
@@ -145,6 +154,13 @@ interface SessionsStorage {
 // All styles are now in styles.scss using CSS classes
 // Removed inline STYLES, THEME, ANIMATIONS objects for better maintainability
 
+// Preset questions for quick analysis
+const PRESET_QUESTIONS: Array<{label: string; question: string; icon: string}> = [
+  {label: '滑动', question: '分析滑动性能', icon: 'swipe'},
+  {label: '启动', question: '分析启动性能', icon: 'rocket_launch'},
+  {label: '跳转', question: '分析跳转性能', icon: 'open_in_new'},
+];
+
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
@@ -165,6 +181,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     currentSessionId: null,  // 当前 Session ID
     isRetryingBackend: false,  // 正在重试连接后端
     retryError: null,  // 重试连接的错误信息
+    agentSessionId: null,  // Agent 多轮对话 Session ID
+    displayedSkillProgress: new Set(),  // 已显示的 skill 进度
+    completionHandled: false,  // 分析完成事件是否已处理
   };
 
   private onClearChat?: () => void;
@@ -488,6 +507,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.bookmarks = [];
     this.state.lastQuery = '';
     this.state.currentSessionId = null;
+    this.state.agentSessionId = null;  // Reset Agent session for multi-turn dialogue
 
     // 如果有有效的 trace 指纹，创建新 session
     if (this.state.currentTraceFingerprint) {
@@ -568,6 +588,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               : null,
             isInRpcMode
               ? m('span.ai-status-text.backend', 'RPC')
+              : null,
+            // Preset question buttons - only show when connected to backend
+            isInRpcMode && !this.state.isLoading
+              ? m('div.ai-preset-questions',
+                  PRESET_QUESTIONS.map(preset =>
+                    m('button.ai-preset-btn', {
+                      onclick: () => this.sendPresetQuestion(preset.question),
+                      title: preset.question,
+                      disabled: this.state.isLoading,
+                    }, [
+                      m('i.pf-icon', preset.icon),
+                      preset.label,
+                    ])
+                  )
+                )
               : null,
           ]),
           m('div.ai-header-right', [
@@ -676,7 +711,31 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               m('div.ai-bubble', {
                 class: msg.role === 'user' ? 'ai-bubble-user' : 'ai-bubble-assistant',
               }, [
-                m('div.ai-message-content', m.trust(this.formatMessage(msg.content))),
+                // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
+                // reconciliation for m.trust() content. This avoids removeChild errors
+                // that occur when multiple SSE events trigger rapid redraws.
+                m('div.ai-message-content', {
+                  onclick: (e: MouseEvent) => {
+                    const target = e.target as HTMLElement;
+                    if (target.classList.contains('ai-clickable-timestamp')) {
+                      const tsNs = target.getAttribute('data-ts');
+                      if (tsNs) {
+                        this.jumpToTimestamp(BigInt(tsNs));
+                      }
+                    }
+                  },
+                  oncreate: (vnode: m.VnodeDOM) => {
+                    (vnode.dom as HTMLElement).innerHTML = this.formatMessage(msg.content);
+                  },
+                  onupdate: (vnode: m.VnodeDOM) => {
+                    const newHtml = this.formatMessage(msg.content);
+                    const dom = vnode.dom as HTMLElement;
+                    // Only update if content actually changed (optimization)
+                    if (dom.innerHTML !== newHtml) {
+                      dom.innerHTML = newHtml;
+                    }
+                  },
+                }),
 
                 // HTML Report Link (问题1修复)
                 msg.reportUrl ? m('div.ai-report-link', [
@@ -1252,6 +1311,9 @@ Click ⚙️ to change settings.`;
 
     if (!input || this.state.isLoading) return;
 
+    // Clear skill progress tracking for new analysis session
+    this.state.displayedSkillProgress.clear();
+
     // Add user message
     this.addMessage({
       id: this.generateId(),
@@ -1272,6 +1334,15 @@ Click ⚙️ to change settings.`;
       await this.handleChatMessage(input);
       console.log('[AIPanel] handleChatMessage completed');
     }
+  }
+
+  /**
+   * Send a preset question - triggered by quick action buttons
+   */
+  private sendPresetQuestion(question: string) {
+    if (this.state.isLoading) return;
+    this.state.input = question;
+    this.sendMessage();
   }
 
   private addMessage(msg: Message) {
@@ -2019,28 +2090,43 @@ Keep your analysis concise and actionable.`;
     }
 
     this.state.isLoading = true;
+    this.state.completionHandled = false;  // Reset completion flag for new analysis
+    this.state.displayedSkillProgress.clear();  // Clear progress tracking for new analysis
     m.redraw();
 
     try {
-      // Call backend analysis API
-      const apiUrl = `${this.state.settings.backendUrl}/api/trace-analysis/analyze`;
-      console.log('[AIPanel] Calling API:', apiUrl, 'with traceId:', this.state.backendTraceId);
+      // Call Agent API (MasterOrchestrator)
+      const apiUrl = `${this.state.settings.backendUrl}/api/agent/analyze`;
+      console.log('[AIPanel] Calling Agent API:', apiUrl, 'with traceId:', this.state.backendTraceId);
+
+      // Build request body, include sessionId for multi-turn dialogue
+      const requestBody: Record<string, any> = {
+        query: message,
+        traceId: this.state.backendTraceId,
+        options: {
+          maxIterations: 3,  // Reduced to avoid unnecessary iterations
+          qualityThreshold: 0.5,  // Match backend default - Skills already produce quality results
+          enableEvaluation: true,
+        },
+      };
+
+      // Include agentSessionId if available for multi-turn dialogue
+      if (this.state.agentSessionId) {
+        requestBody.sessionId = this.state.agentSessionId;
+        console.log('[AIPanel] Reusing Agent session for multi-turn dialogue:', this.state.agentSessionId);
+      }
 
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: message,
-          traceId: this.state.backendTraceId,
-          maxIterations: 12,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
-      console.log('[AIPanel] API response status:', response.status);
+      console.log('[AIPanel] Agent API response status:', response.status);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        if (errorData.code === 'TRACE_NOT_UPLOADED') {
+        if (errorData.code === 'TRACE_NOT_UPLOADED' || errorData.error?.includes('not found')) {
           this.addMessage({
             id: this.generateId(),
             role: 'system',
@@ -2050,23 +2136,33 @@ Keep your analysis concise and actionable.`;
           this.state.backendTraceId = null;
           return;
         }
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+        throw new Error(`API error: ${response.status} ${errorData.error || response.statusText}`);
       }
 
       const data = await response.json();
-      console.log('[AIPanel] API response data:', data);
+      console.log('[AIPanel] Agent API response data:', data);
 
       if (!data.success) {
         throw new Error(data.error || 'Analysis failed');
       }
 
       // Use SSE for real-time progress updates
-      const analysisId = data.analysisId;
-      if (analysisId) {
-        console.log('[AIPanel] Starting SSE listener for:', analysisId);
-        await this.listenToSSE(analysisId);
+      const sessionId = data.sessionId;
+      if (sessionId) {
+        // Save sessionId for multi-turn dialogue
+        // Only save if this is a new session or reusing existing session
+        const isNewSession = data.isNewSession !== false;
+        if (isNewSession) {
+          console.log('[AIPanel] Saving new Agent session for multi-turn dialogue:', sessionId);
+        } else {
+          console.log('[AIPanel] Continuing existing Agent session:', sessionId);
+        }
+        this.state.agentSessionId = sessionId;
+
+        console.log('[AIPanel] Starting Agent SSE listener for session:', sessionId);
+        await this.listenToAgentSSE(sessionId);
       } else {
-        console.log('[AIPanel] No analysisId in response, data:', data);
+        console.log('[AIPanel] No sessionId in response, data:', data);
       }
 
     } catch (e: any) {
@@ -2083,15 +2179,15 @@ Keep your analysis concise and actionable.`;
   }
 
   /**
-   * Listen to SSE events from backend for real-time progress updates
+   * Listen to Agent SSE events from MasterOrchestrator
    */
-  private async listenToSSE(analysisId: string): Promise<void> {
-    const apiUrl = `${this.state.settings.backendUrl}/api/trace-analysis/${analysisId}/stream`;
+  private async listenToAgentSSE(sessionId: string): Promise<void> {
+    const apiUrl = `${this.state.settings.backendUrl}/api/agent/${sessionId}/stream`;
 
     try {
       const response = await fetch(apiUrl);
       if (!response.ok) {
-        throw new Error(`SSE connection failed: ${response.statusText}`);
+        throw new Error(`Agent SSE connection failed: ${response.statusText}`);
       }
 
       const reader = response.body?.getReader();
@@ -2116,36 +2212,36 @@ Keep your analysis concise and actionable.`;
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i].trim();
           if (!line) continue;
-          if (line.startsWith(':')) continue; // Skip comments
+          if (line.startsWith(':')) continue; // Skip keep-alive comments
 
           if (line.startsWith('event:')) {
-            // Extract event type (e.g., "event: progress" -> "progress")
             currentEventType = line.replace('event:', '').trim();
           } else if (line.startsWith('data:')) {
-            // Parse data line
             const dataStr = line.replace('data:', '').trim();
             if (dataStr) {
               try {
                 const data = JSON.parse(dataStr);
-                // Use the event type from the event: line, or fall back to data.type
                 const eventType = currentEventType || data.type;
+                console.log('[AIPanel] Agent SSE event:', eventType);
                 this.handleSSEEvent(eventType, data);
               } catch (e) {
-                console.error('[AIPanel] Failed to parse SSE data:', e, dataStr);
+                console.error('[AIPanel] Failed to parse Agent SSE data:', e, dataStr);
               }
             }
-            currentEventType = ''; // Reset for next event
+            currentEventType = '';
           }
         }
       }
     } catch (e: any) {
-      console.error('[AIPanel] SSE error:', e);
+      console.error('[AIPanel] Agent SSE error:', e);
+      this.state.isLoading = false;
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Connection Error:** ${e.message || 'Lost connection to backend'}`,
+        content: `**Connection Error:** ${e.message || 'Lost connection to Agent backend'}`,
         timestamp: Date.now(),
       });
+      m.redraw();
     }
   }
 
@@ -2288,6 +2384,13 @@ Keep your analysis concise and actionable.`;
         const layeredResult = data?.data?.result?.layers || data?.data?.layers;
         if (layeredResult) {
           console.log('[AIPanel] skill_layered_result received:', data.data);
+          console.log('[AIPanel] Deep layer details:', {
+            hasDeep: !!layeredResult.deep,
+            deepKeys: layeredResult.deep ? Object.keys(layeredResult.deep) : [],
+            deepSample: layeredResult.deep ? Object.entries(layeredResult.deep).slice(0, 1).map(
+              ([sid, frames]) => ({ sessionId: sid, frameKeys: Object.keys(frames as object) })
+            ) : [],
+          });
           const layers = layeredResult;
           // Support both metadata locations
           const metadata = data.data.result?.metadata || {
@@ -2303,68 +2406,224 @@ Keep your analysis concise and actionable.`;
           // Process overview layer (L1) - metrics summary
           const overview = layers.overview || layers.L1;
           if (overview && Object.keys(overview).length > 0) {
-            // Separate simple values from nested objects
-            const simpleMetrics: Record<string, any> = {};
-            const nestedObjects: Record<string, any> = {};
+            // Helper to check if object is a StepResult format
+            const isStepResult = (obj: any): boolean => {
+              return obj && typeof obj === 'object' &&
+                'data' in obj && Array.isArray(obj.data);
+            };
 
-            for (const [key, val] of Object.entries(overview)) {
-              if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
-                nestedObjects[key] = val;
-              } else {
-                simpleMetrics[key] = val;
+            // Helper to extract data from StepResult or use as-is
+            const extractData = (obj: any): any[] | null => {
+              if (isStepResult(obj)) {
+                return obj.data;
               }
-            }
+              return null;
+            };
 
-            // Display simple metrics as a single-row table
-            if (Object.keys(simpleMetrics).length > 0) {
-              const columns = Object.keys(simpleMetrics);
-              const row = columns.map(col => this.formatDisplayValue(simpleMetrics[col], col));
+            // Helper to get display title from StepResult
+            const getDisplayTitle = (key: string, obj: any): string => {
+              if (isStepResult(obj) && obj.display?.title) {
+                return obj.display.title;
+              }
+              // Use metadata.skillName as context for the title
+              const skillContext = metadata.skillName ? ` (${metadata.skillName})` : '';
+              return this.formatLayerName(key) + skillContext;
+            };
 
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: '',
-                timestamp: Date.now(),
-                sqlResult: {
-                  columns,
-                  rows: [row],
-                  rowCount: 1,
-                  sectionTitle: `📊 ${metadata.skillName || '分析'} - 概览指标`,
-                },
-              });
-            }
+            // Process each entry in overview layer
+            for (const [key, val] of Object.entries(overview)) {
+              if (val === null || val === undefined) continue;
 
-            // Display nested objects as separate tables (e.g., performance_summary, jank_type_stats)
-            for (const [key, obj] of Object.entries(nestedObjects)) {
-              const objColumns = Object.keys(obj);
-              const objRow = objColumns.map(col => this.formatDisplayValue(obj[col], col));
+              // Check if it's a StepResult format (has data array)
+              const dataArray = extractData(val);
+              if (dataArray && dataArray.length > 0) {
+                // StepResult format: extract and display the data array
+                const firstRow = dataArray[0];
+                if (typeof firstRow === 'object' && firstRow !== null) {
+                  const columns = Object.keys(firstRow);
+                  const rows = dataArray.map((item: any) =>
+                    columns.map(col => this.formatDisplayValue(item[col], col))
+                  );
 
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: '',
-                timestamp: Date.now(),
-                sqlResult: {
-                  columns: objColumns,
-                  rows: [objRow],
-                  rowCount: 1,
-                  sectionTitle: `📈 ${this.formatLayerName(key)}`,
-                },
-              });
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: '',
+                    timestamp: Date.now(),
+                    sqlResult: {
+                      columns,
+                      rows,
+                      rowCount: rows.length,
+                      sectionTitle: `📊 ${getDisplayTitle(key, val)}`,
+                    },
+                  });
+                }
+              } else if (typeof val === 'object' && !Array.isArray(val)) {
+                // Nested object: display as single-row table
+                const objColumns = Object.keys(val);
+                const objRow = objColumns.map(col => this.formatDisplayValue((val as any)[col], col));
+
+                this.addMessage({
+                  id: this.generateId(),
+                  role: 'assistant',
+                  content: '',
+                  timestamp: Date.now(),
+                  sqlResult: {
+                    columns: objColumns,
+                    rows: [objRow],
+                    rowCount: 1,
+                    sectionTitle: `📈 ${this.formatLayerName(key)}`,
+                  },
+                });
+              } else if (!Array.isArray(val)) {
+                // Simple value - collect for combined display (skip for now, handled below)
+              }
             }
           }
 
           // Process list layer (L2) - array data tables
+          // Get deep layer data for potential expandable rows
+          const deep = layers.deep || layers.L4;
           const list = layers.list || layers.L2;
+
+          // Debug logging for expandable data
+          console.log('[AIPanel] Processing L2/deep layers:', {
+            hasDeep: !!deep,
+            hasList: !!list,
+            deepKeys: deep ? Object.keys(deep) : [],
+            listKeys: list ? Object.keys(list) : [],
+          });
           if (list && typeof list === 'object') {
-            for (const [key, items] of Object.entries(list)) {
-              if (!Array.isArray(items) || items.length === 0) continue;
+            // Helper to check if object is a StepResult format
+            const isStepResult = (obj: any): boolean => {
+              return obj && typeof obj === 'object' &&
+                'data' in obj && Array.isArray(obj.data);
+            };
+
+            // Helper to find frame detail in deep layer
+            // Supports both prefixed (session_1, frame_123) and non-prefixed (1, 123) formats
+            let findFrameDetailCallCount = 0;
+            const findFrameDetail = (frameId: string | number, sessionId?: string | number): any => {
+              findFrameDetailCallCount++;
+              if (!deep || typeof deep !== 'object') {
+                if (findFrameDetailCallCount <= 5) console.warn('[findFrameDetail] deep is invalid:', deep);
+                return null;
+              }
+
+              // Generate all possible key variants for matching
+              const sessionKeys = sessionId !== undefined
+                ? [String(sessionId), `session_${sessionId}`]
+                : [];
+              const frameKeys = [String(frameId), `frame_${frameId}`];
+
+              // Deep layer structure: { sessionId: { frameId: frameData } }
+              for (const [sid, frames] of Object.entries(deep)) {
+                // Check if session matches (if sessionId provided)
+                if (sessionId !== undefined) {
+                  const sessionMatches = sessionKeys.some(sk => sid === sk);
+                  if (!sessionMatches) continue;
+                }
+
+                if (frames && typeof frames === 'object') {
+                  // Try all possible frame key formats
+                  for (const fk of frameKeys) {
+                    const frameData = (frames as any)[fk];
+                    if (frameData) return frameData;
+                  }
+                  // Debug: log when session matches but frame not found
+                  if (findFrameDetailCallCount <= 5) {
+                    const availableKeys = Object.keys(frames as object).slice(0, 5);
+                    console.log(`[findFrameDetail] Session ${sid} matched but frame not found. Looking for: ${frameKeys.join(', ')}. Available keys sample: ${availableKeys.join(', ')}`);
+                  }
+                }
+              }
+              return null;
+            };
+
+            for (const [key, value] of Object.entries(list)) {
+              // Handle StepResult format: { stepId, data: [...], display }
+              let items: any[] = [];
+              let displayTitle = this.formatLayerName(key);
+              let isExpandable = false;
+
+              if (isStepResult(value)) {
+                items = (value as any).data;
+                if ((value as any).display?.title) {
+                  displayTitle = (value as any).display.title;
+                }
+                // Check if this list should be expandable (has frame details in deep layer)
+                isExpandable = (value as any).display?.expandable === true;
+              } else if (Array.isArray(value)) {
+                items = value;
+              }
+
+              if (items.length === 0) continue;
 
               const columns = Object.keys(items[0] || {});
               const rows = items.map((item: any) => columns.map(col => {
                 return this.formatDisplayValue(item[col], col);
               }));
 
+              // Build expandable data if this is a frame list with deep analysis
+              let expandableData: any[] | undefined;
+              if (isExpandable && deep) {
+                console.log('[AIPanel] Building expandable data for', key, {
+                  itemCount: items.length,
+                  sampleItem: items[0],
+                  deepStructure: Object.fromEntries(
+                    Object.entries(deep).slice(0, 2).map(([k, v]) => [k, Object.keys(v as object)])
+                  ),
+                });
+
+                // IMPORTANT: Don't use .filter(Boolean) - we need to preserve array indices
+                // so that expandableData[rowIndex] matches the correct row
+                expandableData = items.map((item: any, idx: number) => {
+                  const frameId = item.frame_id || item.frameId || item.id;
+                  const sessionId = item.session_id || item.sessionId;
+                  const frameDetail = findFrameDetail(frameId, sessionId);
+
+                  // Log all frames to help diagnose expand issues
+                  if (idx < 10 || !frameDetail) {
+                    console.log(`[AIPanel] Frame ${idx}: frameId=${frameId}, sessionId=${sessionId}, found=${!!frameDetail}`);
+                    if (frameDetail) {
+                      console.log(`[AIPanel] Frame ${idx} detail:`, {
+                        hasData: !!frameDetail.data,
+                        dataType: typeof frameDetail.data,
+                        dataKeys: frameDetail.data ? Object.keys(frameDetail.data) : [],
+                      });
+                    }
+                  }
+
+                  if (frameDetail) {
+                    // Convert backend format to frontend sections format
+                    const sections = this.convertToExpandableSections(frameDetail.data);
+
+                    if (idx < 3) {
+                      console.log(`[AIPanel] Frame ${idx} sections:`, Object.keys(sections));
+                    }
+
+                    return {
+                      item: frameDetail.item || item,
+                      result: {
+                        success: true,
+                        sections,
+                      },
+                    };
+                  }
+                  // Return null but DON'T filter - preserve index alignment with rows
+                  return null;
+                });
+
+                const expandableItemCount = expandableData?.filter(Boolean).length || 0;
+                const failedIndices = expandableData?.map((d, i) => d ? null : i).filter(i => i !== null) || [];
+                console.log('[AIPanel] Expandable data built:', expandableData?.length || 0, 'slots,', expandableItemCount, 'with data');
+                if (failedIndices.length > 0 && failedIndices.length <= 10) {
+                  console.warn('[AIPanel] Failed to find deep data for frames at indices:', failedIndices);
+                } else if (failedIndices.length > 10) {
+                  console.warn('[AIPanel] Failed to find deep data for', failedIndices.length, 'frames. First 10:', failedIndices.slice(0, 10));
+                }
+              }
+
               this.addMessage({
                 id: this.generateId(),
                 role: 'assistant',
@@ -2374,38 +2633,19 @@ Keep your analysis concise and actionable.`;
                   columns,
                   rows,
                   rowCount: rows.length,
-                  sectionTitle: `📋 ${this.formatLayerName(key)} (${rows.length}条)`,
+                  sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
+                  // Include expandableData if at least one item has data (use filter to count non-null items)
+                  expandableData: expandableData && expandableData.filter(Boolean).length > 0 ? expandableData : undefined,
                 },
               });
             }
           }
 
           // Process deep layer (L4) - detailed frame data
-          const deep = layers.deep || layers.L4;
-          if (deep && typeof deep === 'object') {
-            for (const [key, items] of Object.entries(deep)) {
-              if (!Array.isArray(items) || items.length === 0) continue;
-
-              const columns = Object.keys(items[0] || {});
-              const rows = items.slice(0, 50).map((item: any) => columns.map(col => {
-                return this.formatDisplayValue(item[col], col);
-              }));
-
-              const totalCount = items.length;
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: '',
-                timestamp: Date.now(),
-                sqlResult: {
-                  columns,
-                  rows,
-                  rowCount: rows.length,
-                  sectionTitle: `🔍 ${this.formatLayerName(key)} (${totalCount > 50 ? `显示前50条/共${totalCount}条` : `${totalCount}条`})`,
-                },
-              });
-            }
-          }
+          // Skip L4 display if data is already embedded in L2 expandable rows
+          // The deep layer data is used for expandable content in list tables
+          // NOTE: We no longer display L4 as standalone tables since it's
+          // now embedded as expandable data in the frame list (L2 layer)
 
           // Show conclusion card if available (Phase 4: Root Cause Classification)
           const conclusion = data.data.result?.conclusion || this.extractConclusionFromOverview(overview);
@@ -2441,25 +2681,51 @@ Keep your analysis concise and actionable.`;
             });
           }
 
-          // Show summary if available
+          // Show summary if available - try to parse as table if it looks like key-value pairs
           if (data.data.summary) {
-            this.addMessage({
-              id: this.generateId(),
-              role: 'assistant',
-              content: `**📝 分析摘要:** ${data.data.summary}`,
-              timestamp: Date.now(),
-            });
+            const summaryTableData = this.parseSummaryToTable(data.data.summary);
+            if (summaryTableData) {
+              // Display as table
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                sqlResult: {
+                  columns: summaryTableData.columns,
+                  rows: summaryTableData.rows,
+                  rowCount: summaryTableData.rows.length,
+                  sectionTitle: '📝 分析摘要',
+                },
+              });
+            } else {
+              // Fallback to text display
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: `**📝 分析摘要:** ${data.data.summary}`,
+                timestamp: Date.now(),
+              });
+            }
           }
         }
         break;
 
       case 'analysis_completed':
-        // Analysis is complete - show final answer
-        console.log('[AIPanel] analysis_completed - full data:', JSON.stringify(data, null, 2));
-        console.log('[AIPanel] answer exists?', !!data?.data?.answer);
-        console.log('[AIPanel] answer value:', data?.data?.answer);
+        // Analysis is complete - show final answer (authoritative completion event)
+        console.log('[AIPanel] analysis_completed received');
         this.state.isLoading = false;
+
+        // Guard against duplicate handling
+        if (this.state.completionHandled) {
+          console.log('[AIPanel] Completion already handled, skipping');
+          break;
+        }
+
         if (data?.data?.answer) {
+          // Mark completion as handled BEFORE modifying messages to prevent race conditions
+          this.state.completionHandled = true;
+
           // Remove any remaining progress message
           const lastMsg = this.state.messages[this.state.messages.length - 1];
           if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
@@ -2467,7 +2733,7 @@ Keep your analysis concise and actionable.`;
           }
           console.log('[AIPanel] Adding final answer message');
           // 构建消息内容，包含 HTML 报告链接
-          let content = data.data.answer;
+          const content = data.data.answer;
           const reportUrl = data.data.reportUrl;
           this.addMessage({
             id: this.generateId(),
@@ -2479,6 +2745,152 @@ Keep your analysis concise and actionable.`;
         } else {
           console.warn('[AIPanel] No answer in analysis_completed event!');
         }
+        break;
+
+      case 'thought':
+        // Agent thinking process (Planner or Evaluator)
+        // Skip detailed thought messages to reduce noise - only show a brief progress indicator
+        // The actual results are shown via skill_data and analysis_completed events
+        console.log(`[AIPanel] Skipping thought display:`, data?.data?.agent);
+        break;
+
+      case 'worker_thought':
+        // Worker skill execution progress
+        // Skip all worker_thought messages to reduce noise - the skill_data/skill_layered_result
+        // already provides the actual data in a more useful format (tables)
+        console.log(`[AIPanel] Skipping worker_thought display (data shown via skill_data):`, data?.data?.step);
+        break;
+
+      case 'skill_data':
+        // Skill layer data - convert to skill_layered_result format for display
+        if (data?.data) {
+          console.log('[AIPanel] skill_data received, converting to layered result:', data.data);
+
+          // Transform to skill_layered_result format
+          const transformedData = {
+            data: {
+              skillId: data.data.skillId,
+              skillName: data.data.skillName,
+              layers: data.data.layers,
+              diagnostics: data.data.diagnostics,
+            },
+          };
+
+          // Delegate to skill_layered_result handler
+          this.handleSSEEvent('skill_layered_result', transformedData);
+        }
+        break;
+
+      case 'finding':
+        // Analysis finding - skip display to reduce noise
+        // The actual data is already shown in skill_data tables (L2 layer)
+        // Findings are also included in the final analysis_completed answer
+        console.log(`[AIPanel] Skipping finding display (data shown in tables):`, data?.data?.stage);
+        break;
+
+      case 'finding_DISABLED':
+        // DISABLED: Original finding display code kept for reference
+        // Analysis finding with clickable timestamps
+        if (data?.data) {
+          const { stage, findings } = data.data;
+
+          if (!findings || findings.length === 0) break;
+
+          // Build finding message with clickable timestamps
+          let content = `## 🔍 发现 (${stage || '分析'})\n\n`;
+
+          // Collect findings that have table data for separate rendering
+          const findingsWithTables: any[] = [];
+
+          for (const finding of findings) {
+            const severityEmoji: Record<string, string> = {
+              critical: '🔴',
+              high: '🟠',
+              warning: '🟡',
+              medium: '🟡',
+              info: '🔵',
+              low: '🟢',
+            };
+            const emoji = severityEmoji[finding.severity] || '⚪';
+
+            content += `### ${emoji} ${finding.title}\n`;
+
+            // Check if this finding has structured table data
+            if (finding.details?.tableData && Array.isArray(finding.details.tableData)) {
+              // Don't include the raw description, we'll show a table instead
+              content += `_(详见下方表格)_\n\n`;
+              findingsWithTables.push({
+                title: finding.details.tableTitle || finding.title,
+                data: finding.details.tableData,
+                emoji,
+              });
+            } else {
+              content += `${finding.description}\n\n`;
+            }
+
+            // Add clickable timestamps
+            if (finding.timestampsNs && finding.timestampsNs.length > 0) {
+              content += `**时间点** (点击跳转):\n`;
+              finding.timestampsNs.slice(0, 5).forEach((ts: number) => {
+                const label = this.formatTimestampForDisplay(ts);
+                content += `- @ts[${ts}|${label}]\n`;
+              });
+              if (finding.timestampsNs.length > 5) {
+                content += `- _...还有 ${finding.timestampsNs.length - 5} 个时间点_\n`;
+              }
+              content += '\n';
+            }
+
+            // Add recommendations
+            if (finding.recommendations && finding.recommendations.length > 0) {
+              content += `**优化建议**:\n`;
+              finding.recommendations.forEach((rec: any) => {
+                content += `- ${rec.text || rec}\n`;
+              });
+              content += '\n';
+            }
+          }
+
+          // First add the text message
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content,
+            timestamp: Date.now(),
+          });
+
+          // Then add table messages for findings with structured data
+          for (const tableInfo of findingsWithTables) {
+            const firstRow = tableInfo.data[0];
+            if (firstRow && typeof firstRow === 'object') {
+              const columns = Object.keys(firstRow).filter(k => !k.startsWith('_'));
+              const rows = tableInfo.data.map((item: any) =>
+                columns.map(col => this.formatDisplayValue(item[col], col))
+              );
+
+              this.addMessage({
+                id: this.generateId(),
+                role: 'assistant',
+                content: '',
+                timestamp: Date.now(),
+                sqlResult: {
+                  columns,
+                  rows,
+                  rowCount: rows.length,
+                  sectionTitle: `${tableInfo.emoji} ${tableInfo.title}`,
+                },
+              });
+            }
+          }
+        }
+        break;
+
+      case 'conclusion':
+        // Final conclusion from analysis (first event in completion sequence)
+        // Note: analysis_completed event follows with more info (reportUrl), so we skip adding message here
+        // and let analysis_completed handle the final message display
+        console.log('[AIPanel] CONCLUSION event received - skipping message add (waiting for analysis_completed)');
+        // Don't set isLoading = false yet, wait for analysis_completed
         break;
 
       case 'error':
@@ -2613,6 +3025,7 @@ Keep your analysis concise and actionable.`;
           this.saveCurrentSession();
           this.createNewSession();
           this.state.messages = [];
+          this.state.agentSessionId = null;  // Reset Agent session for new conversation
           if (this.engine?.mode === 'HTTP_RPC') {
             this.addRpcModeWelcomeMessage();
           } else {
@@ -2646,12 +3059,107 @@ Keep your analysis concise and actionable.`;
   }
 
   private formatMessage(content: string): string {
-    // Simple markdown-like formatting
-    return content
+    // Process clickable timestamps: @ts[timestampNs|label]
+    // Convert to clickable span elements with data attributes
+    let processedContent = content.replace(
+      /@ts\[(\d+)\|([^\]]+)\]/g,
+      '<span class="ai-clickable-timestamp" data-ts="$1" title="点击跳转到此时间点">$2</span>'
+    );
+
+    // Process Markdown tables BEFORE other formatting
+    // Match table blocks: header row, separator row, and data rows
+    processedContent = processedContent.replace(
+      /(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n?)+)/g,
+      (tableBlock) => {
+        const lines = tableBlock.trim().split('\n');
+        if (lines.length < 2) return tableBlock;
+
+        // Parse header
+        const headerCells = lines[0]
+          .split('|')
+          .filter((cell) => cell.trim() !== '')
+          .map((cell) => `<th>${cell.trim()}</th>`)
+          .join('');
+
+        // Skip separator line (line 1), parse data rows
+        const dataRows = lines
+          .slice(2)
+          .map((line) => {
+            const cells = line
+              .split('|')
+              .filter((cell) => cell.trim() !== '')
+              .map((cell) => `<td>${cell.trim()}</td>`)
+              .join('');
+            return `<tr>${cells}</tr>`;
+          })
+          .join('');
+
+        return `<table class="ai-md-table"><thead><tr>${headerCells}</tr></thead><tbody>${dataRows}</tbody></table>`;
+      }
+    );
+
+    // Markdown-like formatting with extended support
+    processedContent = processedContent
+      .replace(/^## (.*?)$/gm, '<h2>$1</h2>')
+      .replace(/^### (.*?)$/gm, '<h3>$1</h3>')
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>')
       .replace(/`(.*?)`/g, '<code>$1</code>')
+      .replace(/^> (.*?)$/gm, '<blockquote>$1</blockquote>')
+      .replace(/^- (.*?)$/gm, '<li>$1</li>')
       .replace(/\n/g, '<br>');
+
+    // Wrap consecutive <li> elements in <ul>
+    processedContent = processedContent.replace(
+      /(<li>.*?<\/li>(?:<br>)?)+/g,
+      (match) => '<ul>' + match.replace(/<br>/g, '') + '</ul>'
+    );
+
+    return processedContent;
+  }
+
+  /**
+   * Format timestamp for display (nanoseconds to human-readable)
+   */
+  private formatTimestampForDisplay(timestampNs: number): string {
+    if (timestampNs >= 1_000_000_000) {
+      return (timestampNs / 1_000_000_000).toFixed(3) + 's';
+    }
+    if (timestampNs >= 1_000_000) {
+      return (timestampNs / 1_000_000).toFixed(2) + 'ms';
+    }
+    if (timestampNs >= 1_000) {
+      return (timestampNs / 1_000).toFixed(2) + 'us';
+    }
+    return timestampNs + 'ns';
+  }
+
+  /**
+   * Jump to a specific timestamp in the Perfetto timeline
+   */
+  private jumpToTimestamp(timestampNs: bigint): void {
+    if (!this.trace) {
+      console.error('[AIPanel] No trace available for navigation');
+      return;
+    }
+
+    try {
+      // Create a 10ms window around the timestamp for better visibility
+      const windowNs = BigInt(10_000_000); // 10ms
+      const startNs = timestampNs - windowNs / BigInt(2);
+      const endNs = timestampNs + windowNs / BigInt(2);
+
+      console.log(`[AIPanel] Jumping to timestamp: ${timestampNs}ns`);
+
+      this.trace.scrollTo({
+        time: {
+          start: Time.fromRaw(startNs > BigInt(0) ? startNs : BigInt(0)),
+          end: Time.fromRaw(endNs),
+        },
+      });
+    } catch (error) {
+      console.error('[AIPanel] Failed to jump to timestamp:', error);
+    }
   }
 
   private async clearChat() {
@@ -2676,6 +3184,7 @@ Keep your analysis concise and actionable.`;
     this.state.historyIndex = -1;
     this.state.backendTraceId = null;  // Clear backend trace ID
     this.state.pinnedResults = [];  // Clear pinned results
+    this.state.agentSessionId = null;  // Clear Agent session for multi-turn dialogue
     this.saveHistory();
 
     // Show welcome message
@@ -2944,6 +3453,167 @@ Keep your analysis concise and actionable.`;
 
     // Default: convert to string
     return String(val);
+  }
+
+  /**
+   * Parse a summary string like "key1: value1, key2: value2" into table data
+   * Returns null if the string doesn't match the expected pattern
+   */
+  private parseSummaryToTable(summary: string): { columns: string[], rows: string[][] } | null {
+    if (!summary || typeof summary !== 'string') {
+      return null;
+    }
+
+    // Try to parse formats like:
+    // "key1: value1, key2: value2, key3: value3"
+    // "key1: value1 | key2: value2 | key3: value3"
+
+    // First, split by common delimiters
+    const parts = summary.split(/[,|]/).map(p => p.trim()).filter(p => p);
+
+    if (parts.length < 2) {
+      // Not enough key-value pairs to make a table worthwhile
+      return null;
+    }
+
+    const keyValuePairs: { key: string; value: string }[] = [];
+
+    for (const part of parts) {
+      // Match "key: value" pattern
+      const match = part.match(/^([^:]+):\s*(.+)$/);
+      if (match) {
+        keyValuePairs.push({
+          key: match[1].trim(),
+          value: match[2].trim(),
+        });
+      }
+    }
+
+    // Need at least 2 valid key-value pairs for a table
+    if (keyValuePairs.length < 2) {
+      return null;
+    }
+
+    // Create a single-row table with columns as keys
+    const columns = keyValuePairs.map(kv => kv.key);
+    const rows = [keyValuePairs.map(kv => this.formatDisplayValue(kv.value, kv.key))];
+
+    return { columns, rows };
+  }
+
+  /**
+   * Convert backend frame detail data to sections format expected by renderExpandableContent.
+   *
+   * Backend returns: FrameDetailData { diagnosis_summary, full_analysis: FullAnalysis }
+   * Frontend expects: ExpandableSections { [sectionId]: { title, data: unknown[] } }
+   *
+   * @see generated/frame_analysis.types.ts for type definitions
+   */
+  private convertToExpandableSections(data: unknown): ExpandableSections {
+    // Type guard: validate input format
+    console.log('[convertToExpandableSections] Input data:', {
+      type: typeof data,
+      isNull: data === null,
+      isUndefined: data === undefined,
+      keys: data && typeof data === 'object' ? Object.keys(data) : [],
+    });
+
+    if (!isFrameDetailData(data)) {
+      console.warn('[convertToExpandableSections] Invalid data format - failing isFrameDetailData check:', data);
+      return {};
+    }
+
+    const sections: ExpandableSections = {};
+
+    // Title mapping for each analysis type (matches FullAnalysis keys)
+    const titleMap: Record<keyof FullAnalysis, string> = {
+      'quadrants': '四象限分析',
+      'binder_calls': 'Binder 调用',
+      'cpu_frequency': 'CPU 频率',
+      'main_thread_slices': '主线程耗时操作',
+      'render_thread_slices': 'RenderThread 耗时操作',
+      'cpu_freq_timeline': 'CPU 频率时间线',
+      'lock_contentions': '锁竞争',
+    };
+
+    // Handle diagnosis_summary as a special section
+    if (data.diagnosis_summary) {
+      sections['diagnosis'] = {
+        title: '🎯 根因诊断',
+        data: [{ diagnosis: data.diagnosis_summary }],
+      };
+    }
+
+    // Handle full_analysis object with typed access
+    const analysis = data.full_analysis;
+    if (analysis) {
+      // Process quadrants - convert nested object to display array
+      if (analysis.quadrants) {
+        const quadrantData: Array<{ thread: string; quadrant: string; percentage: number }> = [];
+        const { main_thread, render_thread } = analysis.quadrants;
+
+        // Convert main_thread quadrants
+        for (const [qKey, qValue] of Object.entries(main_thread)) {
+          if (qValue > 0) {
+            quadrantData.push({
+              thread: '主线程',
+              quadrant: qKey.toUpperCase(),
+              percentage: qValue,
+            });
+          }
+        }
+
+        // Convert render_thread quadrants
+        for (const [qKey, qValue] of Object.entries(render_thread)) {
+          if (qValue > 0) {
+            quadrantData.push({
+              thread: 'RenderThread',
+              quadrant: qKey.toUpperCase(),
+              percentage: qValue,
+            });
+          }
+        }
+
+        if (quadrantData.length > 0) {
+          sections['quadrants'] = { title: titleMap['quadrants'], data: quadrantData };
+        }
+      }
+
+      // Process cpu_frequency - convert object to display array
+      if (analysis.cpu_frequency) {
+        const freqData: Array<{ core_type: string; avg_freq_mhz: number }> = [];
+        const { big_avg_mhz, little_avg_mhz } = analysis.cpu_frequency;
+
+        if (big_avg_mhz > 0) {
+          freqData.push({ core_type: '大核', avg_freq_mhz: big_avg_mhz });
+        }
+        if (little_avg_mhz > 0) {
+          freqData.push({ core_type: '小核', avg_freq_mhz: little_avg_mhz });
+        }
+
+        if (freqData.length > 0) {
+          sections['cpu_frequency'] = { title: titleMap['cpu_frequency'], data: freqData };
+        }
+      }
+
+      // Process array fields directly
+      const arrayFields: Array<keyof FullAnalysis> = [
+        'binder_calls',
+        'main_thread_slices',
+        'render_thread_slices',
+        'cpu_freq_timeline',
+        'lock_contentions',
+      ];
+
+      for (const field of arrayFields) {
+        const value = analysis[field];
+        if (Array.isArray(value) && value.length > 0) {
+          sections[field] = { title: titleMap[field], data: value };
+        }
+      }
+    }
+
+    return sections;
   }
 
   /**

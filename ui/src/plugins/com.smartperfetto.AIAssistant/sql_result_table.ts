@@ -101,8 +101,21 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     return m('div.sql-result.compact', [
       // 汇总报告（如果有且有关键发现）
+      // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
+      // reconciliation for formatted content (avoids removeChild errors)
       summary && summary.content.includes('关键发现') ? m('.sql-result-summary', [
-        m('div.summary-content', m.trust(this.formatMarkdown(summary.content))),
+        m('div.summary-content', {
+          oncreate: (vnode: m.VnodeDOM) => {
+            (vnode.dom as HTMLElement).innerHTML = this.formatMarkdown(summary.content);
+          },
+          onupdate: (vnode: m.VnodeDOM) => {
+            const newHtml = this.formatMarkdown(summary.content);
+            const dom = vnode.dom as HTMLElement;
+            if (dom.innerHTML !== newHtml) {
+              dom.innerHTML = newHtml;
+            }
+          },
+        }),
       ]) : null,
 
       // Compact single-row header with title (if provided), row count, and actions
@@ -159,8 +172,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         m('table.sql-result-table', [
           m('thead',
             m('tr', [
-              // 可展开按钮列表头（如果有可展开数据）
-              expandableData && expandableData.length > 0 ? m('th.col-expand', '') : null,
+              // 可展开按钮列表头（如果有可展开数据 - check for at least one non-null item）
+              expandableData && expandableData.some(Boolean) ? m('th.col-expand', '') : null,
               ...columns.map((col, idx) =>
                 m('th', {
                   class: columnClasses[idx] || '',
@@ -172,18 +185,23 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
               trace ? m('th.col-action', '') : null,
             ])
           ),
+          // Use map().flat() instead of flatMap for more predictable DOM structure
+          // CRITICAL: Each row ALWAYS produces exactly 2 tr elements for structural stability
+          // This prevents Mithril's virtual DOM reconciliation errors during concurrent redraws
           m('tbody',
-            displayRows.flatMap((row, rowIndex) => {
+            displayRows.map((row, rowIndex) => {
               const hasExpandableData = expandableData && expandableData[rowIndex];
-              const isExpanded = this.expandedRows.has(rowIndex);
+              const isExpanded = hasExpandableData && this.expandedRows.has(rowIndex);
+              const hasAnyExpandable = expandableData && expandableData.some(Boolean);
+              const totalColSpan = columns.length + (trace ? 2 : 1) + (hasAnyExpandable ? 1 : 0);
 
-              // 主行
-              const mainRow = m('tr', {
-                key: `row-${rowIndex}`,
+              // 主行 - 始终渲染
+              const mainRow = m('tr.main-row', {
+                key: `main-${rowIndex}`,
                 class: trace ? 'clickable' : '',
               }, [
-                // 可展开按钮列（如果有可展开数据）
-                hasExpandableData ? m('td.col-expand', {
+                // 可展开按钮列（如果整体有可展开数据）
+                hasAnyExpandable ? m('td.col-expand', hasExpandableData ? {
                   onclick: (e: MouseEvent) => {
                     e.stopPropagation();
                     if (isExpanded) {
@@ -193,7 +211,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                     }
                     m.redraw();
                   },
-                }, m('span.expand-icon', isExpanded ? '▼' : '▶')) : null,
+                } : {}, hasExpandableData ? m('span.expand-icon', isExpanded ? '▼' : '▶') : null) : null,
                 // 数据列
                 ...row.map((cell, cellIndex) =>
                   this.renderCellPerfetto(cell, cellIndex, columnClasses[cellIndex], trace, row)
@@ -205,19 +223,21 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                 }, '→') : null,
               ]);
 
-              // 展开的详细内容行
-              const detailRow = hasExpandableData && isExpanded
-                ? m('tr.expanded-row', { key: `detail-${rowIndex}` },
-                    m('td', {
-                      colSpan: columns.length + (trace ? 2 : 1) + (hasExpandableData ? 1 : 0),
-                    }, m('div.expanded-content',
-                      this.renderExpandableContent(expandableData![rowIndex])
-                    ))
-                  )
-                : null;
+              // 详情行 - 始终渲染完整内容，仅用 CSS 控制显示
+              // 关键：内容始终存在，不根据 isExpanded 条件渲染，避免 DOM 变化
+              const detailRow = m('tr.detail-row', {
+                key: `detail-${rowIndex}`,
+                style: { display: isExpanded ? 'table-row' : 'none' },
+              }, m('td', {
+                colSpan: totalColSpan,
+              }, hasExpandableData
+                ? m('div.expanded-content', this.renderExpandableContent(expandableData![rowIndex]))
+                : null  // 没有数据的行内容为空，但 tr 和 td 始终存在
+              ));
 
-              return detailRow ? [mainRow, detailRow] : mainRow;
-            })
+              // 始终返回 2 个元素的数组
+              return [mainRow, detailRow];
+            }).flat()
           ),
         ])
       ),
