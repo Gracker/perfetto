@@ -85,19 +85,27 @@ export class BackendUploader {
 
   /**
    * Get filename from TraceSource
+   * Note: Use || instead of ?? to also handle empty strings
    */
   getFilename(source: TraceSource): string {
+    let filename: string;
     switch (source.type) {
       case 'FILE':
-        return source.file.name;
+        filename = source.file.name;
+        break;
       case 'ARRAY_BUFFER':
-        return source.fileName ?? source.title ?? 'trace.perfetto';
+        // Use || to handle empty strings, not just null/undefined
+        filename = source.fileName || source.title || 'trace.perfetto';
+        break;
       case 'URL':
         const urlPath = new URL(source.url).pathname;
-        return urlPath.split('/').pop() ?? 'trace.perfetto';
+        filename = urlPath.split('/').pop() || 'trace.perfetto';
+        break;
       default:
-        return 'trace.perfetto';
+        filename = 'trace.perfetto';
     }
+    // Ensure we never return an empty filename
+    return filename || 'trace.perfetto';
   }
 
   /**
