@@ -16,6 +16,7 @@ import m from 'mithril';
 import {AIService, OllamaService, OpenAIService, BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
 import {SqlResultTable} from './sql_result_table';
+import {ChartVisualizer} from './chart_visualizer';
 import {NavigationBookmarkBar, NavigationBookmark} from './navigation_bookmark_bar';
 import {Engine} from '../../trace_processor/engine';
 import {Trace} from '../../public/trace';
@@ -28,6 +29,11 @@ import {
   FullAnalysis,
   ExpandableSections,
   isFrameDetailData,
+  // DataEnvelope types (v2.0)
+  DataEnvelope,
+  DataPayload,
+  isDataEnvelope,
+  envelopeToSqlQueryResult,
 } from './generated';
 
 export interface AIPanelAttrs {
@@ -43,6 +49,20 @@ export interface Message {
   sqlResult?: SqlQueryResult;
   query?: string;
   reportUrl?: string;  // HTML 报告链接
+  // Chart data for visualization (display.format: 'chart')
+  chartData?: {
+    type: 'pie' | 'bar' | 'histogram';
+    title?: string;
+    data: Array<{ label: string; value: number; percentage?: number; color?: string }>;
+  };
+  // Metric card data (display.format: 'metric')
+  metricData?: {
+    title: string;
+    value: string | number;
+    unit?: string;
+    status?: 'good' | 'warning' | 'critical';
+    delta?: string;  // e.g., "+5%" or "-10ms"
+  };
 }
 
 export interface SqlQueryResult {
@@ -60,11 +80,24 @@ export interface SqlQueryResult {
       error?: string;
     };
   }>;
-  // 汇总报告
+  // 汇总报告 (legacy format)
   summary?: {
     title: string;
     content: string;
   };
+  // 汇总报告 (v2.0 DataPayload format - from SummaryContent)
+  summaryReport?: {
+    title: string;
+    content: string;
+    keyMetrics?: Array<{
+      name: string;
+      value: string;
+      status?: 'good' | 'warning' | 'critical';
+    }>;
+  };
+  // 元数据：从列表中提取的固定值（如 layer_name, process_name）
+  // 这些值在所有行中相同，显示在标题区域
+  metadata?: Record<string, any>;
 }
 
 interface AIPanelState {
@@ -88,6 +121,18 @@ interface AIPanelState {
   agentSessionId: string | null;  // Agent 多轮对话 Session ID
   displayedSkillProgress: Set<string>;  // 已显示的 skill 进度 (skillId:step)，用于去重
   completionHandled: boolean;  // 是否已处理分析完成事件（防止 conclusion + analysis_completed 重复处理）
+  // SSE Connection State (Phase 2: Reconnection Logic)
+  sseConnectionState: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+  sseRetryCount: number;  // Current retry attempt count
+  sseMaxRetries: number;  // Maximum retry attempts (default: 5)
+  sseLastEventTime: number | null;  // Last received event timestamp
+  // Error Aggregation (Phase 3: Error Summary Display)
+  collectedErrors: Array<{
+    skillId: string;
+    stepId?: string;
+    error: string;
+    timestamp: number;
+  }>;
 }
 
 interface PinnedResult {
@@ -184,12 +229,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     agentSessionId: null,  // Agent 多轮对话 Session ID
     displayedSkillProgress: new Set(),  // 已显示的 skill 进度
     completionHandled: false,  // 分析完成事件是否已处理
+    // SSE Connection State Initialization
+    sseConnectionState: 'disconnected',
+    sseRetryCount: 0,
+    sseMaxRetries: 5,
+    sseLastEventTime: null,
+    // Error Aggregation Initialization
+    collectedErrors: [],
   };
 
   private onClearChat?: () => void;
   private onOpenSettings?: () => void;
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
+  // SSE Connection Management
+  private sseAbortController: AbortController | null = null;
 
   // oninit is called before view(), so AI service is initialized before first render
   oninit(vnode: m.Vnode<AIPanelAttrs>) {
@@ -765,6 +819,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       onPin: (data) => this.handlePin(data),
                       expandableData: sqlResult.expandableData,
                       summary: sqlResult.summary,
+                      metadata: sqlResult.metadata,  // Pass metadata for header display
                     });
                   }
 
@@ -812,9 +867,100 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       onExport: (format) => this.exportResult(sqlResult, format),
                       expandableData: sqlResult.expandableData,
                       summary: sqlResult.summary,
+                      metadata: sqlResult.metadata,  // Pass metadata for header display
                     }),
                   ]);
                 })(),
+
+                // Chart Data Visualization
+                msg.chartData ? m('div.ai-chart-card', {
+                  style: {
+                    marginTop: '12px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    overflow: 'hidden',
+                  },
+                }, [
+                  m(ChartVisualizer, {
+                    chartData: msg.chartData,
+                    width: 400,
+                    height: 280,
+                  }),
+                ]) : null,
+
+                // Metric Card Visualization
+                msg.metricData ? m('div.ai-metric-card', {
+                  style: {
+                    marginTop: '12px',
+                    padding: '16px 20px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                    background: 'var(--background)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '16px',
+                  },
+                }, [
+                  m('div', {
+                    style: {
+                      width: '48px',
+                      height: '48px',
+                      borderRadius: '50%',
+                      background: msg.metricData.status === 'good' ? '#10b98120' :
+                                  msg.metricData.status === 'warning' ? '#f59e0b20' :
+                                  msg.metricData.status === 'critical' ? '#ef444420' : '#3b82f620',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    },
+                  }, [
+                    m('i.pf-icon', {
+                      style: {
+                        fontSize: '24px',
+                        color: msg.metricData.status === 'good' ? '#10b981' :
+                               msg.metricData.status === 'warning' ? '#f59e0b' :
+                               msg.metricData.status === 'critical' ? '#ef4444' : '#3b82f6',
+                      },
+                    }, msg.metricData.status === 'good' ? 'check_circle' :
+                       msg.metricData.status === 'warning' ? 'warning' :
+                       msg.metricData.status === 'critical' ? 'error' : 'analytics'),
+                  ]),
+                  m('div', { style: { flex: 1 } }, [
+                    m('div', {
+                      style: {
+                        fontSize: '12px',
+                        color: 'var(--text-secondary)',
+                        marginBottom: '4px',
+                      },
+                    }, msg.metricData.title),
+                    m('div', {
+                      style: {
+                        fontSize: '28px',
+                        fontWeight: '600',
+                        color: 'var(--text)',
+                        lineHeight: '1.2',
+                      },
+                    }, [
+                      String(msg.metricData.value),
+                      msg.metricData.unit ? m('span', {
+                        style: {
+                          fontSize: '14px',
+                          fontWeight: '400',
+                          color: 'var(--text-secondary)',
+                          marginLeft: '4px',
+                        },
+                      }, msg.metricData.unit) : null,
+                    ]),
+                    msg.metricData.delta ? m('div', {
+                      style: {
+                        fontSize: '12px',
+                        color: msg.metricData.delta.startsWith('+') ? '#10b981' :
+                               msg.metricData.delta.startsWith('-') ? '#ef4444' : 'var(--text-secondary)',
+                        marginTop: '4px',
+                      },
+                    }, msg.metricData.delta) : null,
+                  ]),
+                ]) : null,
               ]),
             ])
           ),
@@ -1311,8 +1457,9 @@ Click ⚙️ to change settings.`;
 
     if (!input || this.state.isLoading) return;
 
-    // Clear skill progress tracking for new analysis session
+    // Clear skill progress tracking and errors for new analysis session
     this.state.displayedSkillProgress.clear();
+    this.state.collectedErrors = [];
 
     // Add user message
     this.addMessage({
@@ -2092,6 +2239,7 @@ Keep your analysis concise and actionable.`;
     this.state.isLoading = true;
     this.state.completionHandled = false;  // Reset completion flag for new analysis
     this.state.displayedSkillProgress.clear();  // Clear progress tracking for new analysis
+    this.state.collectedErrors = [];  // Clear error collection for new analysis
     m.redraw();
 
     try {
@@ -2179,69 +2327,197 @@ Keep your analysis concise and actionable.`;
   }
 
   /**
+   * Calculate exponential backoff delay for SSE reconnection
+   * Base: 1 second, Max: 30 seconds
+   */
+  private calculateBackoffDelay(retryCount: number): number {
+    const baseDelay = 1000; // 1 second
+    const maxDelay = 30000; // 30 seconds
+    const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
+    // Add jitter (±20%) to prevent thundering herd
+    const jitter = delay * 0.2 * (Math.random() * 2 - 1);
+    return Math.round(delay + jitter);
+  }
+
+  /**
+   * Cancel any ongoing SSE connection
+   */
+  private cancelSSEConnection(): void {
+    if (this.sseAbortController) {
+      this.sseAbortController.abort();
+      this.sseAbortController = null;
+    }
+    this.state.sseConnectionState = 'disconnected';
+  }
+
+  /**
    * Listen to Agent SSE events from MasterOrchestrator
+   * With automatic reconnection and exponential backoff
    */
   private async listenToAgentSSE(sessionId: string): Promise<void> {
     const apiUrl = `${this.state.settings.backendUrl}/api/agent/${sessionId}/stream`;
 
-    try {
-      const response = await fetch(apiUrl);
-      if (!response.ok) {
-        throw new Error(`Agent SSE connection failed: ${response.statusText}`);
-      }
+    // Cancel any existing connection
+    this.cancelSSEConnection();
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body');
-      }
+    // Create new AbortController for this connection
+    this.sseAbortController = new AbortController();
+    const signal = this.sseAbortController.signal;
 
-      const decoder = new TextDecoder();
-      let buffer = '';
+    // Mark as connecting
+    this.state.sseConnectionState = 'connecting';
+    this.state.sseRetryCount = 0;
+    m.redraw();
 
-      while (true) {
-        const {done, value} = await reader.read();
-        if (done) break;
+    // Main connection loop with retry logic
+    while (this.state.sseRetryCount <= this.state.sseMaxRetries) {
+      try {
+        // Check if aborted before attempting connection
+        if (signal.aborted) {
+          console.log('[AIPanel] SSE connection aborted');
+          return;
+        }
 
-        buffer += decoder.decode(value, {stream: true});
+        const response = await fetch(apiUrl, { signal });
+        if (!response.ok) {
+          throw new Error(`Agent SSE connection failed: ${response.statusText}`);
+        }
 
-        // Process complete SSE messages
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('No response body');
+        }
 
-        let currentEventType = '';
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          if (line.startsWith(':')) continue; // Skip keep-alive comments
+        // Connection successful - update state
+        this.state.sseConnectionState = 'connected';
+        this.state.sseRetryCount = 0;
+        this.state.sseLastEventTime = Date.now();
+        console.log('[AIPanel] SSE connected successfully');
+        m.redraw();
 
-          if (line.startsWith('event:')) {
-            currentEventType = line.replace('event:', '').trim();
-          } else if (line.startsWith('data:')) {
-            const dataStr = line.replace('data:', '').trim();
-            if (dataStr) {
-              try {
-                const data = JSON.parse(dataStr);
-                const eventType = currentEventType || data.type;
-                console.log('[AIPanel] Agent SSE event:', eventType);
-                this.handleSSEEvent(eventType, data);
-              } catch (e) {
-                console.error('[AIPanel] Failed to parse Agent SSE data:', e, dataStr);
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        // Read loop
+        while (true) {
+          // Check if aborted
+          if (signal.aborted) {
+            console.log('[AIPanel] SSE reader aborted');
+            reader.releaseLock();
+            return;
+          }
+
+          const {done, value} = await reader.read();
+          if (done) {
+            console.log('[AIPanel] SSE stream ended normally');
+            reader.releaseLock();
+            // Stream ended normally (server closed), no need to reconnect
+            this.state.sseConnectionState = 'disconnected';
+            m.redraw();
+            return;
+          }
+
+          buffer += decoder.decode(value, {stream: true});
+          this.state.sseLastEventTime = Date.now();
+
+          // Process complete SSE messages
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          let currentEventType = '';
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            if (line.startsWith(':')) continue; // Skip keep-alive comments
+
+            if (line.startsWith('event:')) {
+              currentEventType = line.replace('event:', '').trim();
+            } else if (line.startsWith('data:')) {
+              const dataStr = line.replace('data:', '').trim();
+              if (dataStr) {
+                try {
+                  const data = JSON.parse(dataStr);
+                  const eventType = currentEventType || data.type;
+                  console.log('[AIPanel] Agent SSE event:', eventType);
+                  this.handleSSEEvent(eventType, data);
+
+                  // Check for terminal events (no need to reconnect after these)
+                  if (eventType === 'analysis_completed' || eventType === 'error') {
+                    this.state.sseConnectionState = 'disconnected';
+                    m.redraw();
+                    return;
+                  }
+                } catch (e) {
+                  console.error('[AIPanel] Failed to parse Agent SSE data:', e, dataStr);
+                }
               }
+              currentEventType = '';
             }
-            currentEventType = '';
           }
         }
+      } catch (e: any) {
+        // Check if this was an intentional abort
+        if (signal.aborted || e.name === 'AbortError') {
+          console.log('[AIPanel] SSE connection intentionally aborted');
+          this.state.sseConnectionState = 'disconnected';
+          return;
+        }
+
+        console.error('[AIPanel] Agent SSE error (attempt', this.state.sseRetryCount + 1, '):', e);
+
+        // Check if we have retries left
+        if (this.state.sseRetryCount >= this.state.sseMaxRetries) {
+          // Max retries exceeded - give up
+          console.error('[AIPanel] SSE max retries exceeded, giving up');
+          this.state.sseConnectionState = 'disconnected';
+          this.state.isLoading = false;
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `**Connection Error:** ${e.message || 'Lost connection to Agent backend'}\n\nFailed to reconnect after ${this.state.sseMaxRetries} attempts. Please try again.`,
+            timestamp: Date.now(),
+          });
+          m.redraw();
+          return;
+        }
+
+        // Schedule reconnection with exponential backoff
+        this.state.sseRetryCount++;
+        this.state.sseConnectionState = 'reconnecting';
+        const delay = this.calculateBackoffDelay(this.state.sseRetryCount - 1);
+        console.log(`[AIPanel] SSE reconnecting in ${delay}ms (attempt ${this.state.sseRetryCount}/${this.state.sseMaxRetries})`);
+
+        // Update UI to show reconnecting status
+        // Find and update any existing reconnecting message, or add new one
+        const lastMsg = this.state.messages[this.state.messages.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('🔄')) {
+          lastMsg.content = `🔄 Connection lost. Reconnecting... (attempt ${this.state.sseRetryCount}/${this.state.sseMaxRetries})`;
+        } else {
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `🔄 Connection lost. Reconnecting... (attempt ${this.state.sseRetryCount}/${this.state.sseMaxRetries})`,
+            timestamp: Date.now(),
+          });
+        }
+        m.redraw();
+
+        // Wait before retrying (unless aborted)
+        await new Promise<void>((resolve) => {
+          const timeoutId = setTimeout(resolve, delay);
+          // If aborted during wait, clear timeout and resolve immediately
+          const abortHandler = () => {
+            clearTimeout(timeoutId);
+            resolve();
+          };
+          signal.addEventListener('abort', abortHandler, { once: true });
+        });
+
+        if (signal.aborted) {
+          console.log('[AIPanel] SSE retry wait aborted');
+          return;
+        }
       }
-    } catch (e: any) {
-      console.error('[AIPanel] Agent SSE error:', e);
-      this.state.isLoading = false;
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `**Connection Error:** ${e.message || 'Lost connection to Agent backend'}`,
-        timestamp: Date.now(),
-      });
-      m.redraw();
     }
   }
 
@@ -2383,6 +2659,15 @@ Keep your analysis concise and actionable.`;
         // 2. MasterOrchestrator/AnalysisWorker: { skillId, skillName, layers, diagnostics }
         const layeredResult = data?.data?.result?.layers || data?.data?.layers;
         if (layeredResult) {
+          // Deduplication check - prevent duplicate skill_layered_result display
+          const skillId = data.data.skillId || data.data.result?.metadata?.skillId || 'unknown';
+          const deduplicationKey = `skill_layered_result:${skillId}`;
+          if (this.state.displayedSkillProgress.has(deduplicationKey)) {
+            console.log('[AIPanel] Skipping duplicate skill_layered_result:', deduplicationKey);
+            break;
+          }
+          this.state.displayedSkillProgress.add(deduplicationKey);
+
           console.log('[AIPanel] skill_layered_result received:', data.data);
           console.log('[AIPanel] Deep layer details:', {
             hasDeep: !!layeredResult.deep,
@@ -2430,10 +2715,104 @@ Keep your analysis concise and actionable.`;
               return this.formatLayerName(key) + skillContext;
             };
 
+            // Helper to get display format from StepResult
+            const getDisplayFormat = (obj: any): string => {
+              return (obj?.display?.format || 'table').toLowerCase();
+            };
+
+            // Helper to build chart data from step result
+            const buildChartData = (obj: any, title: string): Message['chartData'] | null => {
+              const dataArray = extractData(obj);
+              if (!dataArray || dataArray.length === 0) return null;
+
+              // Try to infer chart type from data structure
+              const firstRow = dataArray[0];
+              if (!firstRow || typeof firstRow !== 'object') return null;
+
+              const keys = Object.keys(firstRow);
+              // Look for label/value pairs
+              const labelKey = keys.find(k => k.toLowerCase().includes('label') || k.toLowerCase().includes('name') || k.toLowerCase().includes('type'));
+              const valueKey = keys.find(k => k.toLowerCase().includes('value') || k.toLowerCase().includes('count') || k.toLowerCase().includes('total'));
+
+              if (!labelKey || !valueKey) return null;
+
+              return {
+                type: 'bar',  // Default to bar chart
+                title: title,
+                data: dataArray.map((item: any) => ({
+                  label: String(item[labelKey] || 'Unknown'),
+                  value: Number(item[valueKey]) || 0,
+                })),
+              };
+            };
+
+            // Helper to build metric data from step result
+            const buildMetricData = (obj: any, title: string): Message['metricData'] | null => {
+              const dataArray = extractData(obj);
+              if (!dataArray || dataArray.length === 0) return null;
+
+              const firstRow = dataArray[0];
+              if (!firstRow || typeof firstRow !== 'object') return null;
+
+              const keys = Object.keys(firstRow);
+              const valueKey = keys.find(k => k.toLowerCase().includes('value') || k.toLowerCase().includes('total') || k.toLowerCase().includes('avg'));
+
+              if (valueKey) {
+                const value = firstRow[valueKey];
+                return {
+                  title: title,
+                  value: typeof value === 'number' ? value.toFixed(2) : String(value),
+                  status: firstRow.status || undefined,
+                };
+              }
+
+              // If single key-value pair, use first entry
+              if (keys.length === 1) {
+                return {
+                  title: title,
+                  value: String(firstRow[keys[0]]),
+                };
+              }
+
+              return null;
+            };
+
             // Process each entry in overview layer
             for (const [key, val] of Object.entries(overview)) {
               if (val === null || val === undefined) continue;
 
+              // Get display format from step config
+              const format = getDisplayFormat(val);
+              const title = getDisplayTitle(key, val);
+
+              // Route based on display format
+              if (format === 'chart') {
+                const chartData = buildChartData(val, title);
+                if (chartData) {
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: '',
+                    timestamp: Date.now(),
+                    chartData,
+                  });
+                  continue;
+                }
+              } else if (format === 'metric') {
+                const metricData = buildMetricData(val, title);
+                if (metricData) {
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: '',
+                    timestamp: Date.now(),
+                    metricData,
+                  });
+                  continue;
+                }
+              }
+
+              // Default: table format
               // Check if it's a StepResult format (has data array)
               const dataArray = extractData(val);
               if (dataArray && dataArray.length > 0) {
@@ -2454,7 +2833,7 @@ Keep your analysis concise and actionable.`;
                       columns,
                       rows,
                       rowCount: rows.length,
-                      sectionTitle: `📊 ${getDisplayTitle(key, val)}`,
+                      sectionTitle: `📊 ${title}`,
                     },
                   });
                 }
@@ -2495,12 +2874,29 @@ Keep your analysis concise and actionable.`;
           });
           if (list && typeof list === 'object') {
             // Helper to check if object is a StepResult format
+            // Supports BOTH formats:
+            // 1. Legacy format: data is an array of row objects [{col1: val1}, ...]
+            // 2. New DataPayload format: data is {columns, rows, expandableData, summary}
             const isStepResult = (obj: any): boolean => {
-              return obj && typeof obj === 'object' &&
-                'data' in obj && Array.isArray(obj.data);
+              if (!obj || typeof obj !== 'object' || !('data' in obj)) return false;
+              // Legacy format: data is array
+              if (Array.isArray(obj.data)) return true;
+              // New DataPayload format: data has columns/rows structure
+              if (obj.data && typeof obj.data === 'object' &&
+                  (Array.isArray(obj.data.columns) || Array.isArray(obj.data.rows))) {
+                return true;
+              }
+              return false;
             };
 
-            // Helper to find frame detail in deep layer
+            // Helper to check if data is in DataPayload format (new format)
+            const isDataPayloadFormat = (data: any): boolean => {
+              return data && typeof data === 'object' &&
+                !Array.isArray(data) &&
+                (Array.isArray(data.columns) || Array.isArray(data.rows));
+            };
+
+            // Helper to find frame detail in deep layer (legacy fallback)
             // Supports both prefixed (session_1, frame_123) and non-prefixed (1, 123) formats
             let findFrameDetailCallCount = 0;
             const findFrameDetail = (frameId: string | number, sessionId?: string | number): any => {
@@ -2541,33 +2937,101 @@ Keep your analysis concise and actionable.`;
             };
 
             for (const [key, value] of Object.entries(list)) {
-              // Handle StepResult format: { stepId, data: [...], display }
+              // Handle StepResult format: { stepId, data: [...] | DataPayload, display }
               let items: any[] = [];
+              let columns: string[] = [];
+              let rows: any[][] = [];
               let displayTitle = this.formatLayerName(key);
               let isExpandable = false;
+              let metadataColumns: string[] = [];
+              let hiddenColumns: string[] = [];
+              let preBindedExpandableData: any[] | undefined;  // L4 data pre-bound by backend
+              let summaryReport: any | undefined;
 
               if (isStepResult(value)) {
-                items = (value as any).data;
-                if ((value as any).display?.title) {
-                  displayTitle = (value as any).display.title;
+                const stepData = (value as any).data;
+                const displayConfig = (value as any).display;
+
+                if (displayConfig?.title) {
+                  displayTitle = displayConfig.title;
                 }
                 // Check if this list should be expandable (has frame details in deep layer)
-                isExpandable = (value as any).display?.expandable === true;
+                isExpandable = displayConfig?.expandable === true;
+                // Get metadata_columns (values to extract to header)
+                metadataColumns = displayConfig?.metadata_columns || [];
+                // Get hidden_columns (columns to hide from main table)
+                hiddenColumns = displayConfig?.hidden_columns || [];
+
+                // Check which data format we have
+                if (isDataPayloadFormat(stepData)) {
+                  // NEW DataPayload format: {columns, rows, expandableData, summary}
+                  console.log('[AIPanel] Processing DataPayload format for', key, {
+                    hasColumns: !!stepData.columns,
+                    hasRows: !!stepData.rows,
+                    hasExpandableData: !!stepData.expandableData,
+                    hasSummary: !!stepData.summary,
+                  });
+
+                  columns = stepData.columns || [];
+                  rows = stepData.rows || [];
+                  preBindedExpandableData = stepData.expandableData;
+                  summaryReport = stepData.summary;
+
+                  // For DataPayload, items is rows converted to objects (for metadata extraction)
+                  items = rows.map((row: any[]) => {
+                    const obj: Record<string, any> = {};
+                    columns.forEach((col, i) => { obj[col] = row[i]; });
+                    return obj;
+                  });
+                } else {
+                  // Legacy format: data is array of row objects
+                  items = stepData;
+                }
               } else if (Array.isArray(value)) {
                 items = value;
               }
 
-              if (items.length === 0) continue;
+              // Skip if no data
+              if (items.length === 0 && rows.length === 0) continue;
 
-              const columns = Object.keys(items[0] || {});
-              const rows = items.map((item: any) => columns.map(col => {
-                return this.formatDisplayValue(item[col], col);
-              }));
+              // If we don't have columns/rows yet, build them from items
+              if (columns.length === 0 && items.length > 0) {
+                // Get all columns from the first item
+                const allColumns = Object.keys(items[0] || {});
 
-              // Build expandable data if this is a frame list with deep analysis
+                // Extract metadata values from the first item (for columns that are constant across rows)
+                const metadata: Record<string, any> = {};
+                if (metadataColumns.length > 0) {
+                  for (const col of metadataColumns) {
+                    if (items[0][col] !== undefined) {
+                      metadata[col] = items[0][col];
+                    }
+                  }
+                }
+
+                // Filter columns: remove metadata_columns and hidden_columns from display
+                const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
+                columns = allColumns.filter(col => !columnsToHide.has(col));
+
+                // Build rows with only visible columns
+                rows = items.map((item: any) => columns.map(col => {
+                  return this.formatDisplayValue(item[col], col);
+                }));
+              }
+
+              // Build expandable data - prefer pre-bound data from backend
               let expandableData: any[] | undefined;
-              if (isExpandable && deep) {
-                console.log('[AIPanel] Building expandable data for', key, {
+
+              if (preBindedExpandableData && preBindedExpandableData.length > 0) {
+                // Use pre-bound expandable data from backend (v2.0 DataPayload format)
+                console.log('[AIPanel] Using pre-bound expandableData for', key, {
+                  count: preBindedExpandableData.length,
+                  sampleHasSections: !!preBindedExpandableData[0]?.result?.sections,
+                });
+                expandableData = preBindedExpandableData;
+              } else if (isExpandable && deep) {
+                // Fallback: build expandable data by looking up in deep layer (legacy)
+                console.log('[AIPanel] Building expandable data via findFrameDetail for', key, {
                   itemCount: items.length,
                   sampleItem: items[0],
                   deepStructure: Object.fromEntries(
@@ -2624,6 +3088,16 @@ Keep your analysis concise and actionable.`;
                 }
               }
 
+              // Extract metadata for header display
+              const metadata: Record<string, any> = {};
+              if (metadataColumns.length > 0 && items.length > 0) {
+                for (const col of metadataColumns) {
+                  if (items[0][col] !== undefined) {
+                    metadata[col] = items[0][col];
+                  }
+                }
+              }
+
               this.addMessage({
                 id: this.generateId(),
                 role: 'assistant',
@@ -2636,6 +3110,10 @@ Keep your analysis concise and actionable.`;
                   sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
                   // Include expandableData if at least one item has data (use filter to count non-null items)
                   expandableData: expandableData && expandableData.filter(Boolean).length > 0 ? expandableData : undefined,
+                  // Include metadata for header display (extracted fixed values like layer_name, process_name)
+                  metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+                  // Include summary report if available (from DataPayload)
+                  summaryReport: summaryReport,
                 },
               });
             }
@@ -2713,7 +3191,8 @@ Keep your analysis concise and actionable.`;
 
       case 'analysis_completed':
         // Analysis is complete - show final answer (authoritative completion event)
-        console.log('[AIPanel] analysis_completed received');
+        // Supports both legacy 'answer' field and agent-driven 'conclusion' field
+        console.log('[AIPanel] analysis_completed received, architecture:', data?.architecture);
         this.state.isLoading = false;
 
         // Guard against duplicate handling
@@ -2722,7 +3201,10 @@ Keep your analysis concise and actionable.`;
           break;
         }
 
-        if (data?.data?.answer) {
+        // Support both 'answer' (legacy) and 'conclusion' (agent-driven)
+        const answerContent = data?.data?.answer || data?.data?.conclusion;
+
+        if (answerContent) {
           // Mark completion as handled BEFORE modifying messages to prevent race conditions
           this.state.completionHandled = true;
 
@@ -2732,8 +3214,26 @@ Keep your analysis concise and actionable.`;
             this.state.messages.pop();
           }
           console.log('[AIPanel] Adding final answer message');
-          // 构建消息内容，包含 HTML 报告链接
-          const content = data.data.answer;
+
+          // Build content with agent-driven metadata if available
+          let content = answerContent;
+
+          // For agent-driven results, add hypothesis summary if available
+          if (data?.architecture === 'v2-agent-driven' && data?.data?.hypotheses) {
+            const hypotheses = data.data.hypotheses;
+            const confirmed = hypotheses.filter((h: any) => h.status === 'confirmed');
+            const confidence = data.data.confidence || 0;
+
+            if (confirmed.length > 0 || confidence > 0) {
+              content += `\n\n---\n**分析元数据**\n`;
+              content += `- 置信度: ${(confidence * 100).toFixed(0)}%\n`;
+              content += `- 分析轮次: ${data.data.rounds || 1}\n`;
+              if (confirmed.length > 0) {
+                content += `- 确认假设: ${confirmed.map((h: any) => h.description).join(', ')}\n`;
+              }
+            }
+          }
+
           const reportUrl = data.data.reportUrl;
           this.addMessage({
             id: this.generateId(),
@@ -2742,8 +3242,17 @@ Keep your analysis concise and actionable.`;
             timestamp: Date.now(),
             reportUrl: reportUrl ? `${this.state.settings.backendUrl}${reportUrl}` : undefined,
           });
+
+          // Show error summary if there were any non-fatal errors during analysis
+          if (this.state.collectedErrors.length > 0) {
+            this.showErrorSummary();
+          }
         } else {
-          console.warn('[AIPanel] No answer in analysis_completed event!');
+          console.warn('[AIPanel] No answer/conclusion in analysis_completed event!');
+          // Still show error summary even if no answer
+          if (this.state.collectedErrors.length > 0) {
+            this.showErrorSummary();
+          }
         }
         break;
 
@@ -2761,8 +3270,159 @@ Keep your analysis concise and actionable.`;
         console.log(`[AIPanel] Skipping worker_thought display (data shown via skill_data):`, data?.data?.step);
         break;
 
+      case 'data':
+        // v2.0 DataEnvelope format - unified data event
+        // Handle both single envelope and array of envelopes
+        if (data) {
+          console.log('[AIPanel] v2.0 data event received:', data.id, data.envelope);
+
+          const envelopes: DataEnvelope[] = Array.isArray(data.envelope)
+            ? data.envelope
+            : [data.envelope];
+
+          for (const envelope of envelopes) {
+            if (!isDataEnvelope(envelope)) {
+              console.warn('[AIPanel] Invalid DataEnvelope:', envelope);
+              continue;
+            }
+
+            // Generate deduplication key
+            const deduplicationKey = `${envelope.meta.skillId || 'unknown'}:${envelope.meta.stepId || envelope.meta.source}`;
+
+            // Check for duplicates
+            if (this.state.displayedSkillProgress.has(deduplicationKey)) {
+              console.log('[AIPanel] Skipping duplicate data envelope:', deduplicationKey);
+              continue;
+            }
+            this.state.displayedSkillProgress.add(deduplicationKey);
+
+            // Remove previous progress message
+            const lastMsg = this.state.messages[this.state.messages.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
+              this.state.messages.pop();
+            }
+
+            // Render based on display.format
+            const format = envelope.display.format || 'table';
+            const payload = envelope.data as DataPayload;
+            const title = envelope.display.title;
+
+            switch (format) {
+              case 'text':
+                // Render text content as markdown
+                if (payload.text) {
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: `**${title}**\n\n${payload.text}`,
+                    timestamp: Date.now(),
+                  });
+                }
+                break;
+
+              case 'summary':
+                // Render summary card with optional metrics
+                if (payload.summary) {
+                  let summaryContent = `## 📊 ${payload.summary.title || title}\n\n`;
+                  summaryContent += payload.summary.content + '\n';
+
+                  // Add metrics if available
+                  if (payload.summary.metrics && payload.summary.metrics.length > 0) {
+                    summaryContent += '\n### 关键指标\n\n';
+                    for (const metric of payload.summary.metrics) {
+                      const icon = metric.severity === 'critical' ? '🔴' :
+                                   metric.severity === 'warning' ? '🟡' : '🟢';
+                      const unit = metric.unit || '';
+                      summaryContent += `${icon} **${metric.label}:** ${metric.value}${unit}\n`;
+                    }
+                  }
+
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: summaryContent,
+                    timestamp: Date.now(),
+                  });
+                }
+                break;
+
+              case 'metric':
+                // Render as metric card (similar to summary but more compact)
+                if (payload.summary && payload.summary.metrics) {
+                  let metricContent = `### 📈 ${title}\n\n`;
+                  for (const metric of payload.summary.metrics) {
+                    const icon = metric.severity === 'critical' ? '🔴' :
+                                 metric.severity === 'warning' ? '🟡' : '🟢';
+                    const unit = metric.unit || '';
+                    metricContent += `| ${icon} ${metric.label} | **${metric.value}${unit}** |\n`;
+                  }
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: metricContent,
+                    timestamp: Date.now(),
+                  });
+                }
+                break;
+
+              case 'chart':
+                // Chart format - placeholder for now, show chart config info
+                if (payload.chart) {
+                  const chartConfig = payload.chart;
+                  let chartContent = `### 📉 ${title}\n\n`;
+                  chartContent += `**图表类型:** ${chartConfig.type}\n\n`;
+                  chartContent += `*[图表渲染暂未实现，数据已记录]*\n`;
+                  // TODO: Integrate with chart visualization library
+                  console.log('[AIPanel] Chart data received:', chartConfig);
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: chartContent,
+                    timestamp: Date.now(),
+                  });
+                }
+                break;
+
+              case 'timeline':
+                // Timeline format - placeholder for now
+                let timelineContent = `### ⏱️ ${title}\n\n`;
+                timelineContent += `*[时间线渲染暂未实现]*\n`;
+                // TODO: Integrate with Perfetto timeline visualization
+                this.addMessage({
+                  id: this.generateId(),
+                  role: 'assistant',
+                  content: timelineContent,
+                  timestamp: Date.now(),
+                });
+                break;
+
+              case 'table':
+              default:
+                // Default: render as table using existing SqlQueryResult logic
+                const sqlResult = envelopeToSqlQueryResult(envelope);
+
+                // Only add message if there's data to display
+                if (sqlResult.rowCount > 0 || (sqlResult.columns.length > 0)) {
+                  this.addMessage({
+                    id: this.generateId(),
+                    role: 'assistant',
+                    content: '',  // Title is in the table header
+                    timestamp: Date.now(),
+                    sqlResult: {
+                      ...sqlResult,
+                      sectionTitle: title,
+                    },
+                  });
+                }
+                break;
+            }
+          }
+          m.redraw();
+        }
+        break;
+
       case 'skill_data':
-        // Skill layer data - convert to skill_layered_result format for display
+        // Legacy skill_data format - convert to skill_layered_result format for display
         if (data?.data) {
           console.log('[AIPanel] skill_data received, converting to layered result:', data.data);
 
@@ -2885,6 +3545,152 @@ Keep your analysis concise and actionable.`;
         }
         break;
 
+      // =========================================================================
+      // Agent-Driven Architecture Events (Phase 5)
+      // =========================================================================
+
+      case 'hypothesis_generated':
+        // Initial hypotheses created by AI
+        if (data?.data?.hypotheses && Array.isArray(data.data.hypotheses)) {
+          const hypotheses = data.data.hypotheses;
+          // Remove previous progress message
+          const lastMsgHypo = this.state.messages[this.state.messages.length - 1];
+          if (lastMsgHypo && lastMsgHypo.role === 'assistant' && lastMsgHypo.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+
+          let content = `### 🧪 生成了 ${hypotheses.length} 个分析假设\n\n`;
+          for (let i = 0; i < hypotheses.length; i++) {
+            const h = hypotheses[i];
+            content += `${i + 1}. **${h}**\n`;
+          }
+          content += '\n_AI 将验证这些假设..._';
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content,
+            timestamp: Date.now(),
+          });
+        }
+        break;
+
+      case 'round_start':
+        // Analysis round started
+        if (data?.data) {
+          const round = data.data.round || 1;
+          const maxRounds = data.data.maxRounds || 5;
+          const message = data.data.message || `分析轮次 ${round}`;
+
+          // Remove previous progress message
+          const lastMsgRound = this.state.messages[this.state.messages.length - 1];
+          if (lastMsgRound && lastMsgRound.role === 'assistant' && lastMsgRound.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `⏳ 🔄 ${message} (${round}/${maxRounds})`,
+            timestamp: Date.now(),
+          });
+        }
+        break;
+
+      case 'agent_task_dispatched':
+        // Tasks sent to domain agents
+        if (data?.data) {
+          const taskCount = data.data.taskCount || 0;
+          const agents = data.data.agents || [];
+          const message = data.data.message || `派发 ${taskCount} 个任务`;
+
+          // Remove previous progress message
+          const lastMsgTask = this.state.messages[this.state.messages.length - 1];
+          if (lastMsgTask && lastMsgTask.role === 'assistant' && lastMsgTask.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+
+          let content = `⏳ 🤖 ${message}`;
+          if (agents.length > 0) {
+            content += `\n\n派发给: ${agents.map((a: string) => `\`${a}\``).join(', ')}`;
+          }
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content,
+            timestamp: Date.now(),
+          });
+        }
+        break;
+
+      case 'agent_dialogue':
+        // Agent communication event (task dispatch or inter-agent query)
+        // These are tracked internally but not always shown to reduce noise
+        console.log('[AIPanel] Agent dialogue event:', data?.data);
+        break;
+
+      case 'agent_response':
+        // Agent completed task
+        if (data?.data) {
+          const agentId = data.data.agentId || 'unknown';
+          console.log(`[AIPanel] Agent ${agentId} completed task`);
+          // Don't add message for every agent response - wait for synthesis
+        }
+        break;
+
+      case 'synthesis_complete':
+        // Feedback synthesis complete
+        if (data?.data) {
+          const confirmedFindings = data.data.confirmedFindings || 0;
+          const updatedHypotheses = data.data.updatedHypotheses || 0;
+          const message = data.data.message || '综合分析结果';
+
+          // Remove previous progress message
+          const lastMsgSynth = this.state.messages[this.state.messages.length - 1];
+          if (lastMsgSynth && lastMsgSynth.role === 'assistant' && lastMsgSynth.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `⏳ 📝 ${message}\n\n确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
+            timestamp: Date.now(),
+          });
+        }
+        break;
+
+      case 'strategy_decision':
+        // Next iteration strategy decided
+        if (data?.data) {
+          const strategy = data.data.strategy || 'continue';
+          const confidence = data.data.confidence || 0;
+          const message = data.data.message || `策略: ${strategy}`;
+
+          // Remove previous progress message
+          const lastMsgStrat = this.state.messages[this.state.messages.length - 1];
+          if (lastMsgStrat && lastMsgStrat.role === 'assistant' && lastMsgStrat.content.startsWith('⏳')) {
+            this.state.messages.pop();
+          }
+
+          const strategyEmoji = strategy === 'conclude' ? '✅' :
+                               strategy === 'deep_dive' ? '🔍' :
+                               strategy === 'pivot' ? '↩️' : '➡️';
+
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `⏳ ${strategyEmoji} ${message} (置信度: ${(confidence * 100).toFixed(0)}%)`,
+            timestamp: Date.now(),
+          });
+        }
+        break;
+
+      // =========================================================================
+      // End Agent-Driven Events
+      // =========================================================================
+
       case 'conclusion':
         // Final conclusion from analysis (first event in completion sequence)
         // Note: analysis_completed event follows with more info (reportUrl), so we skip adding message here
@@ -2894,7 +3700,7 @@ Keep your analysis concise and actionable.`;
         break;
 
       case 'error':
-        // Error occurred
+        // Fatal error occurred - stop loading and show error
         this.state.isLoading = false;
         if (data?.data?.error) {
           this.addMessage({
@@ -2903,6 +3709,25 @@ Keep your analysis concise and actionable.`;
             content: `**错误:** ${data.data.error}`,
             timestamp: Date.now(),
           });
+        }
+        // Show collected errors summary if any
+        if (this.state.collectedErrors.length > 0) {
+          this.showErrorSummary();
+        }
+        break;
+
+      case 'skill_error':
+        // Non-fatal skill execution error - collect for summary
+        // These errors don't stop the analysis, but should be shown at the end
+        if (data) {
+          const errorInfo = {
+            skillId: data.skillId || 'unknown',
+            stepId: data.data?.stepId,
+            error: data.data?.error || 'Unknown error',
+            timestamp: Date.now(),
+          };
+          console.log('[AIPanel] Skill error collected:', errorInfo);
+          this.state.collectedErrors.push(errorInfo);
         }
         break;
 
@@ -2914,6 +3739,49 @@ Keep your analysis concise and actionable.`;
 
     // Trigger redraw after handling each event
     m.redraw();
+  }
+
+  /**
+   * Show a summary of all collected errors from the analysis
+   * Called after analysis_completed or error events
+   */
+  private showErrorSummary(): void {
+    if (this.state.collectedErrors.length === 0) {
+      return;
+    }
+
+    // Group errors by skillId
+    const errorsBySkill = new Map<string, Array<{ stepId?: string; error: string }>>();
+    for (const err of this.state.collectedErrors) {
+      if (!errorsBySkill.has(err.skillId)) {
+        errorsBySkill.set(err.skillId, []);
+      }
+      errorsBySkill.get(err.skillId)!.push({ stepId: err.stepId, error: err.error });
+    }
+
+    let summaryContent = `### ⚠️ 分析过程中遇到 ${this.state.collectedErrors.length} 个错误\n\n`;
+
+    // Group and format errors
+    for (const [skillId, errors] of errorsBySkill) {
+      summaryContent += `**Skill: ${skillId}**\n`;
+      for (const err of errors) {
+        const stepInfo = err.stepId ? ` (step: ${err.stepId})` : '';
+        summaryContent += `- ${err.error}${stepInfo}\n`;
+      }
+      summaryContent += '\n';
+    }
+
+    summaryContent += `\n*这些错误不影响其他分析结果的展示，但可能导致部分数据缺失。*`;
+
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: summaryContent,
+      timestamp: Date.now(),
+    });
+
+    // Clear collected errors after showing summary
+    this.state.collectedErrors = [];
   }
 
   private getHelpMessage(): string {

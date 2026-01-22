@@ -16,6 +16,13 @@ import m from 'mithril';
 import {Trace} from '../../public/trace';
 import {Time} from '../../base/time';
 import {ChartVisualizer, ChartData} from './chart_visualizer';
+import {
+  ColumnDefinition,
+  buildColumnDefinitions,
+} from './generated/data_contract.types';
+import {
+  getColumnClasses,
+} from './renderers/formatters';
 
 export interface SqlResultTableAttrs {
   columns: string[];
@@ -40,6 +47,16 @@ export interface SqlResultTableAttrs {
     title: string;
     content: string;
   };
+  // 元数据：从列表中提取的固定值（如 layer_name, process_name）
+  // 这些值在所有行中相同，显示在标题区域而非表格列中
+  metadata?: Record<string, any>;
+  /**
+   * Column definitions for schema-driven rendering (v2.0)
+   *
+   * When provided, column formatting and click actions are determined
+   * by the column definitions rather than auto-detection from column names.
+   */
+  columnDefinitions?: ColumnDefinition[];
 }
 
 // 时间戳列信息
@@ -80,16 +97,25 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private expandedRows = new Set<number>();
 
   view(vnode: m.Vnode<SqlResultTableAttrs>) {
-    const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary} = vnode.attrs;
+    const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary, metadata, columnDefinitions} = vnode.attrs;
+
+    // Build or infer column definitions (v2.0 schema-driven rendering)
+    // If columnDefinitions are provided, use them; otherwise infer from column names
+    const effectiveColumnDefs = columnDefinitions || buildColumnDefinitions(columns);
 
     // 检测时间戳列（只在第一次或列变化时执行）
+    // If column definitions are provided, extract from them; otherwise use pattern matching
     if (this.timestampColumns.length === 0 ||
         this.timestampColumns.some((tc) => columns[tc.columnIndex] !== tc.columnName)) {
-      this.timestampColumns = this.detectTimestampColumns(columns);
+      this.timestampColumns = columnDefinitions
+        ? this.extractTimestampColumnsFromDefinitions(columnDefinitions, columns)
+        : this.detectTimestampColumns(columns);
     }
 
-    // Classify columns for styling
-    const columnClasses = this.classifyColumns(columns);
+    // Classify columns for styling (use column definitions if available)
+    const columnClasses = columnDefinitions
+      ? columns.map((_, idx) => getColumnClasses(effectiveColumnDefs[idx]))
+      : this.classifyColumns(columns);
 
     // Limit displayed rows: collapsed shows 10, expanded shows up to 50
     const displayLimit = this.expanded ? EXPANDED_ROW_LIMIT : COLLAPSED_ROW_LIMIT;
@@ -126,6 +152,19 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             ? m('span.section-title', title)
             : null,
           m('span.row-count', `${rowCount} 条`),
+          // Inline metadata display (layer_name, process_name)
+          metadata && Object.keys(metadata).length > 0
+            ? m('span.header-metadata', [
+                metadata.layer_name ? m('span.metadata-tag', [
+                  m('span.metadata-label', 'Layer:'),
+                  m('span.metadata-value', this.formatMetadataValue(metadata.layer_name)),
+                ]) : null,
+                metadata.process_name ? m('span.metadata-tag', [
+                  m('span.metadata-label', 'Process:'),
+                  m('span.metadata-value', metadata.process_name),
+                ]) : null,
+              ])
+            : null,
         ]),
         m('.sql-result-actions', [
           // Copy button (icon only)
@@ -693,6 +732,46 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   }
 
   /**
+   * Extract timestamp columns from column definitions (v2.0 schema-driven)
+   *
+   * This method uses explicit column definitions instead of pattern matching,
+   * providing more reliable timestamp column detection.
+   */
+  private extractTimestampColumnsFromDefinitions(
+    columnDefs: ColumnDefinition[],
+    columns: string[]
+  ): TimestampColumn[] {
+    const detected: TimestampColumn[] = [];
+
+    columnDefs.forEach((def, idx) => {
+      // Check if this column has a navigate_timeline or navigate_range click action
+      if (
+        def.type === 'timestamp' &&
+        (def.clickAction === 'navigate_timeline' || def.clickAction === 'navigate_range')
+      ) {
+        const tsColumn: TimestampColumn = {
+          columnIndex: idx,
+          columnName: columns[idx],
+          unit: def.unit || 'ns',
+        };
+
+        // If durationColumn is specified, find its index
+        if (def.durationColumn) {
+          const durIndex = columns.indexOf(def.durationColumn);
+          if (durIndex !== -1) {
+            tsColumn.durationColumnIndex = durIndex;
+            tsColumn.durationColumnName = def.durationColumn;
+          }
+        }
+
+        detected.push(tsColumn);
+      }
+    });
+
+    return detected;
+  }
+
+  /**
    * 格式化时间戳显示（假设输入是纳秒）
    */
   private formatTimestamp(ns: number): string {
@@ -905,6 +984,29 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     }
 
     return sections.length > 0 ? sections : m('div.expanded-empty', '无详细数据');
+  }
+
+  /**
+   * 格式化元数据值（如 layer_name）为更短的显示形式
+   * 例如 "TX-com.example.app/MainActivity#0" -> "TX-MainActivity"
+   */
+  private formatMetadataValue(value: any): string {
+    if (value === null || value === undefined) return '';
+    const str = String(value);
+
+    // 对于 layer_name，提取简短形式
+    // 格式通常是 "TX-com.example.app/ActivityName#0"
+    const layerMatch = str.match(/^(TX-)[^/]+\/([^#]+)/);
+    if (layerMatch) {
+      return `${layerMatch[1]}${layerMatch[2]}`;
+    }
+
+    // 如果太长，截断
+    if (str.length > 40) {
+      return str.substring(0, 37) + '...';
+    }
+
+    return str;
   }
 
   /**
