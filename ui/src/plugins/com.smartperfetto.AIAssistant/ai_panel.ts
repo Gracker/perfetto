@@ -153,7 +153,6 @@ export interface AISettings {
   deepseekModel: string;
   deepseekApiKey: string;
   backendUrl: string;
-  maxHistory: number;
 }
 
 const DEFAULT_SETTINGS: AISettings = {
@@ -166,7 +165,6 @@ const DEFAULT_SETTINGS: AISettings = {
   deepseekModel: 'deepseek-chat',
   deepseekApiKey: '',  // Set your API key in settings
   backendUrl: 'http://localhost:3000',
-  maxHistory: 10,
 };
 
 // Storage key for settings
@@ -1494,11 +1492,6 @@ Click ⚙️ to change settings.`;
 
   private addMessage(msg: Message) {
     this.state.messages.push(msg);
-    // Trim to max history
-    const maxMsgs = this.state.settings.maxHistory * 2; // user + assistant
-    if (this.state.messages.length > maxMsgs) {
-      this.state.messages = this.state.messages.slice(-maxMsgs);
-    }
     this.saveHistory();
     // 同时保存到 Session
     this.saveCurrentSession();
@@ -2056,81 +2049,7 @@ Keep your analysis concise and actionable.`;
       });
       return;
     }
-
-    this.state.isLoading = true;
-    m.redraw();
-
-    try {
-      // Call backend slow analysis endpoint
-      const apiUrl = `${this.state.settings.backendUrl}/api/trace-analysis/analyze/slow`;
-      console.log('[AIPanel] Calling slow analysis API:', apiUrl, 'with traceId:', this.state.backendTraceId);
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          traceId: this.state.backendTraceId,
-        }),
-      });
-
-      console.log('[AIPanel] Slow analysis API response status:', response.status);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        if (errorData.code === 'TRACE_NOT_UPLOADED') {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'system',
-            content: '⚠️ **Trace not found in backend.**\n\nPlease upload the trace again using the 📤 button.',
-            timestamp: Date.now(),
-          });
-          this.state.backendTraceId = null;
-          return;
-        }
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log('[AIPanel] Slow analysis API response data:', data);
-
-      if (!data.success) {
-        throw new Error(data.error || 'Slow analysis failed');
-      }
-
-      // Display results with SQL result table if available
-      if (data.data?.result) {
-        const result = data.data.result;
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: data.data.summary || `**Slow operations analysis complete.** Found **${result.rowCount}** slow operations.`,
-          timestamp: Date.now(),
-          sqlResult: {
-            columns: result.columns || [],
-            rows: result.rows || [],
-            rowCount: result.rowCount || 0,
-            query: result.query || '',
-          },
-        });
-      } else {
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: data.data?.summary || '**Slow operations analysis complete.** No slow operations detected.',
-          timestamp: Date.now(),
-        });
-      }
-    } catch (e: any) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `**Error:** ${e.message || 'Failed to analyze slow operations'}`,
-        timestamp: Date.now(),
-      });
-    }
-
-    this.state.isLoading = false;
-    m.redraw();
+    await this.handleChatMessage('分析慢操作（IO/数据库/输入事件）');
   }
 
   private async handleMemoryCommand() {
@@ -2144,81 +2063,7 @@ Keep your analysis concise and actionable.`;
       });
       return;
     }
-
-    this.state.isLoading = true;
-    m.redraw();
-
-    try {
-      // Call backend memory analysis endpoint
-      const apiUrl = `${this.state.settings.backendUrl}/api/trace-analysis/analyze/memory`;
-      console.log('[AIPanel] Calling memory analysis API:', apiUrl, 'with traceId:', this.state.backendTraceId);
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          traceId: this.state.backendTraceId,
-        }),
-      });
-
-      console.log('[AIPanel] Memory analysis API response status:', response.status);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        if (errorData.code === 'TRACE_NOT_UPLOADED') {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'system',
-            content: '⚠️ **Trace not found in backend.**\n\nPlease upload the trace again using the 📤 button.',
-            timestamp: Date.now(),
-          });
-          this.state.backendTraceId = null;
-          return;
-        }
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log('[AIPanel] Memory analysis API response data:', data);
-
-      if (!data.success) {
-        throw new Error(data.error || 'Memory analysis failed');
-      }
-
-      // Display results with SQL result table if available
-      if (data.data?.result) {
-        const result = data.data.result;
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: data.data.summary || `**Memory analysis complete.** Found **${result.rowCount}** memory allocations.`,
-          timestamp: Date.now(),
-          sqlResult: {
-            columns: result.columns || [],
-            rows: result.rows || [],
-            rowCount: result.rowCount || 0,
-            query: result.query || '',
-          },
-        });
-      } else {
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: data.data?.summary || '**Memory analysis complete.** No memory data detected.',
-          timestamp: Date.now(),
-        });
-      }
-    } catch (e: any) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `**Error:** ${e.message || 'Failed to analyze memory'}`,
-        timestamp: Date.now(),
-      });
-    }
-
-    this.state.isLoading = false;
-    m.redraw();
+    await this.handleChatMessage('分析内存与 GC/LMK 情况');
   }
 
   private async handleChatMessage(message: string) {
@@ -2243,7 +2088,7 @@ Keep your analysis concise and actionable.`;
     m.redraw();
 
     try {
-      // Call Agent API (MasterOrchestrator)
+      // Call Agent API (Agent-Driven Orchestrator)
       const apiUrl = `${this.state.settings.backendUrl}/api/agent/analyze`;
       console.log('[AIPanel] Calling Agent API:', apiUrl, 'with traceId:', this.state.backendTraceId);
 
@@ -2252,9 +2097,10 @@ Keep your analysis concise and actionable.`;
         query: message,
         traceId: this.state.backendTraceId,
         options: {
-          maxIterations: 3,  // Reduced to avoid unnecessary iterations
-          qualityThreshold: 0.5,  // Match backend default - Skills already produce quality results
-          enableEvaluation: true,
+          maxRounds: 3,  // Reduced to avoid unnecessary iterations
+          confidenceThreshold: 0.5,  // Match backend default
+          maxNoProgressRounds: 2,
+          maxFailureRounds: 2,
         },
       };
 
@@ -2397,6 +2243,9 @@ Keep your analysis concise and actionable.`;
 
         const decoder = new TextDecoder();
         let buffer = '';
+        // Persist event type across read chunks to handle large payloads
+        // that may span multiple reader.read() calls
+        let currentEventType = '';
 
         // Read loop
         while (true) {
@@ -2424,7 +2273,6 @@ Keep your analysis concise and actionable.`;
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
 
-          let currentEventType = '';
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
@@ -2438,17 +2286,21 @@ Keep your analysis concise and actionable.`;
                 try {
                   const data = JSON.parse(dataStr);
                   const eventType = currentEventType || data.type;
-                  console.log('[AIPanel] Agent SSE event:', eventType);
-                  this.handleSSEEvent(eventType, data);
+                  if (!eventType) {
+                    console.warn('[AIPanel] SSE event with no type, skipping:', Object.keys(data));
+                  } else {
+                    console.log('[AIPanel] Agent SSE event:', eventType);
+                    this.handleSSEEvent(eventType, data);
 
-                  // Check for terminal events (no need to reconnect after these)
-                  if (eventType === 'analysis_completed' || eventType === 'error') {
-                    this.state.sseConnectionState = 'disconnected';
-                    m.redraw();
-                    return;
+                    // Check for terminal events (no need to reconnect after these)
+                    if (eventType === 'analysis_completed' || eventType === 'error') {
+                      this.state.sseConnectionState = 'disconnected';
+                      m.redraw();
+                      return;
+                    }
                   }
                 } catch (e) {
-                  console.error('[AIPanel] Failed to parse Agent SSE data:', e, dataStr);
+                  console.error('[AIPanel] Failed to parse Agent SSE data:', e, dataStr.substring(0, 200));
                 }
               }
               currentEventType = '';
@@ -2957,10 +2809,10 @@ Keep your analysis concise and actionable.`;
                 }
                 // Check if this list should be expandable (has frame details in deep layer)
                 isExpandable = displayConfig?.expandable === true;
-                // Get metadata_columns (values to extract to header)
-                metadataColumns = displayConfig?.metadata_columns || [];
-                // Get hidden_columns (columns to hide from main table)
-                hiddenColumns = displayConfig?.hidden_columns || [];
+                // Get metadata_fields (values to extract to header) - prefer camelCase, fallback to legacy snake_case
+                metadataColumns = displayConfig?.metadataFields || displayConfig?.metadata_columns || [];
+                // Get hidden_columns (columns to hide from main table) - support legacy/camelCase
+                hiddenColumns = displayConfig?.hidden_columns || displayConfig?.hiddenColumns || [];
 
                 // Check which data format we have
                 if (isDataPayloadFormat(stepData)) {
@@ -3219,7 +3071,8 @@ Keep your analysis concise and actionable.`;
           let content = answerContent;
 
           // For agent-driven results, add hypothesis summary if available
-          if (data?.architecture === 'v2-agent-driven' && data?.data?.hypotheses) {
+          const isAgentDriven = data?.architecture === 'v2-agent-driven' || data?.architecture === 'agent-driven';
+          if (isAgentDriven && data?.data?.hypotheses) {
             const hypotheses = data.data.hypotheses;
             const confirmed = hypotheses.filter((h: any) => h.status === 'confirmed');
             const confidence = data.data.confidence || 0;
@@ -3235,6 +3088,9 @@ Keep your analysis concise and actionable.`;
           }
 
           const reportUrl = data.data.reportUrl;
+          if (!reportUrl && data.data.reportError) {
+            console.warn('[AIPanel] HTML report generation failed:', data.data.reportError);
+          }
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
@@ -3287,7 +3143,9 @@ Keep your analysis concise and actionable.`;
             }
 
             // Generate deduplication key
-            const deduplicationKey = `${envelope.meta.skillId || 'unknown'}:${envelope.meta.stepId || envelope.meta.source}`;
+            // Use meta.source so repeated executions (e.g. per-session deep dives) can be displayed independently.
+            const deduplicationKey = envelope.meta.source ||
+              `${envelope.meta.skillId || 'unknown'}:${envelope.meta.stepId || 'unknown'}`;
 
             // Check for duplicates
             if (this.state.displayedSkillProgress.has(deduplicationKey)) {
@@ -3422,9 +3280,14 @@ Keep your analysis concise and actionable.`;
         break;
 
       case 'skill_data':
-        // Legacy skill_data format - convert to skill_layered_result format for display
+        // ⚠️ DEPRECATED: skill_data format is deprecated, use skill_layered_result instead
+        // This handler provides backward compatibility but will be removed in v3.0
+        console.warn('[AIPanel] ⚠️ DEPRECATED: skill_data event received. ' +
+          'Backend should emit skill_layered_result instead. ' +
+          'skill_data support will be removed in v3.0');
+
         if (data?.data) {
-          console.log('[AIPanel] skill_data received, converting to layered result:', data.data);
+          console.log('[AIPanel] Converting legacy skill_data to skill_layered_result:', data.data);
 
           // Transform to skill_layered_result format
           const transformedData = {

@@ -598,26 +598,6 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                 ])
               : null,
 
-            // Interaction Settings
-            m('div', {style: MODAL_STYLES.section}, [
-              m('h4', {style: MODAL_STYLES.sectionTitle}, 'Interaction Settings'),
-              m('div', {style: MODAL_STYLES.field}, [
-                m('label', {style: MODAL_STYLES.fieldLabel}, [
-                  m('span', {style: MODAL_STYLES.fieldIcon}, '📝'),
-                  'Max Conversation History',
-                ]),
-                m('input[type=number]', {
-                  style: MODAL_STYLES.input,
-                  value: this.settings.maxHistory,
-                  min: 1,
-                  max: 50,
-                  onchange: (e: Event) => {
-                    this.settings.maxHistory = parseInt((e.target as HTMLInputElement).value, 10);
-                  },
-                }),
-                m('div', {style: MODAL_STYLES.hint}, 'Number of conversation rounds to remember for context'),
-              ]),
-            ]),
 
             // Test Connection
             m('div', {style: MODAL_STYLES.section}, [
