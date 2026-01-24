@@ -8,7 +8,7 @@
  *
  * @module dataContract.types
  * @version 2.0.0 - DataEnvelope refactoring
- * @generated 2026-01-23T14:36:01.622Z
+ * @generated 2026-01-24T00:54:55.862Z
  */
 
 // =============================================================================
@@ -208,6 +208,26 @@ export interface DataEnvelopeDisplay {
 
   /** Level of detail (key, summary, detail, debug) */
   level?: DisplayLevel;
+
+  // === Phase 3: Output Structure Optimization ===
+
+  /** Rendering priority (0 = highest). Used to order envelopes within a group. */
+  priority?: number;
+
+  /** Group identifier for grouping related envelopes (e.g. "interval_1"). */
+  group?: string;
+
+  /** Data severity level. Used to sort (critical first) and style. */
+  severity?: 'critical' | 'warning' | 'info' | 'normal';
+
+  /** Whether this envelope's table is collapsible in the UI. */
+  collapsible?: boolean;
+
+  /** Whether this envelope should be collapsed by default (requires collapsible=true). */
+  defaultCollapsed?: boolean;
+
+  /** Maximum number of visible rows before "show more" truncation. */
+  maxVisibleRows?: number;
 }
 
 /**

@@ -71,6 +71,11 @@ export interface SqlQueryResult {
   rowCount: number;
   query?: string;
   sectionTitle?: string;  // For skill_section messages - shows title in table header
+  // Output structure optimization: grouping and collapse support
+  group?: string;         // Group identifier for interval grouping
+  collapsible?: boolean;  // Whether this table can be collapsed
+  defaultCollapsed?: boolean;  // Whether this table starts collapsed
+  maxVisibleRows?: number;  // Max rows to show before "show more"
   // 可展开行数据（用于 iterator 类型的结果）
   expandableData?: Array<{
     item: Record<string, any>;
@@ -133,6 +138,8 @@ interface AIPanelState {
     error: string;
     timestamp: number;
   }>;
+  // Output structure optimization: track collapsed table states
+  collapsedTables: Set<string>;  // Message IDs of currently collapsed tables
 }
 
 interface PinnedResult {
@@ -234,6 +241,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     sseLastEventTime: null,
     // Error Aggregation Initialization
     collectedErrors: [],
+    // Output structure optimization
+    collapsedTables: new Set(),
   };
 
   private onClearChat?: () => void;
@@ -807,18 +816,77 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
                   // For skill_section messages with sectionTitle, render compact table only
                   if (sqlResult.sectionTitle) {
-                    return m(SqlResultTable, {
-                      columns: sqlResult.columns,
-                      rows: sqlResult.rows,
-                      rowCount: sqlResult.rowCount,
-                      query: '',  // No SQL display
-                      title: sqlResult.sectionTitle,  // Pass title to table
-                      trace: vnode.attrs.trace,
-                      onPin: (data) => this.handlePin(data),
-                      expandableData: sqlResult.expandableData,
-                      summary: sqlResult.summary,
-                      metadata: sqlResult.metadata,  // Pass metadata for header display
-                    });
+                    // Auto-collapse tables marked as defaultCollapsed on first render
+                    if (sqlResult.defaultCollapsed && !this.state.collapsedTables.has(msg.id) &&
+                        !this.state.collapsedTables.has(`_init_${msg.id}`)) {
+                      this.state.collapsedTables.add(msg.id);
+                      this.state.collapsedTables.add(`_init_${msg.id}`);  // Mark as initialized
+                    }
+
+                    const isCollapsed = sqlResult.collapsible && this.state.collapsedTables.has(msg.id);
+
+                    if (isCollapsed) {
+                      // Render collapsed: just a clickable title bar
+                      return m('div.ai-collapsed-table', {
+                        style: {
+                          padding: '8px 12px',
+                          background: 'var(--surface)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          opacity: '0.7',
+                        },
+                        onclick: () => {
+                          this.state.collapsedTables.delete(msg.id);
+                          m.redraw();
+                        },
+                      }, [
+                        m('i.pf-icon', {style: {fontSize: '14px'}}, 'chevron_right'),
+                        m('span', {style: {fontSize: '13px', fontWeight: '500'}},
+                          `${sqlResult.sectionTitle} (${sqlResult.rowCount} 条)`),
+                      ]);
+                    }
+
+                    // Render expanded table with optional collapse toggle
+                    return m('div', [
+                      sqlResult.collapsible ? m('div.ai-table-collapse-toggle', {
+                        style: {
+                          padding: '4px 8px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          color: 'var(--text-secondary)',
+                        },
+                        onclick: () => {
+                          this.state.collapsedTables.add(msg.id);
+                          m.redraw();
+                        },
+                      }, [
+                        m('i.pf-icon', {style: {fontSize: '12px'}}, 'expand_less'),
+                        m('span', '收起'),
+                      ]) : null,
+                      m(SqlResultTable, {
+                        columns: sqlResult.columns,
+                        rows: sqlResult.maxVisibleRows
+                          ? sqlResult.rows.slice(0, sqlResult.maxVisibleRows)
+                          : sqlResult.rows,
+                        rowCount: sqlResult.maxVisibleRows
+                          ? Math.min(sqlResult.rowCount, sqlResult.maxVisibleRows)
+                          : sqlResult.rowCount,
+                        query: '',  // No SQL display
+                        title: sqlResult.sectionTitle,  // Pass title to table
+                        trace: vnode.attrs.trace,
+                        onPin: (data) => this.handlePin(data),
+                        expandableData: sqlResult.expandableData,
+                        summary: sqlResult.summary,
+                        metadata: sqlResult.metadata,  // Pass metadata for header display
+                      }),
+                    ]);
                   }
 
                   // Regular SQL result with outer header
@@ -3091,13 +3159,29 @@ Keep your analysis concise and actionable.`;
           if (!reportUrl && data.data.reportError) {
             console.warn('[AIPanel] HTML report generation failed:', data.data.reportError);
           }
-          this.addMessage({
+
+          // Conclusion-first: insert conclusion BEFORE data tables for better readability
+          const conclusionMsg: Message = {
             id: this.generateId(),
             role: 'assistant',
             content: content,
             timestamp: Date.now(),
             reportUrl: reportUrl ? `${this.state.settings.backendUrl}${reportUrl}` : undefined,
-          });
+          };
+
+          // Find the first data table message (sqlResult or metricData) to insert before it
+          const firstDataIdx = this.state.messages.findIndex(
+            m => m.sqlResult || m.metricData
+          );
+          if (firstDataIdx >= 0) {
+            // Insert conclusion before the first data table
+            this.state.messages.splice(firstDataIdx, 0, conclusionMsg);
+            this.saveHistory();
+            this.saveCurrentSession();
+            this.scrollToBottom();
+          } else {
+            this.addMessage(conclusionMsg);
+          }
 
           // Show error summary if there were any non-fatal errors during analysis
           if (this.state.collectedErrors.length > 0) {
@@ -3259,8 +3343,8 @@ Keep your analysis concise and actionable.`;
                 // Default: render as table using existing SqlQueryResult logic
                 const sqlResult = envelopeToSqlQueryResult(envelope);
 
-                // Only add message if there's data to display
-                if (sqlResult.rowCount > 0 || (sqlResult.columns.length > 0)) {
+                // Only add message if there are actual data rows (skip empty tables)
+                if (sqlResult.rowCount > 0) {
                   this.addMessage({
                     id: this.generateId(),
                     role: 'assistant',
@@ -3269,6 +3353,11 @@ Keep your analysis concise and actionable.`;
                     sqlResult: {
                       ...sqlResult,
                       sectionTitle: title,
+                      // Pass grouping/collapse metadata from DataEnvelope
+                      group: envelope.display.group,
+                      collapsible: envelope.display.collapsible,
+                      defaultCollapsed: envelope.display.defaultCollapsed,
+                      maxVisibleRows: envelope.display.maxVisibleRows,
                     },
                   });
                 }
