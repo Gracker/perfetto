@@ -173,6 +173,6 @@ export function validateFrameDetailData(data: unknown): {
   }
   return {
     success: false,
-    error: result.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; '),
+    error: result.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join('; '),
   };
 }
