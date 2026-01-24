@@ -95,9 +95,16 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private timestampColumns: TimestampColumn[] = [];  // 存储检测到的时间戳列
   // 可展开行状态：记录哪些行处于展开状态
   private expandedRows = new Set<number>();
+  // Trace 起始时间（纳秒），用于计算相对时间显示
+  private traceStartNs: number = 0;
 
   view(vnode: m.Vnode<SqlResultTableAttrs>) {
     const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary, metadata, columnDefinitions} = vnode.attrs;
+
+    // 获取 trace 起始时间，用于相对时间戳显示
+    if (trace) {
+      this.traceStartNs = Number(trace.traceInfo.start);
+    }
 
     // Build or infer column definitions (v2.0 schema-driven rendering)
     // If columnDefinitions are provided, use them; otherwise infer from column names
@@ -323,8 +330,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         return 'col-duration';
       }
 
-      // Count/number columns
-      if (/count|cnt|num|total|sum|avg|min|max|^id$|_id$|percent|ratio|depth/i.test(lowerCol)) {
+      // Count/number/ID columns
+      if (/count|cnt|num|total|sum|avg|min|max|^id$|_id$|^pid$|^tid$|^upid$|^utid$|percent|ratio|depth|index|frame_index|token|session_id|track_id|slice_id|arg_set_id/i.test(lowerCol)) {
         return 'col-number';
       }
 
@@ -561,46 +568,18 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   }
 
   private formatValue(value: number): string {
-    if (value > 1_000_000_000) return (value / 1_000_000_000).toFixed(2) + 's';
-    if (value > 1_000_000) return (value / 1_000_000).toFixed(2) + 'ms';
-    if (value > 1000) return (value / 1000).toFixed(2) + 'µs';
+    if (Number.isInteger(value)) return value.toLocaleString();
     return value.toFixed(2);
   }
 
   private formatCellValue(value: any): string {
-    if (value === null || value === undefined) {
-      return 'NULL';
-    }
+    if (value === null || value === undefined) return 'NULL';
     if (typeof value === 'number') {
-      // Format timestamps as readable time
-      if (value > 1_000_000_000) {
-        return (value / 1_000_000_000).toFixed(2) + 's';
-      }
-      if (value > 1_000_000) {
-        return (value / 1_000_000).toFixed(2) + 'ms';
-      }
-      if (value > 1000) {
-        return (value / 1000).toFixed(2) + 'µs';
-      }
-      return String(value);
+      if (Number.isInteger(value)) return value.toLocaleString();
+      return value.toFixed(2);
     }
-    if (typeof value === 'bigint') {
-      // 大整数也按时间格式化（假设是纳秒）
-      const num = Number(value);
-      if (num > 1_000_000_000) {
-        return (num / 1_000_000_000).toFixed(2) + 's';
-      }
-      if (num > 1_000_000) {
-        return (num / 1_000_000).toFixed(2) + 'ms';
-      }
-      if (num > 1000) {
-        return (num / 1000).toFixed(2) + 'µs';
-      }
-      return value.toString();
-    }
-    if (typeof value === 'object') {
-      return JSON.stringify(value);
-    }
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'object') return JSON.stringify(value);
     return String(value);
   }
 
@@ -774,25 +753,55 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   /**
    * 格式化时间戳显示（假设输入是纳秒）
    */
+  /**
+   * 格式化时间戳为相对时间（相对于 trace 起始时间）
+   * 显示为 "Xm Ys.ZZZs" 或 "Ys.ZZZs" 格式
+   */
   private formatTimestamp(ns: number): string {
+    // 计算相对于 trace 起始时间的偏移
+    const relativeNs = this.traceStartNs > 0 ? ns - this.traceStartNs : ns;
+
+    // 如果相对时间为负或极小，直接显示
+    if (relativeNs < 0) {
+      return `-${this.formatDurationForTimestamp(Math.abs(relativeNs))}`;
+    }
+
+    return this.formatDurationForTimestamp(relativeNs);
+  }
+
+  /**
+   * 将纳秒值格式化为人类可读的时间格式
+   * 用于时间戳的相对时间显示
+   */
+  private formatDurationForTimestamp(ns: number): string {
     if (ns < 1000) {
       return `${ns}ns`;
     }
-    const us = ns / 1000;
-    if (us < 1000) {
-      return `${us.toFixed(2)}µs`;
+
+    const totalSeconds = ns / 1e9;
+
+    if (totalSeconds >= 60) {
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds - minutes * 60;
+      return `${minutes}m${seconds.toFixed(3)}s`;
     }
-    const ms = us / 1000;
-    if (ms < 1000) {
+
+    if (totalSeconds >= 1) {
+      return `${totalSeconds.toFixed(3)}s`;
+    }
+
+    const ms = ns / 1e6;
+    if (ms >= 1) {
       return `${ms.toFixed(2)}ms`;
     }
-    const sec = ms / 1000;
-    return `${sec.toFixed(2)}s`;
+
+    const us = ns / 1e3;
+    return `${us.toFixed(1)}µs`;
   }
 
   /**
    * 根据单位格式化时间戳显示
-   * 先转换为纳秒，再格式化
+   * 先转换为纳秒，再计算相对时间
    */
   private formatTimestampWithUnit(value: number, unit: 'ns' | 'us' | 'ms' | 's'): string {
     const multiplier = UNIT_TO_NS[unit] || 1;

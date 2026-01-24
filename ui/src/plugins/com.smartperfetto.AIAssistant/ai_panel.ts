@@ -71,6 +71,8 @@ export interface SqlQueryResult {
   rowCount: number;
   query?: string;
   sectionTitle?: string;  // For skill_section messages - shows title in table header
+  stepId?: string;        // Skill step identifier (from DataEnvelope.meta.stepId)
+  layer?: string;         // Display layer (overview/list/detail/deep)
   // Output structure optimization: grouping and collapse support
   group?: string;         // Group identifier for interval grouping
   collapsible?: boolean;  // Whether this table can be collapsed
@@ -3160,27 +3162,30 @@ Keep your analysis concise and actionable.`;
             console.warn('[AIPanel] HTML report generation failed:', data.data.reportError);
           }
 
-          // Conclusion-first: insert conclusion BEFORE data tables for better readability
-          const conclusionMsg: Message = {
-            id: this.generateId(),
-            role: 'assistant',
-            content: content,
-            timestamp: Date.now(),
-            reportUrl: reportUrl ? `${this.state.settings.backendUrl}${reportUrl}` : undefined,
-          };
-
-          // Find the first data table message (sqlResult or metricData) to insert before it
-          const firstDataIdx = this.state.messages.findIndex(
-            m => m.sqlResult || m.metricData
+          // Check if conclusion was already shown by skill_layered_result handler
+          const hasConclusionAlready = this.state.messages.some(
+            m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
           );
-          if (firstDataIdx >= 0) {
-            // Insert conclusion before the first data table
-            this.state.messages.splice(firstDataIdx, 0, conclusionMsg);
-            this.saveHistory();
-            this.saveCurrentSession();
-            this.scrollToBottom();
-          } else {
-            this.addMessage(conclusionMsg);
+
+          if (!hasConclusionAlready) {
+            // Append conclusion at the end of the conversation (after all data tables)
+            this.addMessage({
+              id: this.generateId(),
+              role: 'assistant',
+              content: content,
+              timestamp: Date.now(),
+              reportUrl: reportUrl ? `${this.state.settings.backendUrl}${reportUrl}` : undefined,
+            });
+          } else if (reportUrl) {
+            // Conclusion already shown, but attach reportUrl to existing conclusion message
+            const conclusionMsg = this.state.messages.find(
+              m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
+            );
+            if (conclusionMsg) {
+              conclusionMsg.reportUrl = `${this.state.settings.backendUrl}${reportUrl}`;
+              this.saveHistory();
+              this.saveCurrentSession();
+            }
           }
 
           // Show error summary if there were any non-fatal errors during analysis

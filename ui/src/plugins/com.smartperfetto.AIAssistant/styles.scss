@@ -2357,8 +2357,8 @@ td.col-expand {
   }
 }
 
-// 展开的行
-tr.expanded-row {
+// 展开的行 (matches tr.detail-row rendered in sql_result_table.ts)
+tr.detail-row {
   background: var(--chat-bg-secondary);
 
   td {
