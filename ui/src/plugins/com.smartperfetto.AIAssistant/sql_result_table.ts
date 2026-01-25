@@ -358,7 +358,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     row?: any[]  // 完整行数据，用于获取 dur_str
   ): m.Children {
     const isTimestamp = columnClass === 'col-timestamp';
-    const isNumber = columnClass === 'col-duration' || columnClass === 'col-number';
+    // Fix: 区分 duration (时长，需要单位转换) 和 number (普通数字如 ID/count)
+    const isDuration = columnClass === 'col-duration';
+    const isPlainNumber = columnClass === 'col-number';
 
     // 获取该列的时间戳信息（如果有）
     const tsColumn = this.timestampColumns.find(tc => tc.columnIndex === columnIndex);
@@ -389,8 +391,14 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     let displayValue: string;
     if (value === null || value === undefined) {
       displayValue = 'NULL';
-    } else if (isNumber && isValueNumeric) {
+    } else if (isDuration && isValueNumeric) {
+      // Duration 类型：将纳秒转换为 ms/s 等可读格式
       displayValue = this.formatDuration(numericValue!);
+    } else if (isPlainNumber && isValueNumeric) {
+      // 普通数字类型 (ID, count, etc.)：保持原始数值，使用千分位分隔
+      displayValue = Number.isInteger(numericValue!)
+        ? numericValue!.toLocaleString()
+        : numericValue!.toFixed(2);
     } else if (isTimestamp && isValueNumeric) {
       // 根据检测到的单位格式化时间戳
       if (tsColumn) {

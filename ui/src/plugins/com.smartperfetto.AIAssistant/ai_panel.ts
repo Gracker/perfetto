@@ -3605,10 +3605,11 @@ Keep your analysis concise and actionable.`;
             this.state.messages.pop();
           }
 
-          let content = `### 🧪 生成了 ${hypotheses.length} 个分析假设\n\n`;
+          // Fix: 减少不必要的换行，避免产生大量 <br> 导致空白过大
+          let content = `### 🧪 生成了 ${hypotheses.length} 个分析假设\n`;
           for (let i = 0; i < hypotheses.length; i++) {
             const h = hypotheses[i];
-            content += `${i + 1}. **${h}**\n`;
+            content += `${i + 1}. ${h}\n`;
           }
           content += '\n_AI 将验证这些假设..._';
 
@@ -4020,14 +4021,27 @@ Keep your analysis concise and actionable.`;
       .replace(/\*(.*?)\*/g, '<em>$1</em>')
       .replace(/`(.*?)`/g, '<code>$1</code>')
       .replace(/^> (.*?)$/gm, '<blockquote>$1</blockquote>')
-      .replace(/^- (.*?)$/gm, '<li>$1</li>')
+      // Unordered list items
+      .replace(/^- (.*?)$/gm, '<li class="ul-item">$1</li>')
+      // Ordered list items (1. 2. 3. etc.)
+      .replace(/^\d+\. (.*?)$/gm, '<li class="ol-item">$1</li>')
       .replace(/\n/g, '<br>');
 
-    // Wrap consecutive <li> elements in <ul>
+    // Wrap consecutive unordered <li> elements in <ul>
     processedContent = processedContent.replace(
-      /(<li>.*?<\/li>(?:<br>)?)+/g,
-      (match) => '<ul>' + match.replace(/<br>/g, '') + '</ul>'
+      /(<li class="ul-item">.*?<\/li>(?:<br>)?)+/g,
+      (match) => '<ul>' + match.replace(/<br>/g, '').replace(/ class="ul-item"/g, '') + '</ul>'
     );
+
+    // Wrap consecutive ordered <li> elements in <ol>
+    processedContent = processedContent.replace(
+      /(<li class="ol-item">.*?<\/li>(?:<br>)?)+/g,
+      (match) => '<ol>' + match.replace(/<br>/g, '').replace(/ class="ol-item"/g, '') + '</ol>'
+    );
+
+    // Fix: 合并连续的 <br> 标签，避免过多空白
+    // 将 3 个或以上连续的 <br> 合并为 2 个
+    processedContent = processedContent.replace(/(<br>){3,}/g, '<br><br>');
 
     return processedContent;
   }

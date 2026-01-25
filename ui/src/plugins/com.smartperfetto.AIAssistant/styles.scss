@@ -2591,6 +2591,24 @@ tr.detail-row {
     }
   }
 
+  // 有序列表样式
+  ol {
+    margin: 4px 0;
+    padding-left: 20px;
+    list-style-type: decimal;
+
+    li {
+      margin: 2px 0;
+      line-height: 1.5;
+    }
+  }
+
+  // 减少标题和紧随其后的列表之间的间距
+  h3 + ol,
+  h3 + ul {
+    margin-top: 2px;
+  }
+
   code {
     background: var(--chat-code-bg);
     color: var(--chat-code-text);
