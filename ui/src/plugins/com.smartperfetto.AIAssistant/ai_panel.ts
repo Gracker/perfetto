@@ -2884,6 +2884,14 @@ Keep your analysis concise and actionable.`;
                 // Get hidden_columns (columns to hide from main table) - support legacy/camelCase
                 hiddenColumns = displayConfig?.hidden_columns || displayConfig?.hiddenColumns || [];
 
+                // Also extract hidden columns from column definitions (columns with hidden: true)
+                if (displayConfig?.columns && Array.isArray(displayConfig.columns)) {
+                  const hiddenFromDefs = displayConfig.columns
+                    .filter((c: any) => c.hidden === true)
+                    .map((c: any) => c.name);
+                  hiddenColumns = [...new Set([...hiddenColumns, ...hiddenFromDefs])];
+                }
+
                 // Check which data format we have
                 if (isDataPayloadFormat(stepData)) {
                   // NEW DataPayload format: {columns, rows, expandableData, summary}
@@ -2894,17 +2902,46 @@ Keep your analysis concise and actionable.`;
                     hasSummary: !!stepData.summary,
                   });
 
-                  columns = stepData.columns || [];
-                  rows = stepData.rows || [];
+                  const allColumns = stepData.columns || [];
+                  const allRows = stepData.rows || [];
                   preBindedExpandableData = stepData.expandableData;
                   summaryReport = stepData.summary;
 
                   // For DataPayload, items is rows converted to objects (for metadata extraction)
-                  items = rows.map((row: any[]) => {
+                  items = allRows.map((row: any[]) => {
                     const obj: Record<string, any> = {};
-                    columns.forEach((col, i) => { obj[col] = row[i]; });
+                    allColumns.forEach((col: string, i: number) => { obj[col] = row[i]; });
                     return obj;
                   });
+
+                  // Apply column filtering for DataPayload format
+                  const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
+                  if (columnsToHide.size > 0) {
+                    // Get indices of visible columns
+                    const visibleIndices: number[] = [];
+                    columns = allColumns.filter((col: string, idx: number) => {
+                      if (!columnsToHide.has(col)) {
+                        visibleIndices.push(idx);
+                        return true;
+                      }
+                      return false;
+                    });
+                    // Filter rows to only include visible column values
+                    rows = allRows.map((row: any[]) =>
+                      visibleIndices.map(idx => this.formatDisplayValue(row[idx], allColumns[idx]))
+                    );
+                    console.log('[AIPanel] Applied column filtering for DataPayload:', {
+                      original: allColumns.length,
+                      filtered: columns.length,
+                      hidden: columnsToHide.size,
+                      hiddenList: Array.from(columnsToHide),
+                    });
+                  } else {
+                    columns = allColumns;
+                    rows = allRows.map((row: any[]) =>
+                      row.map((val, idx) => this.formatDisplayValue(val, allColumns[idx]))
+                    );
+                  }
                 } else {
                   // Legacy format: data is array of row objects
                   items = stepData;
@@ -2916,7 +2953,7 @@ Keep your analysis concise and actionable.`;
               // Skip if no data
               if (items.length === 0 && rows.length === 0) continue;
 
-              // If we don't have columns/rows yet, build them from items
+              // If we don't have columns/rows yet (legacy format), build them from items
               if (columns.length === 0 && items.length > 0) {
                 // Get all columns from the first item
                 const allColumns = Object.keys(items[0] || {});
@@ -3346,7 +3383,59 @@ Keep your analysis concise and actionable.`;
               case 'table':
               default:
                 // Default: render as table using existing SqlQueryResult logic
-                const sqlResult = envelopeToSqlQueryResult(envelope);
+                const rawResult = envelopeToSqlQueryResult(envelope);
+
+                // Filter hidden columns from column definitions (v2.0)
+                // This mirrors the logic in skill_layered_result handling
+                let filteredColumns = rawResult.columns;
+                let filteredRows = rawResult.rows;
+                let filteredColumnDefs = rawResult.columnDefinitions;
+
+                if (rawResult.columnDefinitions && Array.isArray(rawResult.columnDefinitions)) {
+                  // Extract hidden columns and metadata fields
+                  const hiddenFromDefs = rawResult.columnDefinitions
+                    .filter((c: any) => c.hidden === true)
+                    .map((c: any) => c.name);
+                  const metadataFields = envelope.display.metadataFields || [];
+                  const columnsToHide = new Set([...hiddenFromDefs, ...metadataFields]);
+
+                  if (columnsToHide.size > 0 && rawResult.columns.length > 0) {
+                    // Get indices of visible columns
+                    const visibleIndices: number[] = [];
+                    filteredColumns = rawResult.columns.filter((col: string, idx: number) => {
+                      if (!columnsToHide.has(col)) {
+                        visibleIndices.push(idx);
+                        return true;
+                      }
+                      return false;
+                    });
+
+                    // Filter rows to only include visible column values
+                    filteredRows = rawResult.rows.map((row: any[]) =>
+                      visibleIndices.map(idx => row[idx])
+                    );
+
+                    // Filter column definitions to only include visible columns
+                    filteredColumnDefs = rawResult.columnDefinitions.filter(
+                      (def: any) => !columnsToHide.has(def.name)
+                    );
+
+                    console.log('[AIPanel] DataEnvelope column filtering applied:', {
+                      original: rawResult.columns.length,
+                      filtered: filteredColumns.length,
+                      hidden: columnsToHide.size,
+                      hiddenList: Array.from(columnsToHide),
+                    });
+                  }
+                }
+
+                const sqlResult = {
+                  ...rawResult,
+                  columns: filteredColumns,
+                  rows: filteredRows,
+                  rowCount: filteredRows.length,
+                  columnDefinitions: filteredColumnDefs,
+                };
 
                 // Only add message if there are actual data rows (skip empty tables)
                 if (sqlResult.rowCount > 0) {

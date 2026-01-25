@@ -8,7 +8,7 @@
  *
  * @module dataContract.types
  * @version 2.0.0 - DataEnvelope refactoring
- * @generated 2026-01-24T13:52:36.785Z
+ * @generated 2026-01-25T05:54:46.362Z
  */
 
 // =============================================================================

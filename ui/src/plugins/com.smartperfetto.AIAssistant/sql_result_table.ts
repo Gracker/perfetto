@@ -159,18 +159,16 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             ? m('span.section-title', title)
             : null,
           m('span.row-count', `${rowCount} 条`),
-          // Inline metadata display (layer_name, process_name)
+          // Inline metadata display - dynamically render all metadata fields
           metadata && Object.keys(metadata).length > 0
-            ? m('span.header-metadata', [
-                metadata.layer_name ? m('span.metadata-tag', [
-                  m('span.metadata-label', 'Layer:'),
-                  m('span.metadata-value', this.formatMetadataValue(metadata.layer_name)),
-                ]) : null,
-                metadata.process_name ? m('span.metadata-tag', [
-                  m('span.metadata-label', 'Process:'),
-                  m('span.metadata-value', metadata.process_name),
-                ]) : null,
-              ])
+            ? m('span.header-metadata',
+                Object.entries(metadata)
+                  .filter(([_, v]) => v !== null && v !== undefined && v !== '')
+                  .map(([key, value]) => m('span.metadata-tag', [
+                    m('span.metadata-label', this.formatMetadataLabel(key) + ':'),
+                    m('span.metadata-value', this.formatMetadataValue(value, key)),
+                  ]))
+              )
             : null,
         ]),
         m('.sql-result-actions', [
@@ -956,6 +954,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     }
 
     const sections: m.Children[] = [];
+    const emptySections: string[] = [];  // 记录空的 section 名称
 
     for (const [sectionId, sectionData] of Object.entries(data.result.sections)) {
       if (!sectionData || typeof sectionData !== 'object') continue;
@@ -964,7 +963,14 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       const title = section.title || sectionId;
       const dataRows = section.data || [];
 
-      if (dataRows.length === 0) continue;
+      // 更严格的空数据检查：数组为空，或者第一行没有任何有效键
+      if (dataRows.length === 0 ||
+          !dataRows[0] ||
+          typeof dataRows[0] !== 'object' ||
+          Object.keys(dataRows[0]).length === 0) {
+        emptySections.push(title);
+        continue;
+      }
 
       sections.push(m('div.expanded-section', [
         m('div.section-title', title),
@@ -992,22 +998,66 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ]));
     }
 
-    return sections.length > 0 ? sections : m('div.expanded-empty', '无详细数据');
+    // 如果有有效 section，返回它们；否则显示紧凑的空数据提示
+    if (sections.length > 0) {
+      return sections;
+    }
+
+    // 所有 section 都是空的，显示简洁提示
+    if (emptySections.length > 0) {
+      return m('div.expanded-empty.compact', [
+        m('span', '无数据'),
+        m('span.empty-sections', ` (${emptySections.join(', ')})`),
+      ]);
+    }
+
+    return m('div.expanded-empty.compact', '无详细数据');
+  }
+
+  /**
+   * 格式化元数据标签为用户友好的显示形式
+   * @param key 字段名 (如 layer_name, process_name, pid)
+   */
+  private formatMetadataLabel(key: string): string {
+    // 常用字段的中文标签映射
+    const labelMap: Record<string, string> = {
+      layer_name: 'Layer',
+      process_name: '进程',
+      pid: 'PID',
+      session_id: '会话',
+      package: '包名',
+      frame_count: '帧数',
+      jank_rate: '掉帧率',
+    };
+    return labelMap[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
   /**
    * 格式化元数据值（如 layer_name）为更短的显示形式
    * 例如 "TX-com.example.app/MainActivity#0" -> "TX-MainActivity"
+   * @param value 字段值
+   * @param key 字段名 (可选，用于上下文相关的格式化)
    */
-  private formatMetadataValue(value: any): string {
+  private formatMetadataValue(value: any, key?: string): string {
     if (value === null || value === undefined) return '';
     const str = String(value);
 
     // 对于 layer_name，提取简短形式
     // 格式通常是 "TX-com.example.app/ActivityName#0"
-    const layerMatch = str.match(/^(TX-)[^/]+\/([^#]+)/);
-    if (layerMatch) {
-      return `${layerMatch[1]}${layerMatch[2]}`;
+    if (key === 'layer_name' || str.match(/^TX-/)) {
+      const layerMatch = str.match(/^(TX-)[^/]+\/([^#]+)/);
+      if (layerMatch) {
+        return `${layerMatch[1]}${layerMatch[2]}`;
+      }
+    }
+
+    // 对于 process_name，提取应用名
+    if (key === 'process_name') {
+      // com.example.app -> app
+      const parts = str.split('.');
+      if (parts.length > 2) {
+        return parts[parts.length - 1];
+      }
     }
 
     // 如果太长，截断

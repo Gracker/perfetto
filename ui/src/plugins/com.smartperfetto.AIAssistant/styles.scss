@@ -2367,9 +2367,14 @@ tr.detail-row {
   }
 
   .expanded-content {
-    padding: 12px 16px;
+    padding: 8px 12px;
     max-height: 500px;
     overflow-y: auto;
+
+    // 当只有空数据提示时，减少 padding
+    &:has(.expanded-empty.compact) {
+      padding: 4px 8px;
+    }
   }
 
   .expanded-error {
@@ -2392,6 +2397,25 @@ tr.detail-row {
     color: var(--chat-text-muted);
     font-size: 13px;
     text-align: center;
+
+    // 紧凑版本 - 用于空数据提示
+    &.compact {
+      padding: 6px 12px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      background: var(--chat-bg-tertiary);
+      border-radius: 4px;
+      margin: 4px 0;
+
+      .empty-sections {
+        font-size: 10px;
+        color: var(--chat-text-muted);
+        opacity: 0.7;
+      }
+    }
   }
 }
 
