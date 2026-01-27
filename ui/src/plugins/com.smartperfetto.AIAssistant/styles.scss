@@ -216,6 +216,25 @@
   }
 }
 
+// Teaching button - special styling for educational content
+.ai-teaching-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-color: #667eea;
+  font-weight: 600;
+
+  .pf-icon {
+    color: white;
+  }
+
+  &:hover:not(:disabled) {
+    background: linear-gradient(135deg, #5a67d8 0%, #6b46c1 100%);
+    color: white;
+    border-color: #5a67d8;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+  }
+}
+
 .ai-header-right {
   display: flex;
   align-items: center;

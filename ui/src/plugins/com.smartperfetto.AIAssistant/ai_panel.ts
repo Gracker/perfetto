@@ -207,7 +207,11 @@ interface SessionsStorage {
 // Removed inline STYLES, THEME, ANIMATIONS objects for better maintainability
 
 // Preset questions for quick analysis
-const PRESET_QUESTIONS: Array<{label: string; question: string; icon: string}> = [
+// Teaching buttons first (visual priority), then analysis buttons
+const PRESET_QUESTIONS: Array<{label: string; question: string; icon: string; isTeaching?: boolean}> = [
+  // Teaching mode - helps users understand rendering pipelines
+  {label: '🎓 出图教学', question: '/teaching-pipeline', icon: 'school', isTeaching: true},
+  // Analysis mode - actual performance analysis
   {label: '滑动', question: '分析滑动性能', icon: 'swipe'},
   {label: '启动', question: '分析启动性能', icon: 'rocket_launch'},
   {label: '跳转', question: '分析跳转性能', icon: 'open_in_new'},
@@ -656,9 +660,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             isInRpcMode && !this.state.isLoading
               ? m('div.ai-preset-questions',
                   PRESET_QUESTIONS.map(preset =>
-                    m('button.ai-preset-btn', {
+                    m(`button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}`, {
                       onclick: () => this.sendPresetQuestion(preset.question),
-                      title: preset.question,
+                      title: preset.isTeaching ? '检测当前 Trace 的渲染管线类型，自动 Pin 关键泳道' : preset.question,
                       disabled: this.state.isLoading,
                     }, [
                       m('i.pf-icon', preset.icon),
@@ -1614,6 +1618,9 @@ Click ⚙️ to change settings.`;
         break;
       case '/settings':
         this.openSettings();
+        break;
+      case '/teaching-pipeline':
+        await this.handleTeachingPipelineCommand();
         break;
       default:
         this.addMessage({
@@ -3831,6 +3838,304 @@ Keep your analysis concise and actionable.`;
     this.state.collectedErrors = [];
   }
 
+  /**
+   * Handle /teaching-pipeline command
+   * Detects the rendering pipeline type and shows educational content
+   */
+  private async handleTeachingPipelineCommand() {
+    if (!this.state.backendTraceId) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: '⚠️ **无法执行管线检测**\n\n请先确保 Trace 已上传到后端。',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    this.state.isLoading = true;
+    m.redraw();
+
+    console.log('[AIPanel] Teaching pipeline request with traceId:', this.state.backendTraceId);
+
+    try {
+      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/teaching/pipeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          traceId: this.state.backendTraceId,
+        }),
+      });
+
+      if (!response.ok) {
+        // Try to parse error details from response body
+        try {
+          const errorData = await response.json();
+          console.error('[AIPanel] Teaching pipeline error response:', errorData);
+          throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+        } catch (parseErr) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      }
+
+      const data = await response.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Pipeline detection failed');
+      }
+
+      // Build teaching content message
+      const detection = data.detection;
+      const teaching = data.teaching;
+      const pinInstructions = data.pinInstructions || [];
+      // v3 Smart Pin: Get active rendering processes for intelligent pinning
+      const activeRenderingProcesses = data.activeRenderingProcesses || [];
+
+      // Format pipeline type with confidence
+      const pipelineType = detection.primary_pipeline.id;
+      const confidence = (detection.primary_pipeline.confidence * 100).toFixed(0);
+
+      // Build message content
+      let content = `## 🎓 渲染管线教学\n\n`;
+      content += `### 检测结果\n`;
+      content += `- **管线类型**: \`${pipelineType}\` (置信度: ${confidence}%)\n`;
+
+      // Show subvariants if relevant
+      const subvariants = detection.subvariants;
+      if (subvariants.buffer_mode !== 'UNKNOWN' && subvariants.buffer_mode !== 'N/A') {
+        content += `- **Buffer 模式**: ${subvariants.buffer_mode}\n`;
+      }
+      if (subvariants.flutter_engine !== 'UNKNOWN' && subvariants.flutter_engine !== 'N/A') {
+        content += `- **Flutter 引擎**: ${subvariants.flutter_engine}\n`;
+      }
+      if (subvariants.webview_mode !== 'UNKNOWN' && subvariants.webview_mode !== 'N/A') {
+        content += `- **WebView 模式**: ${subvariants.webview_mode}\n`;
+      }
+      if (subvariants.game_engine !== 'UNKNOWN' && subvariants.game_engine !== 'N/A') {
+        content += `- **游戏引擎**: ${subvariants.game_engine}\n`;
+      }
+
+      // Show candidates if there are alternatives
+      if (detection.candidates && detection.candidates.length > 1) {
+        content += `\n**候选类型**: `;
+        content += detection.candidates
+          .slice(0, 3)
+          .map((c: {id: string; confidence: number}) => `${c.id} (${(c.confidence * 100).toFixed(0)}%)`)
+          .join(', ');
+        content += `\n`;
+      }
+
+      // Show features if detected
+      if (detection.features && detection.features.length > 0) {
+        content += `\n**伴随特性**: `;
+        content += detection.features
+          .map((f: {id: string; confidence: number}) => `${f.id}`)
+          .join(', ');
+        content += `\n`;
+      }
+
+      // v3: Show active rendering processes
+      if (activeRenderingProcesses.length > 0) {
+        content += `\n**活跃渲染进程**: `;
+        content += activeRenderingProcesses
+          .slice(0, 5) // Show top 5
+          .map((p: {processName: string; frameCount: number}) => `${p.processName} (${p.frameCount} 帧)`)
+          .join(', ');
+        if (activeRenderingProcesses.length > 5) {
+          content += ` 等 ${activeRenderingProcesses.length} 个进程`;
+        }
+        content += `\n`;
+      }
+
+      // Teaching content
+      content += `\n---\n\n### ${teaching.title}\n\n`;
+      content += `${teaching.summary}\n\n`;
+
+      // Thread roles table
+      if (teaching.threadRoles && teaching.threadRoles.length > 0) {
+        content += `#### 关键线程角色\n\n`;
+        content += `| 线程 | 职责 | Trace 标签 |\n`;
+        content += `|------|------|------------|\n`;
+        for (const role of teaching.threadRoles) {
+          content += `| ${role.thread} | ${role.responsibility} | ${role.traceTag || '-'} |\n`;
+        }
+        content += `\n`;
+      }
+
+      // Key slices
+      if (teaching.keySlices && teaching.keySlices.length > 0) {
+        content += `#### 关键 Slice\n`;
+        content += `\`${teaching.keySlices.join('`, `')}\`\n\n`;
+      }
+
+      // Mermaid diagrams - render as image via mermaid.ink + fallback code block
+      if (teaching.mermaidBlocks && teaching.mermaidBlocks.length > 0) {
+        content += `#### 时序图\n\n`;
+        const mermaidCode = teaching.mermaidBlocks[0];
+        // Encode for mermaid.ink (base64 of JSON with mermaid code)
+        const mermaidJson = JSON.stringify({code: mermaidCode, mermaid: {theme: 'default'}});
+        const base64 = btoa(unescape(encodeURIComponent(mermaidJson)));
+        const mermaidUrl = `https://mermaid.ink/img/${base64}`;
+        const mermaidLiveUrl = `https://mermaid.live/edit#base64:${base64}`;
+
+        // Add rendered image
+        content += `![渲染管线时序图](${mermaidUrl})\n\n`;
+        content += `> 📊 [在 Mermaid Live 编辑器中查看](${mermaidLiveUrl}) | `;
+        content += `[复制代码](#mermaid-code)\n\n`;
+
+        // Also include code block for offline/copy
+        content += `<details>\n<summary>📝 查看 Mermaid 源码</summary>\n\n`;
+        content += `\`\`\`mermaid\n${mermaidCode}\n\`\`\`\n</details>\n\n`;
+      }
+
+      // Trace requirements warning
+      if (detection.trace_requirements_missing && detection.trace_requirements_missing.length > 0) {
+        content += `\n⚠️ **采集建议**:\n`;
+        for (const hint of detection.trace_requirements_missing) {
+          content += `- ${hint}\n`;
+        }
+      }
+
+      // Add message
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content,
+        timestamp: Date.now(),
+      });
+
+      // Auto-pin relevant tracks with v3 smart pinning
+      if (pinInstructions.length > 0 && this.trace) {
+        this.pinTracksFromInstructions(pinInstructions, activeRenderingProcesses);
+      }
+
+    } catch (error: any) {
+      console.error('[AIPanel] Teaching pipeline error:', error);
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `❌ **管线检测失败**\n\n${error.message || '未知错误'}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    this.state.isLoading = false;
+    m.redraw();
+  }
+
+  /**
+   * Pin tracks based on pin instructions from the teaching pipeline API
+   * v3 Enhancement: Uses activeRenderingProcesses to only pin RenderThreads from active processes
+   */
+  private pinTracksFromInstructions(
+    instructions: Array<{
+      pattern: string;
+      matchBy: string;
+      priority: number;
+      reason: string;
+      smartPin?: boolean;
+      skipPin?: boolean;  // v3.1: Skip RenderThread when no active rendering processes
+      activeProcessNames?: string[];
+    }>,
+    activeRenderingProcesses: Array<{processName: string; frameCount: number}> = []
+  ) {
+    if (!this.trace) return;
+
+    const workspace = this.trace.currentWorkspace;
+    if (!workspace) {
+      console.warn('[AIPanel] No workspace available for track pinning');
+      return;
+    }
+
+    const pinnedCount = {count: 0, skipped: 0};
+    const sortedInstructions = [...instructions].sort((a, b) => a.priority - b.priority);
+
+    // Build set of active process names for smart filtering
+    const activeProcessNames = new Set(activeRenderingProcesses.map(p => p.processName));
+
+    // Debug: Log available track names and active processes
+    const flatTracks = workspace.flatTracks;
+    if (flatTracks) {
+      const trackNames = flatTracks.slice(0, 50).map(t => t.name);
+      console.log('[AIPanel] Available track names (first 50):', trackNames);
+      console.log('[AIPanel] Active rendering processes:', Array.from(activeProcessNames));
+    }
+
+    // Try using the PinTracksByRegex command first (Perfetto built-in) - but only for non-smart patterns
+    const pinByRegexAvailable = this.trace.commands?.hasCommand?.('dev.perfetto.PinTracksByRegex');
+
+    for (const inst of sortedInstructions) {
+      try {
+        // v3.1: Skip instructions marked with skipPin (e.g., RenderThread with no active processes)
+        if (inst.skipPin) {
+          console.log(`[AIPanel] Skipped by skipPin flag: ${inst.pattern} - ${inst.reason || 'no reason'}`);
+          pinnedCount.skipped++;
+          continue;
+        }
+
+        const regex = new RegExp(inst.pattern);
+
+        // v3 Smart Pin: For RenderThread patterns, filter by active rendering processes
+        if (inst.smartPin && inst.pattern.includes('RenderThread') && activeProcessNames.size > 0) {
+          // Manual iteration required for smart filtering
+          if (flatTracks) {
+            for (const track of flatTracks) {
+              const matchValue = inst.matchBy === 'uri' ? track.uri : track.name;
+              if (matchValue && regex.test(matchValue)) {
+                // Smart filter: Check if track belongs to an active rendering process
+                // Track's fullPath contains process name, e.g., ["com.example.app 12345", "RenderThread 12346"]
+                const fullPath = (track as any).fullPath;
+                const trackFullPathStr = fullPath ? fullPath.join(' > ') : '';
+
+                // Check if this track belongs to an active rendering process
+                let isActiveProcess = false;
+                for (const procName of activeProcessNames) {
+                  if (trackFullPathStr.includes(procName)) {
+                    isActiveProcess = true;
+                    break;
+                  }
+                }
+
+                if (isActiveProcess) {
+                  if (!track.isPinned) {
+                    track.pin();
+                    pinnedCount.count++;
+                    console.log(`[AIPanel] Smart pinned: ${matchValue} (active renderer)`);
+                  }
+                } else {
+                  pinnedCount.skipped++;
+                  console.log(`[AIPanel] Skipped inactive: ${matchValue}`);
+                }
+              }
+            }
+          }
+        } else if (pinByRegexAvailable && !inst.smartPin) {
+          // Use built-in command for non-smart patterns
+          this.trace.commands.runCommand('dev.perfetto.PinTracksByRegex', inst.pattern, inst.matchBy);
+          pinnedCount.count++;
+        } else {
+          // Fallback: manually iterate tracks (for non-RenderThread patterns or when built-in unavailable)
+          if (flatTracks) {
+            for (const track of flatTracks) {
+              const matchValue = inst.matchBy === 'uri' ? track.uri : track.name;
+              if (matchValue && regex.test(matchValue)) {
+                if (!track.isPinned) {
+                  track.pin();
+                  pinnedCount.count++;
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[AIPanel] Failed to pin tracks with pattern ${inst.pattern}:`, e);
+      }
+    }
+
+    if (pinnedCount.count > 0 || pinnedCount.skipped > 0) {
+      console.log(`[AIPanel] Pinned ${pinnedCount.count} tracks for teaching (skipped ${pinnedCount.skipped} inactive)`);
+    }
+  }
+
   private getHelpMessage(): string {
     return `**AI Assistant Commands:**
 
@@ -3843,6 +4148,7 @@ Keep your analysis concise and actionable.`;
 | \`/jank\` | Find janky frames |
 | \`/slow\` | Analyze slow operations (backend) |
 | \`/memory\` | Analyze memory usage (backend) |
+| \`/teaching-pipeline\` | 🎓 教学：检测渲染管线类型 |
 | \`/export [csv|json]\` | Export session results |
 | \`/pins\` | View pinned query results |
 | \`/clear\` | Clear chat history |
