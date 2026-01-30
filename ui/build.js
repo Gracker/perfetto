@@ -277,6 +277,7 @@ async function main() {
     scanDir('ui/src/chrome_extension');
     scanDir('buildtools/typefaces');
     scanDir('buildtools/catapult_trace_viewer');
+    copyMermaid();
     compileProtos();
     genVersion();
     generateStdlibDocs();
@@ -398,6 +399,15 @@ function copyAssets(src, dst) {
   addTask(cp, [src, pjoin(cfg.outDistDir, 'assets', dst)]);
   if (cfg.bigtrace) {
     addTask(cp, [src, pjoin(cfg.outBigtraceDistDir, 'assets', dst)]);
+  }
+}
+
+// Copy mermaid.min.js from node_modules to dist/assets for CSP-compliant loading.
+function copyMermaid() {
+  const src = pjoin(ROOT_DIR, 'ui/node_modules/mermaid/dist/mermaid.min.js');
+  addTask(cp, [src, pjoin(cfg.outDistDir, 'assets', 'mermaid.min.js')]);
+  if (cfg.bigtrace) {
+    addTask(cp, [src, pjoin(cfg.outBigtraceDistDir, 'assets', 'mermaid.min.js')]);
   }
 }
 

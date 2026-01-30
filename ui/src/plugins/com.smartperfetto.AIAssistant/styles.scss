@@ -2694,6 +2694,143 @@ tr.detail-row {
     margin: 4px 0;
     line-height: 1.5;
   }
+
+  // Markdown images (mermaid diagrams, etc.)
+  img.ai-markdown-image {
+    max-width: 100%;
+    height: auto;
+    margin: 12px 0;
+    border-radius: 8px;
+    background: var(--chat-bg);
+    border: 1px solid var(--chat-border);
+    display: block;
+
+    // Loading state
+    &:not([src=""]) {
+      min-height: 100px;
+    }
+
+    // Error state - show alt text
+    &:not([src=""]):not([src^="data:"]) {
+      &::after {
+        content: attr(alt);
+        display: block;
+        padding: 12px;
+        text-align: center;
+        color: var(--chat-text-secondary);
+        font-style: italic;
+      }
+    }
+  }
+
+  // Mermaid diagrams (rendered locally)
+  .ai-mermaid-block {
+    margin: 12px 0;
+    padding: 12px;
+    border: 1px solid var(--chat-border);
+    border-radius: 8px;
+    background: var(--chat-bg);
+  }
+
+  .ai-mermaid-diagram {
+    overflow-x: auto;
+
+    svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+  }
+
+  .ai-mermaid-error {
+    padding: 8px;
+    color: var(--chat-text-secondary);
+    font-style: italic;
+    text-align: center;
+  }
+
+  .ai-mermaid-details {
+    margin-top: 10px;
+  }
+
+  .ai-mermaid-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 12px 0 12px;
+  }
+
+  .ai-mermaid-copy {
+    appearance: none;
+    border: 1px solid var(--chat-border);
+    background: var(--chat-bg-secondary);
+    color: var(--chat-text);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+
+    &:hover {
+      border-color: var(--chat-primary);
+    }
+  }
+
+  .ai-mermaid-source {
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--chat-bg-secondary);
+    border-top: 1px solid var(--chat-border);
+    font-family: 'Roboto Mono', monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  // Links (markdown links)
+  a {
+    color: var(--chat-primary);
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  // Details/summary for collapsible content
+  details {
+    margin: 8px 0;
+    border: 1px solid var(--chat-border);
+    border-radius: 6px;
+    overflow: hidden;
+
+    summary {
+      padding: 8px 12px;
+      background: var(--chat-bg-secondary);
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 12px;
+      color: var(--chat-text-secondary);
+      user-select: none;
+      transition: background 0.15s ease;
+
+      &:hover {
+        background: var(--chat-bg-tertiary);
+      }
+
+      &::marker {
+        color: var(--chat-primary);
+      }
+    }
+
+    &[open] summary {
+      border-bottom: 1px solid var(--chat-border);
+    }
+
+    // Content inside details
+    > *:not(summary) {
+      padding: 8px 12px;
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------

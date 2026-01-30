@@ -13,6 +13,9 @@
 // limitations under the License.
 
 import m from 'mithril';
+// Mermaid is loaded as external via <script> tag to avoid Rollup code-splitting.
+// The script is copied to dist/assets/ by build.js and loaded lazily when needed.
+import {assetSrc} from '../../base/assets';
 import {AIService, OllamaService, OpenAIService, BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
 import {SqlResultTable} from './sql_result_table';
@@ -220,6 +223,7 @@ const PRESET_QUESTIONS: Array<{label: string; question: string; icon: string; is
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
+  private mermaidInitialized = false;
   private state: AIPanelState = {
     messages: [],
     input: '',
@@ -257,6 +261,170 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private lastMessageCount = 0;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
+
+  private getMermaid(): any | undefined {
+    return (globalThis as any).mermaid;
+  }
+
+  private mermaidLoadPromise: Promise<void> | null = null;
+
+  private loadMermaidScript(): Promise<void> {
+    if (this.mermaidLoadPromise) return this.mermaidLoadPromise;
+    if (this.getMermaid()) return Promise.resolve();
+
+    this.mermaidLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      // Load mermaid from local assets (copied by build.js) to comply with CSP.
+      script.src = assetSrc('assets/mermaid.min.js');
+      script.async = true;
+      script.onload = () => {
+        console.log('[AIPanel] Mermaid loaded from local assets');
+        resolve();
+      };
+      script.onerror = () => {
+        console.error('[AIPanel] Failed to load Mermaid from local assets');
+        this.mermaidLoadPromise = null;
+        reject(new Error('Failed to load Mermaid'));
+      };
+      document.head.appendChild(script);
+    });
+
+    return this.mermaidLoadPromise;
+  }
+
+  private async ensureMermaidInitialized(): Promise<void> {
+    if (this.mermaidInitialized) return;
+
+    // Load mermaid script if not already loaded
+    if (!this.getMermaid()) {
+      try {
+        await this.loadMermaidScript();
+      } catch (e) {
+        console.warn('[AIPanel] Mermaid not available:', e);
+        return;
+      }
+    }
+
+    const mermaid = this.getMermaid();
+    if (!mermaid) {
+      console.warn('[AIPanel] Mermaid not available on globalThis after load');
+      return;
+    }
+    // Keep this safe for untrusted markdown: strict sanitization and no autostart.
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'default',
+    });
+    this.mermaidInitialized = true;
+  }
+
+  private encodeBase64Unicode(input: string): string {
+    // btoa only supports latin1 - convert safely.
+    return btoa(unescape(encodeURIComponent(input)));
+  }
+
+  private decodeBase64Unicode(base64: string): string {
+    return decodeURIComponent(escape(atob(base64)));
+  }
+
+  private async copyTextToClipboard(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {}
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private trackFullPathToString(trackNode: any): string {
+    const fullPath = trackNode?.fullPath as string[] | undefined;
+    return Array.isArray(fullPath) ? fullPath.join(' > ') : '';
+  }
+
+  private shouldIgnoreAutoPinTrackName(trackName: string): boolean {
+    // Avoid noisy or misleading pins in teaching mode.
+    if (/^VSYNC-appsf$/i.test(trackName)) return true;
+    if (/^AChoreographer/i.test(trackName)) return true;
+    return false;
+  }
+
+  private async renderMermaidInElement(container: HTMLElement): Promise<void> {
+    const diagramNodes = Array.from(
+      container.querySelectorAll<HTMLElement>('.ai-mermaid-diagram[data-mermaid-b64]')
+    );
+    const sourceNodes = Array.from(
+      container.querySelectorAll<HTMLElement>('.ai-mermaid-source[data-mermaid-b64]')
+    );
+
+    if (diagramNodes.length === 0 && sourceNodes.length === 0) return;
+
+    await this.ensureMermaidInitialized();
+    const mermaid = this.getMermaid();
+    if (!mermaid) return;
+
+    // Populate sources first (textContent, no HTML interpretation).
+    for (const source of sourceNodes) {
+      if (source.dataset.rendered === 'true') continue;
+      const b64 = source.dataset.mermaidB64;
+      if (!b64) continue;
+      try {
+        source.textContent = this.decodeBase64Unicode(b64);
+        source.dataset.rendered = 'true';
+      } catch (e) {
+        console.warn('[AIPanel] Failed to decode mermaid source:', e);
+      }
+    }
+
+    // Render diagrams.
+    for (const host of diagramNodes) {
+      if (host.dataset.rendered === 'true') continue;
+      const b64 = host.dataset.mermaidB64;
+      if (!b64) continue;
+
+      let code = '';
+      try {
+        code = this.decodeBase64Unicode(b64);
+      } catch (e) {
+        console.warn('[AIPanel] Failed to decode mermaid diagram:', e);
+        continue;
+      }
+
+      const renderId = `ai-mermaid-${Math.random().toString(36).slice(2)}`;
+      host.classList.add('mermaid');
+      host.textContent = '';
+
+      try {
+        // mermaid.render returns {svg, bindFunctions} in modern versions.
+        const result: any = await mermaid.render(renderId, code);
+        host.innerHTML = result?.svg || '';
+        if (typeof result?.bindFunctions === 'function') {
+          result.bindFunctions(host);
+        }
+        host.dataset.rendered = 'true';
+      } catch (e) {
+        console.warn('[AIPanel] Mermaid render failed:', e);
+        host.innerHTML =
+          '<div class="ai-mermaid-error">Mermaid 渲染失败（请展开查看源码）</div>';
+        host.dataset.rendered = 'true';
+      }
+    }
+  }
 
   // oninit is called before view(), so AI service is initialized before first render
   oninit(vnode: m.Vnode<AIPanelAttrs>) {
@@ -784,6 +952,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 m('div.ai-message-content', {
                   onclick: (e: MouseEvent) => {
                     const target = e.target as HTMLElement;
+                    const copyBtn = target.closest?.('.ai-mermaid-copy') as HTMLElement | null;
+                    if (copyBtn) {
+                      const b64 = copyBtn.getAttribute('data-mermaid-b64');
+                      if (b64) {
+                        try {
+                          const code = this.decodeBase64Unicode(b64);
+                          void this.copyTextToClipboard(code);
+                        } catch (err) {
+                          console.warn('[AIPanel] Failed to copy mermaid code:', err);
+                        }
+                      }
+                      return;
+                    }
                     if (target.classList.contains('ai-clickable-timestamp')) {
                       const tsNs = target.getAttribute('data-ts');
                       if (tsNs) {
@@ -792,7 +973,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     }
                   },
                   oncreate: (vnode: m.VnodeDOM) => {
-                    (vnode.dom as HTMLElement).innerHTML = this.formatMessage(msg.content);
+                    const dom = vnode.dom as HTMLElement;
+                    dom.innerHTML = this.formatMessage(msg.content);
+                    void this.renderMermaidInElement(dom);
                   },
                   onupdate: (vnode: m.VnodeDOM) => {
                     const newHtml = this.formatMessage(msg.content);
@@ -800,6 +983,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     // Only update if content actually changed (optimization)
                     if (dom.innerHTML !== newHtml) {
                       dom.innerHTML = newHtml;
+                      void this.renderMermaidInElement(dom);
                     }
                   },
                 }),
@@ -3967,24 +4151,23 @@ Keep your analysis concise and actionable.`;
         content += `\`${teaching.keySlices.join('`, `')}\`\n\n`;
       }
 
-      // Mermaid diagrams - render as image via mermaid.ink + fallback code block
+      // Mermaid diagrams - render locally in the UI (offline, no external services).
       if (teaching.mermaidBlocks && teaching.mermaidBlocks.length > 0) {
         content += `#### 时序图\n\n`;
         const mermaidCode = teaching.mermaidBlocks[0];
-        // Encode for mermaid.ink (base64 of JSON with mermaid code)
-        const mermaidJson = JSON.stringify({code: mermaidCode, mermaid: {theme: 'default'}});
-        const base64 = btoa(unescape(encodeURIComponent(mermaidJson)));
-        const mermaidUrl = `https://mermaid.ink/img/${base64}`;
-        const mermaidLiveUrl = `https://mermaid.live/edit#base64:${base64}`;
+        const b64 = this.encodeBase64Unicode(mermaidCode);
 
-        // Add rendered image
-        content += `![渲染管线时序图](${mermaidUrl})\n\n`;
-        content += `> 📊 [在 Mermaid Live 编辑器中查看](${mermaidLiveUrl}) | `;
-        content += `[复制代码](#mermaid-code)\n\n`;
-
-        // Also include code block for offline/copy
-        content += `<details>\n<summary>📝 查看 Mermaid 源码</summary>\n\n`;
-        content += `\`\`\`mermaid\n${mermaidCode}\n\`\`\`\n</details>\n\n`;
+        // Diagram placeholder - rendered on the client by mermaid.js
+        content += `<div class="ai-mermaid-block">`;
+        content += `<div class="ai-mermaid-diagram" data-mermaid-b64="${b64}"></div>`;
+        content += `<details class="ai-mermaid-details">`;
+        content += `<summary>📝 查看 Mermaid 源码</summary>`;
+        content += `<div class="ai-mermaid-actions">`;
+        content += `<button class="ai-mermaid-copy" data-mermaid-b64="${b64}" type="button">复制代码</button>`;
+        content += `</div>`;
+        content += `<pre class="ai-mermaid-source" data-mermaid-b64="${b64}"></pre>`;
+        content += `</details>`;
+        content += `</div>\n\n`;
       }
 
       // Trace requirements warning
@@ -4025,6 +4208,7 @@ Keep your analysis concise and actionable.`;
   /**
    * Pin tracks based on pin instructions from the teaching pipeline API
    * v3 Enhancement: Uses activeRenderingProcesses to only pin RenderThreads from active processes
+   * v4 Enhancement: Uses mainThreadOnly to only pin main thread tracks (checks track.chips)
    */
   private pinTracksFromInstructions(
     instructions: Array<{
@@ -4032,6 +4216,8 @@ Keep your analysis concise and actionable.`;
       matchBy: string;
       priority: number;
       reason: string;
+      expand?: boolean;          // Whether to expand the track after pinning
+      mainThreadOnly?: boolean;  // Only pin main thread (track.chips includes 'main thread')
       smartPin?: boolean;
       skipPin?: boolean;  // v3.1: Skip RenderThread when no active rendering processes
       activeProcessNames?: string[];
@@ -4073,55 +4259,62 @@ Keep your analysis concise and actionable.`;
         }
 
         const regex = new RegExp(inst.pattern);
+        const smartProcessNames = inst.activeProcessNames ?? Array.from(activeProcessNames);
+        const shouldSmartFilterByProcess = Boolean(inst.smartPin) && smartProcessNames.length > 0;
+        const maxPinsForInstruction = /surfaceflinger/i.test(inst.pattern) ? 1 : undefined;
+        let pinnedForInstruction = 0;
 
-        // v3 Smart Pin: For RenderThread patterns, filter by active rendering processes
-        if (inst.smartPin && inst.pattern.includes('RenderThread') && activeProcessNames.size > 0) {
-          // Manual iteration required for smart filtering
-          if (flatTracks) {
-            for (const track of flatTracks) {
-              const matchValue = inst.matchBy === 'uri' ? track.uri : track.name;
-              if (matchValue && regex.test(matchValue)) {
-                // Smart filter: Check if track belongs to an active rendering process
-                // Track's fullPath contains process name, e.g., ["com.example.app 12345", "RenderThread 12346"]
-                const fullPath = (track as any).fullPath;
-                const trackFullPathStr = fullPath ? fullPath.join(' > ') : '';
+        // Use built-in pin-by-regex only when we don't need extra filtering.
+        // Smart pinning and mainThreadOnly require manual iteration.
+        const canUsePinByRegex = pinByRegexAvailable && !shouldSmartFilterByProcess && !inst.mainThreadOnly;
 
-                // Check if this track belongs to an active rendering process
-                let isActiveProcess = false;
-                for (const procName of activeProcessNames) {
-                  if (trackFullPathStr.includes(procName)) {
-                    isActiveProcess = true;
-                    break;
-                  }
-                }
-
-                if (isActiveProcess) {
-                  if (!track.isPinned) {
-                    track.pin();
-                    pinnedCount.count++;
-                    console.log(`[AIPanel] Smart pinned: ${matchValue} (active renderer)`);
-                  }
-                } else {
-                  pinnedCount.skipped++;
-                  console.log(`[AIPanel] Skipped inactive: ${matchValue}`);
-                }
-              }
-            }
-          }
-        } else if (pinByRegexAvailable && !inst.smartPin) {
-          // Use built-in command for non-smart patterns
+        if (canUsePinByRegex) {
           this.trace.commands.runCommand('dev.perfetto.PinTracksByRegex', inst.pattern, inst.matchBy);
           pinnedCount.count++;
-        } else {
-          // Fallback: manually iterate tracks (for non-RenderThread patterns or when built-in unavailable)
-          if (flatTracks) {
-            for (const track of flatTracks) {
-              const matchValue = inst.matchBy === 'uri' ? track.uri : track.name;
-              if (matchValue && regex.test(matchValue)) {
-                if (!track.isPinned) {
-                  track.pin();
-                  pinnedCount.count++;
+          continue;
+        }
+
+        // Manual iteration (supports smart process filtering and mainThreadOnly).
+        if (flatTracks) {
+          for (const trackNode of flatTracks) {
+            const matchValue = inst.matchBy === 'uri' ? trackNode.uri : trackNode.name;
+            if (!matchValue || !regex.test(matchValue)) continue;
+            if (this.shouldIgnoreAutoPinTrackName(trackNode.name || '')) {
+              pinnedCount.skipped++;
+              continue;
+            }
+
+            if (inst.mainThreadOnly) {
+              const track = trackNode.uri ? this.trace.tracks.getTrack(trackNode.uri) : undefined;
+              const chips = track?.chips;
+              const hasMainThreadChip = chips?.includes('main thread') ?? false;
+              if (!hasMainThreadChip) {
+                pinnedCount.skipped++;
+                continue;
+              }
+            }
+
+            if (shouldSmartFilterByProcess) {
+              const trackFullPathStr = this.trackFullPathToString(trackNode as any);
+              let isActiveProcess = false;
+              for (const procName of smartProcessNames) {
+                if (trackFullPathStr.includes(procName)) {
+                  isActiveProcess = true;
+                  break;
                 }
+              }
+              if (!isActiveProcess) {
+                pinnedCount.skipped++;
+                continue;
+              }
+            }
+
+            if (!trackNode.isPinned) {
+              trackNode.pin();
+              pinnedCount.count++;
+              pinnedForInstruction++;
+              if (maxPinsForInstruction && pinnedForInstruction >= maxPinsForInstruction) {
+                break;
               }
             }
           }
@@ -4323,6 +4516,10 @@ Keep your analysis concise and actionable.`;
     processedContent = processedContent
       .replace(/^## (.*?)$/gm, '<h2>$1</h2>')
       .replace(/^### (.*?)$/gm, '<h3>$1</h3>')
+      // Image markdown: ![alt](url) - must be before link processing
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="ai-markdown-image" />')
+      // Link markdown: [text](url)
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>')
       .replace(/`(.*?)`/g, '<code>$1</code>')
