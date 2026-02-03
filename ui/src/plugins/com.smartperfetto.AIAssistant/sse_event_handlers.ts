@@ -26,7 +26,7 @@
  * - analysis_completed/error: Terminal events
  */
 
-import {Message} from './types';
+import {Message, InterventionPoint, InterventionState} from './types';
 import {
   formatDisplayValue,
   formatLayerName,
@@ -73,6 +73,12 @@ export interface SSEHandlerContext {
   setCompletionHandled: (handled: boolean) => void;
   /** Backend URL for building report links */
   backendUrl: string;
+
+  // Agent-Driven Architecture v2.0 - Intervention support
+  /** Set intervention state */
+  setInterventionState?: (state: Partial<InterventionState>) => void;
+  /** Get current intervention state */
+  getInterventionState?: () => InterventionState;
 }
 
 /**
@@ -1101,6 +1107,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             collapsible: envelope.display.collapsible,
             defaultCollapsed: envelope.display.defaultCollapsed,
             maxVisibleRows: envelope.display.maxVisibleRows,
+            expandableData: rawResult.expandableData,  // 【修复】传递 expandableData 用于行展开功能
           },
         });
       }
@@ -1189,6 +1196,221 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
 
   // Clear collected errors after showing summary
   ctx.collectedErrors.length = 0;
+}
+
+// =============================================================================
+// Agent-Driven Architecture v2.0 - Intervention Event Handlers
+// =============================================================================
+
+/**
+ * Process intervention_required event - user input needed.
+ * Shows the intervention panel with options for the user.
+ */
+export function handleInterventionRequiredEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  console.log('[SSEHandlers] intervention_required received:', data?.data);
+
+  if (!ctx.setInterventionState) {
+    console.warn('[SSEHandlers] Intervention state handler not available');
+    return {};
+  }
+
+  const interventionData = data?.data;
+  if (!interventionData?.interventionId) {
+    console.warn('[SSEHandlers] Invalid intervention_required event:', data);
+    return {};
+  }
+
+  // Build intervention point
+  const intervention: InterventionPoint = {
+    interventionId: interventionData.interventionId,
+    type: interventionData.type || 'agent_request',
+    options: interventionData.options || [],
+    context: interventionData.context || {
+      confidence: 0,
+      elapsedTimeMs: 0,
+      roundsCompleted: 0,
+      progressSummary: '',
+      triggerReason: '',
+      findingsCount: 0,
+    },
+    timeout: interventionData.timeout || 60000,
+  };
+
+  // Update intervention state to show panel
+  ctx.setInterventionState({
+    isActive: true,
+    intervention,
+    selectedOptionId: null,
+    customInput: '',
+    isSending: false,
+    timeoutRemaining: intervention.timeout,
+  });
+
+  // Add a message to show intervention is required
+  ctx.removeLastMessageIf(
+    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
+  );
+
+  const typeEmoji = intervention.type === 'low_confidence' ? '🤔' :
+                    intervention.type === 'ambiguity' ? '🔀' :
+                    intervention.type === 'timeout' ? '⏰' :
+                    intervention.type === 'circuit_breaker' ? '⚠️' : '❓';
+
+  ctx.addMessage({
+    id: ctx.generateId(),
+    role: 'system',
+    content: `${typeEmoji} **需要您的决定**\n\n${intervention.context.triggerReason || '分析需要用户输入才能继续。'}\n\n_请在下方选择操作..._`,
+    timestamp: Date.now(),
+  });
+
+  return {};
+}
+
+/**
+ * Process intervention_resolved event - user responded to intervention.
+ */
+export function handleInterventionResolvedEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  console.log('[SSEHandlers] intervention_resolved received:', data?.data);
+
+  if (!ctx.setInterventionState) {
+    return {};
+  }
+
+  const resolvedData = data?.data;
+  if (!resolvedData) return {};
+
+  // Clear intervention state
+  ctx.setInterventionState({
+    isActive: false,
+    intervention: null,
+    selectedOptionId: null,
+    customInput: '',
+    isSending: false,
+    timeoutRemaining: null,
+  });
+
+  // Add confirmation message
+  const actionEmoji = resolvedData.action === 'continue' ? '▶️' :
+                      resolvedData.action === 'focus' ? '🎯' :
+                      resolvedData.action === 'abort' ? '🛑' : '✅';
+
+  ctx.addMessage({
+    id: ctx.generateId(),
+    role: 'assistant',
+    content: `${actionEmoji} 已收到您的决定: **${resolvedData.action}**\n\n_分析继续中..._`,
+    timestamp: Date.now(),
+  });
+
+  return {};
+}
+
+/**
+ * Process intervention_timeout event - user didn't respond in time.
+ */
+export function handleInterventionTimeoutEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  console.log('[SSEHandlers] intervention_timeout received:', data?.data);
+
+  if (!ctx.setInterventionState) {
+    return {};
+  }
+
+  const timeoutData = data?.data;
+
+  // Clear intervention state
+  ctx.setInterventionState({
+    isActive: false,
+    intervention: null,
+    selectedOptionId: null,
+    customInput: '',
+    isSending: false,
+    timeoutRemaining: null,
+  });
+
+  // Add timeout message
+  ctx.addMessage({
+    id: ctx.generateId(),
+    role: 'system',
+    content: `⏰ **响应超时**\n\n已自动执行默认操作: **${timeoutData?.defaultAction || 'abort'}**`,
+    timestamp: Date.now(),
+  });
+
+  return {};
+}
+
+/**
+ * Process strategy_selected event - strategy was matched.
+ */
+export function handleStrategySelectedEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  console.log('[SSEHandlers] strategy_selected received:', data?.data);
+
+  const strategyData = data?.data;
+  if (!strategyData) return {};
+
+  ctx.removeLastMessageIf(
+    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
+  );
+
+  const methodEmoji = strategyData.selectionMethod === 'llm' ? '🧠' : '🔑';
+  const confidencePercent = Math.round((strategyData.confidence || 0) * 100);
+
+  ctx.addMessage({
+    id: ctx.generateId(),
+    role: 'assistant',
+    content: `⏳ ${methodEmoji} 选择策略: **${strategyData.strategyName}** (${confidencePercent}%)\n\n_${strategyData.reasoning || '开始执行分析流水线...'}_`,
+    timestamp: Date.now(),
+  });
+
+  return {};
+}
+
+/**
+ * Process strategy_fallback event - no strategy matched, using hypothesis-driven.
+ */
+export function handleStrategyFallbackEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  console.log('[SSEHandlers] strategy_fallback received:', data?.data);
+
+  const fallbackData = data?.data;
+  if (!fallbackData) return {};
+
+  ctx.removeLastMessageIf(
+    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
+  );
+
+  ctx.addMessage({
+    id: ctx.generateId(),
+    role: 'assistant',
+    content: `⏳ 🔄 使用假设驱动分析\n\n_${fallbackData.reason || '未匹配到预设策略，启动自适应分析...'}_`,
+    timestamp: Date.now(),
+  });
+
+  return {};
+}
+
+/**
+ * Process focus_updated event - user focus tracking updated.
+ */
+export function handleFocusUpdatedEvent(
+  data: any,
+  _ctx: SSEHandlerContext  // eslint-disable-line @typescript-eslint/no-unused-vars
+): SSEHandlerResult {
+  // Focus updates are typically silent - just log for debugging
+  console.log('[SSEHandlers] focus_updated:', data?.data);
+  return {};
 }
 
 /**
@@ -1305,6 +1527,32 @@ export function handleSSEEvent(
     case 'conclusion':
       // Skip - let analysis_completed handle final message
       console.log('[SSEHandlers] CONCLUSION event received - waiting for analysis_completed');
+      return {};
+
+    // Agent-Driven Architecture v2.0 - Intervention Events
+    case 'intervention_required':
+      return handleInterventionRequiredEvent(data, ctx);
+
+    case 'intervention_resolved':
+      return handleInterventionResolvedEvent(data, ctx);
+
+    case 'intervention_timeout':
+      return handleInterventionTimeoutEvent(data, ctx);
+
+    // Agent-Driven Architecture v2.0 - Strategy Selection Events
+    case 'strategy_selected':
+      return handleStrategySelectedEvent(data, ctx);
+
+    case 'strategy_fallback':
+      return handleStrategyFallbackEvent(data, ctx);
+
+    // Agent-Driven Architecture v2.0 - Focus Tracking Events
+    case 'focus_updated':
+      return handleFocusUpdatedEvent(data, ctx);
+
+    case 'incremental_scope':
+      // Incremental scope changes are internal - just log
+      console.log('[SSEHandlers] incremental_scope:', data?.data);
       return {};
 
     case 'error':

@@ -24,6 +24,34 @@ import {
   getColumnClasses,
 } from './renderers/formatters';
 
+/**
+ * User interaction data for focus tracking (Agent-Driven Architecture v2.0).
+ *
+ * This captures user clicks on timestamps, entities, etc. and sends them
+ * to the backend FocusStore for incremental analysis context.
+ */
+export interface UserInteraction {
+  type: 'click' | 'drill_down';
+  target: {
+    /** Entity type if clicking on an entity column */
+    entityType?: 'frame' | 'process' | 'thread' | 'session' | 'cpu_slice' | 'binder';
+    /** Entity ID (string for JSON serialization) */
+    entityId?: string;
+    /** Entity name for display */
+    entityName?: string;
+    /** Time range if clicking on timestamp (stringified for JSON) */
+    timeRange?: { start: string; end: string };
+  };
+  source: 'ui';
+  timestamp: number;
+  context?: {
+    /** Column name where the click occurred */
+    columnName?: string;
+    /** Row data for context */
+    rowContext?: Record<string, any>;
+  };
+}
+
 export interface SqlResultTableAttrs {
   columns: string[];
   rows: any[][];
@@ -33,6 +61,13 @@ export interface SqlResultTableAttrs {
   trace?: Trace;  // 新增：用于跳转到时间线
   onPin?: (data: {query: string, columns: string[], rows: any[][], timestamp: number}) => void;
   onExport?: (format: 'csv' | 'json') => void;
+  /**
+   * Callback for user interaction tracking (Agent-Driven Architecture v2.0).
+   *
+   * When provided, the table will capture user clicks on timestamps and
+   * entities, sending them to the backend for focus tracking.
+   */
+  onInteraction?: (interaction: UserInteraction) => void;
   // 可展开行数据：每行的详细分析结果（用于 iterator 类型结果）
   expandableData?: Array<{
     item: Record<string, any>;
@@ -69,6 +104,13 @@ interface TimestampColumn {
   durationColumnName?: string;
 }
 
+// 实体列信息 (用于交互追踪)
+interface EntityColumn {
+  columnIndex: number;
+  columnName: string;
+  entityType: 'frame' | 'process' | 'thread' | 'session' | 'cpu_slice' | 'binder';
+}
+
 // 单位转换为纳秒的乘数
 const UNIT_TO_NS: Record<string, number> = {
   'ns': 1,
@@ -93,13 +135,14 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private pinSuccess = false;
   private pinTimeout: any = null;
   private timestampColumns: TimestampColumn[] = [];  // 存储检测到的时间戳列
+  private entityColumns: EntityColumn[] = [];  // 存储检测到的实体列 (v2.0 交互追踪)
   // 可展开行状态：记录哪些行处于展开状态
   private expandedRows = new Set<number>();
   // Trace 起始时间（纳秒），用于计算相对时间显示
   private traceStartNs: number = 0;
 
   view(vnode: m.Vnode<SqlResultTableAttrs>) {
-    const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary, metadata, columnDefinitions} = vnode.attrs;
+    const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary, metadata, columnDefinitions, onInteraction} = vnode.attrs;
 
     // 获取 trace 起始时间，用于相对时间戳显示
     if (trace) {
@@ -117,6 +160,12 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       this.timestampColumns = columnDefinitions
         ? this.extractTimestampColumnsFromDefinitions(columnDefinitions, columns)
         : this.detectTimestampColumns(columns);
+    }
+
+    // 检测实体列 (v2.0 交互追踪)
+    if (this.entityColumns.length === 0 ||
+        this.entityColumns.some((ec) => columns[ec.columnIndex] !== ec.columnName)) {
+      this.entityColumns = this.detectEntityColumns(columns);
     }
 
     // Classify columns for styling (use column definitions if available)
@@ -258,7 +307,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                 } : {}, hasExpandableData ? m('span.expand-icon', isExpanded ? '▼' : '▶') : null) : null,
                 // 数据列
                 ...row.map((cell, cellIndex) =>
-                  this.renderCellPerfetto(cell, cellIndex, columnClasses[cellIndex], trace, row)
+                  this.renderCellPerfetto(cell, cellIndex, columnClasses[cellIndex], trace, row, columns, onInteraction)
                 ),
                 // Navigation arrow
                 trace ? m('td.col-action', {
@@ -355,7 +404,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     columnIndex: number,
     columnClass: string,
     trace?: Trace,
-    row?: any[]  // 完整行数据，用于获取 dur_str
+    row?: any[],  // 完整行数据，用于获取 dur_str
+    columns?: string[],  // 列名数组，用于构建交互上下文
+    onInteraction?: (interaction: UserInteraction) => void  // 交互回调
   ): m.Children {
     const isTimestamp = columnClass === 'col-timestamp';
     // Fix: 区分 duration (时长，需要单位转换) 和 number (普通数字如 ID/count)
@@ -427,14 +478,78 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             try {
               const durNs = BigInt(durValue);
               this.jumpToTimeRange(bigintValue!, durNs, trace);
+              // 发送交互事件 (v2.0 Focus Tracking)
+              if (onInteraction) {
+                const endNs = bigintValue! + durNs;
+                onInteraction({
+                  type: 'click',
+                  target: {
+                    timeRange: {
+                      start: bigintValue!.toString(),
+                      end: endNs.toString(),
+                    },
+                  },
+                  source: 'ui',
+                  timestamp: Date.now(),
+                  context: {
+                    columnName: columns?.[columnIndex],
+                    rowContext: this.buildRowContext(row, columns),
+                  },
+                });
+              }
             } catch {
               this.jumpToTimestampBigInt(bigintValue!, tsColumn.unit, trace);
             }
           } else {
             this.jumpToTimestampBigInt(bigintValue!, tsColumn.unit, trace);
+            // 发送单点时间戳交互事件 (v2.0 Focus Tracking)
+            if (onInteraction) {
+              onInteraction({
+                type: 'click',
+                target: {
+                  timeRange: {
+                    start: bigintValue!.toString(),
+                    end: bigintValue!.toString(),
+                  },
+                },
+                source: 'ui',
+                timestamp: Date.now(),
+                context: {
+                  columnName: columns?.[columnIndex],
+                  rowContext: this.buildRowContext(row, columns),
+                },
+              });
+            }
           }
         },
         title: durValue ? `Click to jump to time range` : `Click to jump (${tsColumn.unit}: ${value})`,
+      }, displayValue);
+    }
+
+    // Entity column cell with click handler (v2.0 Focus Tracking)
+    const entityColumn = this.entityColumns.find(ec => ec.columnIndex === columnIndex);
+    if (entityColumn && value !== null && value !== undefined && onInteraction) {
+      return m('td', {
+        class: `${columnClass} entity-cell`,
+        onclick: (e: MouseEvent) => {
+          e.stopPropagation();
+          // 发送实体点击交互事件
+          onInteraction({
+            type: 'click',
+            target: {
+              entityType: entityColumn.entityType,
+              entityId: String(value),
+              entityName: this.findEntityName(row, columns, entityColumn.entityType),
+            },
+            source: 'ui',
+            timestamp: Date.now(),
+            context: {
+              columnName: columns?.[columnIndex],
+              rowContext: this.buildRowContext(row, columns),
+            },
+          });
+        },
+        title: `Click to focus on this ${entityColumn.entityType}`,
       }, displayValue);
     }
 
@@ -714,6 +829,107 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     });
 
     return detected;
+  }
+
+  /**
+   * 检测实体列 (v2.0 交互追踪)
+   * 识别包含实体 ID 的列，如 frame_id, session_id, process_name 等
+   */
+  private detectEntityColumns(columns: string[]): EntityColumn[] {
+    const detected: EntityColumn[] = [];
+
+    columns.forEach((col, idx) => {
+      // Frame 相关列
+      if (/^frame_id$/i.test(col) || /^jank_frame_id$/i.test(col) || /^actual_frame_id$/i.test(col)) {
+        detected.push({ columnIndex: idx, columnName: col, entityType: 'frame' });
+        return;
+      }
+
+      // Session 相关列
+      if (/^session_id$/i.test(col) || /^scroll_session_id$/i.test(col)) {
+        detected.push({ columnIndex: idx, columnName: col, entityType: 'session' });
+        return;
+      }
+
+      // Process 相关列 (只检测 upid/pid，不检测 process_name 因为那是名称不是 ID)
+      if (/^upid$/i.test(col) || /^pid$/i.test(col)) {
+        detected.push({ columnIndex: idx, columnName: col, entityType: 'process' });
+        return;
+      }
+
+      // Thread 相关列
+      if (/^utid$/i.test(col) || /^tid$/i.test(col)) {
+        detected.push({ columnIndex: idx, columnName: col, entityType: 'thread' });
+        return;
+      }
+
+      // CPU slice 相关列
+      if (/^slice_id$/i.test(col) || /^cpu_slice_id$/i.test(col)) {
+        detected.push({ columnIndex: idx, columnName: col, entityType: 'cpu_slice' });
+        return;
+      }
+
+      // Binder 相关列
+      if (/^binder_id$/i.test(col) || /^transaction_id$/i.test(col)) {
+        detected.push({ columnIndex: idx, columnName: col, entityType: 'binder' });
+        return;
+      }
+    });
+
+    return detected;
+  }
+
+  /**
+   * 构建行上下文，用于交互事件的 context 字段
+   */
+  private buildRowContext(row?: any[], columns?: string[]): Record<string, any> | undefined {
+    if (!row || !columns) return undefined;
+
+    const context: Record<string, any> = {};
+
+    // 提取关键字段作为上下文
+    const keyFields = [
+      'frame_id', 'session_id', 'process_name', 'thread_name',
+      'upid', 'utid', 'pid', 'tid', 'ts', 'dur', 'name', 'slice_name',
+    ];
+
+    columns.forEach((col, idx) => {
+      const lowerCol = col.toLowerCase();
+      if (keyFields.some(kf => lowerCol.includes(kf)) && row[idx] !== null && row[idx] !== undefined) {
+        context[col] = row[idx];
+      }
+    });
+
+    return Object.keys(context).length > 0 ? context : undefined;
+  }
+
+  /**
+   * 从行数据中查找实体名称
+   * 例如：对于 process 实体，查找 process_name 列
+   */
+  private findEntityName(row?: any[], columns?: string[], entityType?: string): string | undefined {
+    if (!row || !columns || !entityType) return undefined;
+
+    // 实体类型到名称列的映射
+    const nameColumnMap: Record<string, string[]> = {
+      frame: ['frame_name', 'slice_name', 'name'],
+      process: ['process_name', 'package_name', 'cmdline'],
+      thread: ['thread_name', 'name'],
+      session: ['session_name', 'scroll_type'],
+      cpu_slice: ['slice_name', 'name'],
+      binder: ['interface', 'method'],
+    };
+
+    const candidateColumns = nameColumnMap[entityType] || ['name'];
+
+    for (const candidateCol of candidateColumns) {
+      const colIndex = columns.findIndex(c => c.toLowerCase() === candidateCol.toLowerCase());
+      if (colIndex !== -1 && row[colIndex] !== null && row[colIndex] !== undefined) {
+        return String(row[colIndex]);
+      }
+    }
+
+    return undefined;
   }
 
   /**

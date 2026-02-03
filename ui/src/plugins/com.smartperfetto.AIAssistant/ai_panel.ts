@@ -15,7 +15,7 @@
 import m from 'mithril';
 import {OllamaService, OpenAIService, BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
-import {SqlResultTable} from './sql_result_table';
+import {SqlResultTable, UserInteraction} from './sql_result_table';
 import {ChartVisualizer} from './chart_visualizer';
 import {NavigationBookmarkBar, NavigationBookmark} from './navigation_bookmark_bar';
 import {SceneNavigationBar} from './scene_navigation_bar';
@@ -42,10 +42,13 @@ import {
   PinnedResult,
   AISettings,
   AISession,
+  InterventionState,
   DEFAULT_SETTINGS,
   PENDING_BACKEND_TRACE_KEY,
   PRESET_QUESTIONS,
 } from './types';
+// Agent-Driven Architecture v2.0 - Intervention Panel
+import {InterventionPanel, DEFAULT_INTERVENTION_STATE} from './intervention_panel';
 import {
   encodeBase64Unicode,
   decodeBase64Unicode,
@@ -107,6 +110,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     detectedScenes: [],
     scenesLoading: false,
     scenesError: null,
+    // Agent-Driven Architecture v2.0 - Intervention State
+    interventionState: {...DEFAULT_INTERVENTION_STATE},
   };
 
   private onClearChat?: () => void;
@@ -822,6 +827,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         title: sqlResult.sectionTitle,  // Pass title to table
                         trace: vnode.attrs.trace,
                         onPin: (data) => this.handlePin(data),
+                        onInteraction: (interaction) => this.handleInteraction(interaction),  // v2.0 Focus Tracking
                         expandableData: sqlResult.expandableData,
                         summary: sqlResult.summary,
                         metadata: sqlResult.metadata,  // Pass metadata for header display
@@ -871,6 +877,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       trace: vnode.attrs.trace,  // 传入 trace 对象以支持时间戳跳转
                       onPin: (data) => this.handlePin(data),
                       onExport: (format) => this.exportResult(sqlResult, format),
+                      onInteraction: (interaction) => this.handleInteraction(interaction),  // v2.0 Focus Tracking
                       expandableData: sqlResult.expandableData,
                       summary: sqlResult.summary,
                       metadata: sqlResult.metadata,  // Pass metadata for header display
@@ -970,6 +977,25 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               ]),
             ])
           ),
+
+          // Intervention Panel (Agent-Driven Architecture v2.0)
+          this.state.interventionState.isActive && this.state.interventionState.intervention
+            ? m(InterventionPanel, {
+                state: this.state.interventionState,
+                sessionId: this.state.agentSessionId,
+                backendUrl: this.state.settings.backendUrl,
+                onStateChange: (newState: Partial<InterventionState>) => {
+                  this.state.interventionState = {
+                    ...this.state.interventionState,
+                    ...newState,
+                  };
+                  m.redraw();
+                },
+                onComplete: () => {
+                  m.redraw();
+                },
+              })
+            : null,
 
           // Loading Indicator
           this.state.isLoading
@@ -1247,6 +1273,46 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     });
   }
 
+  /**
+   * Handle user interaction from SqlResultTable (Agent-Driven Architecture v2.0).
+   *
+   * This sends the interaction to the backend FocusStore for tracking user focus
+   * across conversation turns, enabling incremental analysis.
+   */
+  private handleInteraction(interaction: UserInteraction): void {
+    const sessionId = this.state.agentSessionId;
+    const backendUrl = this.state.settings.backendUrl;
+
+    // Only send if we have an active session
+    if (!sessionId) {
+      console.log('[AIPanel] No active session, skipping interaction capture');
+      return;
+    }
+
+    // Fire and forget - don't block UI for interaction tracking
+    fetch(`${backendUrl}/api/agent/${sessionId}/interaction`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: interaction.type,
+        target: interaction.target,
+        source: interaction.source,
+        timestamp: interaction.timestamp,
+        context: interaction.context,
+      }),
+    }).then((response) => {
+      if (!response.ok) {
+        console.warn('[AIPanel] Failed to send interaction:', response.status);
+      } else {
+        console.log('[AIPanel] Interaction captured:', interaction.type, interaction.target);
+      }
+    }).catch((error) => {
+      console.warn('[AIPanel] Error sending interaction:', error);
+    });
+  }
+
   private initAIService() {
     const {provider, ollamaUrl, ollamaModel, openaiUrl, openaiModel, openaiApiKey, deepseekModel, backendUrl} =
       this.state.settings;
@@ -1405,6 +1471,14 @@ Click ⚙️ to change settings.`;
         this.state.completionHandled = handled;
       },
       backendUrl: this.state.settings.backendUrl,
+      // Agent-Driven Architecture v2.0 - Intervention support
+      setInterventionState: (state: Partial<InterventionState>) => {
+        this.state.interventionState = {
+          ...this.state.interventionState,
+          ...state,
+        };
+      },
+      getInterventionState: () => this.state.interventionState,
     };
   }
 

@@ -1080,6 +1080,20 @@
     }
   }
 
+  // Entity ID column - clickable for focus tracking (v2.0)
+  .entity-cell {
+    color: #9c27b0; // Purple for entity IDs
+    cursor: pointer;
+    font-family: 'Roboto Mono', 'SF Mono', monospace;
+    font-size: 10px;
+    max-width: 100px;
+
+    &:hover {
+      text-decoration: underline;
+      background: rgba(156, 39, 176, 0.1);
+    }
+  }
+
   // Duration/number columns - right aligned, monospace
   .col-number,
   .col-duration,
@@ -1126,6 +1140,14 @@
   .col-timestamp,
   .timestamp-cell {
     color: #8ab4f8; // Lighter blue for dark mode
+  }
+
+  .entity-cell {
+    color: #ce93d8; // Lighter purple for dark mode
+
+    &:hover {
+      background: rgba(156, 39, 176, 0.15);
+    }
   }
 }
 
