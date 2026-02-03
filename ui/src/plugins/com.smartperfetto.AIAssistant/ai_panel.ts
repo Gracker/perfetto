@@ -13,14 +13,17 @@
 // limitations under the License.
 
 import m from 'mithril';
-// Mermaid is loaded as external via <script> tag to avoid Rollup code-splitting.
-// The script is copied to dist/assets/ by build.js and loaded lazily when needed.
-import {assetSrc} from '../../base/assets';
-import {AIService, OllamaService, OpenAIService, BackendProxyService} from './ai_service';
+import {OllamaService, OpenAIService, BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
 import {SqlResultTable} from './sql_result_table';
 import {ChartVisualizer} from './chart_visualizer';
 import {NavigationBookmarkBar, NavigationBookmark} from './navigation_bookmark_bar';
+import {SceneNavigationBar} from './scene_navigation_bar';
+import {
+  getActivityHintFromBufferTxTrackName,
+  getMaxPinsForPattern,
+  needsActiveDisambiguation,
+} from './auto_pin_utils';
 import {Engine} from '../../trace_processor/engine';
 import {Trace} from '../../public/trace';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
@@ -28,202 +31,49 @@ import {AppImpl} from '../../core/app_impl';
 import {getBackendUploader} from '../../core/backend_uploader';
 import {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
+// Note: generated types are used by SSE event handlers module
+// import {FullAnalysis, ExpandableSections, isFrameDetailData} from './generated';
+
+// Refactored modules - centralized types and utilities
 import {
-  FullAnalysis,
-  ExpandableSections,
-  isFrameDetailData,
-  // DataEnvelope types (v2.0)
-  DataEnvelope,
-  DataPayload,
-  isDataEnvelope,
-  envelopeToSqlQueryResult,
-} from './generated';
+  Message,
+  SqlQueryResult,
+  AIPanelState,
+  PinnedResult,
+  AISettings,
+  AISession,
+  DEFAULT_SETTINGS,
+  PENDING_BACKEND_TRACE_KEY,
+  PRESET_QUESTIONS,
+} from './types';
+import {
+  encodeBase64Unicode,
+  decodeBase64Unicode,
+  formatMessage,
+} from './data_formatter';
+import {sessionManager} from './session_manager';
+import {mermaidRenderer} from './mermaid_renderer';
+import {
+  handleSSEEvent as handleSSEEventExternal,
+  SSEHandlerContext,
+} from './sse_event_handlers';
+// Scene reconstruction module available for future integration
+// import {SceneReconstructionHandler, SceneHandlerContext} from './scene_reconstruction';
 
 export interface AIPanelAttrs {
   engine: Engine;
   trace: Trace;
 }
 
-export interface Message {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: number;
-  sqlResult?: SqlQueryResult;
-  query?: string;
-  reportUrl?: string;  // HTML 报告链接
-  // Chart data for visualization (display.format: 'chart')
-  chartData?: {
-    type: 'pie' | 'bar' | 'histogram';
-    title?: string;
-    data: Array<{ label: string; value: number; percentage?: number; color?: string }>;
-  };
-  // Metric card data (display.format: 'metric')
-  metricData?: {
-    title: string;
-    value: string | number;
-    unit?: string;
-    status?: 'good' | 'warning' | 'critical';
-    delta?: string;  // e.g., "+5%" or "-10ms"
-  };
-}
-
-export interface SqlQueryResult {
-  columns: string[];
-  rows: any[][];
-  rowCount: number;
-  query?: string;
-  sectionTitle?: string;  // For skill_section messages - shows title in table header
-  stepId?: string;        // Skill step identifier (from DataEnvelope.meta.stepId)
-  layer?: string;         // Display layer (overview/list/detail/deep)
-  // Output structure optimization: grouping and collapse support
-  group?: string;         // Group identifier for interval grouping
-  collapsible?: boolean;  // Whether this table can be collapsed
-  defaultCollapsed?: boolean;  // Whether this table starts collapsed
-  maxVisibleRows?: number;  // Max rows to show before "show more"
-  // 可展开行数据（用于 iterator 类型的结果）
-  expandableData?: Array<{
-    item: Record<string, any>;
-    result: {
-      success: boolean;
-      sections?: Record<string, any>;
-      error?: string;
-    };
-  }>;
-  // 汇总报告 (legacy format)
-  summary?: {
-    title: string;
-    content: string;
-  };
-  // 汇总报告 (v2.0 DataPayload format - from SummaryContent)
-  summaryReport?: {
-    title: string;
-    content: string;
-    keyMetrics?: Array<{
-      name: string;
-      value: string;
-      status?: 'good' | 'warning' | 'critical';
-    }>;
-  };
-  // 元数据：从列表中提取的固定值（如 layer_name, process_name）
-  // 这些值在所有行中相同，显示在标题区域
-  metadata?: Record<string, any>;
-}
-
-interface AIPanelState {
-  messages: Message[];
-  input: string;
-  isLoading: boolean;
-  showSettings: boolean;
-  aiService: AIService | null;
-  settings: AISettings;
-  commandHistory: string[];
-  historyIndex: number;
-  lastQuery: string;
-  pinnedResults: PinnedResult[];
-  backendTraceId: string | null;
-  // isUploading removed - auto-upload now happens in load_trace.ts
-  bookmarks: NavigationBookmark[];  // 新增：导航书签
-  currentTraceFingerprint: string | null;  // 当前 Trace 指纹，用于检测 Trace 变化
-  currentSessionId: string | null;  // 当前 Session ID
-  isRetryingBackend: boolean;  // 正在重试连接后端
-  retryError: string | null;  // 重试连接的错误信息
-  agentSessionId: string | null;  // Agent 多轮对话 Session ID
-  displayedSkillProgress: Set<string>;  // 已显示的 skill 进度 (skillId:step)，用于去重
-  completionHandled: boolean;  // 是否已处理分析完成事件（防止 conclusion + analysis_completed 重复处理）
-  // SSE Connection State (Phase 2: Reconnection Logic)
-  sseConnectionState: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
-  sseRetryCount: number;  // Current retry attempt count
-  sseMaxRetries: number;  // Maximum retry attempts (default: 5)
-  sseLastEventTime: number | null;  // Last received event timestamp
-  // Error Aggregation (Phase 3: Error Summary Display)
-  collectedErrors: Array<{
-    skillId: string;
-    stepId?: string;
-    error: string;
-    timestamp: number;
-  }>;
-  // Output structure optimization: track collapsed table states
-  collapsedTables: Set<string>;  // Message IDs of currently collapsed tables
-}
-
-interface PinnedResult {
-  id: string;
-  query: string;
-  columns: string[];
-  rows: any[][];
-  timestamp: number;
-}
-
-export interface AISettings {
-  provider: 'ollama' | 'openai' | 'deepseek';
-  ollamaUrl: string;
-  ollamaModel: string;
-  openaiUrl: string;
-  openaiModel: string;
-  openaiApiKey: string;
-  deepseekModel: string;
-  deepseekApiKey: string;
-  backendUrl: string;
-}
-
-const DEFAULT_SETTINGS: AISettings = {
-  provider: 'deepseek',
-  ollamaUrl: 'http://localhost:11434',
-  ollamaModel: 'llama3.4',
-  openaiUrl: 'https://api.openai.com/v1',
-  openaiModel: 'gpt-4o',
-  openaiApiKey: '',
-  deepseekModel: 'deepseek-chat',
-  deepseekApiKey: '',  // Set your API key in settings
-  backendUrl: 'http://localhost:3000',
-};
-
-// Storage key for settings
-const SETTINGS_KEY = 'smartperfetto-ai-settings';
-const HISTORY_KEY = 'smartperfetto-ai-history';
-const SESSIONS_KEY = 'smartperfetto-ai-sessions';
-// Temporary storage for backendTraceId during trace reload
-const PENDING_BACKEND_TRACE_KEY = 'smartperfetto-pending-backend-trace';
-
-// Session 数据结构
-export interface AISession {
-  sessionId: string;
-  traceFingerprint: string;
-  traceName: string;              // 显示名（如文件名）
-  backendTraceId?: string;        // 后端 session ID
-  createdAt: number;
-  lastActiveAt: number;
-  messages: Message[];
-  summary?: string;               // AI 生成的对话摘要
-  pinnedResults?: PinnedResult[]; // 固定的查询结果
-  bookmarks?: NavigationBookmark[]; // 导航书签
-}
-
-// Sessions 存储结构
-interface SessionsStorage {
-  // 按 trace fingerprint 索引的 sessions
-  byTrace: Record<string, AISession[]>;
-}
+// Re-export types for backward compatibility with external consumers
+export {Message, SqlQueryResult, AISettings, AISession, PinnedResult} from './types';
 
 // All styles are now in styles.scss using CSS classes
 // Removed inline STYLES, THEME, ANIMATIONS objects for better maintainability
 
-// Preset questions for quick analysis
-// Teaching buttons first (visual priority), then analysis buttons
-const PRESET_QUESTIONS: Array<{label: string; question: string; icon: string; isTeaching?: boolean}> = [
-  // Teaching mode - helps users understand rendering pipelines
-  {label: '🎓 出图教学', question: '/teaching-pipeline', icon: 'school', isTeaching: true},
-  // Analysis mode - actual performance analysis
-  {label: '滑动', question: '分析滑动性能', icon: 'swipe'},
-  {label: '启动', question: '分析启动性能', icon: 'rocket_launch'},
-  {label: '跳转', question: '分析跳转性能', icon: 'open_in_new'},
-];
-
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
-  private mermaidInitialized = false;
   private state: AIPanelState = {
     messages: [],
     input: '',
@@ -253,6 +103,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     collectedErrors: [],
     // Output structure optimization
     collapsedTables: new Set(),
+    // Scene Navigation Bar
+    detectedScenes: [],
+    scenesLoading: false,
+    scenesError: null,
   };
 
   private onClearChat?: () => void;
@@ -262,70 +116,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
 
-  private getMermaid(): any | undefined {
-    return (globalThis as any).mermaid;
-  }
-
-  private mermaidLoadPromise: Promise<void> | null = null;
-
-  private loadMermaidScript(): Promise<void> {
-    if (this.mermaidLoadPromise) return this.mermaidLoadPromise;
-    if (this.getMermaid()) return Promise.resolve();
-
-    this.mermaidLoadPromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      // Load mermaid from local assets (copied by build.js) to comply with CSP.
-      script.src = assetSrc('assets/mermaid.min.js');
-      script.async = true;
-      script.onload = () => {
-        console.log('[AIPanel] Mermaid loaded from local assets');
-        resolve();
-      };
-      script.onerror = () => {
-        console.error('[AIPanel] Failed to load Mermaid from local assets');
-        this.mermaidLoadPromise = null;
-        reject(new Error('Failed to load Mermaid'));
-      };
-      document.head.appendChild(script);
-    });
-
-    return this.mermaidLoadPromise;
-  }
-
-  private async ensureMermaidInitialized(): Promise<void> {
-    if (this.mermaidInitialized) return;
-
-    // Load mermaid script if not already loaded
-    if (!this.getMermaid()) {
-      try {
-        await this.loadMermaidScript();
-      } catch (e) {
-        console.warn('[AIPanel] Mermaid not available:', e);
-        return;
-      }
-    }
-
-    const mermaid = this.getMermaid();
-    if (!mermaid) {
-      console.warn('[AIPanel] Mermaid not available on globalThis after load');
-      return;
-    }
-    // Keep this safe for untrusted markdown: strict sanitization and no autostart.
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: 'strict',
-      theme: 'default',
-    });
-    this.mermaidInitialized = true;
-  }
-
-  private encodeBase64Unicode(input: string): string {
-    // btoa only supports latin1 - convert safely.
-    return btoa(unescape(encodeURIComponent(input)));
-  }
-
-  private decodeBase64Unicode(base64: string): string {
-    return decodeURIComponent(escape(atob(base64)));
+  // Delegate to mermaidRenderer module
+  private async renderMermaidInElement(container: HTMLElement): Promise<void> {
+    await mermaidRenderer.renderMermaidInElement(container);
   }
 
   private async copyTextToClipboard(text: string): Promise<boolean> {
@@ -362,68 +155,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (/^VSYNC-appsf$/i.test(trackName)) return true;
     if (/^AChoreographer/i.test(trackName)) return true;
     return false;
-  }
-
-  private async renderMermaidInElement(container: HTMLElement): Promise<void> {
-    const diagramNodes = Array.from(
-      container.querySelectorAll<HTMLElement>('.ai-mermaid-diagram[data-mermaid-b64]')
-    );
-    const sourceNodes = Array.from(
-      container.querySelectorAll<HTMLElement>('.ai-mermaid-source[data-mermaid-b64]')
-    );
-
-    if (diagramNodes.length === 0 && sourceNodes.length === 0) return;
-
-    await this.ensureMermaidInitialized();
-    const mermaid = this.getMermaid();
-    if (!mermaid) return;
-
-    // Populate sources first (textContent, no HTML interpretation).
-    for (const source of sourceNodes) {
-      if (source.dataset.rendered === 'true') continue;
-      const b64 = source.dataset.mermaidB64;
-      if (!b64) continue;
-      try {
-        source.textContent = this.decodeBase64Unicode(b64);
-        source.dataset.rendered = 'true';
-      } catch (e) {
-        console.warn('[AIPanel] Failed to decode mermaid source:', e);
-      }
-    }
-
-    // Render diagrams.
-    for (const host of diagramNodes) {
-      if (host.dataset.rendered === 'true') continue;
-      const b64 = host.dataset.mermaidB64;
-      if (!b64) continue;
-
-      let code = '';
-      try {
-        code = this.decodeBase64Unicode(b64);
-      } catch (e) {
-        console.warn('[AIPanel] Failed to decode mermaid diagram:', e);
-        continue;
-      }
-
-      const renderId = `ai-mermaid-${Math.random().toString(36).slice(2)}`;
-      host.classList.add('mermaid');
-      host.textContent = '';
-
-      try {
-        // mermaid.render returns {svg, bindFunctions} in modern versions.
-        const result: any = await mermaid.render(renderId, code);
-        host.innerHTML = result?.svg || '';
-        if (typeof result?.bindFunctions === 'function') {
-          result.bindFunctions(host);
-        }
-        host.dataset.rendered = 'true';
-      } catch (e) {
-        console.warn('[AIPanel] Mermaid render failed:', e);
-        host.innerHTML =
-          '<div class="ai-mermaid-error">Mermaid 渲染失败（请展开查看源码）</div>';
-        host.dataset.rendered = 'true';
-      }
-    }
   }
 
   // oninit is called before view(), so AI service is initialized before first render
@@ -475,6 +206,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (appBackendTraceId && !this.state.backendTraceId) {
       console.log('[AIPanel] Using backendTraceId from auto-upload:', appBackendTraceId);
       this.state.backendTraceId = appBackendTraceId;
+      // Trigger quick scene detection for navigation bar
+      this.detectScenesQuick();
     }
 
     // 如果指纹没变且已经有 session，不需要重新加载
@@ -570,6 +303,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           });
 
           this.saveCurrentSession();
+
+          // Trigger quick scene detection for navigation bar
+          this.detectScenesQuick();
+
           m.redraw();
           return;
         }
@@ -865,6 +602,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         }, [
           // Left: Main content area
           m('div.ai-main-content', [
+            // Scene Navigation Bar (场景导航 - 自动检测 Trace 中的操作场景)
+            isInRpcMode && this.trace
+              ? m(SceneNavigationBar, {
+                  scenes: this.state.detectedScenes,
+                  trace: this.trace,
+                  isLoading: this.state.scenesLoading,
+                  onSceneClick: (scene, index) => {
+                    console.log(`[AIPanel] Jumped to scene ${index}: ${scene.type}`);
+                  },
+                  onRefresh: () => this.detectScenesQuick(),
+                })
+              : null,
+
             // Navigation Bookmark Bar (显示AI识别的关键时间点)
             this.state.bookmarks.length > 0 && this.trace
               ? m(NavigationBookmarkBar, {
@@ -957,7 +707,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       const b64 = copyBtn.getAttribute('data-mermaid-b64');
                       if (b64) {
                         try {
-                          const code = this.decodeBase64Unicode(b64);
+                          const code = decodeBase64Unicode(b64);
                           void this.copyTextToClipboard(code);
                         } catch (err) {
                           console.warn('[AIPanel] Failed to copy mermaid code:', err);
@@ -974,11 +724,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   },
                   oncreate: (vnode: m.VnodeDOM) => {
                     const dom = vnode.dom as HTMLElement;
-                    dom.innerHTML = this.formatMessage(msg.content);
+                    dom.innerHTML = formatMessage(msg.content);
                     void this.renderMermaidInElement(dom);
                   },
                   onupdate: (vnode: m.VnodeDOM) => {
-                    const newHtml = this.formatMessage(msg.content);
+                    const newHtml = formatMessage(msg.content);
                     const dom = vnode.dom as HTMLElement;
                     // Only update if content actually changed (optimization)
                     if (dom.innerHTML !== newHtml) {
@@ -1288,72 +1038,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private saveSettings(newSettings: AISettings) {
     this.state.settings = newSettings;
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(newSettings));
+    sessionManager.saveSettings(newSettings);
     this.initAIService();
     m.redraw();
   }
 
   private loadSettings() {
-    try {
-      const stored = localStorage.getItem(SETTINGS_KEY);
-      if (stored) {
-        // Merge stored settings with defaults to handle new properties
-        const storedSettings = JSON.parse(stored);
-        this.state.settings = {...DEFAULT_SETTINGS, ...storedSettings};
-      }
-    } catch {
-      // Use default settings on error
-    }
+    this.state.settings = sessionManager.loadSettings();
   }
 
   /**
    * 从旧的 HISTORY_KEY 迁移数据到新的 Session 格式
    * 仅在首次加载时调用，用于向后兼容
+   * Delegates to sessionManager for the actual migration
    */
   private migrateOldHistoryToSession(): boolean {
-    try {
-      const stored = localStorage.getItem(HISTORY_KEY);
-      if (!stored) return false;
-
-      const parsed = JSON.parse(stored);
-      const messages = Array.isArray(parsed) ? parsed : (parsed.messages || []);
-      const fingerprint = parsed.traceFingerprint || this.state.currentTraceFingerprint;
-
-      // 如果没有消息或没有指纹，不迁移
-      if (messages.length === 0 || !fingerprint) return false;
-
-      // 检查是否已经有这个 trace 的 sessions
-      const existingSessions = this.getSessionsForTrace(fingerprint);
-      if (existingSessions.length > 0) {
-        // 已经有 sessions，不需要迁移
-        return false;
-      }
-
-      // 创建迁移的 session
-      console.log('[AIPanel] Migrating old history to new session format');
-      const session: AISession = {
-        sessionId: this.generateId(),
-        traceFingerprint: fingerprint,
-        traceName: this.trace?.traceInfo?.traceTitle || 'Migrated Trace',
-        backendTraceId: parsed.backendTraceId,
-        createdAt: messages[0]?.timestamp || Date.now(),
-        lastActiveAt: messages[messages.length - 1]?.timestamp || Date.now(),
-        messages: messages,
-      };
-
-      // 保存到新格式
-      const storage = this.loadSessionsStorage();
-      if (!storage.byTrace[fingerprint]) {
-        storage.byTrace[fingerprint] = [];
-      }
-      storage.byTrace[fingerprint].push(session);
-      this.saveSessionsStorage(storage);
-
-      console.log('[AIPanel] Migration complete, session:', session.sessionId);
-      return true;
-    } catch {
-      return false;
-    }
+    const fingerprint = this.state.currentTraceFingerprint || 'unknown';
+    const traceName = this.trace?.traceInfo?.traceTitle || 'Migrated Trace';
+    return sessionManager.migrateOldHistoryToSession(fingerprint, traceName);
   }
 
   private addWelcomeMessage() {
@@ -1387,63 +1089,27 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private saveHistory() {
-    try {
-      // Save messages, backendTraceId, and trace fingerprint
-      const data = {
-        messages: this.state.messages,
-        backendTraceId: this.state.backendTraceId,
-        traceFingerprint: this.state.currentTraceFingerprint,
-      };
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(data));
-    } catch {
-      // Ignore errors
-    }
+    sessionManager.saveHistory(
+      this.state.messages,
+      this.state.backendTraceId,
+      this.state.currentTraceFingerprint
+    );
   }
 
   // loadPinnedResults 已移至 Session 中管理
 
   private savePinnedResults() {
-    try {
-      localStorage.setItem('smartperfetto-pinned-results', JSON.stringify(this.state.pinnedResults));
-    } catch {
-      // Ignore errors
-    }
+    sessionManager.savePinnedResults(this.state.pinnedResults);
   }
 
   // ============ Session 管理方法 ============
-
-  /**
-   * 加载所有 Sessions 存储
-   */
-  private loadSessionsStorage(): SessionsStorage {
-    try {
-      const stored = localStorage.getItem(SESSIONS_KEY);
-      if (stored) {
-        return JSON.parse(stored);
-      }
-    } catch {
-      // Ignore errors
-    }
-    return { byTrace: {} };
-  }
-
-  /**
-   * 保存所有 Sessions 存储
-   */
-  private saveSessionsStorage(storage: SessionsStorage): void {
-    try {
-      localStorage.setItem(SESSIONS_KEY, JSON.stringify(storage));
-    } catch {
-      // Ignore errors
-    }
-  }
+  // Storage operations delegated to sessionManager module
 
   /**
    * 获取指定 Trace 的所有 Sessions
    */
   getSessionsForTrace(fingerprint: string): AISession[] {
-    const storage = this.loadSessionsStorage();
-    return storage.byTrace[fingerprint] || [];
+    return sessionManager.getSessionsForTrace(fingerprint);
   }
 
   /**
@@ -1461,29 +1127,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const fingerprint = this.state.currentTraceFingerprint || 'unknown';
     const traceName = this.trace?.traceInfo?.traceTitle || 'Untitled Trace';
 
-    const session: AISession = {
-      sessionId: this.generateId(),
-      traceFingerprint: fingerprint,
-      traceName: traceName,
-      createdAt: Date.now(),
-      lastActiveAt: Date.now(),
-      messages: [],
-      pinnedResults: [],
-      bookmarks: [],
-    };
-
-    // 保存到存储
-    const storage = this.loadSessionsStorage();
-    if (!storage.byTrace[fingerprint]) {
-      storage.byTrace[fingerprint] = [];
-    }
-    storage.byTrace[fingerprint].push(session);
-    this.saveSessionsStorage(storage);
+    const session = sessionManager.createSession(fingerprint, traceName);
 
     // 更新当前 session ID
     this.state.currentSessionId = session.sessionId;
 
-    console.log('[AIPanel] Created new session:', session.sessionId);
     return session;
   }
 
@@ -1495,71 +1143,54 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
-    const storage = this.loadSessionsStorage();
-    const sessions = storage.byTrace[this.state.currentTraceFingerprint];
-    if (!sessions) return;
-
-    const sessionIndex = sessions.findIndex(s => s.sessionId === this.state.currentSessionId);
-    if (sessionIndex === -1) return;
-
-    // 更新 session 数据
-    sessions[sessionIndex] = {
-      ...sessions[sessionIndex],
-      messages: this.state.messages,
-      pinnedResults: this.state.pinnedResults,
-      bookmarks: this.state.bookmarks,
-      backendTraceId: this.state.backendTraceId || undefined,
-      lastActiveAt: Date.now(),
-    };
-
-    this.saveSessionsStorage(storage);
-    console.log('[AIPanel] Saved session:', this.state.currentSessionId);
+    sessionManager.updateSession(
+      this.state.currentTraceFingerprint,
+      this.state.currentSessionId,
+      {
+        messages: this.state.messages,
+        pinnedResults: this.state.pinnedResults,
+        bookmarks: this.state.bookmarks,
+        backendTraceId: this.state.backendTraceId || undefined,
+      }
+    );
   }
 
   /**
    * 加载指定 Session
    */
   loadSession(sessionId: string): boolean {
-    const storage = this.loadSessionsStorage();
+    const session = sessionManager.loadSession(sessionId);
+    if (!session) return false;
 
-    // 在所有 traces 中查找 session
-    for (const fingerprint in storage.byTrace) {
-      const sessions = storage.byTrace[fingerprint];
-      const session = sessions.find(s => s.sessionId === sessionId);
-      if (session) {
-        this.state.currentSessionId = session.sessionId;
-        this.state.currentTraceFingerprint = session.traceFingerprint;
-        this.state.messages = session.messages;
-        this.state.pinnedResults = session.pinnedResults || [];
-        this.state.bookmarks = session.bookmarks || [];
+    this.state.currentSessionId = session.sessionId;
+    this.state.currentTraceFingerprint = session.traceFingerprint;
+    this.state.messages = session.messages;
+    this.state.pinnedResults = session.pinnedResults || [];
+    this.state.bookmarks = session.bookmarks || [];
 
-        // Only restore backendTraceId if we're currently in RPC mode
-        // If not in RPC mode, the old backendTraceId is stale and invalid
-        const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
-        if (engineInRpcMode && session.backendTraceId) {
-          this.state.backendTraceId = session.backendTraceId;
-          // 验证 backend trace 是否仍然有效
-          this.verifyBackendTrace();
-        } else {
-          // Not in RPC mode or no backendTraceId - clear it
-          this.state.backendTraceId = null;
-        }
-
-        // 恢复命令历史
-        this.state.commandHistory = this.state.messages
-          .filter((m) => m.role === 'user')
-          .map((m) => m.content);
-
-        console.log('[AIPanel] Loaded session:', sessionId, {
-          engineInRpcMode,
-          backendTraceId: this.state.backendTraceId,
-        });
-        m.redraw();
-        return true;
-      }
+    // Only restore backendTraceId if we're currently in RPC mode
+    // If not in RPC mode, the old backendTraceId is stale and invalid
+    const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
+    if (engineInRpcMode && session.backendTraceId) {
+      this.state.backendTraceId = session.backendTraceId;
+      // 验证 backend trace 是否仍然有效
+      this.verifyBackendTrace();
+    } else {
+      // Not in RPC mode or no backendTraceId - clear it
+      this.state.backendTraceId = null;
     }
 
-    return false;
+    // 恢复命令历史
+    this.state.commandHistory = this.state.messages
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content);
+
+    console.log('[AIPanel] Loaded session:', sessionId, {
+      engineInRpcMode,
+      backendTraceId: this.state.backendTraceId,
+    });
+    m.redraw();
+    return true;
   }
 
   /**
@@ -1578,27 +1209,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 删除指定 Session
    */
   deleteSession(sessionId: string): boolean {
-    const storage = this.loadSessionsStorage();
-
-    for (const fingerprint in storage.byTrace) {
-      const sessions = storage.byTrace[fingerprint];
-      const index = sessions.findIndex(s => s.sessionId === sessionId);
-      if (index !== -1) {
-        sessions.splice(index, 1);
-        this.saveSessionsStorage(storage);
-
-        // 如果删除的是当前 session，重置状态
-        if (sessionId === this.state.currentSessionId) {
-          this.state.currentSessionId = null;
-          this.resetStateForNewTrace();
-        }
-
-        console.log('[AIPanel] Deleted session:', sessionId);
-        return true;
+    const deleted = sessionManager.deleteSession(sessionId);
+    if (deleted) {
+      // 如果删除的是当前 session，重置状态
+      if (sessionId === this.state.currentSessionId) {
+        this.state.currentSessionId = null;
+        this.resetStateForNewTrace();
       }
+      // IMPORTANT: Trigger UI update after session deletion
+      // This is needed because confirm() dialog breaks Mithril's auto-redraw
+      m.redraw();
     }
-
-    return false;
+    return deleted;
   }
 
   // ============ Session 管理方法结束 ============
@@ -1756,6 +1378,60 @@ Click ⚙️ to change settings.`;
     this.scrollToBottom();
   }
 
+  /**
+   * Create the context object for SSE event handlers.
+   * This encapsulates the AIPanel state and methods needed by the handlers.
+   */
+  private createSSEHandlerContext(): SSEHandlerContext {
+    return {
+      addMessage: (msg: Message) => this.addMessage(msg),
+      generateId: () => this.generateId(),
+      getMessages: () => this.state.messages,
+      removeLastMessageIf: (predicate: (msg: Message) => boolean) => {
+        const lastMsg = this.state.messages[this.state.messages.length - 1];
+        if (lastMsg && predicate(lastMsg)) {
+          this.state.messages.pop();
+          return true;
+        }
+        return false;
+      },
+      setLoading: (loading: boolean) => {
+        this.state.isLoading = loading;
+      },
+      displayedSkillProgress: this.state.displayedSkillProgress,
+      collectedErrors: this.state.collectedErrors,
+      completionHandled: this.state.completionHandled,
+      setCompletionHandled: (handled: boolean) => {
+        this.state.completionHandled = handled;
+      },
+      backendUrl: this.state.settings.backendUrl,
+    };
+  }
+
+  /**
+   * Handle SSE events from backend - delegates to sse_event_handlers module.
+   *
+   * Note: State synchronization strategy:
+   * - displayedSkillProgress, collectedErrors: Passed by reference, changes reflect automatically
+   * - completionHandled: Updated via setCompletionHandled() which directly modifies this.state
+   * - No manual sync needed as all state changes go directly to this.state
+   */
+  private handleSSEEvent(eventType: string, data?: any): void {
+    const ctx = this.createSSEHandlerContext();
+    const result = handleSSEEventExternal(eventType, data, ctx);
+
+    // Handle terminal events
+    if (result.stopLoading) {
+      this.state.isLoading = false;
+    }
+
+    // Note: completionHandled is updated via setCompletionHandled() directly on this.state
+    // Do NOT sync ctx.completionHandled back - it's the original value before handler ran
+
+    // Trigger redraw after handling each event
+    m.redraw();
+  }
+
   private async handleCommand(input: string) {
     const parts = input.split(/\s+/);
     const cmd = parts[0].toLowerCase();
@@ -1805,6 +1481,9 @@ Click ⚙️ to change settings.`;
         break;
       case '/teaching-pipeline':
         await this.handleTeachingPipelineCommand();
+        break;
+      case '/scene':
+        await this.handleSceneReconstructCommand();
         break;
       default:
         this.addMessage({
@@ -1986,15 +1665,24 @@ Click ⚙️ to change settings.`;
       // Query the selected slice details
       const query = `
         SELECT
-          id,
-          name,
-          category,
-          ts,
-          dur / 1e6 as dur_ms,
-          track_id,
-          depth
-        FROM slice
-        WHERE id = ${eventId}
+          s.id,
+          s.name,
+          s.category,
+          s.ts,
+          s.dur / 1e6 as dur_ms,
+          s.track_id,
+          s.depth,
+          t.name AS track_name,
+          thread.name AS thread_name,
+          thread.tid AS tid,
+          process.name AS process_name,
+          process.pid AS pid
+        FROM slice s
+        LEFT JOIN track t ON s.track_id = t.id
+        LEFT JOIN thread_track tt ON s.track_id = tt.id
+        LEFT JOIN thread USING (utid)
+        LEFT JOIN process USING (upid)
+        WHERE s.id = ${eventId}
         LIMIT 1
       `;
 
@@ -2026,21 +1714,33 @@ Selected Slice Information:
 - ID: ${sliceData.id}
 - Name: ${sliceData.name}
 - Category: ${sliceData.category || 'N/A'}
-- Timestamp: ${sliceData.ts} (convert to human-readable time if needed)
+- Timestamp: ${sliceData.ts} (ns, absolute)
 - Duration: ${sliceData.dur_ms?.toFixed(2) || 'N/A'} ms
+- Process: ${sliceData.process_name || 'N/A'} (pid=${sliceData.pid ?? 'N/A'})
+- Thread: ${sliceData.thread_name || 'N/A'} (tid=${sliceData.tid ?? 'N/A'})
+- Track: ${sliceData.track_name || 'N/A'}
 - Track ID: ${sliceData.track_id}
 - Depth: ${sliceData.depth}
-`.trim();
+      `.trim();
 
       // If AI service is configured, ask for analysis
       if (this.state.aiService) {
-        const systemPrompt = `You are an Android performance analysis expert. Analyze the given slice from a Perfetto trace and provide insights about:
-1. What this slice represents
-2. Whether the duration is typical or concerning
-3. Possible performance issues if any
-4. Suggestions for further investigation
+        const systemPrompt = `You are an Android performance analysis expert.
 
-Keep your analysis concise and actionable.`;
+You will be given ONE slice row from a Perfetto trace (plus any joined context like thread/process/track if available).
+
+Rules:
+- Base your analysis ONLY on the provided slice data. Do NOT invent missing context.
+- If data is insufficient, explicitly say what is missing and suggest how to obtain it (what tables/joins to query).
+- Use nanoseconds (ns) for raw timestamps and milliseconds (ms) for durations in your narrative.
+
+Output MUST follow this exact markdown structure:
+
+## What It Is
+## Is It Abnormal?
+## Why It Matters
+## Next Checks (Perfetto SQL)
+- Provide up to 2 SQL queries, each in a \`\`\`sql\`\`\` block, and nothing else.`;
 
         const userPrompt = `Analyze this slice:\n\n${sliceInfo}`;
 
@@ -2389,7 +2089,8 @@ Keep your analysis concise and actionable.`;
             timestamp: Date.now(),
           });
           this.state.backendTraceId = null;
-          return;
+          // Note: Don't return early - let finally block handle cleanup
+          throw new Error('TRACE_NOT_FOUND');  // Will be caught and cleanup will run
         }
         throw new Error(`API error: ${response.status} ${errorData.error || response.statusText}`);
       }
@@ -2421,16 +2122,20 @@ Keep your analysis concise and actionable.`;
       }
 
     } catch (e: any) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `**Error:** ${e.message || 'Failed to start analysis'}`,
-        timestamp: Date.now(),
-      });
+      // Don't show duplicate error message for TRACE_NOT_FOUND (already shown above)
+      if (e.message !== 'TRACE_NOT_FOUND') {
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: `**Error:** ${e.message || 'Failed to start analysis'}`,
+          timestamp: Date.now(),
+        });
+      }
+    } finally {
+      // Always reset loading state, even on early returns via thrown errors
+      this.state.isLoading = false;
+      m.redraw();
     }
-
-    this.state.isLoading = false;
-    m.redraw();
   }
 
   /**
@@ -2634,1393 +2339,6 @@ Keep your analysis concise and actionable.`;
     }
   }
 
-  /**
-   * Handle SSE events from backend
-   */
-  private handleSSEEvent(eventType: string, data?: any): void {
-    console.log('[AIPanel] SSE event:', eventType, data);
-
-    switch (eventType) {
-      case 'connected':
-        // Connection established
-        break;
-
-      case 'progress':
-        // Show progress update (replaces previous progress message)
-        if (data?.data?.message) {
-          // Remove previous progress message
-          const lastMsg = this.state.messages[this.state.messages.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `⏳ ${data.data.message}`,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case 'sql_generated':
-        // SQL was generated - don't show raw SQL to user
-        // The progress event will show the status
-        break;
-
-      case 'sql_executed':
-        // SQL was executed - show result count
-        if (data?.data?.result) {
-          const rowCount = data.data.result.rowCount || 0;
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `📊 查询到 **${rowCount}** 条记录`,
-            timestamp: Date.now(),
-            sqlResult: {
-              columns: data.data.result.columns || [],
-              rows: data.data.result.rows || [],
-              rowCount,
-              query: data.data.sql || '',
-              expandableData: data.data.result.expandableData,
-              summary: data.data.result.summary,
-            },
-          });
-        }
-        break;
-
-      case 'step_completed':
-        // A step was completed - skip empty content
-        if (data?.data?.content && data.data.content !== 'Query returned 0 rows.') {
-          // Don't show this, we already showed the result in sql_executed
-        }
-        break;
-
-      case 'skill_section':
-        // Skill section data - display as a table
-        if (data?.data) {
-          const section = data.data;
-          // Remove previous progress message
-          const lastMsg = this.state.messages[this.state.messages.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-          // Show progress for this section - use sectionTitle for compact display
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: '',  // No message content, title is in table header
-            timestamp: Date.now(),
-            sqlResult: section.rowCount > 0 ? {
-              columns: section.columns,
-              rows: section.rows,
-              rowCount: section.rowCount,
-              query: '',  // No SQL display
-              sectionTitle: `${section.sectionTitle} (${section.sectionIndex}/${section.totalSections})`,
-              expandableData: section.expandableData,
-              summary: section.summary,
-            } : undefined,
-          });
-        }
-        break;
-
-      case 'skill_diagnostics':
-        // Skill diagnostics - display as a warning/info message
-        if (data?.data?.diagnostics && data.data.diagnostics.length > 0) {
-          const diagnostics = data.data.diagnostics;
-          const criticalItems = diagnostics.filter((d: any) => d.severity === 'critical');
-          const warningItems = diagnostics.filter((d: any) => d.severity === 'warning');
-          const infoItems = diagnostics.filter((d: any) => d.severity === 'info');
-
-          let content = '**🔍 诊断结果**\n\n';
-          if (criticalItems.length > 0) {
-            content += '🔴 **严重问题:**\n';
-            criticalItems.forEach((d: any) => {
-              content += `- ${d.message}\n`;
-              if (d.suggestions && d.suggestions.length > 0) {
-                content += `  *建议: ${d.suggestions.join('; ')}*\n`;
-              }
-            });
-            content += '\n';
-          }
-          if (warningItems.length > 0) {
-            content += '🟡 **警告:**\n';
-            warningItems.forEach((d: any) => {
-              content += `- ${d.message}\n`;
-            });
-            content += '\n';
-          }
-          if (infoItems.length > 0) {
-            content += '🔵 **提示:**\n';
-            infoItems.forEach((d: any) => {
-              content += `- ${d.message}\n`;
-            });
-          }
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: content.trim(),
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case 'skill_layered_result':
-        // Layered skill result - display L1/L2/L4 data as tables
-        // Support both formats:
-        // 1. PerfettoAnalysisOrchestrator: { result: { layers, metadata }, summary }
-        // 2. MasterOrchestrator/AnalysisWorker: { skillId, skillName, layers, diagnostics }
-        const layeredResult = data?.data?.result?.layers || data?.data?.layers;
-        if (layeredResult) {
-          // Deduplication check - prevent duplicate skill_layered_result display
-          const skillId = data.data.skillId || data.data.result?.metadata?.skillId || 'unknown';
-          const deduplicationKey = `skill_layered_result:${skillId}`;
-          if (this.state.displayedSkillProgress.has(deduplicationKey)) {
-            console.log('[AIPanel] Skipping duplicate skill_layered_result:', deduplicationKey);
-            break;
-          }
-          this.state.displayedSkillProgress.add(deduplicationKey);
-
-          console.log('[AIPanel] skill_layered_result received:', data.data);
-          console.log('[AIPanel] Deep layer details:', {
-            hasDeep: !!layeredResult.deep,
-            deepKeys: layeredResult.deep ? Object.keys(layeredResult.deep) : [],
-            deepSample: layeredResult.deep ? Object.entries(layeredResult.deep).slice(0, 1).map(
-              ([sid, frames]) => ({ sessionId: sid, frameKeys: Object.keys(frames as object) })
-            ) : [],
-          });
-          const layers = layeredResult;
-          // Support both metadata locations
-          const metadata = data.data.result?.metadata || {
-            skillName: data.data.skillName || data.data.skillId,
-          };
-
-          // Remove previous progress message
-          const lastProgressMsg = this.state.messages[this.state.messages.length - 1];
-          if (lastProgressMsg && lastProgressMsg.role === 'assistant' && lastProgressMsg.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-
-          // Process overview layer (L1) - metrics summary
-          const overview = layers.overview || layers.L1;
-          if (overview && Object.keys(overview).length > 0) {
-            // Helper to check if object is a StepResult format
-            const isStepResult = (obj: any): boolean => {
-              return obj && typeof obj === 'object' &&
-                'data' in obj && Array.isArray(obj.data);
-            };
-
-            // Helper to extract data from StepResult or use as-is
-            const extractData = (obj: any): any[] | null => {
-              if (isStepResult(obj)) {
-                return obj.data;
-              }
-              return null;
-            };
-
-            // Helper to get display title from StepResult
-            const getDisplayTitle = (key: string, obj: any): string => {
-              if (isStepResult(obj) && obj.display?.title) {
-                return obj.display.title;
-              }
-              // Use metadata.skillName as context for the title
-              const skillContext = metadata.skillName ? ` (${metadata.skillName})` : '';
-              return this.formatLayerName(key) + skillContext;
-            };
-
-            // Helper to get display format from StepResult
-            const getDisplayFormat = (obj: any): string => {
-              return (obj?.display?.format || 'table').toLowerCase();
-            };
-
-            // Helper to build chart data from step result
-            const buildChartData = (obj: any, title: string): Message['chartData'] | null => {
-              const dataArray = extractData(obj);
-              if (!dataArray || dataArray.length === 0) return null;
-
-              // Try to infer chart type from data structure
-              const firstRow = dataArray[0];
-              if (!firstRow || typeof firstRow !== 'object') return null;
-
-              const keys = Object.keys(firstRow);
-              // Look for label/value pairs
-              const labelKey = keys.find(k => k.toLowerCase().includes('label') || k.toLowerCase().includes('name') || k.toLowerCase().includes('type'));
-              const valueKey = keys.find(k => k.toLowerCase().includes('value') || k.toLowerCase().includes('count') || k.toLowerCase().includes('total'));
-
-              if (!labelKey || !valueKey) return null;
-
-              return {
-                type: 'bar',  // Default to bar chart
-                title: title,
-                data: dataArray.map((item: any) => ({
-                  label: String(item[labelKey] || 'Unknown'),
-                  value: Number(item[valueKey]) || 0,
-                })),
-              };
-            };
-
-            // Helper to build metric data from step result
-            const buildMetricData = (obj: any, title: string): Message['metricData'] | null => {
-              const dataArray = extractData(obj);
-              if (!dataArray || dataArray.length === 0) return null;
-
-              const firstRow = dataArray[0];
-              if (!firstRow || typeof firstRow !== 'object') return null;
-
-              const keys = Object.keys(firstRow);
-              const valueKey = keys.find(k => k.toLowerCase().includes('value') || k.toLowerCase().includes('total') || k.toLowerCase().includes('avg'));
-
-              if (valueKey) {
-                const value = firstRow[valueKey];
-                return {
-                  title: title,
-                  value: typeof value === 'number' ? value.toFixed(2) : String(value),
-                  status: firstRow.status || undefined,
-                };
-              }
-
-              // If single key-value pair, use first entry
-              if (keys.length === 1) {
-                return {
-                  title: title,
-                  value: String(firstRow[keys[0]]),
-                };
-              }
-
-              return null;
-            };
-
-            // Process each entry in overview layer
-            for (const [key, val] of Object.entries(overview)) {
-              if (val === null || val === undefined) continue;
-
-              // Get display format from step config
-              const format = getDisplayFormat(val);
-              const title = getDisplayTitle(key, val);
-
-              // Route based on display format
-              if (format === 'chart') {
-                const chartData = buildChartData(val, title);
-                if (chartData) {
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: '',
-                    timestamp: Date.now(),
-                    chartData,
-                  });
-                  continue;
-                }
-              } else if (format === 'metric') {
-                const metricData = buildMetricData(val, title);
-                if (metricData) {
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: '',
-                    timestamp: Date.now(),
-                    metricData,
-                  });
-                  continue;
-                }
-              }
-
-              // Default: table format
-              // Check if it's a StepResult format (has data array)
-              const dataArray = extractData(val);
-              if (dataArray && dataArray.length > 0) {
-                // StepResult format: extract and display the data array
-                const firstRow = dataArray[0];
-                if (typeof firstRow === 'object' && firstRow !== null) {
-                  const columns = Object.keys(firstRow);
-                  const rows = dataArray.map((item: any) =>
-                    columns.map(col => this.formatDisplayValue(item[col], col))
-                  );
-
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: '',
-                    timestamp: Date.now(),
-                    sqlResult: {
-                      columns,
-                      rows,
-                      rowCount: rows.length,
-                      sectionTitle: `📊 ${title}`,
-                    },
-                  });
-                }
-              } else if (typeof val === 'object' && !Array.isArray(val)) {
-                // Nested object: display as single-row table
-                const objColumns = Object.keys(val);
-                const objRow = objColumns.map(col => this.formatDisplayValue((val as any)[col], col));
-
-                this.addMessage({
-                  id: this.generateId(),
-                  role: 'assistant',
-                  content: '',
-                  timestamp: Date.now(),
-                  sqlResult: {
-                    columns: objColumns,
-                    rows: [objRow],
-                    rowCount: 1,
-                    sectionTitle: `📈 ${this.formatLayerName(key)}`,
-                  },
-                });
-              } else if (!Array.isArray(val)) {
-                // Simple value - collect for combined display (skip for now, handled below)
-              }
-            }
-          }
-
-          // Process list layer (L2) - array data tables
-          // Get deep layer data for potential expandable rows
-          const deep = layers.deep || layers.L4;
-          const list = layers.list || layers.L2;
-
-          // Debug logging for expandable data
-          console.log('[AIPanel] Processing L2/deep layers:', {
-            hasDeep: !!deep,
-            hasList: !!list,
-            deepKeys: deep ? Object.keys(deep) : [],
-            listKeys: list ? Object.keys(list) : [],
-          });
-          if (list && typeof list === 'object') {
-            // Helper to check if object is a StepResult format
-            // Supports BOTH formats:
-            // 1. Legacy format: data is an array of row objects [{col1: val1}, ...]
-            // 2. New DataPayload format: data is {columns, rows, expandableData, summary}
-            const isStepResult = (obj: any): boolean => {
-              if (!obj || typeof obj !== 'object' || !('data' in obj)) return false;
-              // Legacy format: data is array
-              if (Array.isArray(obj.data)) return true;
-              // New DataPayload format: data has columns/rows structure
-              if (obj.data && typeof obj.data === 'object' &&
-                  (Array.isArray(obj.data.columns) || Array.isArray(obj.data.rows))) {
-                return true;
-              }
-              return false;
-            };
-
-            // Helper to check if data is in DataPayload format (new format)
-            const isDataPayloadFormat = (data: any): boolean => {
-              return data && typeof data === 'object' &&
-                !Array.isArray(data) &&
-                (Array.isArray(data.columns) || Array.isArray(data.rows));
-            };
-
-            // Helper to find frame detail in deep layer (legacy fallback)
-            // Supports both prefixed (session_1, frame_123) and non-prefixed (1, 123) formats
-            let findFrameDetailCallCount = 0;
-            const findFrameDetail = (frameId: string | number, sessionId?: string | number): any => {
-              findFrameDetailCallCount++;
-              if (!deep || typeof deep !== 'object') {
-                if (findFrameDetailCallCount <= 5) console.warn('[findFrameDetail] deep is invalid:', deep);
-                return null;
-              }
-
-              // Generate all possible key variants for matching
-              const sessionKeys = sessionId !== undefined
-                ? [String(sessionId), `session_${sessionId}`]
-                : [];
-              const frameKeys = [String(frameId), `frame_${frameId}`];
-
-              // Deep layer structure: { sessionId: { frameId: frameData } }
-              for (const [sid, frames] of Object.entries(deep)) {
-                // Check if session matches (if sessionId provided)
-                if (sessionId !== undefined) {
-                  const sessionMatches = sessionKeys.some(sk => sid === sk);
-                  if (!sessionMatches) continue;
-                }
-
-                if (frames && typeof frames === 'object') {
-                  // Try all possible frame key formats
-                  for (const fk of frameKeys) {
-                    const frameData = (frames as any)[fk];
-                    if (frameData) return frameData;
-                  }
-                  // Debug: log when session matches but frame not found
-                  if (findFrameDetailCallCount <= 5) {
-                    const availableKeys = Object.keys(frames as object).slice(0, 5);
-                    console.log(`[findFrameDetail] Session ${sid} matched but frame not found. Looking for: ${frameKeys.join(', ')}. Available keys sample: ${availableKeys.join(', ')}`);
-                  }
-                }
-              }
-              return null;
-            };
-
-            for (const [key, value] of Object.entries(list)) {
-              // Handle StepResult format: { stepId, data: [...] | DataPayload, display }
-              let items: any[] = [];
-              let columns: string[] = [];
-              let rows: any[][] = [];
-              let displayTitle = this.formatLayerName(key);
-              let isExpandable = false;
-              let metadataColumns: string[] = [];
-              let hiddenColumns: string[] = [];
-              let preBindedExpandableData: any[] | undefined;  // L4 data pre-bound by backend
-              let summaryReport: any | undefined;
-
-              if (isStepResult(value)) {
-                const stepData = (value as any).data;
-                const displayConfig = (value as any).display;
-
-                if (displayConfig?.title) {
-                  displayTitle = displayConfig.title;
-                }
-                // Check if this list should be expandable (has frame details in deep layer)
-                isExpandable = displayConfig?.expandable === true;
-                // Get metadata_fields (values to extract to header) - prefer camelCase, fallback to legacy snake_case
-                metadataColumns = displayConfig?.metadataFields || displayConfig?.metadata_columns || [];
-                // Get hidden_columns (columns to hide from main table) - support legacy/camelCase
-                hiddenColumns = displayConfig?.hidden_columns || displayConfig?.hiddenColumns || [];
-
-                // Also extract hidden columns from column definitions (columns with hidden: true)
-                if (displayConfig?.columns && Array.isArray(displayConfig.columns)) {
-                  const hiddenFromDefs = displayConfig.columns
-                    .filter((c: any) => c.hidden === true)
-                    .map((c: any) => c.name);
-                  hiddenColumns = [...new Set([...hiddenColumns, ...hiddenFromDefs])];
-                }
-
-                // Check which data format we have
-                if (isDataPayloadFormat(stepData)) {
-                  // NEW DataPayload format: {columns, rows, expandableData, summary}
-                  console.log('[AIPanel] Processing DataPayload format for', key, {
-                    hasColumns: !!stepData.columns,
-                    hasRows: !!stepData.rows,
-                    hasExpandableData: !!stepData.expandableData,
-                    hasSummary: !!stepData.summary,
-                  });
-
-                  const allColumns = stepData.columns || [];
-                  const allRows = stepData.rows || [];
-                  preBindedExpandableData = stepData.expandableData;
-                  summaryReport = stepData.summary;
-
-                  // For DataPayload, items is rows converted to objects (for metadata extraction)
-                  items = allRows.map((row: any[]) => {
-                    const obj: Record<string, any> = {};
-                    allColumns.forEach((col: string, i: number) => { obj[col] = row[i]; });
-                    return obj;
-                  });
-
-                  // Apply column filtering for DataPayload format
-                  const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
-                  if (columnsToHide.size > 0) {
-                    // Get indices of visible columns
-                    const visibleIndices: number[] = [];
-                    columns = allColumns.filter((col: string, idx: number) => {
-                      if (!columnsToHide.has(col)) {
-                        visibleIndices.push(idx);
-                        return true;
-                      }
-                      return false;
-                    });
-                    // Filter rows to only include visible column values
-                    rows = allRows.map((row: any[]) =>
-                      visibleIndices.map(idx => this.formatDisplayValue(row[idx], allColumns[idx]))
-                    );
-                    console.log('[AIPanel] Applied column filtering for DataPayload:', {
-                      original: allColumns.length,
-                      filtered: columns.length,
-                      hidden: columnsToHide.size,
-                      hiddenList: Array.from(columnsToHide),
-                    });
-                  } else {
-                    columns = allColumns;
-                    rows = allRows.map((row: any[]) =>
-                      row.map((val, idx) => this.formatDisplayValue(val, allColumns[idx]))
-                    );
-                  }
-                } else {
-                  // Legacy format: data is array of row objects
-                  items = stepData;
-                }
-              } else if (Array.isArray(value)) {
-                items = value;
-              }
-
-              // Skip if no data
-              if (items.length === 0 && rows.length === 0) continue;
-
-              // If we don't have columns/rows yet (legacy format), build them from items
-              if (columns.length === 0 && items.length > 0) {
-                // Get all columns from the first item
-                const allColumns = Object.keys(items[0] || {});
-
-                // Extract metadata values from the first item (for columns that are constant across rows)
-                const metadata: Record<string, any> = {};
-                if (metadataColumns.length > 0) {
-                  for (const col of metadataColumns) {
-                    if (items[0][col] !== undefined) {
-                      metadata[col] = items[0][col];
-                    }
-                  }
-                }
-
-                // Filter columns: remove metadata_columns and hidden_columns from display
-                const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
-                columns = allColumns.filter(col => !columnsToHide.has(col));
-
-                // Build rows with only visible columns
-                rows = items.map((item: any) => columns.map(col => {
-                  return this.formatDisplayValue(item[col], col);
-                }));
-              }
-
-              // Build expandable data - prefer pre-bound data from backend
-              let expandableData: any[] | undefined;
-
-              if (preBindedExpandableData && preBindedExpandableData.length > 0) {
-                // Use pre-bound expandable data from backend (v2.0 DataPayload format)
-                console.log('[AIPanel] Using pre-bound expandableData for', key, {
-                  count: preBindedExpandableData.length,
-                  sampleHasSections: !!preBindedExpandableData[0]?.result?.sections,
-                });
-                expandableData = preBindedExpandableData;
-              } else if (isExpandable && deep) {
-                // Fallback: build expandable data by looking up in deep layer (legacy)
-                console.log('[AIPanel] Building expandable data via findFrameDetail for', key, {
-                  itemCount: items.length,
-                  sampleItem: items[0],
-                  deepStructure: Object.fromEntries(
-                    Object.entries(deep).slice(0, 2).map(([k, v]) => [k, Object.keys(v as object)])
-                  ),
-                });
-
-                // IMPORTANT: Don't use .filter(Boolean) - we need to preserve array indices
-                // so that expandableData[rowIndex] matches the correct row
-                expandableData = items.map((item: any, idx: number) => {
-                  const frameId = item.frame_id || item.frameId || item.id;
-                  const sessionId = item.session_id || item.sessionId;
-                  const frameDetail = findFrameDetail(frameId, sessionId);
-
-                  // Log all frames to help diagnose expand issues
-                  if (idx < 10 || !frameDetail) {
-                    console.log(`[AIPanel] Frame ${idx}: frameId=${frameId}, sessionId=${sessionId}, found=${!!frameDetail}`);
-                    if (frameDetail) {
-                      console.log(`[AIPanel] Frame ${idx} detail:`, {
-                        hasData: !!frameDetail.data,
-                        dataType: typeof frameDetail.data,
-                        dataKeys: frameDetail.data ? Object.keys(frameDetail.data) : [],
-                      });
-                    }
-                  }
-
-                  if (frameDetail) {
-                    // Convert backend format to frontend sections format
-                    const sections = this.convertToExpandableSections(frameDetail.data);
-
-                    if (idx < 3) {
-                      console.log(`[AIPanel] Frame ${idx} sections:`, Object.keys(sections));
-                    }
-
-                    return {
-                      item: frameDetail.item || item,
-                      result: {
-                        success: true,
-                        sections,
-                      },
-                    };
-                  }
-                  // Return null but DON'T filter - preserve index alignment with rows
-                  return null;
-                });
-
-                const expandableItemCount = expandableData?.filter(Boolean).length || 0;
-                const failedIndices = expandableData?.map((d, i) => d ? null : i).filter(i => i !== null) || [];
-                console.log('[AIPanel] Expandable data built:', expandableData?.length || 0, 'slots,', expandableItemCount, 'with data');
-                if (failedIndices.length > 0 && failedIndices.length <= 10) {
-                  console.warn('[AIPanel] Failed to find deep data for frames at indices:', failedIndices);
-                } else if (failedIndices.length > 10) {
-                  console.warn('[AIPanel] Failed to find deep data for', failedIndices.length, 'frames. First 10:', failedIndices.slice(0, 10));
-                }
-              }
-
-              // Extract metadata for header display
-              const metadata: Record<string, any> = {};
-              if (metadataColumns.length > 0 && items.length > 0) {
-                for (const col of metadataColumns) {
-                  if (items[0][col] !== undefined) {
-                    metadata[col] = items[0][col];
-                  }
-                }
-              }
-
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: '',
-                timestamp: Date.now(),
-                sqlResult: {
-                  columns,
-                  rows,
-                  rowCount: rows.length,
-                  sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
-                  // Include expandableData if at least one item has data (use filter to count non-null items)
-                  expandableData: expandableData && expandableData.filter(Boolean).length > 0 ? expandableData : undefined,
-                  // Include metadata for header display (extracted fixed values like layer_name, process_name)
-                  metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-                  // Include summary report if available (from DataPayload)
-                  summaryReport: summaryReport,
-                },
-              });
-            }
-          }
-
-          // Process deep layer (L4) - detailed frame data
-          // Skip L4 display if data is already embedded in L2 expandable rows
-          // The deep layer data is used for expandable content in list tables
-          // NOTE: We no longer display L4 as standalone tables since it's
-          // now embedded as expandable data in the frame list (L2 layer)
-
-          // Show conclusion card if available (Phase 4: Root Cause Classification)
-          const conclusion = data.data.result?.conclusion || this.extractConclusionFromOverview(overview);
-          if (conclusion && conclusion.category && conclusion.category !== 'UNKNOWN') {
-            const categoryEmoji = conclusion.category === 'APP' ? '📱' :
-                                  conclusion.category === 'SYSTEM' ? '⚙️' :
-                                  conclusion.category === 'MIXED' ? '🔄' : '❓';
-            const confidencePercent = Math.round((conclusion.confidence || 0.5) * 100);
-            const confidenceBar = '█'.repeat(Math.floor(confidencePercent / 10)) + '░'.repeat(10 - Math.floor(confidencePercent / 10));
-
-            let conclusionContent = `## 🎯 分析结论\n\n`;
-            conclusionContent += `**问题分类:** ${categoryEmoji} **${this.translateCategory(conclusion.category)}**\n`;
-            conclusionContent += `**问题组件:** \`${this.translateComponent(conclusion.component)}\`\n`;
-            conclusionContent += `**置信度:** ${confidenceBar} ${confidencePercent}%\n\n`;
-            conclusionContent += `### 📋 根因分析\n${conclusion.summary}\n\n`;
-
-            if (conclusion.suggestion) {
-              conclusionContent += `### 💡 优化建议\n${conclusion.suggestion}\n\n`;
-            }
-
-            if (conclusion.evidence && Array.isArray(conclusion.evidence) && conclusion.evidence.length > 0) {
-              conclusionContent += `### 📊 证据\n`;
-              conclusion.evidence.forEach((e: string) => {
-                conclusionContent += `- ${e}\n`;
-              });
-            }
-
-            this.addMessage({
-              id: this.generateId(),
-              role: 'assistant',
-              content: conclusionContent,
-              timestamp: Date.now(),
-            });
-          }
-
-          // Show summary if available - try to parse as table if it looks like key-value pairs
-          if (data.data.summary) {
-            const summaryTableData = this.parseSummaryToTable(data.data.summary);
-            if (summaryTableData) {
-              // Display as table
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: '',
-                timestamp: Date.now(),
-                sqlResult: {
-                  columns: summaryTableData.columns,
-                  rows: summaryTableData.rows,
-                  rowCount: summaryTableData.rows.length,
-                  sectionTitle: '📝 分析摘要',
-                },
-              });
-            } else {
-              // Fallback to text display
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: `**📝 分析摘要:** ${data.data.summary}`,
-                timestamp: Date.now(),
-              });
-            }
-          }
-        }
-        break;
-
-      case 'analysis_completed':
-        // Analysis is complete - show final answer (authoritative completion event)
-        // Supports both legacy 'answer' field and agent-driven 'conclusion' field
-        console.log('[AIPanel] analysis_completed received, architecture:', data?.architecture);
-        this.state.isLoading = false;
-
-        // Guard against duplicate handling
-        if (this.state.completionHandled) {
-          console.log('[AIPanel] Completion already handled, skipping');
-          break;
-        }
-
-        // Support both 'answer' (legacy) and 'conclusion' (agent-driven)
-        const answerContent = data?.data?.answer || data?.data?.conclusion;
-
-        if (answerContent) {
-          // Mark completion as handled BEFORE modifying messages to prevent race conditions
-          this.state.completionHandled = true;
-
-          // Remove any remaining progress message
-          const lastMsg = this.state.messages[this.state.messages.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-          console.log('[AIPanel] Adding final answer message');
-
-          // Build content with agent-driven metadata if available
-          let content = answerContent;
-
-          // For agent-driven results, add hypothesis summary if available
-          const isAgentDriven = data?.architecture === 'v2-agent-driven' || data?.architecture === 'agent-driven';
-          if (isAgentDriven && data?.data?.hypotheses) {
-            const hypotheses = data.data.hypotheses;
-            const confirmed = hypotheses.filter((h: any) => h.status === 'confirmed');
-            const confidence = data.data.confidence || 0;
-
-            if (confirmed.length > 0 || confidence > 0) {
-              content += `\n\n---\n**分析元数据**\n`;
-              content += `- 置信度: ${(confidence * 100).toFixed(0)}%\n`;
-              content += `- 分析轮次: ${data.data.rounds || 1}\n`;
-              if (confirmed.length > 0) {
-                content += `- 确认假设: ${confirmed.map((h: any) => h.description).join(', ')}\n`;
-              }
-            }
-          }
-
-          const reportUrl = data.data.reportUrl;
-          if (!reportUrl && data.data.reportError) {
-            console.warn('[AIPanel] HTML report generation failed:', data.data.reportError);
-          }
-
-          // Check if conclusion was already shown by skill_layered_result handler
-          const hasConclusionAlready = this.state.messages.some(
-            m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
-          );
-
-          if (!hasConclusionAlready) {
-            // Append conclusion at the end of the conversation (after all data tables)
-            this.addMessage({
-              id: this.generateId(),
-              role: 'assistant',
-              content: content,
-              timestamp: Date.now(),
-              reportUrl: reportUrl ? `${this.state.settings.backendUrl}${reportUrl}` : undefined,
-            });
-          } else if (reportUrl) {
-            // Conclusion already shown, but attach reportUrl to existing conclusion message
-            const conclusionMsg = this.state.messages.find(
-              m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
-            );
-            if (conclusionMsg) {
-              conclusionMsg.reportUrl = `${this.state.settings.backendUrl}${reportUrl}`;
-              this.saveHistory();
-              this.saveCurrentSession();
-            }
-          }
-
-          // Show error summary if there were any non-fatal errors during analysis
-          if (this.state.collectedErrors.length > 0) {
-            this.showErrorSummary();
-          }
-        } else {
-          console.warn('[AIPanel] No answer/conclusion in analysis_completed event!');
-          // Still show error summary even if no answer
-          if (this.state.collectedErrors.length > 0) {
-            this.showErrorSummary();
-          }
-        }
-        break;
-
-      case 'thought':
-        // Agent thinking process (Planner or Evaluator)
-        // Skip detailed thought messages to reduce noise - only show a brief progress indicator
-        // The actual results are shown via skill_data and analysis_completed events
-        console.log(`[AIPanel] Skipping thought display:`, data?.data?.agent);
-        break;
-
-      case 'worker_thought':
-        // Worker skill execution progress
-        // Skip all worker_thought messages to reduce noise - the skill_data/skill_layered_result
-        // already provides the actual data in a more useful format (tables)
-        console.log(`[AIPanel] Skipping worker_thought display (data shown via skill_data):`, data?.data?.step);
-        break;
-
-      case 'data':
-        // v2.0 DataEnvelope format - unified data event
-        // Handle both single envelope and array of envelopes
-        if (data) {
-          console.log('[AIPanel] v2.0 data event received:', data.id, data.envelope);
-
-          const envelopes: DataEnvelope[] = Array.isArray(data.envelope)
-            ? data.envelope
-            : [data.envelope];
-
-          for (const envelope of envelopes) {
-            if (!isDataEnvelope(envelope)) {
-              console.warn('[AIPanel] Invalid DataEnvelope:', envelope);
-              continue;
-            }
-
-            // Generate deduplication key
-            // Use meta.source so repeated executions (e.g. per-session deep dives) can be displayed independently.
-            const deduplicationKey = envelope.meta.source ||
-              `${envelope.meta.skillId || 'unknown'}:${envelope.meta.stepId || 'unknown'}`;
-
-            // Check for duplicates
-            if (this.state.displayedSkillProgress.has(deduplicationKey)) {
-              console.log('[AIPanel] Skipping duplicate data envelope:', deduplicationKey);
-              continue;
-            }
-            this.state.displayedSkillProgress.add(deduplicationKey);
-
-            // Remove previous progress message
-            const lastMsg = this.state.messages[this.state.messages.length - 1];
-            if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content.startsWith('⏳')) {
-              this.state.messages.pop();
-            }
-
-            // Render based on display.format
-            const format = envelope.display.format || 'table';
-            const payload = envelope.data as DataPayload;
-            const title = envelope.display.title;
-
-            switch (format) {
-              case 'text':
-                // Render text content as markdown
-                if (payload.text) {
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: `**${title}**\n\n${payload.text}`,
-                    timestamp: Date.now(),
-                  });
-                }
-                break;
-
-              case 'summary':
-                // Render summary card with optional metrics
-                if (payload.summary) {
-                  let summaryContent = `## 📊 ${payload.summary.title || title}\n\n`;
-                  summaryContent += payload.summary.content + '\n';
-
-                  // Add metrics if available
-                  if (payload.summary.metrics && payload.summary.metrics.length > 0) {
-                    summaryContent += '\n### 关键指标\n\n';
-                    for (const metric of payload.summary.metrics) {
-                      const icon = metric.severity === 'critical' ? '🔴' :
-                                   metric.severity === 'warning' ? '🟡' : '🟢';
-                      const unit = metric.unit || '';
-                      summaryContent += `${icon} **${metric.label}:** ${metric.value}${unit}\n`;
-                    }
-                  }
-
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: summaryContent,
-                    timestamp: Date.now(),
-                  });
-                }
-                break;
-
-              case 'metric':
-                // Render as metric card (similar to summary but more compact)
-                if (payload.summary && payload.summary.metrics) {
-                  let metricContent = `### 📈 ${title}\n\n`;
-                  for (const metric of payload.summary.metrics) {
-                    const icon = metric.severity === 'critical' ? '🔴' :
-                                 metric.severity === 'warning' ? '🟡' : '🟢';
-                    const unit = metric.unit || '';
-                    metricContent += `| ${icon} ${metric.label} | **${metric.value}${unit}** |\n`;
-                  }
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: metricContent,
-                    timestamp: Date.now(),
-                  });
-                }
-                break;
-
-              case 'chart':
-                // Chart format - placeholder for now, show chart config info
-                if (payload.chart) {
-                  const chartConfig = payload.chart;
-                  let chartContent = `### 📉 ${title}\n\n`;
-                  chartContent += `**图表类型:** ${chartConfig.type}\n\n`;
-                  chartContent += `*[图表渲染暂未实现，数据已记录]*\n`;
-                  // TODO: Integrate with chart visualization library
-                  console.log('[AIPanel] Chart data received:', chartConfig);
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: chartContent,
-                    timestamp: Date.now(),
-                  });
-                }
-                break;
-
-              case 'timeline':
-                // Timeline format - placeholder for now
-                let timelineContent = `### ⏱️ ${title}\n\n`;
-                timelineContent += `*[时间线渲染暂未实现]*\n`;
-                // TODO: Integrate with Perfetto timeline visualization
-                this.addMessage({
-                  id: this.generateId(),
-                  role: 'assistant',
-                  content: timelineContent,
-                  timestamp: Date.now(),
-                });
-                break;
-
-              case 'table':
-              default:
-                // Default: render as table using existing SqlQueryResult logic
-                const rawResult = envelopeToSqlQueryResult(envelope);
-
-                // Filter hidden columns from column definitions (v2.0)
-                // This mirrors the logic in skill_layered_result handling
-                let filteredColumns = rawResult.columns;
-                let filteredRows = rawResult.rows;
-                let filteredColumnDefs = rawResult.columnDefinitions;
-
-                if (rawResult.columnDefinitions && Array.isArray(rawResult.columnDefinitions)) {
-                  // Extract hidden columns and metadata fields
-                  const hiddenFromDefs = rawResult.columnDefinitions
-                    .filter((c: any) => c.hidden === true)
-                    .map((c: any) => c.name);
-                  const metadataFields = envelope.display.metadataFields || [];
-                  const columnsToHide = new Set([...hiddenFromDefs, ...metadataFields]);
-
-                  if (columnsToHide.size > 0 && rawResult.columns.length > 0) {
-                    // Get indices of visible columns
-                    const visibleIndices: number[] = [];
-                    filteredColumns = rawResult.columns.filter((col: string, idx: number) => {
-                      if (!columnsToHide.has(col)) {
-                        visibleIndices.push(idx);
-                        return true;
-                      }
-                      return false;
-                    });
-
-                    // Filter rows to only include visible column values
-                    filteredRows = rawResult.rows.map((row: any[]) =>
-                      visibleIndices.map(idx => row[idx])
-                    );
-
-                    // Filter column definitions to only include visible columns
-                    filteredColumnDefs = rawResult.columnDefinitions.filter(
-                      (def: any) => !columnsToHide.has(def.name)
-                    );
-
-                    console.log('[AIPanel] DataEnvelope column filtering applied:', {
-                      original: rawResult.columns.length,
-                      filtered: filteredColumns.length,
-                      hidden: columnsToHide.size,
-                      hiddenList: Array.from(columnsToHide),
-                    });
-                  }
-                }
-
-                const sqlResult = {
-                  ...rawResult,
-                  columns: filteredColumns,
-                  rows: filteredRows,
-                  rowCount: filteredRows.length,
-                  columnDefinitions: filteredColumnDefs,
-                };
-
-                // Only add message if there are actual data rows (skip empty tables)
-                if (sqlResult.rowCount > 0) {
-                  this.addMessage({
-                    id: this.generateId(),
-                    role: 'assistant',
-                    content: '',  // Title is in the table header
-                    timestamp: Date.now(),
-                    sqlResult: {
-                      ...sqlResult,
-                      sectionTitle: title,
-                      // Pass grouping/collapse metadata from DataEnvelope
-                      group: envelope.display.group,
-                      collapsible: envelope.display.collapsible,
-                      defaultCollapsed: envelope.display.defaultCollapsed,
-                      maxVisibleRows: envelope.display.maxVisibleRows,
-                    },
-                  });
-                }
-                break;
-            }
-          }
-          m.redraw();
-        }
-        break;
-
-      case 'skill_data':
-        // ⚠️ DEPRECATED: skill_data format is deprecated, use skill_layered_result instead
-        // This handler provides backward compatibility but will be removed in v3.0
-        console.warn('[AIPanel] ⚠️ DEPRECATED: skill_data event received. ' +
-          'Backend should emit skill_layered_result instead. ' +
-          'skill_data support will be removed in v3.0');
-
-        if (data?.data) {
-          console.log('[AIPanel] Converting legacy skill_data to skill_layered_result:', data.data);
-
-          // Transform to skill_layered_result format
-          const transformedData = {
-            data: {
-              skillId: data.data.skillId,
-              skillName: data.data.skillName,
-              layers: data.data.layers,
-              diagnostics: data.data.diagnostics,
-            },
-          };
-
-          // Delegate to skill_layered_result handler
-          this.handleSSEEvent('skill_layered_result', transformedData);
-        }
-        break;
-
-      case 'finding':
-        // Analysis finding - skip display to reduce noise
-        // The actual data is already shown in skill_data tables (L2 layer)
-        // Findings are also included in the final analysis_completed answer
-        console.log(`[AIPanel] Skipping finding display (data shown in tables):`, data?.data?.stage);
-        break;
-
-      case 'finding_DISABLED':
-        // DISABLED: Original finding display code kept for reference
-        // Analysis finding with clickable timestamps
-        if (data?.data) {
-          const { stage, findings } = data.data;
-
-          if (!findings || findings.length === 0) break;
-
-          // Build finding message with clickable timestamps
-          let content = `## 🔍 发现 (${stage || '分析'})\n\n`;
-
-          // Collect findings that have table data for separate rendering
-          const findingsWithTables: any[] = [];
-
-          for (const finding of findings) {
-            const severityEmoji: Record<string, string> = {
-              critical: '🔴',
-              high: '🟠',
-              warning: '🟡',
-              medium: '🟡',
-              info: '🔵',
-              low: '🟢',
-            };
-            const emoji = severityEmoji[finding.severity] || '⚪';
-
-            content += `### ${emoji} ${finding.title}\n`;
-
-            // Check if this finding has structured table data
-            if (finding.details?.tableData && Array.isArray(finding.details.tableData)) {
-              // Don't include the raw description, we'll show a table instead
-              content += `_(详见下方表格)_\n\n`;
-              findingsWithTables.push({
-                title: finding.details.tableTitle || finding.title,
-                data: finding.details.tableData,
-                emoji,
-              });
-            } else {
-              content += `${finding.description}\n\n`;
-            }
-
-            // Add clickable timestamps
-            if (finding.timestampsNs && finding.timestampsNs.length > 0) {
-              content += `**时间点** (点击跳转):\n`;
-              finding.timestampsNs.slice(0, 5).forEach((ts: number) => {
-                const label = this.formatTimestampForDisplay(ts);
-                content += `- @ts[${ts}|${label}]\n`;
-              });
-              if (finding.timestampsNs.length > 5) {
-                content += `- _...还有 ${finding.timestampsNs.length - 5} 个时间点_\n`;
-              }
-              content += '\n';
-            }
-
-            // Add recommendations
-            if (finding.recommendations && finding.recommendations.length > 0) {
-              content += `**优化建议**:\n`;
-              finding.recommendations.forEach((rec: any) => {
-                content += `- ${rec.text || rec}\n`;
-              });
-              content += '\n';
-            }
-          }
-
-          // First add the text message
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content,
-            timestamp: Date.now(),
-          });
-
-          // Then add table messages for findings with structured data
-          for (const tableInfo of findingsWithTables) {
-            const firstRow = tableInfo.data[0];
-            if (firstRow && typeof firstRow === 'object') {
-              const columns = Object.keys(firstRow).filter(k => !k.startsWith('_'));
-              const rows = tableInfo.data.map((item: any) =>
-                columns.map(col => this.formatDisplayValue(item[col], col))
-              );
-
-              this.addMessage({
-                id: this.generateId(),
-                role: 'assistant',
-                content: '',
-                timestamp: Date.now(),
-                sqlResult: {
-                  columns,
-                  rows,
-                  rowCount: rows.length,
-                  sectionTitle: `${tableInfo.emoji} ${tableInfo.title}`,
-                },
-              });
-            }
-          }
-        }
-        break;
-
-      // =========================================================================
-      // Agent-Driven Architecture Events (Phase 5)
-      // =========================================================================
-
-      case 'hypothesis_generated':
-        // Initial hypotheses created by AI
-        if (data?.data?.hypotheses && Array.isArray(data.data.hypotheses)) {
-          const hypotheses = data.data.hypotheses;
-          // Remove previous progress message
-          const lastMsgHypo = this.state.messages[this.state.messages.length - 1];
-          if (lastMsgHypo && lastMsgHypo.role === 'assistant' && lastMsgHypo.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-
-          // Fix: 减少不必要的换行，避免产生大量 <br> 导致空白过大
-          let content = `### 🧪 生成了 ${hypotheses.length} 个分析假设\n`;
-          for (let i = 0; i < hypotheses.length; i++) {
-            const h = hypotheses[i];
-            content += `${i + 1}. ${h}\n`;
-          }
-          content += '\n_AI 将验证这些假设..._';
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case 'round_start':
-        // Analysis round started
-        if (data?.data) {
-          const round = data.data.round || 1;
-          const maxRounds = data.data.maxRounds || 5;
-          const message = data.data.message || `分析轮次 ${round}`;
-
-          // Remove previous progress message
-          const lastMsgRound = this.state.messages[this.state.messages.length - 1];
-          if (lastMsgRound && lastMsgRound.role === 'assistant' && lastMsgRound.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `⏳ 🔄 ${message} (${round}/${maxRounds})`,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case 'agent_task_dispatched':
-        // Tasks sent to domain agents
-        if (data?.data) {
-          const taskCount = data.data.taskCount || 0;
-          const agents = data.data.agents || [];
-          const message = data.data.message || `派发 ${taskCount} 个任务`;
-
-          // Remove previous progress message
-          const lastMsgTask = this.state.messages[this.state.messages.length - 1];
-          if (lastMsgTask && lastMsgTask.role === 'assistant' && lastMsgTask.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-
-          let content = `⏳ 🤖 ${message}`;
-          if (agents.length > 0) {
-            content += `\n\n派发给: ${agents.map((a: string) => `\`${a}\``).join(', ')}`;
-          }
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case 'agent_dialogue':
-        // Agent communication event (task dispatch or inter-agent query)
-        // These are tracked internally but not always shown to reduce noise
-        console.log('[AIPanel] Agent dialogue event:', data?.data);
-        break;
-
-      case 'agent_response':
-        // Agent completed task
-        if (data?.data) {
-          const agentId = data.data.agentId || 'unknown';
-          console.log(`[AIPanel] Agent ${agentId} completed task`);
-          // Don't add message for every agent response - wait for synthesis
-        }
-        break;
-
-      case 'synthesis_complete':
-        // Feedback synthesis complete
-        if (data?.data) {
-          const confirmedFindings = data.data.confirmedFindings || 0;
-          const updatedHypotheses = data.data.updatedHypotheses || 0;
-          const message = data.data.message || '综合分析结果';
-
-          // Remove previous progress message
-          const lastMsgSynth = this.state.messages[this.state.messages.length - 1];
-          if (lastMsgSynth && lastMsgSynth.role === 'assistant' && lastMsgSynth.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `⏳ 📝 ${message}\n\n确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case 'strategy_decision':
-        // Next iteration strategy decided
-        if (data?.data) {
-          const strategy = data.data.strategy || 'continue';
-          const confidence = data.data.confidence || 0;
-          const message = data.data.message || `策略: ${strategy}`;
-
-          // Remove previous progress message
-          const lastMsgStrat = this.state.messages[this.state.messages.length - 1];
-          if (lastMsgStrat && lastMsgStrat.role === 'assistant' && lastMsgStrat.content.startsWith('⏳')) {
-            this.state.messages.pop();
-          }
-
-          const strategyEmoji = strategy === 'conclude' ? '✅' :
-                               strategy === 'deep_dive' ? '🔍' :
-                               strategy === 'pivot' ? '↩️' : '➡️';
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `⏳ ${strategyEmoji} ${message} (置信度: ${(confidence * 100).toFixed(0)}%)`,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      // =========================================================================
-      // End Agent-Driven Events
-      // =========================================================================
-
-      case 'conclusion':
-        // Final conclusion from analysis (first event in completion sequence)
-        // Note: analysis_completed event follows with more info (reportUrl), so we skip adding message here
-        // and let analysis_completed handle the final message display
-        console.log('[AIPanel] CONCLUSION event received - skipping message add (waiting for analysis_completed)');
-        // Don't set isLoading = false yet, wait for analysis_completed
-        break;
-
-      case 'error':
-        // Fatal error occurred - stop loading and show error
-        this.state.isLoading = false;
-        if (data?.data?.error) {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `**错误:** ${data.data.error}`,
-            timestamp: Date.now(),
-          });
-        }
-        // Show collected errors summary if any
-        if (this.state.collectedErrors.length > 0) {
-          this.showErrorSummary();
-        }
-        break;
-
-      case 'skill_error':
-        // Non-fatal skill execution error - collect for summary
-        // These errors don't stop the analysis, but should be shown at the end
-        if (data) {
-          const errorInfo = {
-            skillId: data.skillId || 'unknown',
-            stepId: data.data?.stepId,
-            error: data.data?.error || 'Unknown error',
-            timestamp: Date.now(),
-          };
-          console.log('[AIPanel] Skill error collected:', errorInfo);
-          this.state.collectedErrors.push(errorInfo);
-        }
-        break;
-
-      case 'end':
-        // Stream ended
-        this.state.isLoading = false;
-        break;
-    }
-
-    // Trigger redraw after handling each event
-    m.redraw();
-  }
-
-  /**
-   * Show a summary of all collected errors from the analysis
-   * Called after analysis_completed or error events
-   */
-  private showErrorSummary(): void {
-    if (this.state.collectedErrors.length === 0) {
-      return;
-    }
-
-    // Group errors by skillId
-    const errorsBySkill = new Map<string, Array<{ stepId?: string; error: string }>>();
-    for (const err of this.state.collectedErrors) {
-      if (!errorsBySkill.has(err.skillId)) {
-        errorsBySkill.set(err.skillId, []);
-      }
-      errorsBySkill.get(err.skillId)!.push({ stepId: err.stepId, error: err.error });
-    }
-
-    let summaryContent = `### ⚠️ 分析过程中遇到 ${this.state.collectedErrors.length} 个错误\n\n`;
-
-    // Group and format errors
-    for (const [skillId, errors] of errorsBySkill) {
-      summaryContent += `**Skill: ${skillId}**\n`;
-      for (const err of errors) {
-        const stepInfo = err.stepId ? ` (step: ${err.stepId})` : '';
-        summaryContent += `- ${err.error}${stepInfo}\n`;
-      }
-      summaryContent += '\n';
-    }
-
-    summaryContent += `\n*这些错误不影响其他分析结果的展示，但可能导致部分数据缺失。*`;
-
-    this.addMessage({
-      id: this.generateId(),
-      role: 'assistant',
-      content: summaryContent,
-      timestamp: Date.now(),
-    });
-
-    // Clear collected errors after showing summary
-    this.state.collectedErrors = [];
-  }
 
   /**
    * Handle /teaching-pipeline command
@@ -4155,7 +2473,7 @@ Keep your analysis concise and actionable.`;
       if (teaching.mermaidBlocks && teaching.mermaidBlocks.length > 0) {
         content += `#### 时序图\n\n`;
         const mermaidCode = teaching.mermaidBlocks[0];
-        const b64 = this.encodeBase64Unicode(mermaidCode);
+        const b64 = encodeBase64Unicode(mermaidCode);
 
         // Diagram placeholder - rendered on the client by mermaid.js
         content += `<div class="ai-mermaid-block">`;
@@ -4188,7 +2506,7 @@ Keep your analysis concise and actionable.`;
 
       // Auto-pin relevant tracks with v3 smart pinning
       if (pinInstructions.length > 0 && this.trace) {
-        this.pinTracksFromInstructions(pinInstructions, activeRenderingProcesses);
+        await this.pinTracksFromInstructions(pinInstructions, activeRenderingProcesses);
       }
 
     } catch (error: any) {
@@ -4205,12 +2523,529 @@ Keep your analysis concise and actionable.`;
     m.redraw();
   }
 
+  // =============================================================================
+  // Scene Reconstruction Types and Mappings
+  // =============================================================================
+
+  /**
+   * Scene category type matching backend's SceneCategory
+   */
+  private static readonly SCENE_DISPLAY_NAMES: Record<string, string> = {
+    'cold_start': '冷启动',
+    'warm_start': '温启动',
+    'hot_start': '热启动',
+    'scroll': '滑动浏览',
+    'navigation': '页面跳转',
+    'app_switch': '应用切换',
+    'screen_unlock': '解锁屏幕',
+    'notification': '通知操作',
+    'split_screen': '分屏操作',
+    'tap': '点击',
+    'long_press': '长按',
+    'idle': '空闲',
+  };
+
+  /**
+   * Scene-to-pin mapping for auto-pinning relevant tracks based on scene type
+   */
+  private static readonly SCENE_PIN_MAPPING: Record<string, Array<{
+    pattern: string;
+    matchBy: string;
+    priority: number;
+    reason: string;
+    expand?: boolean;
+    mainThreadOnly?: boolean;
+    smartPin?: boolean;
+  }>> = {
+    'scroll': [
+      { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
+      { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
+      { pattern: '^BufferTX', matchBy: 'name', priority: 3, reason: '缓冲区', smartPin: true },
+    ],
+    'cold_start': [
+      { pattern: '^main$', matchBy: 'name', priority: 1, reason: '主线程', smartPin: true, mainThreadOnly: true },
+      { pattern: 'ActivityManager', matchBy: 'name', priority: 2, reason: '活动管理' },
+      { pattern: 'Zygote', matchBy: 'name', priority: 3, reason: '进程创建' },
+    ],
+    'warm_start': [
+      { pattern: '^main$', matchBy: 'name', priority: 1, reason: '主线程', smartPin: true, mainThreadOnly: true },
+      { pattern: 'ActivityManager', matchBy: 'name', priority: 2, reason: '活动管理' },
+    ],
+    'hot_start': [
+      { pattern: '^main$', matchBy: 'name', priority: 1, reason: '主线程', smartPin: true, mainThreadOnly: true },
+    ],
+    'tap': [
+      { pattern: '^main$', matchBy: 'name', priority: 1, reason: '主线程', smartPin: true, mainThreadOnly: true },
+      { pattern: '^RenderThread$', matchBy: 'name', priority: 2, reason: '渲染响应', smartPin: true },
+    ],
+    'navigation': [
+      { pattern: '^main$', matchBy: 'name', priority: 1, reason: '主线程', smartPin: true, mainThreadOnly: true },
+      { pattern: '^RenderThread$', matchBy: 'name', priority: 2, reason: '渲染线程', smartPin: true },
+    ],
+    'app_switch': [
+      { pattern: 'ActivityManager', matchBy: 'name', priority: 1, reason: '活动管理' },
+      { pattern: 'WindowManager', matchBy: 'name', priority: 2, reason: '窗口管理' },
+    ],
+  };
+
+  /**
+   * Performance rating thresholds for scenes
+   */
+  private static readonly SCENE_THRESHOLDS: Record<string, { good: number; acceptable: number }> = {
+    'cold_start': { good: 500, acceptable: 1000 },
+    'warm_start': { good: 300, acceptable: 600 },
+    'hot_start': { good: 100, acceptable: 200 },
+    'scroll_fps': { good: 55, acceptable: 45 },
+    'tap': { good: 100, acceptable: 200 },
+    'navigation': { good: 300, acceptable: 500 },
+  };
+
+  /**
+   * Get performance rating emoji based on scene type and duration
+   */
+  private getScenePerformanceRating(sceneType: string, durationMs: number, metadata?: Record<string, any>): string {
+    // For scroll, check FPS instead of duration
+    if (sceneType === 'scroll' && metadata?.averageFps !== undefined) {
+      const fps = metadata.averageFps;
+      const thresholds = AIPanel.SCENE_THRESHOLDS['scroll_fps'];
+      if (fps >= thresholds.good) return '🟢';
+      if (fps >= thresholds.acceptable) return '🟡';
+      return '🔴';
+    }
+
+    // For other scenes, check duration
+    const thresholds = AIPanel.SCENE_THRESHOLDS[sceneType];
+    if (!thresholds) return '⚪'; // Unknown scene type
+
+    if (durationMs <= thresholds.good) return '🟢';
+    if (durationMs <= thresholds.acceptable) return '🟡';
+    return '🔴';
+  }
+
+  // =============================================================================
+  // Scene Reconstruction Command Handler
+  // =============================================================================
+
+  /**
+   * Handle /scene command
+   * Detects user operation scenes in the trace and provides performance analysis
+   */
+  private async handleSceneReconstructCommand() {
+    if (!this.state.backendTraceId) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: '⚠️ **无法执行场景还原**\n\n请先确保 Trace 已上传到后端。',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    this.state.isLoading = true;
+    m.redraw();
+
+    // Add initial progress message
+    const progressMessageId = this.generateId();
+    this.addMessage({
+      id: progressMessageId,
+      role: 'assistant',
+      content: '🎬 **场景还原中...**\n\n正在分析 Trace 中的用户操作场景...',
+      timestamp: Date.now(),
+    });
+
+    console.log('[AIPanel] Scene reconstruction request with traceId:', this.state.backendTraceId);
+
+    try {
+      // Start scene reconstruction
+      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/scene-reconstruct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          traceId: this.state.backendTraceId,
+          options: {
+            deepAnalysis: true,
+            generateTracks: true,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        try {
+          const errorData = await response.json();
+          console.error('[AIPanel] Scene reconstruction error response:', errorData);
+          throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+        } catch (parseErr) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      }
+
+      const data = await response.json();
+      if (!data.success || !data.analysisId) {
+        throw new Error(data.error || 'Failed to start scene reconstruction');
+      }
+
+      const analysisId = data.analysisId;
+      console.log('[AIPanel] Scene reconstruction started with analysisId:', analysisId);
+
+      // Connect to SSE for real-time updates
+      await this.connectToSceneSSE(analysisId, progressMessageId);
+
+    } catch (error: any) {
+      console.error('[AIPanel] Scene reconstruction error:', error);
+      // Update the progress message with error
+      this.updateMessage(progressMessageId, {
+        content: `❌ **场景还原失败**\n\n${error.message || '未知错误'}`,
+      });
+    }
+
+    this.state.isLoading = false;
+    m.redraw();
+  }
+
+  /**
+   * Connect to SSE endpoint for scene reconstruction updates
+   */
+  private async connectToSceneSSE(analysisId: string, progressMessageId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const eventSource = new EventSource(
+        `${this.state.settings.backendUrl}/api/agent/scene-reconstruct/${analysisId}/stream`
+      );
+
+      let scenes: any[] = [];
+      let trackEvents: any[] = [];
+      let narrative = '';
+      let findings: any[] = [];
+
+      eventSource.onopen = () => {
+        console.log('[AIPanel] Scene SSE connected');
+      };
+
+      eventSource.onerror = (error) => {
+        console.error('[AIPanel] Scene SSE error:', error);
+        eventSource.close();
+        reject(new Error('SSE connection failed'));
+      };
+
+      // Handle different event types
+      eventSource.addEventListener('connected', () => {
+        console.log('[AIPanel] Scene SSE: connected event received');
+      });
+
+      eventSource.addEventListener('phase_start', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[AIPanel] Scene phase start:', data);
+          this.updateMessage(progressMessageId, {
+            content: `🎬 **场景还原中...**\n\n${data.phase || '正在分析'}...`,
+          });
+          m.redraw();
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse phase_start event:', e);
+        }
+      });
+
+      eventSource.addEventListener('scene_detected', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[AIPanel] Scene detected:', data);
+          if (data.scene) {
+            scenes.push(data.scene);
+          }
+          this.updateMessage(progressMessageId, {
+            content: `🎬 **场景还原中...**\n\n已检测到 ${scenes.length} 个场景...`,
+          });
+          m.redraw();
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse scene_detected event:', e);
+        }
+      });
+
+      eventSource.addEventListener('finding', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[AIPanel] Scene finding:', data);
+          if (data.finding) {
+            findings.push(data.finding);
+          }
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse finding event:', e);
+        }
+      });
+
+      eventSource.addEventListener('track_events', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[AIPanel] Track events:', data);
+          if (Array.isArray(data.events)) {
+            trackEvents = data.events;
+          }
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse track_events:', e);
+        }
+      });
+
+      eventSource.addEventListener('result', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[AIPanel] Scene result:', data);
+          if (data.scenes) scenes = data.scenes;
+          if (data.trackEvents) trackEvents = data.trackEvents;
+          if (data.narrative) narrative = data.narrative;
+          if (data.findings) findings = data.findings;
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse result event:', e);
+        }
+      });
+
+      eventSource.addEventListener('end', () => {
+        console.log('[AIPanel] Scene SSE: end event received');
+        eventSource.close();
+
+        // Render the final result
+        this.renderSceneReconstructionResult(progressMessageId, scenes, trackEvents, narrative, findings);
+
+        // Auto-pin tracks based on detected scenes
+        this.autoPinTracksForScenes(scenes);
+
+        resolve();
+      });
+
+      eventSource.addEventListener('error', (event) => {
+        try {
+          const data = JSON.parse((event as any).data || '{}');
+          console.error('[AIPanel] Scene SSE error event:', data);
+          eventSource.close();
+          reject(new Error(data.error || 'Scene reconstruction failed'));
+        } catch (e) {
+          // Not a data event, might be connection error
+          eventSource.close();
+          reject(new Error('Scene reconstruction connection failed'));
+        }
+      });
+
+      // Timeout after 5 minutes
+      setTimeout(() => {
+        if (eventSource.readyState !== EventSource.CLOSED) {
+          console.warn('[AIPanel] Scene SSE timeout');
+          eventSource.close();
+          reject(new Error('Scene reconstruction timeout'));
+        }
+      }, 5 * 60 * 1000);
+    });
+  }
+
+  /**
+   * Render the scene reconstruction result
+   */
+  private renderSceneReconstructionResult(
+    messageId: string,
+    scenes: any[],
+    _trackEvents: any[],
+    narrative: string,
+    findings: any[]
+  ) {
+    if (scenes.length === 0) {
+      this.updateMessage(messageId, {
+        content: '🎬 **场景还原完成**\n\n未检测到明显的用户操作场景。',
+      });
+      m.redraw();
+      return;
+    }
+
+    // Build scene cards content
+    let content = '## 🎬 场景还原结果\n\n';
+
+    // Scene summary
+    content += `共检测到 **${scenes.length}** 个操作场景：\n\n`;
+
+    // Scene timeline as a table
+    content += '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 评级 |\n';
+    content += '|------|------|----------|------|-----------|------|\n';
+
+    scenes.forEach((scene, index) => {
+      const displayName = AIPanel.SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+      const rating = this.getScenePerformanceRating(scene.type, scene.durationMs, scene.metadata);
+      const durationStr = scene.durationMs >= 1000
+        ? `${(scene.durationMs / 1000).toFixed(2)}s`
+        : `${scene.durationMs.toFixed(0)}ms`;
+      const appInfo = scene.appPackage
+        ? (scene.activityName ? `${scene.appPackage}/${scene.activityName}` : scene.appPackage)
+        : '-';
+
+      // Make start timestamp clickable for navigation
+      const startTsNs = scene.startTs;
+      content += `| ${index + 1} | ${displayName} | `;
+      content += `<span class="clickable-ts" data-ts="${startTsNs}">${this.formatSceneTimestamp(startTsNs)}</span> | `;
+      content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${rating} |\n`;
+    });
+
+    // Add narrative if available
+    if (narrative) {
+      content += `\n---\n\n### 📝 场景描述\n\n${narrative}\n`;
+    }
+
+    // Add key findings
+    if (findings && findings.length > 0) {
+      content += `\n---\n\n### 🔍 关键发现\n\n`;
+      const criticalFindings = findings.filter((f: any) => f.severity === 'critical' || f.severity === 'warning');
+      if (criticalFindings.length > 0) {
+        criticalFindings.slice(0, 5).forEach((finding: any) => {
+          const icon = finding.severity === 'critical' ? '🔴' : '🟡';
+          content += `- ${icon} ${finding.message || finding.summary || finding.description}\n`;
+        });
+      } else {
+        content += '未发现明显性能问题。\n';
+      }
+    }
+
+    // Add navigation tips
+    content += `\n---\n\n💡 **提示**: 点击时间戳可跳转到对应位置，关键泳道已自动 Pin 到顶部。`;
+
+    this.updateMessage(messageId, { content });
+    m.redraw();
+  }
+
+  /**
+   * Auto-pin tracks based on detected scene types
+   */
+  private async autoPinTracksForScenes(scenes: any[]) {
+    if (!this.trace || scenes.length === 0) return;
+
+    // Collect unique scene types
+    const sceneTypes = new Set(scenes.map(s => s.type));
+
+    // Collect pin instructions for all detected scene types
+    const allInstructions: Array<{
+      pattern: string;
+      matchBy: string;
+      priority: number;
+      reason: string;
+      expand?: boolean;
+      mainThreadOnly?: boolean;
+      smartPin?: boolean;
+    }> = [];
+
+    sceneTypes.forEach(sceneType => {
+      const instructions = AIPanel.SCENE_PIN_MAPPING[sceneType];
+      if (instructions) {
+        instructions.forEach(inst => {
+          // Avoid duplicates
+          if (!allInstructions.some(i => i.pattern === inst.pattern)) {
+            allInstructions.push(inst);
+          }
+        });
+      }
+    });
+
+    if (allInstructions.length === 0) return;
+
+    // Get active processes from scenes
+    const activeProcesses = scenes
+      .filter(s => s.appPackage)
+      .map(s => ({ processName: s.appPackage, frameCount: 1 }));
+
+    console.log('[AIPanel] Auto-pinning tracks for scenes:', sceneTypes, 'with', allInstructions.length, 'instructions');
+
+    // Use existing pinTracksFromInstructions method
+    await this.pinTracksFromInstructions(allInstructions, activeProcesses);
+  }
+
+  /**
+   * Format scene timestamp for display (ns string to human readable)
+   * Handles BigInt string timestamps from scene reconstruction
+   */
+  private formatSceneTimestamp(tsNs: string): string {
+    try {
+      const ns = BigInt(tsNs);
+      const ms = Number(ns / BigInt(1000000));
+      const seconds = ms / 1000;
+      if (seconds < 60) {
+        return `${seconds.toFixed(3)}s`;
+      }
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      return `${minutes}m ${remainingSeconds.toFixed(3)}s`;
+    } catch {
+      return tsNs;
+    }
+  }
+
+  /**
+   * Update an existing message by ID
+   */
+  private updateMessage(messageId: string, updates: Partial<Message>) {
+    const index = this.state.messages.findIndex(m => m.id === messageId);
+    if (index !== -1) {
+      this.state.messages[index] = {
+        ...this.state.messages[index],
+        ...updates,
+      };
+    }
+  }
+
+  // =============================================================================
+  // Quick Scene Detection (for navigation bar)
+  // =============================================================================
+
+  /**
+   * Perform quick scene detection for the navigation bar
+   * Called automatically when trace loads and manually on refresh
+   */
+  private async detectScenesQuick() {
+    if (!this.state.backendTraceId) {
+      console.log('[AIPanel] No backend trace ID, skipping quick scene detection');
+      return;
+    }
+
+    if (this.state.scenesLoading) {
+      console.log('[AIPanel] Scene detection already in progress');
+      return;
+    }
+
+    this.state.scenesLoading = true;
+    this.state.scenesError = null;
+    m.redraw();
+
+    console.log('[AIPanel] Starting quick scene detection for trace:', this.state.backendTraceId);
+
+    try {
+      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/scene-detect-quick`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          traceId: this.state.backendTraceId,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Quick scene detection failed');
+      }
+
+      this.state.detectedScenes = data.scenes || [];
+      console.log('[AIPanel] Quick scene detection complete:', this.state.detectedScenes.length, 'scenes');
+
+    } catch (error: any) {
+      console.warn('[AIPanel] Quick scene detection failed:', error.message);
+      this.state.scenesError = error.message;
+      this.state.detectedScenes = [];
+    }
+
+    this.state.scenesLoading = false;
+    m.redraw();
+  }
+
   /**
    * Pin tracks based on pin instructions from the teaching pipeline API
    * v3 Enhancement: Uses activeRenderingProcesses to only pin RenderThreads from active processes
    * v4 Enhancement: Uses mainThreadOnly to only pin main thread tracks (checks track.chips)
    */
-  private pinTracksFromInstructions(
+  private async pinTracksFromInstructions(
     instructions: Array<{
       pattern: string;
       matchBy: string;
@@ -4237,13 +3072,92 @@ Keep your analysis concise and actionable.`;
 
     // Build set of active process names for smart filtering
     const activeProcessNames = new Set(activeRenderingProcesses.map(p => p.processName));
+    const activeProcessNamesList = Array.from(activeProcessNames);
+
+    const trackActivityCountCache = new Map<string, number>();
+
+    const isCounterOrSliceTrack = (
+      uri: string,
+      kind: 'CounterTrack' | 'SliceTrack' | 'ThreadStateTrack',
+    ): boolean => {
+      const track = this.trace?.tracks.getTrack(uri);
+      return Boolean(track?.tags?.kinds?.includes(kind));
+    };
+
+    // Check if track is suitable for main thread pinning (SliceTrack or ThreadStateTrack)
+    const isMainThreadPinnableTrack = (uri: string): boolean => {
+      return isCounterOrSliceTrack(uri, 'SliceTrack') ||
+             isCounterOrSliceTrack(uri, 'ThreadStateTrack');
+    };
+
+    const getTrackActivityCount = async (trackNode: any): Promise<number> => {
+      const uri = trackNode?.uri as string | undefined;
+      if (!uri) return 0;
+      if (trackActivityCountCache.has(uri)) return trackActivityCountCache.get(uri) ?? 0;
+
+      const track = this.trace?.tracks.getTrack(uri);
+      const trackIdsRaw = track?.tags?.trackIds;
+      const trackIds =
+        Array.isArray(trackIdsRaw)
+          ? trackIdsRaw
+              .map((v: any) => Number(v))
+              .filter((v: number) => Number.isFinite(v))
+          : [];
+      if (trackIds.length === 0) {
+        trackActivityCountCache.set(uri, 0);
+        return 0;
+      }
+
+      const engine = this.engine;
+      if (!engine) {
+        trackActivityCountCache.set(uri, 0);
+        return 0;
+      }
+
+      let table: 'counter' | 'slice' | undefined;
+      if (track?.tags?.kinds?.includes('CounterTrack')) table = 'counter';
+      if (track?.tags?.kinds?.includes('SliceTrack')) table = table ?? 'slice';
+      if (!table) {
+        trackActivityCountCache.set(uri, 0);
+        return 0;
+      }
+
+      const query = `select count(*) as cnt from ${table} where track_id in (${trackIds.join(',')})`;
+      try {
+        const result = await engine.query(query);
+        const it = result.iter({});
+        let count = 0;
+        if (it.valid()) {
+          const raw = it.get('cnt');
+          count = typeof raw === 'bigint' ? Number(raw) : Number(raw);
+          if (!Number.isFinite(count)) count = 0;
+        }
+        trackActivityCountCache.set(uri, count);
+        return count;
+      } catch {
+        trackActivityCountCache.set(uri, 0);
+        return 0;
+      }
+    };
+
+    const activityHints = new Set<string>();
+    const flatTracks = workspace.flatTracks;
+    if (flatTracks && activeProcessNamesList.length > 0) {
+      for (const trackNode of flatTracks) {
+        const name = trackNode?.name || '';
+        if (!/^BufferTX\b/i.test(name)) continue;
+        if (!activeProcessNamesList.some((p) => name.includes(p))) continue;
+        const hint = getActivityHintFromBufferTxTrackName(name);
+        if (hint) activityHints.add(hint);
+      }
+    }
 
     // Debug: Log available track names and active processes
-    const flatTracks = workspace.flatTracks;
     if (flatTracks) {
       const trackNames = flatTracks.slice(0, 50).map(t => t.name);
       console.log('[AIPanel] Available track names (first 50):', trackNames);
       console.log('[AIPanel] Active rendering processes:', Array.from(activeProcessNames));
+      console.log('[AIPanel] Active surface hints:', Array.from(activityHints));
     }
 
     // Try using the PinTracksByRegex command first (Perfetto built-in) - but only for non-smart patterns
@@ -4261,12 +3175,19 @@ Keep your analysis concise and actionable.`;
         const regex = new RegExp(inst.pattern);
         const smartProcessNames = inst.activeProcessNames ?? Array.from(activeProcessNames);
         const shouldSmartFilterByProcess = Boolean(inst.smartPin) && smartProcessNames.length > 0;
-        const maxPinsForInstruction = /surfaceflinger/i.test(inst.pattern) ? 1 : undefined;
+        const maxPinsForInstruction = getMaxPinsForPattern(inst.pattern);
+        const shouldAttemptDisambiguation = needsActiveDisambiguation(inst.pattern);
         let pinnedForInstruction = 0;
 
         // Use built-in pin-by-regex only when we don't need extra filtering.
         // Smart pinning and mainThreadOnly require manual iteration.
-        const canUsePinByRegex = pinByRegexAvailable && !shouldSmartFilterByProcess && !inst.mainThreadOnly;
+        const canUsePinByRegex =
+          pinByRegexAvailable &&
+          !shouldSmartFilterByProcess &&
+          !inst.mainThreadOnly &&
+          !inst.expand &&
+          !shouldAttemptDisambiguation &&
+          (inst.matchBy === 'name' || inst.matchBy === 'path');
 
         if (canUsePinByRegex) {
           this.trace.commands.runCommand('dev.perfetto.PinTracksByRegex', inst.pattern, inst.matchBy);
@@ -4276,6 +3197,10 @@ Keep your analysis concise and actionable.`;
 
         // Manual iteration (supports smart process filtering and mainThreadOnly).
         if (flatTracks) {
+          const candidates: any[] = [];
+          const hasActiveContext = smartProcessNames.length > 0 || activityHints.size > 0;
+          const shouldFilterToActive = hasActiveContext && (shouldSmartFilterByProcess || shouldAttemptDisambiguation);
+
           for (const trackNode of flatTracks) {
             const matchValue = inst.matchBy === 'uri' ? trackNode.uri : trackNode.name;
             if (!matchValue || !regex.test(matchValue)) continue;
@@ -4285,37 +3210,112 @@ Keep your analysis concise and actionable.`;
             }
 
             if (inst.mainThreadOnly) {
-              const track = trackNode.uri ? this.trace.tracks.getTrack(trackNode.uri) : undefined;
-              const chips = track?.chips;
-              const hasMainThreadChip = chips?.includes('main thread') ?? false;
-              if (!hasMainThreadChip) {
+              const uri = trackNode.uri as string | undefined;
+              if (!uri) {
+                pinnedCount.skipped++;
+                continue;
+              }
+              const track = this.trace.tracks.getTrack(uri);
+              const hasMainThreadChip = track?.chips?.includes('main thread') ?? false;
+              // Allow both SliceTrack (events) and ThreadStateTrack (CPU scheduling state)
+              if (!hasMainThreadChip || !isMainThreadPinnableTrack(uri)) {
                 pinnedCount.skipped++;
                 continue;
               }
             }
 
-            if (shouldSmartFilterByProcess) {
+            if (shouldFilterToActive) {
               const trackFullPathStr = this.trackFullPathToString(trackNode as any);
-              let isActiveProcess = false;
-              for (const procName of smartProcessNames) {
-                if (trackFullPathStr.includes(procName)) {
-                  isActiveProcess = true;
-                  break;
-                }
-              }
-              if (!isActiveProcess) {
+              const matchesProcess = smartProcessNames.some((procName) => trackFullPathStr.includes(procName));
+              const matchesActivityHint = matchesProcess
+                ? true
+                : Array.from(activityHints).some((hint) => trackFullPathStr.includes(hint));
+
+              if (!matchesProcess && !matchesActivityHint) {
                 pinnedCount.skipped++;
                 continue;
               }
             }
 
-            if (!trackNode.isPinned) {
+            candidates.push(trackNode);
+          }
+
+          // Main thread fallback: thread name is often NOT literally "main" (pid == tid).
+          // Pin both SliceTrack (events) and ThreadStateTrack (CPU scheduling state)
+          if (candidates.length === 0 && inst.pattern.startsWith('^main')) {
+            // Track by proc+kind to allow both SliceTrack and ThreadStateTrack per process
+            const pinnedByProcAndKind = new Set<string>();
+            for (const trackNode of flatTracks) {
+              if (this.shouldIgnoreAutoPinTrackName(trackNode.name || '')) continue;
+              const uri = trackNode.uri as string | undefined;
+              if (!uri || !isMainThreadPinnableTrack(uri)) continue;
+
+              const track = this.trace.tracks.getTrack(uri);
+              const hasMainThreadChip = track?.chips?.includes('main thread') ?? false;
+              if (!hasMainThreadChip) continue;
+
+              // Determine track kind for dedup key
+              const kinds = track?.tags?.kinds ?? [];
+              const trackKind = kinds.includes('SliceTrack') ? 'slice' :
+                               kinds.includes('ThreadStateTrack') ? 'state' : 'other';
+
+              if (smartProcessNames.length > 0) {
+                const pathStr = this.trackFullPathToString(trackNode as any);
+                const matchedProc = smartProcessNames.find((p) => pathStr.includes(p));
+                if (!matchedProc) continue;
+                // Allow one SliceTrack and one ThreadStateTrack per process
+                const dedupKey = `${matchedProc}:${trackKind}`;
+                if (pinnedByProcAndKind.has(dedupKey)) continue;
+                pinnedByProcAndKind.add(dedupKey);
+              }
+
+              if (!trackNode.isPinned) {
+                trackNode.pin();
+                if (inst.expand) trackNode.expand();
+                pinnedCount.count++;
+                pinnedForInstruction++;
+                // If we don't have per-proc filtering, pin at most 2 (slice + state).
+                if (smartProcessNames.length === 0 && pinnedForInstruction >= 2) break;
+              }
+            }
+            continue;
+          }
+
+          if (candidates.length > 0) {
+            let nodesToPin = candidates;
+
+            if (maxPinsForInstruction !== undefined && candidates.length > maxPinsForInstruction) {
+              const scored = await Promise.all(
+                candidates.map(async (trackNode) => {
+                  let score = await getTrackActivityCount(trackNode);
+                  const name = trackNode?.name || '';
+
+                  // Prefer tracks tied to the active app surface when possible.
+                  if (/^QueuedBuffer\\b/i.test(name) && activityHints.size > 0) {
+                    if (Array.from(activityHints).some((h) => name.includes(h))) score += 1_000_000;
+                  }
+                  if (/^BufferTX\\b/i.test(name) && smartProcessNames.length > 0) {
+                    if (smartProcessNames.some((p) => name.includes(p))) score += 1_000_000;
+                  }
+                  if (/BufferQueue/i.test(name) && activityHints.size > 0) {
+                    if (Array.from(activityHints).some((h) => name.includes(h))) score += 1_000_000;
+                  }
+
+                  return {trackNode, score};
+                })
+              );
+
+              scored.sort((a, b) => b.score - a.score);
+              nodesToPin = scored.slice(0, maxPinsForInstruction).map((x) => x.trackNode);
+            }
+
+            for (const trackNode of nodesToPin) {
+              if (trackNode.isPinned) continue;
               trackNode.pin();
+              if (inst.expand) trackNode.expand();
               pinnedCount.count++;
               pinnedForInstruction++;
-              if (maxPinsForInstruction && pinnedForInstruction >= maxPinsForInstruction) {
-                break;
-              }
+              if (maxPinsForInstruction && pinnedForInstruction >= maxPinsForInstruction) break;
             }
           }
         }
@@ -4342,6 +3342,7 @@ Keep your analysis concise and actionable.`;
 | \`/slow\` | Analyze slow operations (backend) |
 | \`/memory\` | Analyze memory usage (backend) |
 | \`/teaching-pipeline\` | 🎓 教学：检测渲染管线类型 |
+| \`/scene\` | 🎬 场景还原：识别 Trace 中的操作场景 |
 | \`/export [csv|json]\` | Export session results |
 | \`/pins\` | View pinned query results |
 | \`/clear\` | Clear chat history |
@@ -4472,98 +3473,7 @@ Keep your analysis concise and actionable.`;
     return '刚刚';
   }
 
-  private formatMessage(content: string): string {
-    // Process clickable timestamps: @ts[timestampNs|label]
-    // Convert to clickable span elements with data attributes
-    let processedContent = content.replace(
-      /@ts\[(\d+)\|([^\]]+)\]/g,
-      '<span class="ai-clickable-timestamp" data-ts="$1" title="点击跳转到此时间点">$2</span>'
-    );
 
-    // Process Markdown tables BEFORE other formatting
-    // Match table blocks: header row, separator row, and data rows
-    processedContent = processedContent.replace(
-      /(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n?)+)/g,
-      (tableBlock) => {
-        const lines = tableBlock.trim().split('\n');
-        if (lines.length < 2) return tableBlock;
-
-        // Parse header
-        const headerCells = lines[0]
-          .split('|')
-          .filter((cell) => cell.trim() !== '')
-          .map((cell) => `<th>${cell.trim()}</th>`)
-          .join('');
-
-        // Skip separator line (line 1), parse data rows
-        const dataRows = lines
-          .slice(2)
-          .map((line) => {
-            const cells = line
-              .split('|')
-              .filter((cell) => cell.trim() !== '')
-              .map((cell) => `<td>${cell.trim()}</td>`)
-              .join('');
-            return `<tr>${cells}</tr>`;
-          })
-          .join('');
-
-        return `<table class="ai-md-table"><thead><tr>${headerCells}</tr></thead><tbody>${dataRows}</tbody></table>`;
-      }
-    );
-
-    // Markdown-like formatting with extended support
-    processedContent = processedContent
-      .replace(/^## (.*?)$/gm, '<h2>$1</h2>')
-      .replace(/^### (.*?)$/gm, '<h3>$1</h3>')
-      // Image markdown: ![alt](url) - must be before link processing
-      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="ai-markdown-image" />')
-      // Link markdown: [text](url)
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/`(.*?)`/g, '<code>$1</code>')
-      .replace(/^> (.*?)$/gm, '<blockquote>$1</blockquote>')
-      // Unordered list items
-      .replace(/^- (.*?)$/gm, '<li class="ul-item">$1</li>')
-      // Ordered list items (1. 2. 3. etc.)
-      .replace(/^\d+\. (.*?)$/gm, '<li class="ol-item">$1</li>')
-      .replace(/\n/g, '<br>');
-
-    // Wrap consecutive unordered <li> elements in <ul>
-    processedContent = processedContent.replace(
-      /(<li class="ul-item">.*?<\/li>(?:<br>)?)+/g,
-      (match) => '<ul>' + match.replace(/<br>/g, '').replace(/ class="ul-item"/g, '') + '</ul>'
-    );
-
-    // Wrap consecutive ordered <li> elements in <ol>
-    processedContent = processedContent.replace(
-      /(<li class="ol-item">.*?<\/li>(?:<br>)?)+/g,
-      (match) => '<ol>' + match.replace(/<br>/g, '').replace(/ class="ol-item"/g, '') + '</ol>'
-    );
-
-    // Fix: 合并连续的 <br> 标签，避免过多空白
-    // 将 3 个或以上连续的 <br> 合并为 2 个
-    processedContent = processedContent.replace(/(<br>){3,}/g, '<br><br>');
-
-    return processedContent;
-  }
-
-  /**
-   * Format timestamp for display (nanoseconds to human-readable)
-   */
-  private formatTimestampForDisplay(timestampNs: number): string {
-    if (timestampNs >= 1_000_000_000) {
-      return (timestampNs / 1_000_000_000).toFixed(3) + 's';
-    }
-    if (timestampNs >= 1_000_000) {
-      return (timestampNs / 1_000_000).toFixed(2) + 'ms';
-    }
-    if (timestampNs >= 1_000) {
-      return (timestampNs / 1_000).toFixed(2) + 'us';
-    }
-    return timestampNs + 'ns';
-  }
 
   /**
    * Jump to a specific timestamp in the Perfetto timeline
@@ -4791,380 +3701,17 @@ Keep your analysis concise and actionable.`;
    * Universal value formatter for displaying any data type in tables.
    * Handles: null, undefined, numbers, bigints, objects, arrays, strings.
    *
-   * @param val - The value to format
-   * @param columnName - Optional column name for context-aware formatting
-   * @returns Formatted string representation
-   */
-  private formatDisplayValue(val: any, columnName?: string): string {
-    // Handle null/undefined
-    if (val === null || val === undefined) {
-      return '';
-    }
 
-    // Handle numbers with smart formatting
-    if (typeof val === 'number') {
-      const col = (columnName || '').toLowerCase();
-
-      // Percentage fields
-      if (col.includes('rate') || col.includes('percent')) {
-        // If value is already in percentage form (e.g., 6.07), don't multiply
-        if (val > 1) {
-          return `${val.toFixed(2)}%`;
-        }
-        return `${(val * 100).toFixed(1)}%`;
-      }
-
-      // Duration/time fields in nanoseconds
-      if (col.includes('ns') || col.includes('_ns')) {
-        if (val > 1_000_000_000) return `${(val / 1_000_000_000).toFixed(2)}s`;
-        if (val > 1_000_000) return `${(val / 1_000_000).toFixed(2)}ms`;
-        if (val > 1000) return `${(val / 1000).toFixed(2)}µs`;
-        return `${val}ns`;
-      }
-
-      // Duration/time fields in milliseconds
-      if (col.includes('duration') || col.includes('time') || col.includes('ms') || col.includes('_ms')) {
-        if (val > 1000) return `${(val / 1000).toFixed(2)}s`;
-        return `${val.toFixed(1)}ms`;
-      }
-
-      // Large numbers get locale formatting
-      if (Math.abs(val) >= 1000) {
-        return val.toLocaleString();
-      }
-
-      // Small decimals
-      if (!Number.isInteger(val)) {
-        return val.toFixed(2);
-      }
-
-      return String(val);
-    }
-
-    // Handle bigint
-    if (typeof val === 'bigint') {
-      const num = Number(val);
-      if (num > 1_000_000_000) return `${(num / 1_000_000_000).toFixed(2)}s`;
-      if (num > 1_000_000) return `${(num / 1_000_000).toFixed(2)}ms`;
-      if (num > 1000) return `${(num / 1000).toFixed(2)}µs`;
-      return val.toString();
-    }
-
-    // Handle arrays
-    if (Array.isArray(val)) {
-      if (val.length === 0) return '[]';
-      // For short arrays, show inline
-      if (val.length <= 3) {
-        return `[${val.map(v => this.formatDisplayValue(v)).join(', ')}]`;
-      }
-      return `[${val.length} items]`;
-    }
-
-    // Handle objects (nested data)
-    if (typeof val === 'object') {
-      const keys = Object.keys(val);
-      if (keys.length === 0) return '{}';
-      // For small objects, try to show key-value pairs
-      if (keys.length <= 3) {
-        const pairs = keys.map(k => `${k}: ${this.formatDisplayValue(val[k])}`);
-        return `{${pairs.join(', ')}}`;
-      }
-      // For larger objects, use JSON
-      try {
-        return JSON.stringify(val);
-      } catch {
-        return `{${keys.length} fields}`;
-      }
-    }
-
-    // Handle boolean
-    if (typeof val === 'boolean') {
-      return val ? '✓' : '✗';
-    }
-
-    // Default: convert to string
-    return String(val);
-  }
-
-  /**
-   * Parse a summary string like "key1: value1, key2: value2" into table data
-   * Returns null if the string doesn't match the expected pattern
-   */
-  private parseSummaryToTable(summary: string): { columns: string[], rows: string[][] } | null {
-    if (!summary || typeof summary !== 'string') {
-      return null;
-    }
-
-    // Try to parse formats like:
-    // "key1: value1, key2: value2, key3: value3"
-    // "key1: value1 | key2: value2 | key3: value3"
-
-    // First, split by common delimiters
-    const parts = summary.split(/[,|]/).map(p => p.trim()).filter(p => p);
-
-    if (parts.length < 2) {
-      // Not enough key-value pairs to make a table worthwhile
-      return null;
-    }
-
-    const keyValuePairs: { key: string; value: string }[] = [];
-
-    for (const part of parts) {
-      // Match "key: value" pattern
-      const match = part.match(/^([^:]+):\s*(.+)$/);
-      if (match) {
-        keyValuePairs.push({
-          key: match[1].trim(),
-          value: match[2].trim(),
-        });
-      }
-    }
-
-    // Need at least 2 valid key-value pairs for a table
-    if (keyValuePairs.length < 2) {
-      return null;
-    }
-
-    // Create a single-row table with columns as keys
-    const columns = keyValuePairs.map(kv => kv.key);
-    const rows = [keyValuePairs.map(kv => this.formatDisplayValue(kv.value, kv.key))];
-
-    return { columns, rows };
-  }
 
   /**
    * Convert backend frame detail data to sections format expected by renderExpandableContent.
    *
    * Backend returns: FrameDetailData { diagnosis_summary, full_analysis: FullAnalysis }
-   * Frontend expects: ExpandableSections { [sectionId]: { title, data: unknown[] } }
-   *
-   * @see generated/frame_analysis.types.ts for type definitions
-   */
-  private convertToExpandableSections(data: unknown): ExpandableSections {
-    // Type guard: validate input format
-    console.log('[convertToExpandableSections] Input data:', {
-      type: typeof data,
-      isNull: data === null,
-      isUndefined: data === undefined,
-      keys: data && typeof data === 'object' ? Object.keys(data) : [],
-    });
 
-    if (!isFrameDetailData(data)) {
-      console.warn('[convertToExpandableSections] Invalid data format - failing isFrameDetailData check:', data);
-      return {};
-    }
 
-    const sections: ExpandableSections = {};
 
-    // Title mapping for each analysis type (matches FullAnalysis keys)
-    const titleMap: Record<keyof FullAnalysis, string> = {
-      'quadrants': '四象限分析',
-      'binder_calls': 'Binder 调用',
-      'cpu_frequency': 'CPU 频率',
-      'main_thread_slices': '主线程耗时操作',
-      'render_thread_slices': 'RenderThread 耗时操作',
-      'cpu_freq_timeline': 'CPU 频率时间线',
-      'lock_contentions': '锁竞争',
-    };
 
-    // Handle diagnosis_summary as a special section
-    if (data.diagnosis_summary) {
-      sections['diagnosis'] = {
-        title: '🎯 根因诊断',
-        data: [{ diagnosis: data.diagnosis_summary }],
-      };
-    }
 
-    // Handle full_analysis object with typed access
-    const analysis = data.full_analysis;
-    if (analysis) {
-      // Process quadrants - convert nested object to display array
-      if (analysis.quadrants) {
-        const quadrantData: Array<{ thread: string; quadrant: string; percentage: number }> = [];
-        const { main_thread, render_thread } = analysis.quadrants;
-
-        // Convert main_thread quadrants
-        for (const [qKey, qValue] of Object.entries(main_thread)) {
-          if (qValue > 0) {
-            quadrantData.push({
-              thread: '主线程',
-              quadrant: qKey.toUpperCase(),
-              percentage: qValue,
-            });
-          }
-        }
-
-        // Convert render_thread quadrants
-        for (const [qKey, qValue] of Object.entries(render_thread)) {
-          if (qValue > 0) {
-            quadrantData.push({
-              thread: 'RenderThread',
-              quadrant: qKey.toUpperCase(),
-              percentage: qValue,
-            });
-          }
-        }
-
-        if (quadrantData.length > 0) {
-          sections['quadrants'] = { title: titleMap['quadrants'], data: quadrantData };
-        }
-      }
-
-      // Process cpu_frequency - convert object to display array
-      if (analysis.cpu_frequency) {
-        const freqData: Array<{ core_type: string; avg_freq_mhz: number }> = [];
-        const { big_avg_mhz, little_avg_mhz } = analysis.cpu_frequency;
-
-        if (big_avg_mhz > 0) {
-          freqData.push({ core_type: '大核', avg_freq_mhz: big_avg_mhz });
-        }
-        if (little_avg_mhz > 0) {
-          freqData.push({ core_type: '小核', avg_freq_mhz: little_avg_mhz });
-        }
-
-        if (freqData.length > 0) {
-          sections['cpu_frequency'] = { title: titleMap['cpu_frequency'], data: freqData };
-        }
-      }
-
-      // Process array fields directly
-      const arrayFields: Array<keyof FullAnalysis> = [
-        'binder_calls',
-        'main_thread_slices',
-        'render_thread_slices',
-        'cpu_freq_timeline',
-        'lock_contentions',
-      ];
-
-      for (const field of arrayFields) {
-        const value = analysis[field];
-        if (Array.isArray(value) && value.length > 0) {
-          sections[field] = { title: titleMap[field], data: value };
-        }
-      }
-    }
-
-    return sections;
-  }
-
-  /**
-   * Format layer data key name to human-readable label
-   */
-  private formatLayerName(key: string): string {
-    // Common layer name mappings
-    const nameMap: Record<string, string> = {
-      'jank_frames': '卡顿帧',
-      'scrolling_sessions': '滑动会话',
-      'frame_details': '帧详情',
-      'frame_analysis': '帧分析',
-      'slow_frames': '慢帧',
-      'blocked_frames': '阻塞帧',
-      'sessions': '会话',
-      'frames': '帧数据',
-      'metrics': '指标',
-      'overview': '概览',
-      'summary': '摘要',
-    };
-
-    // Check for exact match
-    const lowerKey = key.toLowerCase();
-    if (nameMap[lowerKey]) {
-      return nameMap[lowerKey];
-    }
-
-    // Format snake_case to readable string
-    return key
-      .replace(/_/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase());
-  }
-
-  /**
-   * Extract conclusion from overview layer data (Phase 4)
-   * Maps the root_cause_classification step output to conclusion format
-   */
-  private extractConclusionFromOverview(overview: Record<string, any> | undefined): any {
-    if (!overview) return null;
-
-    // Check for conclusion data in various locations
-    const conclusion = overview.conclusion || overview.root_cause_classification;
-    if (conclusion && typeof conclusion === 'object') {
-      // Direct conclusion object
-      if (conclusion.problem_category || conclusion.category) {
-        return {
-          category: conclusion.problem_category || conclusion.category,
-          component: conclusion.problem_component || conclusion.component,
-          confidence: conclusion.confidence || 0.5,
-          summary: conclusion.root_cause_summary || conclusion.summary || '',
-          evidence: this.parseEvidence(conclusion.evidence),
-          suggestion: conclusion.suggestion,
-        };
-      }
-    }
-
-    // Check if conclusion fields are at the top level of overview
-    if (overview.problem_category) {
-      return {
-        category: overview.problem_category,
-        component: overview.problem_component,
-        confidence: overview.confidence || 0.5,
-        summary: overview.root_cause_summary || '',
-        evidence: this.parseEvidence(overview.evidence),
-        suggestion: overview.suggestion,
-      };
-    }
-
-    return null;
-  }
-
-  /**
-   * Parse evidence field which may be JSON string or array
-   */
-  private parseEvidence(evidence: any): string[] {
-    if (!evidence) return [];
-    if (Array.isArray(evidence)) return evidence;
-    if (typeof evidence === 'string') {
-      try {
-        const parsed = JSON.parse(evidence);
-        return Array.isArray(parsed) ? parsed : [];
-      } catch {
-        return [evidence];
-      }
-    }
-    return [];
-  }
-
-  /**
-   * Translate problem category to Chinese (Phase 4)
-   */
-  private translateCategory(category: string): string {
-    const translations: Record<string, string> = {
-      'APP': '应用问题',
-      'SYSTEM': '系统问题',
-      'MIXED': '混合问题',
-      'UNKNOWN': '未知',
-    };
-    return translations[category] || category;
-  }
-
-  /**
-   * Translate problem component to Chinese (Phase 4)
-   */
-  private translateComponent(component: string): string {
-    const translations: Record<string, string> = {
-      'MAIN_THREAD': '主线程',
-      'RENDER_THREAD': '渲染线程',
-      'SURFACE_FLINGER': 'SurfaceFlinger',
-      'BINDER': 'Binder 跨进程调用',
-      'CPU_SCHEDULING': 'CPU 调度',
-      'CPU_AFFINITY': 'CPU 亲和性',
-      'GPU': 'GPU',
-      'MEMORY': '内存',
-      'IO': 'IO',
-      'MAIN_THREAD_BLOCKING': '主线程阻塞',
-      'UNKNOWN': '未知',
-    };
-    return translations[component] || component;
-  }
 
   /**
    * 从SQL查询结果中提取关键时间点作为导航书签
