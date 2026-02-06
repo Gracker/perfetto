@@ -139,44 +139,87 @@ async function createEngine(
   engineId: string,
   traceSource: TraceSource,
 ): Promise<EngineBase> {
-  // === Auto-upload to AI backend ===
-  // Try to upload trace to backend first for AI analysis capabilities.
-  // If successful, the backend starts a trace_processor_shell in HTTP RPC mode
-  // and we connect to it, sharing the same trace processor with the backend.
-  const uploader = getBackendUploader();
+  const appWithBackendState = app as unknown as {
+    backendTraceId?: string;
+    backendUploadPromise?: Promise<void>;
+    backendUploadState?: 'idle' | 'uploading' | 'ready' | 'failed';
+    backendUploadError?: string;
+  };
 
+  // === Background upload to AI backend (non-blocking) ===
+  // Upload runs in the background while WASM engine is created immediately.
+  // When upload completes, a CustomEvent notifies plugins (e.g. AI panel).
+  // This creates two independent trace_processor instances:
+  // - WASM in-browser for UI queries (immediate)
+  // - trace_processor_shell for AI analysis (deferred)
   if (traceSource.type !== 'HTTP_RPC') {
-    try {
-      const backendAvailable = await uploader.checkAvailable();
-      if (backendAvailable) {
-        updateStatus(app, 'Connecting to AI backend...');
+    appWithBackendState.backendUploadState = 'uploading';
+    appWithBackendState.backendUploadError = undefined;
+
+    const uploader = getBackendUploader();
+    const notifyUploadFailed = (error: string): void => {
+      appWithBackendState.backendUploadState = 'failed';
+      appWithBackendState.backendUploadError = error;
+      window.dispatchEvent(
+        new CustomEvent('perfetto:backend-upload-failed', {
+          detail: {error},
+        }),
+      );
+    };
+
+    let uploadPromise: Promise<void> | undefined;
+    uploadPromise = (async () => {
+      try {
+        const backendAvailable = await uploader.checkAvailable();
+        if (!backendAvailable) {
+          notifyUploadFailed('AI backend unavailable');
+          return;
+        }
+
+        console.log('[AutoRPC] Starting background upload...');
         const result = await uploader.upload(traceSource);
 
         if (result.success && result.port) {
-          console.log(`[AutoRPC] Backend upload successful, using port ${result.port}`);
-          HttpRpcEngine.rpcPort = String(result.port);
+          console.log(
+            `[AutoRPC] Background upload complete, traceId=${result.traceId}, port=${result.port}`,
+          );
+          appWithBackendState.backendTraceId = result.traceId ?? '';
+          appWithBackendState.backendUploadState = 'ready';
+          appWithBackendState.backendUploadError = undefined;
 
-          // Store traceId for AI Assistant plugin to use
-          (app as unknown as {backendTraceId: string}).backendTraceId = result.traceId ?? '';
-
-          const engine = new HttpRpcEngine(engineId);
-          engine.onResponseReceived = () => raf.scheduleFullRedraw();
-
-          if (isMetatracingEnabled()) {
-            engine.enableMetatrace(assertExists(getEnabledMetatracingCategories()));
-          }
-
-          return engine;
-        } else if (result.error) {
-          console.warn('[AutoRPC] Backend upload failed:', result.error);
+          // Notify plugins that backend is ready
+          window.dispatchEvent(
+            new CustomEvent('perfetto:backend-upload-complete', {
+              detail: {traceId: result.traceId, port: result.port},
+            }),
+          );
+        } else {
+          const error = result.error ?? 'Background upload failed';
+          console.warn('[AutoRPC] Background upload failed:', error);
+          notifyUploadFailed(error);
+        }
+      } catch (error) {
+        console.warn('[AutoRPC] Background upload error:', error);
+        notifyUploadFailed(String(error));
+      } finally {
+        // Clear upload promise regardless of outcome.
+        if (
+          uploadPromise !== undefined &&
+          appWithBackendState.backendUploadPromise === uploadPromise
+        ) {
+          appWithBackendState.backendUploadPromise = undefined;
         }
       }
-    } catch (error) {
-      console.warn('[AutoRPC] Backend connection failed, falling back to WASM:', error);
-    }
+    })();
+
+    // Store promise so plugins can optionally await it
+    appWithBackendState.backendUploadPromise = uploadPromise;
+  } else {
+    appWithBackendState.backendUploadState = 'idle';
+    appWithBackendState.backendUploadError = undefined;
   }
 
-  // === Fallback to original logic ===
+  // === Create engine immediately (no blocking on upload) ===
   // Check if there is any instance of the trace_processor_shell running in
   // HTTP RPC mode (i.e. trace_processor_shell -D).
   let useRpc = false;

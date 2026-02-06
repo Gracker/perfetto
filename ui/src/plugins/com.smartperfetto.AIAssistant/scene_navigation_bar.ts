@@ -44,6 +44,7 @@ const SCENE_DISPLAY_NAMES: Record<string, string> = {
   'warm_start': '温启动',
   'hot_start': '热启动',
   'scroll': '滑动',
+  'inertial_scroll': '惯性滑动',
   'navigation': '跳转',
   'app_switch': '切换',
   'screen_unlock': '解锁',
@@ -60,6 +61,7 @@ const SCENE_ICONS: Record<string, string> = {
   'warm_start': '🔄',
   'hot_start': '⚡',
   'scroll': '📜',
+  'inertial_scroll': '🌀',
   'navigation': '🔀',
   'app_switch': '🔁',
   'screen_unlock': '🔓',
@@ -76,6 +78,7 @@ const PERF_THRESHOLDS: Record<string, { good: number; acceptable: number }> = {
   'warm_start': { good: 300, acceptable: 600 },
   'hot_start': { good: 100, acceptable: 200 },
   'scroll_fps': { good: 55, acceptable: 45 },
+  'inertial_scroll': { good: 500, acceptable: 1000 },
   'tap': { good: 100, acceptable: 200 },
   'navigation': { good: 300, acceptable: 500 },
 };
@@ -172,7 +175,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
 
   private getPerformanceRating(scene: DetectedScene): string {
     // For scroll, check FPS instead of duration
-    if (scene.type === 'scroll' && scene.metadata?.averageFps !== undefined) {
+    if ((scene.type === 'scroll' || scene.type === 'inertial_scroll') && scene.metadata?.averageFps !== undefined) {
       const fps = scene.metadata.averageFps;
       const thresholds = PERF_THRESHOLDS['scroll_fps'];
       if (fps >= thresholds.good) return '🟢';
@@ -199,7 +202,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
 
     parts.push(`时长: ${scene.durationMs}ms`);
 
-    if (scene.type === 'scroll' && scene.metadata?.averageFps !== undefined) {
+    if ((scene.type === 'scroll' || scene.type === 'inertial_scroll') && scene.metadata?.averageFps !== undefined) {
       parts.push(`FPS: ${scene.metadata.averageFps}`);
     }
 

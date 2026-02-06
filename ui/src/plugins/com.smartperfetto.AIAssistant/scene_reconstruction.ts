@@ -96,6 +96,7 @@ export const SCENE_DISPLAY_NAMES: Record<string, string> = {
   'warm_start': '温启动',
   'hot_start': '热启动',
   'scroll': '滑动浏览',
+  'inertial_scroll': '惯性滑动',
   'navigation': '页面跳转',
   'app_switch': '应用切换',
   'screen_unlock': '解锁屏幕',
@@ -112,6 +113,11 @@ export const SCENE_DISPLAY_NAMES: Record<string, string> = {
  */
 export const SCENE_PIN_MAPPING: Record<string, PinInstruction[]> = {
   'scroll': [
+    { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
+    { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
+    { pattern: '^BufferTX', matchBy: 'name', priority: 3, reason: '缓冲区', smartPin: true },
+  ],
+  'inertial_scroll': [
     { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
     { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
     { pattern: '^BufferTX', matchBy: 'name', priority: 3, reason: '缓冲区', smartPin: true },
@@ -151,6 +157,7 @@ export const SCENE_THRESHOLDS: Record<string, { good: number; acceptable: number
   'warm_start': { good: 300, acceptable: 600 },
   'hot_start': { good: 100, acceptable: 200 },
   'scroll_fps': { good: 55, acceptable: 45 },
+  'inertial_scroll': { good: 500, acceptable: 1000 },
   'tap': { good: 100, acceptable: 200 },
   'navigation': { good: 300, acceptable: 500 },
 };
@@ -173,7 +180,7 @@ export function getScenePerformanceRating(
   metadata?: Record<string, any>
 ): string {
   // For scroll, check FPS instead of duration
-  if (sceneType === 'scroll' && metadata?.averageFps !== undefined) {
+  if ((sceneType === 'scroll' || sceneType === 'inertial_scroll') && metadata?.averageFps !== undefined) {
     const fps = metadata.averageFps;
     const thresholds = SCENE_THRESHOLDS['scroll_fps'];
     if (fps >= thresholds.good) return '🟢';
@@ -326,6 +333,22 @@ export class SceneReconstructionHandler {
       let narrative = '';
       let findings: SceneFinding[] = [];
 
+      const unwrapEventData = (raw: any): any => {
+        if (!raw || typeof raw !== 'object') return {};
+        if (raw.data && typeof raw.data === 'object') return raw.data;
+        return raw;
+      };
+
+      const applyScenePayload = (payload: any) => {
+        if (!payload || typeof payload !== 'object') return;
+        if (Array.isArray(payload.scenes)) scenes = payload.scenes;
+        if (Array.isArray(payload.trackEvents)) trackEvents = payload.trackEvents;
+        if (Array.isArray(payload.tracks) && trackEvents.length === 0) trackEvents = payload.tracks;
+        if (typeof payload.narrative === 'string' && payload.narrative) narrative = payload.narrative;
+        if (typeof payload.conclusion === 'string' && payload.conclusion && !narrative) narrative = payload.conclusion;
+        if (Array.isArray(payload.findings)) findings = payload.findings;
+      };
+
       eventSource.onopen = () => {
         console.log('[SceneReconstruction] SSE connected');
       };
@@ -341,6 +364,23 @@ export class SceneReconstructionHandler {
         console.log('[SceneReconstruction] SSE: connected event received');
       });
 
+      eventSource.addEventListener('progress', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          const phase = data.phase || raw.phase;
+          if (!phase) return;
+          console.log('[SceneReconstruction] Progress:', phase, data);
+          this.ctx.updateMessage(progressMessageId, {
+            content: `🎬 **场景还原中...**\n\n${phase}...`,
+          });
+          m.redraw();
+        } catch (e) {
+          console.warn('[SceneReconstruction] Failed to parse progress event:', e);
+        }
+      });
+
+      // Backward compatibility with legacy scene SSE.
       eventSource.addEventListener('phase_start', (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -356,7 +396,8 @@ export class SceneReconstructionHandler {
 
       eventSource.addEventListener('scene_detected', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[SceneReconstruction] Scene detected:', data);
           if (data.scene) {
             scenes.push(data.scene);
@@ -372,7 +413,8 @@ export class SceneReconstructionHandler {
 
       eventSource.addEventListener('finding', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[SceneReconstruction] Finding:', data);
           if (data.finding) {
             findings.push(data.finding);
@@ -384,26 +426,62 @@ export class SceneReconstructionHandler {
 
       eventSource.addEventListener('track_events', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[SceneReconstruction] Track events:', data);
           if (Array.isArray(data.events)) {
             trackEvents = data.events;
+          } else if (Array.isArray(data.trackEvents)) {
+            trackEvents = data.trackEvents;
           }
         } catch (e) {
           console.warn('[SceneReconstruction] Failed to parse track_events:', e);
         }
       });
 
+      eventSource.addEventListener('track_data', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          console.log('[SceneReconstruction] Track data:', data);
+          if (Array.isArray(data.scenes)) scenes = data.scenes;
+          if (Array.isArray(data.tracks)) trackEvents = data.tracks;
+          if (Array.isArray(data.trackEvents)) trackEvents = data.trackEvents;
+        } catch (e) {
+          console.warn('[SceneReconstruction] Failed to parse track_data event:', e);
+        }
+      });
+
       eventSource.addEventListener('result', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[SceneReconstruction] Result:', data);
-          if (data.scenes) scenes = data.scenes;
-          if (data.trackEvents) trackEvents = data.trackEvents;
-          if (data.narrative) narrative = data.narrative;
-          if (data.findings) findings = data.findings;
+          applyScenePayload(data);
         } catch (e) {
           console.warn('[SceneReconstruction] Failed to parse result event:', e);
+        }
+      });
+
+      eventSource.addEventListener('analysis_completed', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          console.log('[SceneReconstruction] Analysis completed:', data);
+          applyScenePayload(data);
+        } catch (e) {
+          console.warn('[SceneReconstruction] Failed to parse analysis_completed event:', e);
+        }
+      });
+
+      eventSource.addEventListener('scene_reconstruction_completed', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          console.log('[SceneReconstruction] Scene reconstruction completed:', data);
+          applyScenePayload(data);
+        } catch (e) {
+          console.warn('[SceneReconstruction] Failed to parse scene_reconstruction_completed event:', e);
         }
       });
 

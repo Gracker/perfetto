@@ -98,6 +98,19 @@ export function handleProgressEvent(
   data: any,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
+  if (data?.data?.phase === 'analysis_plan') {
+    ctx.removeLastMessageIf(
+      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
+    );
+    ctx.addMessage({
+      id: ctx.generateId(),
+      role: 'assistant',
+      content: formatAnalysisPlanMessage(data.data.plan, data.data.message),
+      timestamp: Date.now(),
+    });
+    return {};
+  }
+
   if (data?.data?.message) {
     // Remove previous progress message
     ctx.removeLastMessageIf(
@@ -111,6 +124,50 @@ export function handleProgressEvent(
     });
   }
   return {};
+}
+
+function formatAnalysisPlanMessage(plan: any, fallbackMessage?: string): string {
+  if (!plan || typeof plan !== 'object') {
+    return `### 🧭 分析计划已确认\n\n${fallbackMessage || '先收集证据，再给根因假设。'}`;
+  }
+
+  const lines: string[] = ['### 🧭 分析计划已确认'];
+
+  if (typeof plan.objective === 'string' && plan.objective.trim()) {
+    lines.push('', `目标: ${plan.objective.trim()}`);
+  }
+
+  if (typeof plan.mode === 'string' && plan.mode.trim()) {
+    lines.push('', `模式: \`${plan.mode.trim()}\``);
+  }
+
+  if (plan.strategy && typeof plan.strategy === 'object') {
+    const strategyName = plan.strategy.name || plan.strategy.id || 'unknown';
+    lines.push('', `策略: **${strategyName}**`);
+  }
+
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  if (steps.length > 0) {
+    lines.push('', '**步骤**');
+    const sorted = [...steps].sort((a: any, b: any) => (Number(a?.order) || 0) - (Number(b?.order) || 0));
+    for (const step of sorted) {
+      const order = Number(step?.order) || 0;
+      const title = String(step?.title || '步骤');
+      const action = String(step?.action || '');
+      lines.push(`${order}. **${title}**: ${action}`);
+    }
+  }
+
+  const evidence = Array.isArray(plan.evidence) ? plan.evidence : [];
+  if (evidence.length > 0) {
+    lines.push('', '**证据清单**');
+    for (const item of evidence) {
+      lines.push(`- ${String(item)}`);
+    }
+  }
+
+  lines.push('', '说明: 先收集证据，再给根因假设。');
+  return lines.join('\n');
 }
 
 /**
@@ -793,18 +850,39 @@ export function handleHypothesisGeneratedEvent(
   data: any,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data?.hypotheses && Array.isArray(data.data.hypotheses)) {
+  if (Array.isArray(data?.data?.hypotheses) && data.data.hypotheses.length > 0) {
     const hypotheses = data.data.hypotheses;
+    const evidenceBased = data?.data?.evidenceBased === true;
+    const evidenceSummary = Array.isArray(data?.data?.evidenceSummary)
+      ? data.data.evidenceSummary
+      : [];
     ctx.removeLastMessageIf(
       msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
     );
 
-    let content = `### 🧪 生成了 ${hypotheses.length} 个分析假设\n`;
-    for (let i = 0; i < hypotheses.length; i++) {
-      const h = hypotheses[i];
-      content += `${i + 1}. ${h}\n`;
+    let content = '';
+    if (evidenceBased) {
+      content += `### 🧪 基于证据形成了 ${hypotheses.length} 个待验证假设\n`;
+      if (evidenceSummary.length > 0) {
+        content += '\n**首轮证据摘要**\n';
+        for (const item of evidenceSummary) {
+          content += `- ${item}\n`;
+        }
+      }
+      content += '\n**待验证假设**\n';
+      for (let i = 0; i < hypotheses.length; i++) {
+        const h = hypotheses[i];
+        content += `${i + 1}. ${h}\n`;
+      }
+      content += '\n_下一步将继续验证并收敛假设。_';
+    } else {
+      content += `### 🧪 生成了 ${hypotheses.length} 个分析假设\n`;
+      for (let i = 0; i < hypotheses.length; i++) {
+        const h = hypotheses[i];
+        content += `${i + 1}. ${h}\n`;
+      }
+      content += '\n_AI 将验证这些假设..._';
     }
-    content += '\n_AI 将验证这些假设..._';
 
     ctx.addMessage({
       id: ctx.generateId(),

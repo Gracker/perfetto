@@ -68,6 +68,13 @@ export interface AIPanelAttrs {
   trace: Trace;
 }
 
+type AppBackendUploadState = {
+  backendTraceId?: string;
+  backendUploadPromise?: Promise<void>;
+  backendUploadState?: 'idle' | 'uploading' | 'ready' | 'failed';
+  backendUploadError?: string;
+};
+
 // Re-export types for backward compatibility with external consumers
 export {Message, SqlQueryResult, AISettings, AISession, PinnedResult} from './types';
 
@@ -116,10 +123,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private onClearChat?: () => void;
   private onOpenSettings?: () => void;
+  private onBackendUploadComplete?: (e: Event) => void;
+  private onBackendUploadFailed?: (e: Event) => void;
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
+
+  private getAppBackendUploadState(): AppBackendUploadState {
+    return AppImpl.instance as unknown as AppBackendUploadState;
+  }
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
@@ -194,25 +207,29 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private handleTraceChange(): void {
     const newFingerprint = this.getTraceFingerprint();
     const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
+    const appBackendState = this.getAppBackendUploadState();
 
-    // Auto-RPC: Try to get backendTraceId from AppImpl (set by auto-upload in load_trace.ts)
-    const appBackendTraceId = (AppImpl.instance as unknown as {backendTraceId?: string}).backendTraceId;
+    // Auto-RPC: Try to get backendTraceId from AppImpl (set by background upload in load_trace.ts)
+    const appBackendTraceId = appBackendState.backendTraceId;
+    const appBackendUploadState = appBackendState.backendUploadState;
+    const appBackendUploadError = appBackendState.backendUploadError;
 
     console.log('[AIPanel] Trace fingerprint check:', {
       new: newFingerprint,
       current: this.state.currentTraceFingerprint,
       backendTraceId: this.state.backendTraceId,
       appBackendTraceId,
+      appBackendUploadState,
+      appBackendUploadError,
       engineMode: this.engine?.mode,
       engineInRpcMode,
     });
 
-    // If we have a backendTraceId from AppImpl, use it
+    // If we have a backendTraceId from AppImpl (upload already completed), use it
     if (appBackendTraceId && !this.state.backendTraceId) {
       console.log('[AIPanel] Using backendTraceId from auto-upload:', appBackendTraceId);
       this.state.backendTraceId = appBackendTraceId;
-      // Trigger quick scene detection for navigation bar
-      this.detectScenesQuick();
+      // Don't call detectScenesQuick() here — defer to after welcome message below
     }
 
     // 如果指纹没变且已经有 session，不需要重新加载
@@ -242,18 +259,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     console.log('[AIPanel] Creating new session for trace');
     this.createNewSession();
 
-    // 显示欢迎消息
-    if (engineInRpcMode) {
-      if (this.state.backendTraceId) {
-        // Auto-upload succeeded, show welcome message
-        this.addRpcModeWelcomeMessage();
-      } else {
-        // Try to register with backend
-        this.autoRegisterWithBackend();
-      }
+    // 显示欢迎消息 — handle three states:
+    // 1. backendTraceId already available (upload completed before panel init)
+    // 2. Upload still in progress (show connecting message, listen for completion)
+    // 3. Manual RPC mode (trace_processor_shell -D)
+    // 4. No backend at all
+    if (this.state.backendTraceId) {
+      // Backend already available — show welcome and fire scene detection
+      this.addRpcModeWelcomeMessage();
+      this.detectScenesQuick();
+    } else if (appBackendUploadState === 'uploading') {
+      // Background upload in progress — show connecting state, listen for completion
+      this.addBackendConnectingMessage();
+      this.listenForBackendUpload();
+    } else if (appBackendUploadState === 'failed') {
+      // Background upload failed — show unavailable state immediately
+      this.addBackendUnavailableMessage(appBackendUploadError);
+    } else if (engineInRpcMode) {
+      // Manual RPC mode (trace_processor_shell -D) — try to register
+      this.autoRegisterWithBackend();
     } else {
-      // Not in RPC mode, show backend unavailable message
-      this.addBackendUnavailableMessage();
+      // No backend connection at all
+      this.addBackendUnavailableMessage(appBackendUploadError);
     }
   }
 
@@ -462,14 +489,93 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   /**
    * 后端不可用时的提示消息
    */
-  private addBackendUnavailableMessage(): void {
+  private addBackendUnavailableMessage(errorDetail?: string): void {
+    const errorSection = errorDetail
+      ? `\n\n**错误详情：**\n- ${errorDetail}`
+      : '';
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `⚠️ **AI 后端未连接**\n\n无法连接到 AI 分析后端 (${this.state.settings.backendUrl})。\n\n**可能的原因：**\n- 后端服务未启动\n- 网络连接问题\n\n**解决方法：**\n1. 确保后端服务正在运行：\n   \`\`\`bash\n   cd backend && npm run dev\n   \`\`\`\n2. 重新打开 Trace 文件\n\nTrace 已加载到 WASM 引擎，但 AI 分析功能不可用。`,
+      content: `⚠️ **AI 后端未连接**\n\n无法连接到 AI 分析后端 (${this.state.settings.backendUrl})。\n\n**可能的原因：**\n- 后端服务未启动\n- 网络连接问题${errorSection}\n\n**解决方法：**\n1. 确保后端服务正在运行：\n   \`\`\`bash\n   cd backend && npm run dev\n   \`\`\`\n2. 重新打开 Trace 文件\n\nTrace 已加载到 WASM 引擎，但 AI 分析功能不可用。`,
       timestamp: Date.now(),
     });
     m.redraw();
+  }
+
+  /**
+   * 后端正在连接中的提示消息（非阻塞上传进行中）
+   */
+  private addBackendConnectingMessage(): void {
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: `⏳ **正在连接 AI 后端...**\n\nTrace 已加载到 WASM 引擎，AI 分析后端正在后台准备中。\n连接成功后将自动启用 AI 分析功能。`,
+      timestamp: Date.now(),
+    });
+    m.redraw();
+  }
+
+  /**
+   * 监听后台上传完成事件
+   * 上传完成/失败后更新状态
+   */
+  private listenForBackendUpload(): void {
+    // Clean up any previous listeners
+    if (this.onBackendUploadComplete) {
+      window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
+    }
+    if (this.onBackendUploadFailed) {
+      window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
+    }
+
+    this.onBackendUploadComplete = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.traceId) {
+        this.state.backendTraceId = detail.traceId;
+        console.log('[AIPanel] Backend upload complete, traceId:', detail.traceId);
+
+        // Update with connected message
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: `✅ **AI 后端已连接**\n\nAI 分析后端已就绪，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+          timestamp: Date.now(),
+        });
+
+        this.saveCurrentSession();
+        this.detectScenesQuick();
+        m.redraw();
+      }
+
+      // One-shot: remove listeners after first terminal event
+      if (this.onBackendUploadComplete) {
+        window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
+        this.onBackendUploadComplete = undefined;
+      }
+      if (this.onBackendUploadFailed) {
+        window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
+        this.onBackendUploadFailed = undefined;
+      }
+    };
+
+    this.onBackendUploadFailed = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const errorText = detail?.error ? String(detail.error) : undefined;
+      console.warn('[AIPanel] Backend upload failed:', errorText ?? 'unknown error');
+      this.addBackendUnavailableMessage(errorText);
+
+      if (this.onBackendUploadComplete) {
+        window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
+        this.onBackendUploadComplete = undefined;
+      }
+      if (this.onBackendUploadFailed) {
+        window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
+        this.onBackendUploadFailed = undefined;
+      }
+    };
+
+    window.addEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
+    window.addEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
   }
 
   /**
@@ -519,17 +625,26 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.onOpenSettings) {
       window.removeEventListener('ai-assistant:open-settings', this.onOpenSettings);
     }
+    if (this.onBackendUploadComplete) {
+      window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
+      this.onBackendUploadComplete = undefined;
+    }
+    if (this.onBackendUploadFailed) {
+      window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
+      this.onBackendUploadFailed = undefined;
+    }
   }
 
   view(vnode: m.Vnode<AIPanelAttrs>) {
     const providerLabel = this.state.settings.provider.charAt(0).toUpperCase() + this.state.settings.provider.slice(1);
     const isConnected = this.state.aiService !== null;
-    // Check RPC mode: engine must be in HTTP_RPC mode
-    // backendTraceId alone is not sufficient - it could be stale from an old session
+    // Check backend availability: engine in HTTP_RPC mode, OR backend upload completed/in-progress
+    // With non-blocking upload, WASM engine is used for UI while backend runs separately
     const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
-    // We're only in RPC mode if the engine is actually using HTTP RPC
-    // This prevents showing chat UI when loading a new trace that isn't in RPC mode yet
-    const isInRpcMode = engineInRpcMode;
+    const hasBackendTrace = !!this.state.backendTraceId;
+    const appBackendState = this.getAppBackendUploadState();
+    const hasUploadInProgress = appBackendState.backendUploadState === 'uploading';
+    const isInRpcMode = engineInRpcMode || hasBackendTrace || hasUploadInProgress;
 
     // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
     const sessions = isInRpcMode ? this.getCurrentTraceSessions() : [];
@@ -2609,6 +2724,7 @@ Output MUST follow this exact markdown structure:
     'warm_start': '温启动',
     'hot_start': '热启动',
     'scroll': '滑动浏览',
+    'inertial_scroll': '惯性滑动',
     'navigation': '页面跳转',
     'app_switch': '应用切换',
     'screen_unlock': '解锁屏幕',
@@ -2632,6 +2748,11 @@ Output MUST follow this exact markdown structure:
     smartPin?: boolean;
   }>> = {
     'scroll': [
+      { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
+      { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
+      { pattern: '^BufferTX', matchBy: 'name', priority: 3, reason: '缓冲区', smartPin: true },
+    ],
+    'inertial_scroll': [
       { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
       { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
       { pattern: '^BufferTX', matchBy: 'name', priority: 3, reason: '缓冲区', smartPin: true },
@@ -2670,6 +2791,7 @@ Output MUST follow this exact markdown structure:
     'warm_start': { good: 300, acceptable: 600 },
     'hot_start': { good: 100, acceptable: 200 },
     'scroll_fps': { good: 55, acceptable: 45 },
+    'inertial_scroll': { good: 500, acceptable: 1000 },
     'tap': { good: 100, acceptable: 200 },
     'navigation': { good: 300, acceptable: 500 },
   };
@@ -2679,7 +2801,7 @@ Output MUST follow this exact markdown structure:
    */
   private getScenePerformanceRating(sceneType: string, durationMs: number, metadata?: Record<string, any>): string {
     // For scroll, check FPS instead of duration
-    if (sceneType === 'scroll' && metadata?.averageFps !== undefined) {
+    if ((sceneType === 'scroll' || sceneType === 'inertial_scroll') && metadata?.averageFps !== undefined) {
       const fps = metadata.averageFps;
       const thresholds = AIPanel.SCENE_THRESHOLDS['scroll_fps'];
       if (fps >= thresholds.good) return '🟢';
@@ -2790,6 +2912,23 @@ Output MUST follow this exact markdown structure:
       let narrative = '';
       let findings: any[] = [];
 
+      const unwrapEventData = (raw: any): any => {
+        if (!raw || typeof raw !== 'object') return {};
+        // Agent-driven backend wraps payload as: { type, data, timestamp }.
+        if (raw.data && typeof raw.data === 'object') return raw.data;
+        return raw;
+      };
+
+      const applyScenePayload = (payload: any) => {
+        if (!payload || typeof payload !== 'object') return;
+        if (Array.isArray(payload.scenes)) scenes = payload.scenes;
+        if (Array.isArray(payload.trackEvents)) trackEvents = payload.trackEvents;
+        if (Array.isArray(payload.tracks) && trackEvents.length === 0) trackEvents = payload.tracks;
+        if (typeof payload.narrative === 'string' && payload.narrative) narrative = payload.narrative;
+        if (typeof payload.conclusion === 'string' && payload.conclusion && !narrative) narrative = payload.conclusion;
+        if (Array.isArray(payload.findings)) findings = payload.findings;
+      };
+
       eventSource.onopen = () => {
         console.log('[AIPanel] Scene SSE connected');
       };
@@ -2805,6 +2944,23 @@ Output MUST follow this exact markdown structure:
         console.log('[AIPanel] Scene SSE: connected event received');
       });
 
+      eventSource.addEventListener('progress', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          const phase = data.phase || raw.phase;
+          if (!phase) return;
+          console.log('[AIPanel] Scene progress:', phase, data);
+          this.updateMessage(progressMessageId, {
+            content: `🎬 **场景还原中...**\n\n${phase}...`,
+          });
+          m.redraw();
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse progress event:', e);
+        }
+      });
+
+      // Backward compatibility with legacy scene SSE.
       eventSource.addEventListener('phase_start', (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -2820,7 +2976,8 @@ Output MUST follow this exact markdown structure:
 
       eventSource.addEventListener('scene_detected', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[AIPanel] Scene detected:', data);
           if (data.scene) {
             scenes.push(data.scene);
@@ -2836,7 +2993,8 @@ Output MUST follow this exact markdown structure:
 
       eventSource.addEventListener('finding', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[AIPanel] Scene finding:', data);
           if (data.finding) {
             findings.push(data.finding);
@@ -2848,26 +3006,62 @@ Output MUST follow this exact markdown structure:
 
       eventSource.addEventListener('track_events', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[AIPanel] Track events:', data);
           if (Array.isArray(data.events)) {
             trackEvents = data.events;
+          } else if (Array.isArray(data.trackEvents)) {
+            trackEvents = data.trackEvents;
           }
         } catch (e) {
           console.warn('[AIPanel] Failed to parse track_events:', e);
         }
       });
 
+      eventSource.addEventListener('track_data', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          console.log('[AIPanel] Track data:', data);
+          if (Array.isArray(data.scenes)) scenes = data.scenes;
+          if (Array.isArray(data.tracks)) trackEvents = data.tracks;
+          if (Array.isArray(data.trackEvents)) trackEvents = data.trackEvents;
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse track_data event:', e);
+        }
+      });
+
       eventSource.addEventListener('result', (event) => {
         try {
-          const data = JSON.parse(event.data);
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
           console.log('[AIPanel] Scene result:', data);
-          if (data.scenes) scenes = data.scenes;
-          if (data.trackEvents) trackEvents = data.trackEvents;
-          if (data.narrative) narrative = data.narrative;
-          if (data.findings) findings = data.findings;
+          applyScenePayload(data);
         } catch (e) {
           console.warn('[AIPanel] Failed to parse result event:', e);
+        }
+      });
+
+      eventSource.addEventListener('analysis_completed', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          console.log('[AIPanel] Analysis completed:', data);
+          applyScenePayload(data);
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse analysis_completed event:', e);
+        }
+      });
+
+      eventSource.addEventListener('scene_reconstruction_completed', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = unwrapEventData(raw);
+          console.log('[AIPanel] Scene reconstruction completed:', data);
+          applyScenePayload(data);
+        } catch (e) {
+          console.warn('[AIPanel] Failed to parse scene_reconstruction_completed event:', e);
         }
       });
 
@@ -3515,7 +3709,7 @@ Output MUST follow this exact markdown structure:
           this.createNewSession();
           this.state.messages = [];
           this.state.agentSessionId = null;  // Reset Agent session for new conversation
-          if (this.engine?.mode === 'HTTP_RPC') {
+          if (this.state.backendTraceId || this.engine?.mode === 'HTTP_RPC') {
             this.addRpcModeWelcomeMessage();
           } else {
             this.addBackendUnavailableMessage();
