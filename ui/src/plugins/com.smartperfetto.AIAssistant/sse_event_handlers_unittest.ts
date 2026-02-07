@@ -1278,6 +1278,41 @@ describe('handleDataEvent', () => {
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('This is a text message');
   });
+
+  it('should normalize excessive blank lines in summary format', () => {
+    const data = {
+      id: 'summary-1',
+      envelope: {
+        meta: {
+          type: 'summary',
+          version: '2.0',
+          source: 'summary_source',
+        },
+        data: {
+          summary: {
+            title: '洞见摘要',
+            content: '\n\n（无显式洞见，见指标）\n \n \n',
+            metrics: [
+              {label: '总帧数', value: 642, severity: 'normal'},
+              {label: '掉帧数', value: 39, severity: 'normal', unit: ' (6.07%)'},
+            ],
+          },
+        },
+        display: {
+          layer: 'overview',
+          format: 'summary',
+          title: '洞见摘要',
+        },
+      },
+    };
+
+    handleDataEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('## 📊 洞见摘要');
+    expect(ctx.messages[0].content).toContain('（无显式洞见，见指标）\n\n### 关键指标');
+    expect(ctx.messages[0].content).not.toMatch(/\n{3,}/);
+  });
 });
 
 // =============================================================================

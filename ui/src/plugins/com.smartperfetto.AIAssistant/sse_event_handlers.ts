@@ -171,6 +171,18 @@ function formatAnalysisPlanMessage(plan: any, fallbackMessage?: string): string 
 }
 
 /**
+ * Normalize markdown spacing to avoid excessive vertical gaps in chat bubbles.
+ */
+function normalizeMarkdownSpacing(content: string): string {
+  return content
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    // Collapse 3+ blank lines (including whitespace-only lines) into 1 blank line.
+    .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
+    .trim();
+}
+
+/**
  * Process sql_executed event - shows query results.
  */
 export function handleSqlExecutedEvent(
@@ -1070,18 +1082,25 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
 
     case 'summary':
       if (payload.summary) {
-        let summaryContent = `## 📊 ${payload.summary.title || title}\n\n`;
-        summaryContent += payload.summary.content + '\n';
+        const sections: string[] = [`## 📊 ${payload.summary.title || title}`];
+
+        const normalizedBody = normalizeMarkdownSpacing(String(payload.summary.content || ''));
+        if (normalizedBody) {
+          sections.push(normalizedBody);
+        }
 
         if (payload.summary.metrics && payload.summary.metrics.length > 0) {
-          summaryContent += '\n### 关键指标\n\n';
+          const metricLines: string[] = ['### 关键指标'];
           for (const metric of payload.summary.metrics) {
             const icon = metric.severity === 'critical' ? '🔴' :
                          metric.severity === 'warning' ? '🟡' : '🟢';
             const unit = metric.unit || '';
-            summaryContent += `${icon} **${metric.label}:** ${metric.value}${unit}\n`;
+            metricLines.push(`${icon} **${metric.label}:** ${metric.value}${unit}`);
           }
+          sections.push(metricLines.join('\n'));
         }
+
+        const summaryContent = sections.join('\n\n');
 
         ctx.addMessage({
           id: ctx.generateId(),
