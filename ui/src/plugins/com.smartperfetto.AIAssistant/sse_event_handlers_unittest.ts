@@ -1283,6 +1283,87 @@ describe('handleSkillLayeredResultEvent', () => {
     expect(sqlResult.columns).toEqual(['start_ts', 'dur_ms']);
     expect(sqlResult.rows[0]).toEqual(['123', 16.67]);
   });
+
+  it('should pass display column definitions to sqlResult for unit/click rendering', () => {
+    const data = {
+      data: {
+        skillId: 'startup_analysis',
+        layers: {
+          overview: {
+            startups: {
+              data: [{
+                start_ts: '1000',
+                dur_ns: '2000',
+                dur_ms: 2.0,
+              }],
+              display: {
+                title: '启动事件',
+                columns: [
+                  {name: 'start_ts', type: 'timestamp', unit: 'ns', clickAction: 'navigate_range', durationColumn: 'dur_ns'},
+                  {name: 'dur_ns', type: 'duration', format: 'duration_ms', unit: 'ns'},
+                  {name: 'dur_ms', type: 'duration', format: 'duration_ms', unit: 'ms', hidden: true},
+                ],
+              },
+            },
+          },
+        },
+      },
+    };
+
+    handleSkillLayeredResultEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    const sqlResult = ctx.messages[0].sqlResult!;
+    expect(sqlResult.columns).toEqual(['start_ts', 'dur_ns', 'dur_ms']);
+    expect(sqlResult.columnDefinitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'start_ts',
+          clickAction: 'navigate_range',
+          durationColumn: 'dur_ns',
+          unit: 'ns',
+        }),
+      ])
+    );
+  });
+
+  it('should keep duration dependency column for navigate_range even when hidden', () => {
+    const data = {
+      data: {
+        skillId: 'scrolling_analysis',
+        layers: {
+          list: {
+            sessions: {
+              data: {
+                columns: ['start_ts', 'dur_ns', 'session_id'],
+                rows: [['1000', '2000', 1]],
+              },
+              display: {
+                title: '会话列表',
+                columns: [
+                  {name: 'start_ts', type: 'timestamp', unit: 'ns', clickAction: 'navigate_range', durationColumn: 'dur_ns'},
+                  {name: 'dur_ns', type: 'duration', format: 'duration_ms', unit: 'ns', hidden: true},
+                  {name: 'session_id', type: 'number'},
+                ],
+              },
+            },
+          },
+        },
+      },
+    };
+
+    handleSkillLayeredResultEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    const sqlResult = ctx.messages[0].sqlResult!;
+    // dur_ns must be preserved for click range calculation.
+    expect(sqlResult.columns).toContain('dur_ns');
+    expect(sqlResult.columnDefinitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({name: 'dur_ns', unit: 'ns'}),
+      ])
+    );
+  });
 });
 
 // =============================================================================

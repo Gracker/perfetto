@@ -181,6 +181,24 @@ function normalizeMarkdownSpacing(content: string): string {
     .trim();
 }
 
+function normalizeColumnDefinitions(columns: any): Array<Record<string, any>> | undefined {
+  if (!Array.isArray(columns)) return undefined;
+
+  const definitions = columns
+    .map((col: any) => {
+      if (typeof col === 'string') {
+        return {name: col};
+      }
+      if (col && typeof col === 'object' && typeof col.name === 'string') {
+        return col;
+      }
+      return null;
+    })
+    .filter(Boolean) as Array<Record<string, any>>;
+
+  return definitions.length > 0 ? definitions : undefined;
+}
+
 /**
  * Process sql_executed event - shows query results.
  */
@@ -421,9 +439,23 @@ function processOverviewLayer(
     if (dataArray && dataArray.length > 0) {
       const firstRow = dataArray[0];
       if (typeof firstRow === 'object' && firstRow !== null) {
-        const columns = Object.keys(firstRow);
+        const displayColumnDefs = normalizeColumnDefinitions((val as any)?.display?.columns);
+        const rowColumns = Object.keys(firstRow);
+        const orderedColumns = displayColumnDefs
+          ? [
+              ...displayColumnDefs
+                .map((def: any) => def.name)
+                .filter((name: string) => rowColumns.includes(name)),
+              ...rowColumns.filter((name) =>
+                !displayColumnDefs.some((def: any) => def.name === name)
+              ),
+            ]
+          : rowColumns;
+        const filteredColumnDefs = displayColumnDefs
+          ? displayColumnDefs.filter((def: any) => orderedColumns.includes(def.name))
+          : undefined;
         const rows = dataArray.map((item: any) =>
-          columns.map(col => item[col])
+          orderedColumns.map(col => item[col])
         );
 
         ctx.addMessage({
@@ -432,9 +464,10 @@ function processOverviewLayer(
           content: '',
           timestamp: Date.now(),
           sqlResult: {
-            columns,
+            columns: orderedColumns,
             rows,
             rowCount: rows.length,
+            columnDefinitions: filteredColumnDefs as any,
             sectionTitle: `📊 ${title}`,
           },
         });
@@ -590,6 +623,8 @@ function processListLayer(
     let isExpandable = false;
     let metadataColumns: string[] = [];
     let hiddenColumns: string[] = [];
+    let displayColumnDefs: Array<Record<string, any>> | undefined;
+    let filteredColumnDefs: Array<Record<string, any>> | undefined;
     let preBindedExpandableData: any[] | undefined;
     let summaryReport: any | undefined;
 
@@ -603,6 +638,21 @@ function processListLayer(
       isExpandable = displayConfig?.expandable === true;
       metadataColumns = displayConfig?.metadataFields || displayConfig?.metadata_columns || [];
       hiddenColumns = displayConfig?.hidden_columns || displayConfig?.hiddenColumns || [];
+      displayColumnDefs = normalizeColumnDefinitions(displayConfig?.columns);
+
+      // Keep duration columns that are required by navigate_range bindings.
+      if (displayColumnDefs && hiddenColumns.length > 0) {
+        const durationDeps = new Set(
+          displayColumnDefs
+            .filter((def: any) =>
+              def?.clickAction === 'navigate_range' &&
+              typeof def?.durationColumn === 'string' &&
+              def.durationColumn.length > 0
+            )
+            .map((def: any) => def.durationColumn)
+        );
+        hiddenColumns = hiddenColumns.filter((name) => !durationDeps.has(name));
+      }
 
       // Extract hidden columns from column definitions
       if (displayConfig?.columns && Array.isArray(displayConfig.columns)) {
@@ -610,6 +660,19 @@ function processListLayer(
           .filter((c: any) => c.hidden === true)
           .map((c: any) => c.name);
         hiddenColumns = [...new Set([...hiddenColumns, ...hiddenFromDefs])];
+      }
+
+      if (displayColumnDefs && hiddenColumns.length > 0) {
+        const durationDeps = new Set(
+          displayColumnDefs
+            .filter((def: any) =>
+              def?.clickAction === 'navigate_range' &&
+              typeof def?.durationColumn === 'string' &&
+              def.durationColumn.length > 0
+            )
+            .map((def: any) => def.durationColumn)
+        );
+        hiddenColumns = hiddenColumns.filter((name) => !durationDeps.has(name));
       }
 
       if (isDataPayloadFormat(stepData)) {
@@ -645,6 +708,27 @@ function processListLayer(
             row.map((val) => val)
           );
         }
+
+        if (displayColumnDefs && displayColumnDefs.length > 0) {
+          const ordered = [
+            ...displayColumnDefs
+              .map((def: any) => def.name)
+              .filter((name: string) => columns.includes(name)),
+            ...columns.filter((name) =>
+              !displayColumnDefs!.some((def: any) => def.name === name)
+            ),
+          ];
+
+          const indexMap = new Map(columns.map((name: string, idx: number) => [name, idx]));
+          columns = ordered;
+          rows = rows.map((row: any[]) =>
+            ordered.map((name: string) => row[indexMap.get(name) ?? -1])
+          );
+
+          filteredColumnDefs = displayColumnDefs.filter((def: any) =>
+            columns.includes(def.name)
+          );
+        }
       } else {
         // Legacy format: data is array of row objects
         items = stepData;
@@ -660,7 +744,22 @@ function processListLayer(
     if (columns.length === 0 && items.length > 0) {
       const allColumns = Object.keys(items[0] || {});
       const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
-      columns = allColumns.filter(col => !columnsToHide.has(col));
+      const visibleColumns = allColumns.filter(col => !columnsToHide.has(col));
+      if (displayColumnDefs && displayColumnDefs.length > 0) {
+        columns = [
+          ...displayColumnDefs
+            .map((def: any) => def.name)
+            .filter((name: string) => visibleColumns.includes(name)),
+          ...visibleColumns.filter((name) =>
+            !displayColumnDefs!.some((def: any) => def.name === name)
+          ),
+        ];
+        filteredColumnDefs = displayColumnDefs.filter((def: any) =>
+          columns.includes(def.name)
+        );
+      } else {
+        columns = visibleColumns;
+      }
       rows = items.map((item: any) => columns.map(col => item[col]));
     }
 
@@ -704,6 +803,7 @@ function processListLayer(
         columns,
         rows,
         rowCount: rows.length,
+        columnDefinitions: filteredColumnDefs as any,
         sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
         expandableData: expandableData && expandableData.filter(Boolean).length > 0
           ? expandableData
