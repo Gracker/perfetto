@@ -95,10 +95,14 @@ export const SCENE_DISPLAY_NAMES: Record<string, string> = {
   'cold_start': '冷启动',
   'warm_start': '温启动',
   'hot_start': '热启动',
+  'scroll_start': '滑动启动',
   'scroll': '滑动浏览',
   'inertial_scroll': '惯性滑动',
   'navigation': '页面跳转',
   'app_switch': '应用切换',
+  'screen_on': '屏幕点亮',
+  'screen_off': '屏幕熄灭',
+  'screen_sleep': '屏幕休眠',
   'screen_unlock': '解锁屏幕',
   'notification': '通知操作',
   'split_screen': '分屏操作',
@@ -112,6 +116,10 @@ export const SCENE_DISPLAY_NAMES: Record<string, string> = {
  * Each scene type maps to an array of track pinning instructions.
  */
 export const SCENE_PIN_MAPPING: Record<string, PinInstruction[]> = {
+  'scroll_start': [
+    { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
+    { pattern: '^main$', matchBy: 'name', priority: 2, reason: '主线程', smartPin: true, mainThreadOnly: true },
+  ],
   'scroll': [
     { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
     { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
@@ -197,6 +205,18 @@ export function getScenePerformanceRating(
   return '🔴';
 }
 
+export function getSceneResponseStatusLabel(
+  sceneType: string,
+  durationMs: number,
+  metadata?: Record<string, any>
+): string {
+  const rating = getScenePerformanceRating(sceneType, durationMs, metadata);
+  if (rating === '🟢') return '🟢 流畅';
+  if (rating === '🟡') return '🟡 轻微波动';
+  if (rating === '🔴') return '🔴 明显波动';
+  return '⚪ 未知';
+}
+
 /**
  * Format scene timestamp for display (ns string to human readable).
  * Handles BigInt string timestamps from scene reconstruction.
@@ -242,7 +262,7 @@ export class SceneReconstructionHandler {
 
   /**
    * Handle /scene command.
-   * Detects user operation scenes in the trace and provides performance analysis.
+   * Replays user operations and device responses from the trace.
    */
   async handleSceneReconstructCommand(): Promise<void> {
     if (!this.ctx.backendTraceId) {
@@ -263,7 +283,7 @@ export class SceneReconstructionHandler {
     this.ctx.addMessage({
       id: progressMessageId,
       role: 'assistant',
-      content: '🎬 **场景还原中...**\n\n正在分析 Trace 中的用户操作场景...',
+      content: '🎬 **场景还原中...**\n\n正在回放 Trace 中的用户操作与设备响应...',
       timestamp: Date.now(),
     });
 
@@ -277,7 +297,7 @@ export class SceneReconstructionHandler {
         body: JSON.stringify({
           traceId: this.ctx.backendTraceId,
           options: {
-            deepAnalysis: true,
+            deepAnalysis: false,
             generateTracks: true,
           },
         }),
@@ -529,14 +549,14 @@ export class SceneReconstructionHandler {
    * @param scenes - Detected scenes
    * @param _trackEvents - Track events (unused, reserved for future)
    * @param narrative - AI-generated narrative description
-   * @param findings - Analysis findings
+   * @param _findings - Analysis findings (replay mode ignores diagnostic findings)
    */
   private renderSceneReconstructionResult(
     messageId: string,
     scenes: SceneData[],
     _trackEvents: any[],
     narrative: string,
-    findings: SceneFinding[]
+    _findings: SceneFinding[]
   ): void {
     if (scenes.length === 0) {
       this.ctx.updateMessage(messageId, {
@@ -550,18 +570,18 @@ export class SceneReconstructionHandler {
     let content = '## 🎬 场景还原结果\n\n';
 
     // Scene summary
-    content += `共检测到 **${scenes.length}** 个操作场景：\n\n`;
+    content += `共还原 **${scenes.length}** 个操作场景（仅回放，不含根因诊断）：\n\n`;
 
     // Scene timeline as a table
-    content += '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 评级 |\n';
-    content += '|------|------|----------|------|-----------|------|\n';
+    content += '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 响应状态 |\n';
+    content += '|------|------|----------|------|-----------|-----------|\n';
 
     scenes.forEach((scene, index) => {
       const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
-      const rating = getScenePerformanceRating(scene.type, scene.durationMs, scene.metadata);
       const durationStr = scene.durationMs >= 1000
         ? `${(scene.durationMs / 1000).toFixed(2)}s`
         : `${scene.durationMs.toFixed(0)}ms`;
+      const responseStatus = getSceneResponseStatusLabel(scene.type, scene.durationMs, scene.metadata);
       const appInfo = scene.appPackage
         ? (scene.activityName ? `${scene.appPackage}/${scene.activityName}` : scene.appPackage)
         : '-';
@@ -570,30 +590,16 @@ export class SceneReconstructionHandler {
       const startTsNs = scene.startTs;
       content += `| ${index + 1} | ${displayName} | `;
       content += `<span class="clickable-ts" data-ts="${startTsNs}">${formatSceneTimestamp(startTsNs)}</span> | `;
-      content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${rating} |\n`;
+      content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${responseStatus} |\n`;
     });
 
     // Add narrative if available
     if (narrative) {
-      content += `\n---\n\n### 📝 场景描述\n\n${narrative}\n`;
-    }
-
-    // Add key findings
-    if (findings && findings.length > 0) {
-      content += `\n---\n\n### 🔍 关键发现\n\n`;
-      const criticalFindings = findings.filter(f => f.severity === 'critical' || f.severity === 'warning');
-      if (criticalFindings.length > 0) {
-        criticalFindings.slice(0, 5).forEach(finding => {
-          const icon = finding.severity === 'critical' ? '🔴' : '🟡';
-          content += `- ${icon} ${finding.message || finding.summary || finding.description}\n`;
-        });
-      } else {
-        content += '未发现明显性能问题。\n';
-      }
+      content += `\n---\n\n### 📝 操作回放摘要\n\n${narrative}\n`;
     }
 
     // Add navigation tips
-    content += `\n---\n\n💡 **提示**: 点击时间戳可跳转到对应位置，关键泳道已自动 Pin 到顶部。`;
+    content += `\n---\n\n💡 **提示**: 点击时间戳可跳转到对应位置，相关泳道已自动 Pin 到顶部。`;
 
     this.ctx.updateMessage(messageId, { content });
     m.redraw();

@@ -71,6 +71,8 @@ export interface SqlQueryResult {
     type?: string;
     format?: string;
     clickAction?: string;
+    durationColumn?: string;
+    unit?: 'ns' | 'us' | 'ms' | 's';
     hidden?: boolean;
   }>;
   // Expandable row data (for iterator type results)
@@ -181,6 +183,7 @@ export interface AISession {
   traceFingerprint: string;
   traceName: string;              // Display name (e.g., filename)
   backendTraceId?: string;        // Backend session ID
+  agentSessionId?: string;        // Backend Agent multi-turn session ID
   createdAt: number;
   lastActiveAt: number;
   messages: Message[];

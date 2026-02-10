@@ -690,6 +690,55 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].content).toContain('Main thread blocked');
   });
 
+  it('should render conclusionContract when narrative text is absent', () => {
+    const data = {
+      architecture: 'agent-driven',
+      data: {
+        conclusionContract: {
+          schema_version: 'conclusion_contract_v1',
+          mode: 'initial_report',
+          conclusion: [
+            {
+              rank: 1,
+              statement: '滑动过程存在明显卡顿',
+              confidence: 88,
+            },
+          ],
+          evidence_chain: [
+            {conclusion_id: 'C1', evidence: ['逐帧根因显示主线程耗时占比65%（ev_111111111111）']},
+          ],
+          next_steps: ['对K1聚类下钻'],
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('## 结论（按可能性排序）');
+    expect(ctx.messages[0].content).toContain('滑动过程存在明显卡顿');
+    expect(ctx.messages[0].content).toContain('对K1聚类下钻');
+  });
+
+  it('should not append metadata twice when conclusion already contains metadata section', () => {
+    const data = {
+      architecture: 'v2-agent-driven',
+      data: {
+        conclusion: `## 结论（按可能性排序）\n1. 示例\n\n## 分析元数据\n- 置信度: 90%\n- 分析轮次: 3`,
+        confidence: 0.9,
+        rounds: 3,
+        hypotheses: [
+          {description: 'Main thread blocked', status: 'confirmed'},
+        ],
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    const metadataCount = (ctx.messages[0].content.match(/分析元数据/g) || []).length;
+    expect(metadataCount).toBe(1);
+  });
+
   it('should not duplicate conclusion if already shown', () => {
     ctx.addMessage({
       id: 'existing',
@@ -1176,6 +1225,63 @@ describe('handleSkillLayeredResultEvent', () => {
     const result = handleSkillLayeredResultEvent(data, ctx);
 
     expect(result).toEqual({});
+  });
+
+  it('should preserve raw numeric values in overview table rows', () => {
+    const data = {
+      data: {
+        skillId: 'scrolling_analysis',
+        layers: {
+          overview: {
+            frame_metrics: {
+              data: [{
+                start_ts: '123',
+                dur_ns: 16666667,
+                dur_ms: 16.67,
+                frame_count: 10,
+              }],
+              display: {title: 'Frame Metrics'},
+            },
+          },
+        },
+      },
+    };
+
+    handleSkillLayeredResultEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    const sqlResult = ctx.messages[0].sqlResult!;
+    expect(sqlResult.columns).toEqual(['start_ts', 'dur_ns', 'dur_ms', 'frame_count']);
+    expect(sqlResult.rows[0]).toEqual(['123', 16666667, 16.67, 10]);
+  });
+
+  it('should preserve raw DataPayload rows after hidden-column filtering', () => {
+    const data = {
+      data: {
+        skillId: 'scrolling_analysis',
+        layers: {
+          list: {
+            app_jank_frames: {
+              data: {
+                columns: ['start_ts', 'dur_ms', 'hidden_metric'],
+                rows: [['123', 16.67, 42]],
+              },
+              display: {
+                title: 'Jank Frames',
+                hidden_columns: ['hidden_metric'],
+              },
+            },
+          },
+        },
+      },
+    };
+
+    handleSkillLayeredResultEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    const sqlResult = ctx.messages[0].sqlResult!;
+    expect(sqlResult.columns).toEqual(['start_ts', 'dur_ms']);
+    expect(sqlResult.rows[0]).toEqual(['123', 16.67]);
   });
 });
 

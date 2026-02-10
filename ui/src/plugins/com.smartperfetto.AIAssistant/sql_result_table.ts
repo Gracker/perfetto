@@ -98,10 +98,11 @@ export interface SqlResultTableAttrs {
 interface TimestampColumn {
   columnIndex: number;
   columnName: string;
-  unit: 'ns' | 'us' | 'ms' | 's';
+  unit: TimeUnit;
   // 关联的 duration 列（用于时间范围跳转）
   durationColumnIndex?: number;
   durationColumnName?: string;
+  durationUnit?: TimeUnit;
 }
 
 // 实体列信息 (用于交互追踪)
@@ -112,7 +113,9 @@ interface EntityColumn {
 }
 
 // 单位转换为纳秒的乘数
-const UNIT_TO_NS: Record<string, number> = {
+type TimeUnit = 'ns' | 'us' | 'ms' | 's';
+
+const UNIT_TO_NS: Record<TimeUnit, number> = {
   'ns': 1,
   'us': 1e3,
   'ms': 1e6,
@@ -271,7 +274,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                 m('th', {
                   class: columnClasses[idx] || '',
                   title: col,
-                  onclick: () => this.copyColumn(rows, idx),
+                  onclick: () => this.copyColumn(rows, columns, idx),
                 }, col)
               ),
               // Navigation arrow column header
@@ -307,7 +310,16 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                 } : {}, hasExpandableData ? m('span.expand-icon', isExpanded ? '▼' : '▶') : null) : null,
                 // 数据列
                 ...row.map((cell, cellIndex) =>
-                  this.renderCellPerfetto(cell, cellIndex, columnClasses[cellIndex], trace, row, columns, onInteraction)
+                  this.renderCellPerfetto(
+                    cell,
+                    cellIndex,
+                    columnClasses[cellIndex],
+                    trace,
+                    row,
+                    columns,
+                    onInteraction,
+                    effectiveColumnDefs[cellIndex]
+                  )
                 ),
                 // Navigation arrow
                 trace ? m('td.col-action', {
@@ -406,34 +418,41 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     trace?: Trace,
     row?: any[],  // 完整行数据，用于获取 dur_str
     columns?: string[],  // 列名数组，用于构建交互上下文
-    onInteraction?: (interaction: UserInteraction) => void  // 交互回调
+    onInteraction?: (interaction: UserInteraction) => void,  // 交互回调
+    columnDefinition?: ColumnDefinition
   ): m.Children {
     const isTimestamp = columnClass === 'col-timestamp';
     // Fix: 区分 duration (时长，需要单位转换) 和 number (普通数字如 ID/count)
     const isDuration = columnClass === 'col-duration';
     const isPlainNumber = columnClass === 'col-number';
+    const columnName = columns?.[columnIndex];
+    const isIdentifier = this.isIdentifierColumn(columnName);
 
     // 获取该列的时间戳信息（如果有）
     const tsColumn = this.timestampColumns.find(tc => tc.columnIndex === columnIndex);
+    const resolvedUnit = this.resolveTimeUnit(columnDefinition?.unit, columnName);
+    const timestampUnit = tsColumn?.unit ?? resolvedUnit;
+    const timestampNs = isTimestamp ? this.parseTimeValueToNs(value, timestampUnit) : null;
+    const durationNs = isDuration ? this.parseTimeValueToNs(value, resolvedUnit) : null;
 
     // Format the display value
-    // 支持 number、bigint 和字符串类型的时间戳
-    // 对于字符串时间戳，使用 BigInt 保持精度
+    // 支持 number、bigint 和字符串数值
     let numericValue: number | null = null;
-    let bigintValue: bigint | null = null;
 
     if (typeof value === 'bigint') {
-      bigintValue = value;
       numericValue = Number(value);
     } else if (typeof value === 'number') {
       numericValue = value;
-    } else if (typeof value === 'string' && /^\d+$/.test(value)) {
-      // 纯数字字符串（如 ts_str）- 使用 BigInt 保持精度
-      try {
-        bigintValue = BigInt(value);
-        numericValue = Number(bigintValue);
-      } catch {
-        numericValue = parseFloat(value);
+    } else if (typeof value === 'string') {
+      const normalized = value.trim().replace(/[,\s]/g, '');
+      if (/^-?\d+$/.test(normalized)) {
+        try {
+          numericValue = Number(BigInt(normalized));
+        } catch {
+          numericValue = parseFloat(normalized);
+        }
+      } else if (/^-?\d+(\.\d+)?$/.test(normalized)) {
+        numericValue = parseFloat(normalized);
       }
     }
 
@@ -442,74 +461,72 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     let displayValue: string;
     if (value === null || value === undefined) {
       displayValue = 'NULL';
-    } else if (isDuration && isValueNumeric) {
-      // Duration 类型：将纳秒转换为 ms/s 等可读格式
-      displayValue = this.formatDuration(numericValue!);
-    } else if (isPlainNumber && isValueNumeric) {
-      // 普通数字类型 (ID, count, etc.)：保持原始数值，使用千分位分隔
-      displayValue = Number.isInteger(numericValue!)
-        ? numericValue!.toLocaleString()
-        : numericValue!.toFixed(2);
-    } else if (isTimestamp && isValueNumeric) {
-      // 根据检测到的单位格式化时间戳
-      if (tsColumn) {
-        displayValue = this.formatTimestampWithUnit(numericValue!, tsColumn.unit);
+    } else if (isDuration && durationNs !== null) {
+      // Duration 类型：统一以 ms 展示
+      displayValue = this.formatDuration(durationNs);
+    } else if (isPlainNumber && (isValueNumeric || isIdentifier)) {
+      // ID/token/pid/tid 等标识符列保持原始数字字符串，不加千分位
+      if (isIdentifier) {
+        displayValue = this.formatIdentifierValue(value);
       } else {
-        displayValue = this.formatTimestamp(numericValue!);
+        // 普通数字类型 (count, avg, etc.)：使用千分位分隔
+        displayValue = Number.isInteger(numericValue!)
+          ? numericValue!.toLocaleString()
+          : numericValue!.toFixed(2);
       }
+    } else if (isTimestamp && timestampNs !== null) {
+      displayValue = this.formatTimestamp(Number(timestampNs));
     } else {
-      displayValue = this.formatCellValue(value);
+      displayValue = this.formatCellValue(value, columnName);
     }
 
     // Timestamp cell with click handler
-    // 使用 ts_str + dur_str 进行时间范围跳转
-    if (isTimestamp && isValueNumeric && trace && tsColumn && bigintValue !== null) {
-      // 获取 dur_str 值（如果有）
+    if (isTimestamp && trace && tsColumn && timestampNs !== null) {
+      // 获取 duration 值（如果有）
       const durValue = (tsColumn.durationColumnIndex !== undefined && row)
         ? row[tsColumn.durationColumnIndex]
         : undefined;
+      const durUnit = tsColumn.durationUnit || this.resolveTimeUnit(undefined, tsColumn.durationColumnName);
+      const durNs = durValue === undefined ? null : this.parseTimeValueToNs(durValue, durUnit);
+      const hasRange = durNs !== null && durNs > BigInt(0);
 
       return m('td', {
         class: `${columnClass} timestamp-cell`,
         onclick: (e: MouseEvent) => {
           e.stopPropagation();
-          // 如果有 dur_str，跳转到时间范围
-          if (durValue && typeof durValue === 'string' && /^\d+$/.test(durValue)) {
-            try {
-              const durNs = BigInt(durValue);
-              this.jumpToTimeRange(bigintValue!, durNs, trace);
-              // 发送交互事件 (v2.0 Focus Tracking)
-              if (onInteraction) {
-                const endNs = bigintValue! + durNs;
-                onInteraction({
-                  type: 'click',
-                  target: {
-                    timeRange: {
-                      start: bigintValue!.toString(),
-                      end: endNs.toString(),
-                    },
+          if (hasRange && durNs !== null) {
+            this.jumpToTimeRange(timestampNs, durNs, trace);
+
+            // 发送交互事件 (v2.0 Focus Tracking)
+            if (onInteraction) {
+              const endNs = timestampNs + durNs;
+              onInteraction({
+                type: 'click',
+                target: {
+                  timeRange: {
+                    start: timestampNs.toString(),
+                    end: endNs.toString(),
                   },
-                  source: 'ui',
-                  timestamp: Date.now(),
-                  context: {
-                    columnName: columns?.[columnIndex],
-                    rowContext: this.buildRowContext(row, columns),
-                  },
-                });
-              }
-            } catch {
-              this.jumpToTimestampBigInt(bigintValue!, tsColumn.unit, trace);
+                },
+                source: 'ui',
+                timestamp: Date.now(),
+                context: {
+                  columnName: columns?.[columnIndex],
+                  rowContext: this.buildRowContext(row, columns),
+                },
+              });
             }
           } else {
-            this.jumpToTimestampBigInt(bigintValue!, tsColumn.unit, trace);
+            this.jumpToTimestampNs(timestampNs, trace);
+
             // 发送单点时间戳交互事件 (v2.0 Focus Tracking)
             if (onInteraction) {
               onInteraction({
                 type: 'click',
                 target: {
                   timeRange: {
-                    start: bigintValue!.toString(),
-                    end: bigintValue!.toString(),
+                    start: timestampNs.toString(),
+                    end: timestampNs.toString(),
                   },
                 },
                 source: 'ui',
@@ -522,7 +539,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             }
           }
         },
-        title: durValue ? `Click to jump to time range` : `Click to jump (${tsColumn.unit}: ${value})`,
+        title: hasRange ? 'Click to jump to time range' : `Click to jump (${timestampUnit})`,
       }, displayValue);
     }
 
@@ -538,7 +555,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             type: 'click',
             target: {
               entityType: entityColumn.entityType,
-              entityId: String(value),
+              entityId: isIdentifier ? this.formatIdentifierValue(value) : String(value),
               entityName: this.findEntityName(row, columns, entityColumn.entityType),
             },
             source: 'ui',
@@ -561,30 +578,29 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   }
 
   /**
-   * Format duration values with appropriate units
+   * Format duration values in milliseconds (统一展示单位)
    */
-  private formatDuration(value: number): string {
-    if (value === 0) return '0';
-
-    // Auto-detect unit based on value magnitude
-    const absValue = Math.abs(value);
-
-    // If value looks like nanoseconds (very large)
-    if (absValue > 1_000_000_000) {
-      return (value / 1_000_000_000).toFixed(2) + 's';
-    }
-    if (absValue > 1_000_000) {
-      return (value / 1_000_000).toFixed(2) + 'ms';
-    }
-    if (absValue > 1000) {
-      return (value / 1000).toFixed(2) + 'µs';
+  private formatDuration(ns: bigint): string {
+    const ms = Number(ns) / 1e6;
+    if (!Number.isFinite(ms)) {
+      return `${ns.toString()}ns`;
     }
 
-    // Small values - show as-is with appropriate precision
-    if (Number.isInteger(value)) {
-      return value.toLocaleString();
+    if (ms === 0) {
+      return '0ms';
     }
-    return value.toFixed(2);
+
+    const absMs = Math.abs(ms);
+    if (absMs >= 100) {
+      return `${ms.toFixed(1)}ms`;
+    }
+    if (absMs >= 1) {
+      return `${ms.toFixed(2)}ms`;
+    }
+    if (absMs >= 0.01) {
+      return `${ms.toFixed(3)}ms`;
+    }
+    return `${ms.toFixed(4)}ms`;
   }
 
   /**
@@ -594,40 +610,24 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private jumpToFirstTimestamp(row: any[], trace: Trace): void {
     for (const tc of this.timestampColumns) {
       const tsValue = row[tc.columnIndex];
-      // 获取 duration 值（如果有）
+
+      const startNs = this.parseTimeValueToNs(tsValue, tc.unit);
+      if (startNs === null) {
+        continue;
+      }
+
       const durValue = tc.durationColumnIndex !== undefined
         ? row[tc.durationColumnIndex]
         : undefined;
+      const durUnit = tc.durationUnit || this.resolveTimeUnit(undefined, tc.durationColumnName);
+      const durNs = durValue === undefined ? null : this.parseTimeValueToNs(durValue, durUnit);
 
-      // 解析 ts_str（纯数字字符串）
-      if (typeof tsValue === 'string' && /^\d+$/.test(tsValue)) {
-        try {
-          const startNs = BigInt(tsValue);
-          // 如果有 dur_str，跳转到时间范围
-          if (durValue && typeof durValue === 'string' && /^\d+$/.test(durValue)) {
-            const durNs = BigInt(durValue);
-            this.jumpToTimeRange(startNs, durNs, trace);
-          } else {
-            this.jumpToTimestampBigInt(startNs, tc.unit, trace);
-          }
-          return;
-        } catch {
-          // BigInt 解析失败，继续尝试其他方法
-        }
+      if (durNs !== null && durNs > BigInt(0)) {
+        this.jumpToTimeRange(startNs, durNs, trace);
+      } else {
+        this.jumpToTimestampNs(startNs, trace);
       }
-
-      // 支持 number、bigint 类型
-      if (typeof tsValue === 'number') {
-        this.jumpToTimestamp(tsValue, tc.unit, trace);
-        return;
-      } else if (typeof tsValue === 'bigint') {
-        if (durValue && typeof durValue === 'bigint') {
-          this.jumpToTimeRange(tsValue, durValue, trace);
-        } else {
-          this.jumpToTimestampBigInt(tsValue, tc.unit, trace);
-        }
-        return;
-      }
+      return;
     }
   }
 
@@ -693,14 +693,66 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     return value.toFixed(2);
   }
 
-  private formatCellValue(value: any): string {
+  private formatCellValue(value: any, columnName?: string): string {
     if (value === null || value === undefined) return 'NULL';
+    const isIdentifier = this.isIdentifierColumn(columnName);
     if (typeof value === 'number') {
+      if (isIdentifier && Number.isFinite(value)) {
+        return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
+      }
       if (Number.isInteger(value)) return value.toLocaleString();
       return value.toFixed(2);
     }
-    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    if (typeof value === 'string' && isIdentifier) {
+      const normalized = this.normalizeLooseNumericString(value);
+      return normalized ?? value;
+    }
     if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  private isIdentifierColumn(columnName?: string): boolean {
+    const col = (columnName || '').toLowerCase();
+    if (!col) return false;
+    if (col === 'id' || col.endsWith('_id')) return true;
+    return [
+      'frame_id',
+      'session_id',
+      'scroll_id',
+      'display_frame_token',
+      'surface_frame_token',
+      'token',
+      'pid',
+      'tid',
+      'upid',
+      'utid',
+      'track_id',
+      'slice_id',
+      'arg_set_id',
+    ].includes(col);
+  }
+
+  private normalizeLooseNumericString(raw: string): string | null {
+    const compact = raw.trim().replace(/[,\s，_]/g, '');
+    if (!/^\d+$/.test(compact)) return null;
+    return compact;
+  }
+
+  private formatIdentifierValue(value: any): string {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
+    }
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    if (typeof value === 'string') {
+      const normalized = this.normalizeLooseNumericString(value);
+      return normalized ?? value;
+    }
     return String(value);
   }
 
@@ -708,7 +760,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     // Copy as TSV (tab-separated values)
     const header = columns.join('\t');
     const data = rows.map((row) =>
-      row.map((cell) => this.formatCellValue(cell)).join('\t')
+      row.map((cell, idx) => this.formatCellValue(cell, columns[idx])).join('\t')
     );
     const tsv = [header, ...data].join('\n');
 
@@ -726,8 +778,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     }
   }
 
-  private async copyColumn(rows: any[][], colIndex: number) {
-    const columnData = rows.map((row) => this.formatCellValue(row[colIndex])).join('\n');
+  private async copyColumn(rows: any[][], columns: string[], colIndex: number) {
+    const columnData = rows.map((row) => this.formatCellValue(row[colIndex], columns[colIndex])).join('\n');
     try {
       await navigator.clipboard.writeText(columnData);
       this.copySuccess = true;
@@ -773,9 +825,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
    */
   private detectTimestampColumns(columns: string[]): TimestampColumn[] {
     const detected: TimestampColumn[] = [];
-
-    // 先找到 dur_str 列的索引（用于时间范围跳转）
-    const durStrIndex = columns.findIndex((col) => /^dur_str$/i.test(col));
+    const durationColumnIndex = this.findDurationColumnIndex(columns);
 
     columns.forEach((col, idx) => {
       const lowerCol = col.toLowerCase();
@@ -784,20 +834,6 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       if (/relative|dur|duration|latency|elapsed|delta|diff|offset/i.test(lowerCol)) {
         return;  // 跳过此列
       }
-
-      // 检测单位：根据列名后缀判断
-      let unit: 'ns' | 'us' | 'ms' | 's' = 'ns';  // 默认纳秒（Perfetto Raw格式）
-
-      if (/_s$|_sec$/.test(lowerCol) || /\btime\s*\(s\)/.test(lowerCol)) {
-        unit = 's';
-      } else if (/_ms$|_millis$/.test(lowerCol) || /\btime\s*\(ms\)/.test(lowerCol)) {
-        unit = 'ms';
-      } else if (/_us$|_micros$/.test(lowerCol) || /\btime\s*\(us\)|time\s*\(µs\)/.test(lowerCol)) {
-        unit = 'us';
-      } else if (/_ns$/.test(lowerCol) || /\btime\s*\(ns\)/.test(lowerCol)) {
-        unit = 'ns';
-      }
-      // 没有后缀的 ts/time 列默认是纳秒（Perfetto 原始 Raw 格式）
 
       // 检测是否是【绝对时间戳】列（可用于跳转到 Perfetto 时间线）
       // 必须是 ts, ts_str, timestamp 等明确的绝对时间列
@@ -815,13 +851,22 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         const tsColumn: TimestampColumn = {
           columnIndex: idx,
           columnName: col,
-          unit,
+          unit: this.resolveTimeUnit(undefined, col),
         };
 
-        // 如果有 dur_str 列，关联起来用于时间范围跳转
-        if (durStrIndex !== -1) {
-          tsColumn.durationColumnIndex = durStrIndex;
-          tsColumn.durationColumnName = columns[durStrIndex];
+        // 默认只对开始时间列绑定 duration，避免 end_ts 误触发范围跳转
+        const isStartLikeTimestamp =
+          /^ts$/i.test(col) ||
+          /^ts_str$/i.test(col) ||
+          /^start_ts$/i.test(col) ||
+          /^start_ts_str$/i.test(col) ||
+          /^start_time$/i.test(col) ||
+          /^client_ts$/i.test(col);
+
+        if (isStartLikeTimestamp && durationColumnIndex !== -1) {
+          tsColumn.durationColumnIndex = durationColumnIndex;
+          tsColumn.durationColumnName = columns[durationColumnIndex];
+          tsColumn.durationUnit = this.resolveTimeUnit(undefined, columns[durationColumnIndex]);
         }
 
         detected.push(tsColumn);
@@ -953,7 +998,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         const tsColumn: TimestampColumn = {
           columnIndex: idx,
           columnName: columns[idx],
-          unit: def.unit || 'ns',
+          unit: this.resolveTimeUnit(def.unit, columns[idx]),
         };
 
         // If durationColumn is specified, find its index
@@ -962,6 +1007,10 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
           if (durIndex !== -1) {
             tsColumn.durationColumnIndex = durIndex;
             tsColumn.durationColumnName = def.durationColumn;
+            tsColumn.durationUnit = this.resolveTimeUnit(
+              columnDefs[durIndex]?.unit,
+              def.durationColumn
+            );
           }
         }
 
@@ -972,9 +1021,112 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     return detected;
   }
 
-  /**
-   * 格式化时间戳显示（假设输入是纳秒）
-   */
+  private findDurationColumnIndex(columns: string[]): number {
+    const candidates = [
+      /^dur_str$/i,
+      /^dur_ms$/i,
+      /^dur_us$/i,
+      /^dur_ns$/i,
+      /^dur$/i,
+      /^duration_str$/i,
+      /^duration_ms$/i,
+      /^duration_us$/i,
+      /^duration_ns$/i,
+      /^duration$/i,
+      /_dur_str$/i,
+      /_dur_ms$/i,
+      /_dur_us$/i,
+      /_dur_ns$/i,
+      /_dur$/i,
+      /_duration_str$/i,
+      /_duration_ms$/i,
+      /_duration_us$/i,
+      /_duration_ns$/i,
+      /_duration$/i,
+    ];
+
+    for (const pattern of candidates) {
+      const index = columns.findIndex(col => pattern.test(col));
+      if (index !== -1) {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private resolveTimeUnit(unit?: string, columnName?: string): TimeUnit {
+    const normalizedUnit = unit?.toLowerCase();
+    if (normalizedUnit && ['ns', 'us', 'ms', 's'].includes(normalizedUnit)) {
+      return normalizedUnit as TimeUnit;
+    }
+
+    const lowerCol = (columnName || '').toLowerCase();
+    if (!lowerCol) {
+      return 'ns';
+    }
+
+    if (/_ns$/.test(lowerCol) || /\b(?:time|duration)\s*\(ns\)/.test(lowerCol)) {
+      return 'ns';
+    }
+    if (/_us$|_micros$/.test(lowerCol) || /\b(?:time|duration)\s*\((?:us|µs)\)/.test(lowerCol)) {
+      return 'us';
+    }
+    if (/_ms$|_millis$/.test(lowerCol) || /\b(?:time|duration)\s*\(ms\)/.test(lowerCol)) {
+      return 'ms';
+    }
+    if (/(^|_)s$|_sec$/.test(lowerCol) || /\b(?:time|duration)\s*\(s\)/.test(lowerCol)) {
+      return 's';
+    }
+
+    return 'ns';
+  }
+
+  private parseTimeValueToNs(value: unknown, unit: TimeUnit): bigint | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    const unitMultiplier = UNIT_TO_NS[unit];
+    const bigintMultiplier = BigInt(unitMultiplier);
+
+    if (typeof value === 'bigint') {
+      return value * bigintMultiplier;
+    }
+
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        return null;
+      }
+      return BigInt(Math.round(value * unitMultiplier));
+    }
+
+    if (typeof value === 'string') {
+      const normalized = value.trim().replace(/[,\s]/g, '');
+      if (!normalized) {
+        return null;
+      }
+
+      if (/^-?\d+$/.test(normalized)) {
+        try {
+          return BigInt(normalized) * bigintMultiplier;
+        } catch {
+          return null;
+        }
+      }
+
+      if (/^-?\d+(\.\d+)?$/.test(normalized)) {
+        const parsed = Number(normalized);
+        if (!Number.isFinite(parsed)) {
+          return null;
+        }
+        return BigInt(Math.round(parsed * unitMultiplier));
+      }
+    }
+
+    return null;
+  }
+
   /**
    * 格式化时间戳为相对时间（相对于 trace 起始时间）
    * 显示为 "Xm Ys.ZZZs" 或 "Ys.ZZZs" 格式
@@ -1022,64 +1174,18 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   }
 
   /**
-   * 根据单位格式化时间戳显示
-   * 先转换为纳秒，再计算相对时间
+   * 跳转到纳秒时间戳
    */
-  private formatTimestampWithUnit(value: number, unit: 'ns' | 'us' | 'ms' | 's'): string {
-    const multiplier = UNIT_TO_NS[unit] || 1;
-    const ns = value * multiplier;
-    return this.formatTimestamp(ns);
-  }
-
-  /**
-   * 跳转到Perfetto时间线
-   * @param value 时间戳值
-   * @param unit 时间单位（ns/us/ms/s）
-   * @param trace Perfetto trace 对象
-   */
-  private jumpToTimestamp(value: number, unit: 'ns' | 'us' | 'ms' | 's', trace: Trace): void {
+  private jumpToTimestampNs(timestampNs: bigint, trace: Trace): void {
     try {
-      // 根据单位转换为纳秒
-      const multiplier = UNIT_TO_NS[unit] || 1;
-      const timestampNs = Math.floor(value * multiplier);
-
-      console.log(`[SqlResultTable] Jumping to timestamp: value=${value}, unit=${unit}, ns=${timestampNs}`);
-
-      // 使用 Perfetto 的 scrollTo API
-      trace.scrollTo({
-        time: {
-          start: Time.fromRaw(BigInt(timestampNs)),
-          end: Time.fromRaw(BigInt(timestampNs + 10000000)), // 结束时间为开始时间+10ms（更宽的视野）
-          behavior: 'focus', // 智能缩放以聚焦到该时间点
-        },
-      });
-
-      console.log(`[SqlResultTable] Jumped to timestamp: ${this.formatTimestamp(timestampNs)}`);
-    } catch (error) {
-      console.error('[SqlResultTable] Failed to jump to timestamp:', error);
-    }
-  }
-
-  /**
-   * 使用 BigInt 跳转到Perfetto时间线（保持精度）
-   * @param value 时间戳值（BigInt）
-   * @param unit 时间单位（ns/us/ms/s）
-   * @param trace Perfetto trace 对象
-   */
-  private jumpToTimestampBigInt(value: bigint, unit: 'ns' | 'us' | 'ms' | 's', trace: Trace): void {
-    try {
-      // 根据单位转换为纳秒
-      const multiplier = BigInt(UNIT_TO_NS[unit] || 1);
-      const timestampNs = value * multiplier;
-
-      console.log(`[SqlResultTable] Jumping to timestamp (BigInt): value=${value}, unit=${unit}, ns=${timestampNs}`);
+      console.log(`[SqlResultTable] Jumping to timestamp ns=${timestampNs}`);
 
       // 使用 Perfetto 的 scrollTo API
       trace.scrollTo({
         time: {
           start: Time.fromRaw(timestampNs),
-          end: Time.fromRaw(timestampNs + BigInt(10000000)), // 结束时间为开始时间+10ms
-          behavior: 'focus',
+          end: Time.fromRaw(timestampNs + BigInt(10000000)), // 结束时间为开始时间+10ms（更宽的视野）
+          behavior: 'focus', // 智能缩放以聚焦到该时间点
         },
       });
 

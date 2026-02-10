@@ -107,6 +107,31 @@ export function formatSceneTimestamp(tsNs: string): string {
  * @returns Formatted string representation
  */
 export function formatDisplayValue(val: any, columnName?: string): string {
+  const col = (columnName || '').toLowerCase();
+  const isIdentifierColumn = (name: string): boolean => {
+    if (!name) return false;
+    if (name.endsWith('_id')) return true;
+    return [
+      'id',
+      'frame_id',
+      'session_id',
+      'scroll_id',
+      'display_frame_token',
+      'surface_frame_token',
+      'token',
+      'pid',
+      'tid',
+      'upid',
+      'utid',
+    ].includes(name);
+  };
+
+  const normalizeLooseNumericString = (input: string): string | null => {
+    const compact = input.trim().replace(/[,\s，_]/g, '');
+    if (!/^\d+$/.test(compact)) return null;
+    return compact;
+  };
+
   // Handle null/undefined
   if (val === null || val === undefined) {
     return '';
@@ -114,7 +139,9 @@ export function formatDisplayValue(val: any, columnName?: string): string {
 
   // Handle numbers with smart formatting
   if (typeof val === 'number') {
-    const col = (columnName || '').toLowerCase();
+    if (isIdentifierColumn(col) && Number.isFinite(val)) {
+      return Number.isInteger(val) ? String(Math.trunc(val)) : String(val);
+    }
 
     // Percentage fields
     if (col.includes('rate') || col.includes('percent')) {
@@ -154,6 +181,10 @@ export function formatDisplayValue(val: any, columnName?: string): string {
 
   // Handle bigint
   if (typeof val === 'bigint') {
+    if (isIdentifierColumn(col)) {
+      return val.toString();
+    }
+
     const num = Number(val);
     if (num > 1_000_000_000) return `${(num / 1_000_000_000).toFixed(2)}s`;
     if (num > 1_000_000) return `${(num / 1_000_000).toFixed(2)}ms`;
@@ -191,6 +222,11 @@ export function formatDisplayValue(val: any, columnName?: string): string {
   // Handle boolean
   if (typeof val === 'boolean') {
     return val ? '✓' : '✗';
+  }
+
+  if (typeof val === 'string' && isIdentifierColumn(col)) {
+    const normalized = normalizeLooseNumericString(val);
+    if (normalized !== null) return normalized;
   }
 
   // Default: convert to string

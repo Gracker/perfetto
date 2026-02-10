@@ -28,7 +28,6 @@
 
 import {Message, InterventionPoint, InterventionState} from './types';
 import {
-  formatDisplayValue,
   formatLayerName,
   translateCategory,
   translateComponent,
@@ -424,7 +423,7 @@ function processOverviewLayer(
       if (typeof firstRow === 'object' && firstRow !== null) {
         const columns = Object.keys(firstRow);
         const rows = dataArray.map((item: any) =>
-          columns.map(col => formatDisplayValue(item[col], col))
+          columns.map(col => item[col])
         );
 
         ctx.addMessage({
@@ -443,7 +442,7 @@ function processOverviewLayer(
     } else if (typeof val === 'object' && !Array.isArray(val)) {
       // Nested object: display as single-row table
       const objColumns = Object.keys(val);
-      const objRow = objColumns.map(col => formatDisplayValue((val as any)[col], col));
+      const objRow = objColumns.map(col => (val as any)[col]);
 
       ctx.addMessage({
         id: ctx.generateId(),
@@ -638,12 +637,12 @@ function processListLayer(
             return false;
           });
           rows = allRows.map((row: any[]) =>
-            visibleIndices.map(idx => formatDisplayValue(row[idx], allColumns[idx]))
+            visibleIndices.map(idx => row[idx])
           );
         } else {
           columns = allColumns;
           rows = allRows.map((row: any[]) =>
-            row.map((val, idx) => formatDisplayValue(val, allColumns[idx]))
+            row.map((val) => val)
           );
         }
       } else {
@@ -662,7 +661,7 @@ function processListLayer(
       const allColumns = Object.keys(items[0] || {});
       const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
       columns = allColumns.filter(col => !columnsToHide.has(col));
-      rows = items.map((item: any) => columns.map(col => formatDisplayValue(item[col], col)));
+      rows = items.map((item: any) => columns.map(col => item[col]));
     }
 
     // Build expandable data
@@ -780,6 +779,141 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
   }
 }
 
+function renderConclusionContract(contract: any): string | null {
+  if (!contract || typeof contract !== 'object') return null;
+
+  const toNumber = (value: any): number | undefined => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const n = Number(value.replace(/[%％]/g, '').trim());
+      if (Number.isFinite(n)) return n;
+    }
+    return undefined;
+  };
+  const toPercent = (value: any): number | undefined => {
+    const n = toNumber(value);
+    if (n === undefined) return undefined;
+    return n <= 1 ? n * 100 : n;
+  };
+  const toText = (value: any): string => String(value ?? '').trim();
+
+  const conclusions = Array.isArray(contract.conclusion)
+    ? contract.conclusion
+    : (Array.isArray(contract.conclusions) ? contract.conclusions : []);
+  const clusters = Array.isArray(contract.clusters) ? contract.clusters : [];
+  const evidenceChain = Array.isArray(contract.evidence_chain)
+    ? contract.evidence_chain
+    : (Array.isArray(contract.evidenceChain) ? contract.evidenceChain : []);
+  const uncertainties = Array.isArray(contract.uncertainties) ? contract.uncertainties : [];
+  const nextSteps = Array.isArray(contract.next_steps)
+    ? contract.next_steps
+    : (Array.isArray(contract.nextSteps) ? contract.nextSteps : []);
+  const metadata = contract.metadata && typeof contract.metadata === 'object' ? contract.metadata : {};
+
+  const hasSignal =
+    conclusions.length > 0 ||
+    clusters.length > 0 ||
+    evidenceChain.length > 0 ||
+    uncertainties.length > 0 ||
+    nextSteps.length > 0;
+  if (!hasSignal) return null;
+
+  const lines: string[] = [];
+  lines.push('## 结论（按可能性排序）');
+  if (conclusions.length === 0) {
+    lines.push('1. 结论信息缺失（证据不足）');
+  } else {
+    conclusions.slice(0, 3).forEach((item: any, idx: number) => {
+      const statement = toText(item?.statement);
+      const trigger = toText(item?.trigger);
+      const supply = toText(item?.supply);
+      const amplification = toText(item?.amplification);
+      let resolved = statement;
+      if (!resolved && (trigger || supply || amplification)) {
+        const parts: string[] = [];
+        if (trigger) parts.push(`触发因子（直接原因）: ${trigger}`);
+        if (supply) parts.push(`供给约束（资源瓶颈）: ${supply}`);
+        if (amplification) parts.push(`放大路径（问题放大环节）: ${amplification}`);
+        resolved = parts.join('；');
+      }
+      const confidence = toPercent(item?.confidencePercent ?? item?.confidence);
+      const suffix = confidence !== undefined ? `（置信度: ${Math.round(confidence)}%）` : '';
+      lines.push(`${idx + 1}. ${resolved || '结论信息缺失'}${suffix}`);
+    });
+  }
+  lines.push('');
+
+  lines.push('## 掉帧聚类（先看大头）');
+  if (clusters.length === 0) {
+    lines.push('- 暂无');
+  } else {
+    clusters.slice(0, 5).forEach((item: any) => {
+      const cluster = toText(item?.cluster);
+      const description = toText(item?.description);
+      const frames = toNumber(item?.frames);
+      const percentage = toPercent(item?.percentage);
+      const label = description ? `${cluster || 'K?'}: ${description}` : (cluster || 'K?');
+      const metrics: string[] = [];
+      if (frames !== undefined) metrics.push(`${Math.round(frames)}帧`);
+      if (percentage !== undefined) metrics.push(`${percentage.toFixed(1)}%`);
+      lines.push(`- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}`);
+    });
+  }
+  lines.push('');
+
+  lines.push('## 证据链（对应上述结论）');
+  if (evidenceChain.length === 0) {
+    lines.push('- 证据链信息缺失');
+  } else {
+    evidenceChain.slice(0, 12).forEach((item: any, idx: number) => {
+      const cid = toText(item?.conclusionId || item?.conclusion_id || item?.conclusion || `C${idx + 1}`);
+      const evidence = item?.evidence;
+      if (Array.isArray(evidence)) {
+        evidence.forEach((entry: any) => {
+          const text = toText(entry);
+          if (text) lines.push(`- ${cid}: ${text}`);
+        });
+      } else {
+        const text = toText(item?.text || evidence || item?.statement || item?.data);
+        if (text) lines.push(`- ${cid}: ${text}`);
+      }
+    });
+  }
+  lines.push('');
+
+  lines.push('## 不确定性与反例');
+  if (uncertainties.length === 0) {
+    lines.push('- 暂无');
+  } else {
+    uncertainties.slice(0, 6).forEach((item: any) => {
+      const text = toText(item);
+      if (text) lines.push(`- ${text}`);
+    });
+  }
+  lines.push('');
+
+  lines.push('## 下一步（最高信息增益）');
+  if (nextSteps.length === 0) {
+    lines.push('- 暂无');
+  } else {
+    nextSteps.slice(0, 6).forEach((item: any) => {
+      const text = toText(item);
+      if (text) lines.push(`- ${text}`);
+    });
+  }
+
+  const confidence = toPercent(metadata?.confidencePercent ?? metadata?.confidence ?? contract?.confidence);
+  const rounds = toNumber(metadata?.rounds ?? contract?.rounds);
+  if (confidence !== undefined || rounds !== undefined) {
+    lines.push('');
+    lines.push('## 分析元数据');
+    if (confidence !== undefined) lines.push(`- 置信度: ${Math.round(confidence)}%`);
+    if (rounds !== undefined) lines.push(`- 分析轮次: ${Math.round(rounds)}`);
+  }
+
+  return lines.join('\n');
+}
+
 /**
  * Process analysis_completed event - final analysis result.
  */
@@ -795,11 +929,16 @@ export function handleAnalysisCompletedEvent(
     return { isTerminal: true, stopLoading: true };
   }
 
-  // Support both 'answer' (legacy) and 'conclusion' (agent-driven)
-  const answerContent = data?.data?.answer || data?.data?.conclusion;
+  // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
+  // and fall back to structured conclusionContract when narrative text is absent.
+  const contractContent = renderConclusionContract(data?.data?.conclusionContract);
+  const answerContent = data?.data?.answer || data?.data?.conclusion || contractContent;
 
   if (answerContent) {
     ctx.setCompletionHandled(true);
+    // Keep the in-flight context object consistent as well (unit tests and
+    // any caller that reuses the same context instance for multiple events).
+    ctx.completionHandled = true;
 
     // Remove any remaining progress message
     ctx.removeLastMessageIf(
@@ -815,7 +954,8 @@ export function handleAnalysisCompletedEvent(
       const confirmed = hypotheses.filter((h: any) => h.status === 'confirmed');
       const confidence = data.data.confidence || 0;
 
-      if (confirmed.length > 0 || confidence > 0) {
+      const hasMetadataSection = /(?:^|\n)(?:##\s*分析元数据|\*\*分析元数据\*\*)/m.test(content);
+      if (!hasMetadataSection && (confirmed.length > 0 || confidence > 0)) {
         content += `\n\n---\n**分析元数据**\n`;
         content += `- 置信度: ${(confidence * 100).toFixed(0)}%\n`;
         content += `- 分析轮次: ${data.data.rounds || 1}\n`;

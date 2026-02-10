@@ -240,6 +240,22 @@ describe('formatDisplayValue', () => {
     });
   });
 
+  describe('identifier formatting', () => {
+    it('should keep identifier columns as plain digit strings', () => {
+      expect(formatDisplayValue(1438035, 'frame_id')).toBe('1438035');
+      expect(formatDisplayValue(7, 'session_id')).toBe('7');
+      expect(formatDisplayValue(1129, 'pid')).toBe('1129');
+      expect(formatDisplayValue(21031, 'tid')).toBe('21031');
+      expect(formatDisplayValue(1438035, 'display_frame_token')).toBe('1438035');
+    });
+
+    it('should normalize loose numeric identifier strings', () => {
+      expect(formatDisplayValue('1,438,035', 'frame_id')).toBe('1438035');
+      expect(formatDisplayValue('1 438 035', 'frame_id')).toBe('1438035');
+      expect(formatDisplayValue('1_438_035', 'frame_id')).toBe('1438035');
+    });
+  });
+
   describe('percentage formatting (rate/percent columns)', () => {
     it('should format percentage when value > 1 (already in %)', () => {
       expect(formatDisplayValue(6.07, 'jank_rate')).toBe('6.07%');

@@ -1292,6 +1292,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         pinnedResults: this.state.pinnedResults,
         bookmarks: this.state.bookmarks,
         backendTraceId: this.state.backendTraceId || undefined,
+        agentSessionId: this.state.agentSessionId || undefined,
       }
     );
   }
@@ -1308,6 +1309,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.messages = session.messages;
     this.state.pinnedResults = session.pinnedResults || [];
     this.state.bookmarks = session.bookmarks || [];
+    this.state.agentSessionId = session.agentSessionId || null;
 
     // Only restore backendTraceId if we're currently in RPC mode
     // If not in RPC mode, the old backendTraceId is stale and invalid
@@ -2216,6 +2218,57 @@ Output MUST follow this exact markdown structure:
     await this.handleChatMessage('分析内存与 GC/LMK 情况');
   }
 
+  /**
+   * Ensure backend has an active Agent session for multi-turn continuity.
+   * Attempts to restore from backend persistence after reload/restart.
+   */
+  private async ensureAgentSessionReady(): Promise<void> {
+    if (!this.state.agentSessionId || !this.state.backendTraceId) {
+      return;
+    }
+
+    const sessionId = this.state.agentSessionId;
+    try {
+      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/resume`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          sessionId,
+          traceId: this.state.backendTraceId,
+        }),
+      });
+
+      if (response.ok) {
+        return;
+      }
+
+      const errorData = await response.json().catch(() => ({} as any));
+      const code = String(errorData?.code || '');
+      const errorText = String(errorData?.error || '');
+
+      // Non-recoverable continuity failures: clear stale session and continue with a new chain.
+      if (
+        response.status === 404 ||
+        code === 'TRACE_ID_MISMATCH' ||
+        errorText.includes('Session not found')
+      ) {
+        console.warn('[AIPanel] Agent session continuity unavailable, falling back to new session:', {
+          sessionId,
+          code,
+          errorText,
+        });
+        this.state.agentSessionId = null;
+        this.saveCurrentSession();
+        return;
+      }
+
+      throw new Error(`resume failed: ${response.status} ${errorText || response.statusText}`);
+    } catch (error) {
+      console.warn('[AIPanel] Failed to ensure Agent session continuity:', error);
+      // Keep current sessionId in state for potential transient backend failures.
+    }
+  }
+
   private async handleChatMessage(message: string) {
     console.log('[AIPanel] handleChatMessage called with:', message);
     console.log('[AIPanel] backendTraceId:', this.state.backendTraceId);
@@ -2238,6 +2291,9 @@ Output MUST follow this exact markdown structure:
     m.redraw();
 
     try {
+      // Ensure prior multi-turn context is restored when possible.
+      await this.ensureAgentSessionReady();
+
       // Call Agent API (Agent-Driven Orchestrator)
       const apiUrl = `${this.state.settings.backendUrl}/api/agent/analyze`;
       console.log('[AIPanel] Calling Agent API:', apiUrl, 'with traceId:', this.state.backendTraceId);
@@ -2303,6 +2359,7 @@ Output MUST follow this exact markdown structure:
           console.log('[AIPanel] Continuing existing Agent session:', sessionId);
         }
         this.state.agentSessionId = sessionId;
+        this.saveCurrentSession();
 
         console.log('[AIPanel] Starting Agent SSE listener for session:', sessionId);
         await this.listenToAgentSSE(sessionId);
@@ -2723,10 +2780,14 @@ Output MUST follow this exact markdown structure:
     'cold_start': '冷启动',
     'warm_start': '温启动',
     'hot_start': '热启动',
+    'scroll_start': '滑动启动',
     'scroll': '滑动浏览',
     'inertial_scroll': '惯性滑动',
     'navigation': '页面跳转',
     'app_switch': '应用切换',
+    'screen_on': '屏幕点亮',
+    'screen_off': '屏幕熄灭',
+    'screen_sleep': '屏幕休眠',
     'screen_unlock': '解锁屏幕',
     'notification': '通知操作',
     'split_screen': '分屏操作',
@@ -2747,6 +2808,10 @@ Output MUST follow this exact markdown structure:
     mainThreadOnly?: boolean;
     smartPin?: boolean;
   }>> = {
+    'scroll_start': [
+      { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
+      { pattern: '^main$', matchBy: 'name', priority: 2, reason: '主线程', smartPin: true, mainThreadOnly: true },
+    ],
     'scroll': [
       { pattern: '^RenderThread$', matchBy: 'name', priority: 1, reason: '渲染线程', smartPin: true },
       { pattern: 'SurfaceFlinger', matchBy: 'name', priority: 2, reason: '合成器' },
@@ -2818,13 +2883,21 @@ Output MUST follow this exact markdown structure:
     return '🔴';
   }
 
+  private getSceneResponseStatusLabel(sceneType: string, durationMs: number, metadata?: Record<string, any>): string {
+    const rating = this.getScenePerformanceRating(sceneType, durationMs, metadata);
+    if (rating === '🟢') return '🟢 流畅';
+    if (rating === '🟡') return '🟡 轻微波动';
+    if (rating === '🔴') return '🔴 明显波动';
+    return '⚪ 未知';
+  }
+
   // =============================================================================
   // Scene Reconstruction Command Handler
   // =============================================================================
 
   /**
    * Handle /scene command
-   * Detects user operation scenes in the trace and provides performance analysis
+   * Replays user operations and device responses from the trace.
    */
   private async handleSceneReconstructCommand() {
     if (!this.state.backendTraceId) {
@@ -2845,7 +2918,7 @@ Output MUST follow this exact markdown structure:
     this.addMessage({
       id: progressMessageId,
       role: 'assistant',
-      content: '🎬 **场景还原中...**\n\n正在分析 Trace 中的用户操作场景...',
+      content: '🎬 **场景还原中...**\n\n正在回放 Trace 中的用户操作与设备响应...',
       timestamp: Date.now(),
     });
 
@@ -2859,7 +2932,7 @@ Output MUST follow this exact markdown structure:
         body: JSON.stringify({
           traceId: this.state.backendTraceId,
           options: {
-            deepAnalysis: true,
+            deepAnalysis: false,
             generateTracks: true,
           },
         }),
@@ -3110,7 +3183,7 @@ Output MUST follow this exact markdown structure:
     scenes: any[],
     _trackEvents: any[],
     narrative: string,
-    findings: any[]
+    _findings: any[]
   ) {
     if (scenes.length === 0) {
       this.updateMessage(messageId, {
@@ -3124,18 +3197,18 @@ Output MUST follow this exact markdown structure:
     let content = '## 🎬 场景还原结果\n\n';
 
     // Scene summary
-    content += `共检测到 **${scenes.length}** 个操作场景：\n\n`;
+    content += `共还原 **${scenes.length}** 个操作场景（仅回放，不含根因诊断）：\n\n`;
 
     // Scene timeline as a table
-    content += '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 评级 |\n';
-    content += '|------|------|----------|------|-----------|------|\n';
+    content += '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 响应状态 |\n';
+    content += '|------|------|----------|------|-----------|-----------|\n';
 
     scenes.forEach((scene, index) => {
       const displayName = AIPanel.SCENE_DISPLAY_NAMES[scene.type] || scene.type;
-      const rating = this.getScenePerformanceRating(scene.type, scene.durationMs, scene.metadata);
       const durationStr = scene.durationMs >= 1000
         ? `${(scene.durationMs / 1000).toFixed(2)}s`
         : `${scene.durationMs.toFixed(0)}ms`;
+      const responseStatus = this.getSceneResponseStatusLabel(scene.type, scene.durationMs, scene.metadata);
       const appInfo = scene.appPackage
         ? (scene.activityName ? `${scene.appPackage}/${scene.activityName}` : scene.appPackage)
         : '-';
@@ -3144,30 +3217,16 @@ Output MUST follow this exact markdown structure:
       const startTsNs = scene.startTs;
       content += `| ${index + 1} | ${displayName} | `;
       content += `<span class="clickable-ts" data-ts="${startTsNs}">${this.formatSceneTimestamp(startTsNs)}</span> | `;
-      content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${rating} |\n`;
+      content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${responseStatus} |\n`;
     });
 
     // Add narrative if available
     if (narrative) {
-      content += `\n---\n\n### 📝 场景描述\n\n${narrative}\n`;
-    }
-
-    // Add key findings
-    if (findings && findings.length > 0) {
-      content += `\n---\n\n### 🔍 关键发现\n\n`;
-      const criticalFindings = findings.filter((f: any) => f.severity === 'critical' || f.severity === 'warning');
-      if (criticalFindings.length > 0) {
-        criticalFindings.slice(0, 5).forEach((finding: any) => {
-          const icon = finding.severity === 'critical' ? '🔴' : '🟡';
-          content += `- ${icon} ${finding.message || finding.summary || finding.description}\n`;
-        });
-      } else {
-        content += '未发现明显性能问题。\n';
-      }
+      content += `\n---\n\n### 📝 操作回放摘要\n\n${narrative}\n`;
     }
 
     // Add navigation tips
-    content += `\n---\n\n💡 **提示**: 点击时间戳可跳转到对应位置，关键泳道已自动 Pin 到顶部。`;
+    content += `\n---\n\n💡 **提示**: 点击时间戳可跳转到对应位置，相关泳道已自动 Pin 到顶部。`;
 
     this.updateMessage(messageId, { content });
     m.redraw();

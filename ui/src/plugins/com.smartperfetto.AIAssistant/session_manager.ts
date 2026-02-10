@@ -215,6 +215,7 @@ export class SessionManager {
       pinnedResults?: PinnedResult[];
       bookmarks?: NavigationBookmark[];
       backendTraceId?: string;
+      agentSessionId?: string;
       summary?: string;
     }
   ): boolean {
