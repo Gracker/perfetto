@@ -49,9 +49,10 @@ import {
   handleStrategyFallbackEvent,
   handleFocusUpdatedEvent,
   handleSSEEvent,
+  handleAnswerTokenEvent,
 } from './sse_event_handlers';
 
-import {Message, InterventionState} from './types';
+import {Message, InterventionState, createStreamingAnswerState, createStreamingFlowState} from './types';
 
 // =============================================================================
 // Test Helpers
@@ -62,9 +63,11 @@ import {Message, InterventionState} from './types';
  */
 function createMockContext(overrides?: Partial<SSEHandlerContext>): SSEHandlerContext & {
   messages: Message[];
+  flowMessages: Message[];
   interventionState: InterventionState;
 } {
   const messages: Message[] = [];
+  const flowMessages: Message[] = [];
   let idCounter = 0;
   let completionHandled = false;
   let interventionState: InterventionState = {
@@ -78,15 +81,34 @@ function createMockContext(overrides?: Partial<SSEHandlerContext>): SSEHandlerCo
 
   const ctxRef: SSEHandlerContext & {
     messages: Message[];
+    flowMessages: Message[];
     interventionState: InterventionState;
   } = {
     messages,
+    flowMessages,
     interventionState,
     addMessage: (msg: Message) => {
+      if (msg.flowTag === 'streaming_flow') {
+        flowMessages.push(msg);
+        return;
+      }
       messages.push(msg);
     },
+    updateMessage: (messageId: string, updates: Partial<Message>) => {
+      const allMessages = [messages, flowMessages];
+      for (const list of allMessages) {
+        const index = list.findIndex((msg) => msg.id === messageId);
+        if (index !== -1) {
+          list[index] = {
+            ...list[index],
+            ...updates,
+          };
+          return;
+        }
+      }
+    },
     generateId: () => `test-msg-${++idCounter}`,
-    getMessages: () => messages,
+    getMessages: () => [...messages, ...flowMessages],
     removeLastMessageIf: (predicate: (msg: Message) => boolean) => {
       if (messages.length > 0 && predicate(messages[messages.length - 1])) {
         messages.pop();
@@ -100,8 +122,11 @@ function createMockContext(overrides?: Partial<SSEHandlerContext>): SSEHandlerCo
     completionHandled,
     setCompletionHandled: (handled: boolean) => {
       completionHandled = handled;
+      (ctxRef as any).completionHandled = handled;
     },
     backendUrl: 'http://localhost:3000',
+    streamingFlow: createStreamingFlowState(),
+    streamingAnswer: createStreamingAnswerState(),
     setInterventionState: (state: Partial<InterventionState>) => {
       interventionState = {...interventionState, ...state};
       // Keep exposed test field in sync with latest intervention state.
@@ -130,13 +155,14 @@ describe('handleProgressEvent', () => {
 
     const result = handleProgressEvent(data, ctx);
 
-    expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('⏳ Analyzing frames...');
-    expect(ctx.messages[0].role).toBe('assistant');
+    expect(ctx.messages).toHaveLength(0);
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('Analyzing frames...');
+    expect(ctx.flowMessages[0].role).toBe('assistant');
     expect(result).toEqual({});
   });
 
-  it('should remove previous progress message before adding new one', () => {
+  it('should keep existing messages and update streaming flow for new progress', () => {
     // Add initial progress message
     ctx.addMessage({
       id: 'prev',
@@ -149,7 +175,9 @@ describe('handleProgressEvent', () => {
     handleProgressEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('⏳ New progress');
+    expect(ctx.messages[0].content).toBe('⏳ Previous progress');
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('New progress');
   });
 
   it('should not remove non-progress messages', () => {
@@ -163,7 +191,9 @@ describe('handleProgressEvent', () => {
     const data = {data: {message: 'Progress update'}};
     handleProgressEvent(data, ctx);
 
-    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('Progress update');
   });
 
   it('should handle null data gracefully', () => {
@@ -1503,6 +1533,29 @@ describe('handleDataEvent', () => {
 });
 
 // =============================================================================
+// Answer Token Stream Tests
+// =============================================================================
+
+describe('handleAnswerTokenEvent', () => {
+  let ctx: ReturnType<typeof createMockContext>;
+
+  beforeEach(() => {
+    ctx = createMockContext();
+  });
+
+  it('should append streamed answer tokens into one assistant message', () => {
+    handleAnswerTokenEvent({data: {token: '你好'}}, ctx);
+    handleAnswerTokenEvent({data: {token: '，世界'}}, ctx);
+    handleAnswerTokenEvent({data: {done: true}}, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].flowTag).toBe('answer_stream');
+    expect(ctx.messages[0].content).toBe('你好，世界');
+    expect(ctx.streamingAnswer.status).toBe('completed');
+  });
+});
+
+// =============================================================================
 // Main Event Dispatcher Tests
 // =============================================================================
 
@@ -1516,8 +1569,9 @@ describe('handleSSEEvent', () => {
   it('should route progress events correctly', () => {
     handleSSEEvent('progress', {data: {message: 'Testing'}}, ctx);
 
-    expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Testing');
+    expect(ctx.messages).toHaveLength(0);
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('Testing');
   });
 
   it('should route error events and return terminal result', () => {
@@ -1557,8 +1611,9 @@ describe('handleSSEEvent', () => {
   it('should handle stage_start events', () => {
     handleSSEEvent('stage_start', {data: {message: 'Starting stage 1'}}, ctx);
 
-    expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Starting stage 1');
+    expect(ctx.messages).toHaveLength(0);
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('Starting stage 1');
   });
 
   it('should route intervention events correctly', () => {
@@ -1585,6 +1640,16 @@ describe('handleSSEEvent', () => {
     handleSSEEvent('conclusion', {data: {conclusion: 'Final conclusion'}}, ctx);
 
     expect(ctx.messages).toHaveLength(0);
+  });
+
+  it('should route answer_token events to incremental answer stream', () => {
+    handleSSEEvent('answer_token', {data: {token: 'A'}}, ctx);
+    handleSSEEvent('answer_token', {data: {token: 'B'}}, ctx);
+    handleSSEEvent('answer_token', {data: {done: true}}, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].flowTag).toBe('answer_stream');
+    expect(ctx.messages[0].content).toBe('AB');
   });
 });
 
@@ -1623,8 +1688,9 @@ describe('Error Handling', () => {
     handleSSEEvent('unknown', {bad: 'data'}, ctx);
     handleSSEEvent('progress', {data: {message: 'Valid'}}, ctx);
 
-    expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Valid');
+    expect(ctx.messages).toHaveLength(0);
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('Valid');
   });
 });
 

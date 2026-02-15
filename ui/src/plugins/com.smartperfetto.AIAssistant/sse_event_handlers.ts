@@ -26,7 +26,7 @@
  * - analysis_completed/error: Terminal events
  */
 
-import {Message, InterventionPoint, InterventionState} from './types';
+import {Message, InterventionPoint, InterventionState, StreamingAnswerState, StreamingFlowState} from './types';
 import {
   formatLayerName,
   translateCategory,
@@ -49,6 +49,12 @@ import {
 export interface SSEHandlerContext {
   /** Add a message to the conversation */
   addMessage: (msg: Message) => void;
+  /** Update an existing message */
+  updateMessage: (
+    messageId: string,
+    updates: Partial<Message>,
+    options?: {persist?: boolean}
+  ) => void;
   /** Generate a unique message ID */
   generateId: () => string;
   /** Get the current messages array (read-only) */
@@ -72,6 +78,10 @@ export interface SSEHandlerContext {
   setCompletionHandled: (handled: boolean) => void;
   /** Backend URL for building report links */
   backendUrl: string;
+  /** Progressive transcript state for streaming output */
+  streamingFlow: StreamingFlowState;
+  /** Incremental final answer stream state */
+  streamingAnswer: StreamingAnswerState;
 
   // Agent-Driven Architecture v2.0 - Intervention support
   /** Set intervention state */
@@ -90,6 +100,229 @@ export interface SSEHandlerResult {
   stopLoading?: boolean;
 }
 
+const STREAM_FLOW_LIMITS = {
+  phases: 8,
+  thoughts: 6,
+  tools: 8,
+  outputs: 8,
+} as const;
+
+const ANSWER_STREAM_RENDER_INTERVAL_MS = 48;
+
+function normalizeFlowLine(value: any): string {
+  return String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+function appendFlowLine(lines: string[], rawLine: any, max: number): boolean {
+  const line = normalizeFlowLine(rawLine);
+  if (!line) return false;
+  if (lines[lines.length - 1] === line) return false;
+  lines.push(line);
+  if (lines.length > max) {
+    lines.splice(0, lines.length - max);
+  }
+  return true;
+}
+
+function buildStreamingFlowContent(flow: StreamingFlowState): string {
+  const lines: string[] = ['### 🧭 分析实时进展'];
+
+  if (flow.phases.length > 0) {
+    lines.push('', '**阶段**');
+    for (const phase of flow.phases) {
+      lines.push(`- ${phase}`);
+    }
+  }
+
+  if (flow.thoughts.length > 0) {
+    lines.push('', '**思考**');
+    for (const thought of flow.thoughts) {
+      lines.push(`- ${thought}`);
+    }
+  }
+
+  if (flow.tools.length > 0) {
+    lines.push('', '**工具与动作**');
+    for (const tool of flow.tools) {
+      lines.push(`- ${tool}`);
+    }
+  }
+
+  if (flow.outputs.length > 0) {
+    lines.push('', '**中间产出**');
+    for (const output of flow.outputs) {
+      lines.push(`- ${output}`);
+    }
+  }
+
+  lines.push('');
+  if (flow.status === 'running') {
+    lines.push('_持续更新中..._');
+  } else if (flow.status === 'completed') {
+    lines.push('_流程完成，结论已生成。_');
+  } else if (flow.status === 'failed') {
+    lines.push(`_流程中断: ${flow.error || '发生错误'}_`);
+  } else {
+    lines.push('_等待后端事件..._');
+  }
+
+  return lines.join('\n');
+}
+
+function ensureStreamingFlowMessage(ctx: SSEHandlerContext): string {
+  const flow = ctx.streamingFlow;
+  if (flow.status === 'idle') {
+    flow.status = 'running';
+    flow.startedAt = Date.now();
+  }
+
+  const hasExisting = flow.messageId
+    ? ctx.getMessages().some((msg) => msg.id === flow.messageId)
+    : false;
+
+  if (!hasExisting) {
+    flow.messageId = ctx.generateId();
+    ctx.addMessage({
+      id: flow.messageId,
+      role: 'assistant',
+      content: buildStreamingFlowContent(flow),
+      timestamp: Date.now(),
+      flowTag: 'streaming_flow',
+    });
+  }
+
+  return flow.messageId!;
+}
+
+function refreshStreamingFlowMessage(ctx: SSEHandlerContext): void {
+  const flow = ctx.streamingFlow;
+  const messageId = ensureStreamingFlowMessage(ctx);
+  flow.lastUpdatedAt = Date.now();
+  ctx.updateMessage(messageId, {
+    content: buildStreamingFlowContent(flow),
+    timestamp: flow.lastUpdatedAt,
+    flowTag: 'streaming_flow',
+  }, {persist: false});
+}
+
+function pushStreamingPhase(ctx: SSEHandlerContext, line: string): void {
+  if (appendFlowLine(ctx.streamingFlow.phases, line, STREAM_FLOW_LIMITS.phases)) {
+    refreshStreamingFlowMessage(ctx);
+  }
+}
+
+function pushStreamingThought(ctx: SSEHandlerContext, line: string): void {
+  if (appendFlowLine(ctx.streamingFlow.thoughts, line, STREAM_FLOW_LIMITS.thoughts)) {
+    refreshStreamingFlowMessage(ctx);
+  }
+}
+
+function pushStreamingTool(ctx: SSEHandlerContext, line: string): void {
+  if (appendFlowLine(ctx.streamingFlow.tools, line, STREAM_FLOW_LIMITS.tools)) {
+    refreshStreamingFlowMessage(ctx);
+  }
+}
+
+function pushStreamingOutput(ctx: SSEHandlerContext, line: string): void {
+  if (appendFlowLine(ctx.streamingFlow.outputs, line, STREAM_FLOW_LIMITS.outputs)) {
+    refreshStreamingFlowMessage(ctx);
+  }
+}
+
+function completeStreamingFlow(ctx: SSEHandlerContext): void {
+  if (ctx.streamingFlow.status === 'running' || ctx.streamingFlow.status === 'idle') {
+    ctx.streamingFlow.status = 'completed';
+    refreshStreamingFlowMessage(ctx);
+  }
+}
+
+function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
+  ctx.streamingFlow.status = 'failed';
+  ctx.streamingFlow.error = normalizeFlowLine(error || 'unknown_error');
+  refreshStreamingFlowMessage(ctx);
+}
+
+function ensureStreamingAnswerMessage(ctx: SSEHandlerContext): string {
+  const answer = ctx.streamingAnswer;
+  if (answer.status === 'idle') {
+    answer.status = 'streaming';
+    answer.startedAt = Date.now();
+  }
+
+  const hasExisting = answer.messageId
+    ? ctx.getMessages().some((msg) => msg.id === answer.messageId)
+    : false;
+
+  if (!hasExisting) {
+    answer.messageId = ctx.generateId();
+    ctx.addMessage({
+      id: answer.messageId,
+      role: 'assistant',
+      content: answer.content || '',
+      timestamp: Date.now(),
+      flowTag: 'answer_stream',
+    });
+  }
+
+  return answer.messageId!;
+}
+
+function flushStreamingAnswer(
+  ctx: SSEHandlerContext,
+  options: {force?: boolean; persist?: boolean} = {}
+): void {
+  const answer = ctx.streamingAnswer;
+  if (!options.force && !answer.pending) return;
+
+  const messageId = ensureStreamingAnswerMessage(ctx);
+  if (answer.pending) {
+    answer.content += answer.pending;
+    answer.pending = '';
+  }
+
+  answer.lastUpdatedAt = Date.now();
+  ctx.updateMessage(messageId, {
+    content: answer.content,
+    timestamp: answer.lastUpdatedAt,
+    flowTag: 'answer_stream',
+  }, {persist: options.persist === true});
+}
+
+function completeStreamingAnswer(ctx: SSEHandlerContext): void {
+  const answer = ctx.streamingAnswer;
+  if (answer.status === 'completed') return;
+  if (!answer.messageId && !answer.pending && !answer.content) {
+    answer.status = 'completed';
+    return;
+  }
+  flushStreamingAnswer(ctx, {force: true, persist: true});
+  answer.status = 'completed';
+}
+
+function failStreamingAnswer(ctx: SSEHandlerContext): void {
+  const answer = ctx.streamingAnswer;
+  if (answer.status === 'failed') return;
+  if (!answer.messageId && !answer.pending && !answer.content) {
+    answer.status = 'failed';
+    return;
+  }
+  flushStreamingAnswer(ctx, {force: true, persist: true});
+  answer.status = 'failed';
+}
+
+function describeEnvelopeOutput(envelope: DataEnvelope): string {
+  const title = envelope.display?.title || envelope.meta?.stepId || envelope.meta?.skillId || '数据更新';
+  const payload = envelope.data as DataPayload;
+  const rowCount = Array.isArray(payload?.rows) ? payload.rows.length : undefined;
+  if (typeof rowCount === 'number') {
+    return `${title} (${rowCount} 行)`;
+  }
+  return `${title} (${envelope.display?.format || 'table'})`;
+}
+
 /**
  * Process a progress event - shows analysis phase updates.
  */
@@ -97,10 +330,11 @@ export function handleProgressEvent(
   data: any,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
+  const phase = normalizeFlowLine(data?.data?.phase);
+  const phaseMessage = normalizeFlowLine(data?.data?.message);
+
   if (data?.data?.phase === 'analysis_plan') {
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingPhase(ctx, phaseMessage || '分析计划已确认');
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
@@ -110,17 +344,13 @@ export function handleProgressEvent(
     return {};
   }
 
-  if (data?.data?.message) {
-    // Remove previous progress message
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
-    ctx.addMessage({
-      id: ctx.generateId(),
-      role: 'assistant',
-      content: `⏳ ${data.data.message}`,
-      timestamp: Date.now(),
-    });
+  if (phaseMessage) {
+    pushStreamingPhase(ctx, phaseMessage);
+    return {};
+  }
+
+  if (phase) {
+    pushStreamingPhase(ctx, `阶段: ${phase}`);
   }
   return {};
 }
@@ -208,6 +438,8 @@ export function handleSqlExecutedEvent(
 ): SSEHandlerResult {
   if (data?.data?.result) {
     const rowCount = data.data.result.rowCount || 0;
+    pushStreamingTool(ctx, '执行 SQL 查询');
+    pushStreamingOutput(ctx, `SQL 结果返回 ${rowCount} 行`);
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
@@ -235,9 +467,9 @@ export function handleSkillSectionEvent(
 ): SSEHandlerResult {
   if (data?.data) {
     const section = data.data;
-    // Remove previous progress message
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
+    pushStreamingOutput(
+      ctx,
+      `${section.sectionTitle || 'Skill Section'} (${section.rowCount || 0} 行)`
     );
     // Show progress for this section - use sectionTitle for compact display
     ctx.addMessage({
@@ -303,6 +535,7 @@ export function handleSkillDiagnosticsEvent(
       content: content.trim(),
       timestamp: Date.now(),
     });
+    pushStreamingOutput(ctx, `诊断输出 ${diagnostics.length} 条`);
   }
   return {};
 }
@@ -333,10 +566,7 @@ export function handleSkillLayeredResultEvent(
     skillName: data.data.skillName || data.data.skillId,
   };
 
-  // Remove previous progress message
-  ctx.removeLastMessageIf(
-    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-  );
+  pushStreamingOutput(ctx, `技能结果: ${metadata.skillName || skillId}`);
 
   // Process overview layer (L1)
   const overview = layers.overview || layers.L1;
@@ -1039,11 +1269,8 @@ export function handleAnalysisCompletedEvent(
     // Keep the in-flight context object consistent as well (unit tests and
     // any caller that reuses the same context instance for multiple events).
     ctx.completionHandled = true;
-
-    // Remove any remaining progress message
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingOutput(ctx, '最终结论已生成');
+    completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
     let content = answerContent;
@@ -1070,26 +1297,54 @@ export function handleAnalysisCompletedEvent(
       console.warn('[SSEHandlers] HTML report generation failed:', data.data.reportError);
     }
 
-    // Check if conclusion was already shown
-    const messages = ctx.getMessages();
-    const hasConclusionAlready = messages.some(
-      m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
+    const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
+    const hasStreamedAnswer = Boolean(
+      streamedAnswerMessageId &&
+      ctx.getMessages().some(
+        (m) => m.id === streamedAnswerMessageId && String(m.content || '').trim().length > 0
+      )
     );
 
-    if (!hasConclusionAlready) {
-      ctx.addMessage({
-        id: ctx.generateId(),
-        role: 'assistant',
-        content: content,
+    if (hasStreamedAnswer && streamedAnswerMessageId) {
+      completeStreamingAnswer(ctx);
+      ctx.streamingAnswer.content = content;
+      ctx.streamingAnswer.pending = '';
+      ctx.streamingAnswer.status = 'completed';
+      ctx.updateMessage(streamedAnswerMessageId, {
+        content,
         timestamp: Date.now(),
         reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
-      });
+        flowTag: 'answer_stream',
+      }, {persist: true});
+    } else {
+    // Check if conclusion was already shown
+      const messages = ctx.getMessages();
+      const hasConclusionAlready = messages.some(
+        m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
+      );
+
+      if (!hasConclusionAlready) {
+        ctx.addMessage({
+          id: ctx.generateId(),
+          role: 'assistant',
+          content: content,
+          timestamp: Date.now(),
+          reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
+        });
+      }
     }
   }
 
   // Show error summary if there were any non-fatal errors
   if (ctx.collectedErrors.length > 0) {
     showErrorSummary(ctx);
+  }
+
+  if (ctx.streamingFlow.status === 'running') {
+    completeStreamingFlow(ctx);
+  }
+  if (ctx.streamingAnswer.status === 'streaming') {
+    completeStreamingAnswer(ctx);
   }
 
   return { isTerminal: true, stopLoading: true };
@@ -1108,9 +1363,10 @@ export function handleHypothesisGeneratedEvent(
     const evidenceSummary = Array.isArray(data?.data?.evidenceSummary)
       ? data.data.evidenceSummary
       : [];
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingThought(ctx, `形成 ${hypotheses.length} 个待验证假设`);
+    for (const hypothesis of hypotheses.slice(0, 3)) {
+      pushStreamingThought(ctx, hypothesis);
+    }
 
     let content = '';
     if (evidenceBased) {
@@ -1157,10 +1413,7 @@ export function handleRoundStartEvent(
     const round = data.data.round || 1;
     const maxRounds = data.data.maxRounds || 5;
     const message = data.data.message || `分析轮次 ${round}`;
-
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingPhase(ctx, `${message} (${round}/${maxRounds})`);
 
     ctx.addMessage({
       id: ctx.generateId(),
@@ -1183,10 +1436,8 @@ export function handleAgentTaskDispatchedEvent(
     const taskCount = data.data.taskCount || 0;
     const agents = data.data.agents || [];
     const message = data.data.message || `派发 ${taskCount} 个任务`;
-
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    const agentText = agents.length > 0 ? ` -> ${agents.join(', ')}` : '';
+    pushStreamingTool(ctx, `${message}${agentText}`);
 
     let content = `⏳ 🤖 ${message}`;
     if (agents.length > 0) {
@@ -1214,10 +1465,8 @@ export function handleSynthesisCompleteEvent(
     const confirmedFindings = data.data.confirmedFindings || 0;
     const updatedHypotheses = data.data.updatedHypotheses || 0;
     const message = data.data.message || '综合分析结果';
-
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingPhase(ctx, message);
+    pushStreamingOutput(ctx, `确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`);
 
     ctx.addMessage({
       id: ctx.generateId(),
@@ -1240,10 +1489,7 @@ export function handleStrategyDecisionEvent(
     const strategy = data.data.strategy || 'continue';
     const confidence = data.data.confidence || 0;
     const message = data.data.message || `策略: ${strategy}`;
-
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingPhase(ctx, `${message} (置信度 ${(confidence * 100).toFixed(0)}%)`);
 
     const strategyEmoji = strategy === 'conclude' ? '✅' :
                          strategy === 'deep_dive' ? '🔍' :
@@ -1289,10 +1535,7 @@ export function handleDataEvent(
       continue;
     }
     ctx.displayedSkillProgress.add(deduplicationKey);
-
-    ctx.removeLastMessageIf(
-      msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-    );
+    pushStreamingOutput(ctx, describeEnvelopeOutput(envelope));
 
     renderDataEnvelope(envelope, ctx);
   }
@@ -1468,6 +1711,7 @@ export function handleSkillErrorEvent(
     };
     console.log('[SSEHandlers] Skill error collected:', errorInfo);
     ctx.collectedErrors.push(errorInfo);
+    pushStreamingOutput(ctx, `步骤错误: ${errorInfo.skillId}${errorInfo.stepId ? `/${errorInfo.stepId}` : ''}`);
   }
   return {};
 }
@@ -1479,13 +1723,18 @@ export function handleErrorEvent(
   data: any,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
+  failStreamingAnswer(ctx);
+
   if (data?.data?.error) {
+    failStreamingFlow(ctx, data.data.error);
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
       content: `**错误:** ${data.data.error}`,
       timestamp: Date.now(),
     });
+  } else {
+    failStreamingFlow(ctx, '分析失败');
   }
 
   // Show collected errors summary if any
@@ -1587,9 +1836,7 @@ export function handleInterventionRequiredEvent(
   });
 
   // Add a message to show intervention is required
-  ctx.removeLastMessageIf(
-    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-  );
+  pushStreamingPhase(ctx, '等待用户决策');
 
   const typeEmoji = intervention.type === 'low_confidence' ? '🤔' :
                     intervention.type === 'ambiguity' ? '🔀' :
@@ -1636,6 +1883,7 @@ export function handleInterventionResolvedEvent(
   const actionEmoji = resolvedData.action === 'continue' ? '▶️' :
                       resolvedData.action === 'focus' ? '🎯' :
                       resolvedData.action === 'abort' ? '🛑' : '✅';
+  pushStreamingPhase(ctx, `用户决策: ${resolvedData.action || 'continue'}`);
 
   ctx.addMessage({
     id: ctx.generateId(),
@@ -1673,6 +1921,7 @@ export function handleInterventionTimeoutEvent(
   });
 
   // Add timeout message
+  pushStreamingPhase(ctx, `用户响应超时，执行默认动作 ${timeoutData?.defaultAction || 'abort'}`);
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'system',
@@ -1695,12 +1944,12 @@ export function handleStrategySelectedEvent(
   const strategyData = data?.data;
   if (!strategyData) return {};
 
-  ctx.removeLastMessageIf(
-    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-  );
-
   const methodEmoji = strategyData.selectionMethod === 'llm' ? '🧠' : '🔑';
   const confidencePercent = Math.round((strategyData.confidence || 0) * 100);
+  pushStreamingPhase(
+    ctx,
+    `选择策略 ${strategyData.strategyName} (${confidencePercent}%, ${strategyData.selectionMethod || 'keyword'})`
+  );
 
   ctx.addMessage({
     id: ctx.generateId(),
@@ -1723,10 +1972,7 @@ export function handleStrategyFallbackEvent(
 
   const fallbackData = data?.data;
   if (!fallbackData) return {};
-
-  ctx.removeLastMessageIf(
-    msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-  );
+  pushStreamingPhase(ctx, `回退到假设驱动分析: ${fallbackData.reason || '未命中预设策略'}`);
 
   ctx.addMessage({
     id: ctx.generateId(),
@@ -1751,6 +1997,116 @@ export function handleFocusUpdatedEvent(
 }
 
 /**
+ * Process thought / worker_thought event - progressive reasoning output.
+ */
+export function handleThoughtEvent(
+  data: any,
+  ctx: SSEHandlerContext,
+  source: 'assistant' | 'worker'
+): SSEHandlerResult {
+  const content = normalizeFlowLine(
+    data?.data?.content ??
+    data?.data?.message ??
+    data?.content ??
+    data?.message
+  );
+  if (!content) return {};
+
+  const prefix = source === 'worker' ? 'Worker' : 'Assistant';
+  pushStreamingThought(ctx, `${prefix}: ${content}`);
+  return {};
+}
+
+/**
+ * Process agent_dialogue event - tool/task dispatch details.
+ */
+export function handleAgentDialogueEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const payload = data?.data || {};
+  const phase = normalizeFlowLine(payload.phase || payload.type || 'task_dispatched');
+  const agentId = normalizeFlowLine(payload.agentId || payload.agent || 'agent');
+  const taskId = normalizeFlowLine(payload.taskId || payload.task_id || '');
+  const title = normalizeFlowLine(
+    payload.taskTitle ||
+    payload.task?.title ||
+    payload.task?.description ||
+    payload.message ||
+    ''
+  );
+
+  const taskSuffix = taskId ? ` (#${taskId})` : '';
+  const detail = title ? `: ${title}` : '';
+  pushStreamingTool(ctx, `${agentId} ${phase}${taskSuffix}${detail}`);
+  return {};
+}
+
+/**
+ * Process agent_response event - tool/task completion details.
+ */
+export function handleAgentResponseEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const payload = data?.data || {};
+  const agentId = normalizeFlowLine(payload.agentId || payload.agent || 'agent');
+  const taskId = normalizeFlowLine(payload.taskId || payload.task_id || '');
+  const summary = normalizeFlowLine(
+    payload.message ||
+    payload.summary ||
+    payload.response?.summary ||
+    payload.response?.conclusion ||
+    '任务完成'
+  );
+
+  const taskSuffix = taskId ? ` (#${taskId})` : '';
+  pushStreamingTool(ctx, `${agentId} 完成任务${taskSuffix}`);
+  pushStreamingOutput(ctx, `${agentId}: ${summary}`);
+  return {};
+}
+
+/**
+ * Process answer_token event - incremental final answer stream.
+ */
+export function handleAnswerTokenEvent(
+  data: any,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const payload = data?.data || {};
+  const rawToken = payload.token ?? payload.delta ?? '';
+  const token = String(rawToken || '');
+  const done = payload.done === true;
+
+  if (token) {
+    const answer = ctx.streamingAnswer;
+    if (answer.status === 'idle') {
+      pushStreamingOutput(ctx, '最终回答生成中...');
+    }
+    answer.status = 'streaming';
+    answer.pending += token;
+
+    const now = Date.now();
+    const lastUpdate = answer.lastUpdatedAt || 0;
+    const shouldFlush =
+      token.includes('\n') ||
+      /[。！？!?；;：:,，]$/.test(token) ||
+      now - lastUpdate >= ANSWER_STREAM_RENDER_INTERVAL_MS;
+
+    if (shouldFlush) {
+      flushStreamingAnswer(ctx, {persist: false});
+    }
+  }
+
+  if (done) {
+    pushStreamingOutput(ctx, '最终回答已输出');
+    completeStreamingAnswer(ctx);
+  }
+
+  return {};
+}
+
+/**
  * Main SSE event dispatcher.
  * Routes events to appropriate handlers based on event type.
  */
@@ -1770,6 +2126,7 @@ export function handleSSEEvent(
 
     case 'sql_generated':
       // SQL was generated - don't show raw SQL to user
+      pushStreamingTool(ctx, 'SQL 已生成，等待执行');
       return {};
 
     case 'sql_executed':
@@ -1792,10 +2149,13 @@ export function handleSSEEvent(
       return handleAnalysisCompletedEvent(data, ctx);
 
     case 'thought':
+      return handleThoughtEvent(data, ctx, 'assistant');
+
     case 'worker_thought':
-      // Skip thought messages to reduce noise
-      console.log(`[SSEHandlers] Skipping ${eventType} display`);
-      return {};
+      return handleThoughtEvent(data, ctx, 'worker');
+
+    case 'answer_token':
+      return handleAnswerTokenEvent(data, ctx);
 
     case 'data':
       return handleDataEvent(data, ctx);
@@ -1830,15 +2190,7 @@ export function handleSSEEvent(
     case 'stage_start':
       // Stage start in strategy execution
       if (data?.data?.message) {
-        ctx.removeLastMessageIf(
-          msg => msg.role === 'assistant' && msg.content.startsWith('⏳')
-        );
-        ctx.addMessage({
-          id: ctx.generateId(),
-          role: 'assistant',
-          content: `⏳ 📋 ${data.data.message}`,
-          timestamp: Date.now(),
-        });
+        pushStreamingPhase(ctx, data.data.message);
       }
       return {};
 
@@ -1846,14 +2198,10 @@ export function handleSSEEvent(
       return handleAgentTaskDispatchedEvent(data, ctx);
 
     case 'agent_dialogue':
-      // Agent communication - tracked internally
-      console.log('[SSEHandlers] Agent dialogue event:', data?.data);
-      return {};
+      return handleAgentDialogueEvent(data, ctx);
 
     case 'agent_response':
-      // Agent completed task - wait for synthesis
-      console.log(`[SSEHandlers] Agent ${data?.data?.agentId || 'unknown'} completed task`);
-      return {};
+      return handleAgentResponseEvent(data, ctx);
 
     case 'synthesis_complete':
       return handleSynthesisCompleteEvent(data, ctx);
@@ -1863,6 +2211,7 @@ export function handleSSEEvent(
 
     case 'conclusion':
       // Skip - let analysis_completed handle final message
+      pushStreamingOutput(ctx, '结论文本已生成，等待落地输出');
       console.log('[SSEHandlers] CONCLUSION event received - waiting for analysis_completed');
       return {};
 
@@ -1890,6 +2239,9 @@ export function handleSSEEvent(
     case 'incremental_scope':
       // Incremental scope changes are internal - just log
       console.log('[SSEHandlers] incremental_scope:', data?.data);
+      if (data?.data?.scopeType) {
+        pushStreamingPhase(ctx, `增量范围: ${data.data.scopeType}`);
+      }
       return {};
 
     case 'error':
@@ -1899,6 +2251,12 @@ export function handleSSEEvent(
       return handleSkillErrorEvent(data, ctx);
 
     case 'end':
+      if (ctx.streamingFlow.status === 'running') {
+        completeStreamingFlow(ctx);
+      }
+      if (ctx.streamingAnswer.status === 'streaming') {
+        completeStreamingAnswer(ctx);
+      }
       return { stopLoading: true };
 
     default:

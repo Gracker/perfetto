@@ -30,6 +30,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  flowTag?: 'streaming_flow' | 'answer_stream';
   sqlResult?: SqlQueryResult;
   query?: string;
   reportUrl?: string;  // HTML report link
@@ -46,6 +47,58 @@ export interface Message {
     unit?: string;
     status?: 'good' | 'warning' | 'critical';
     delta?: string;  // e.g., "+5%" or "-10ms"
+  };
+}
+
+/**
+ * Streaming transcript state for progressive, step-by-step output.
+ */
+export interface StreamingFlowState {
+  messageId: string | null;
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  phases: string[];
+  thoughts: string[];
+  tools: string[];
+  outputs: string[];
+  startedAt: number | null;
+  lastUpdatedAt: number | null;
+  error: string | null;
+}
+
+export function createStreamingFlowState(): StreamingFlowState {
+  return {
+    messageId: null,
+    status: 'idle',
+    phases: [],
+    thoughts: [],
+    tools: [],
+    outputs: [],
+    startedAt: null,
+    lastUpdatedAt: null,
+    error: null,
+  };
+}
+
+/**
+ * Incremental final-answer text stream state.
+ */
+export interface StreamingAnswerState {
+  messageId: string | null;
+  content: string;
+  pending: string;
+  status: 'idle' | 'streaming' | 'completed' | 'failed';
+  startedAt: number | null;
+  lastUpdatedAt: number | null;
+}
+
+export function createStreamingAnswerState(): StreamingAnswerState {
+  return {
+    messageId: null,
+    content: '',
+    pending: '',
+    status: 'idle',
+    startedAt: null,
+    lastUpdatedAt: null,
   };
 }
 
@@ -147,6 +200,8 @@ export interface AIPanelState {
   scenesError: string | null;  // Error message from scene detection
   // Intervention state (Agent-Driven Architecture v2.0)
   interventionState: InterventionState;
+  streamingFlow: StreamingFlowState;
+  streamingAnswer: StreamingAnswerState;
 }
 
 /**

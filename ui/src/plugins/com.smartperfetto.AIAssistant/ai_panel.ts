@@ -42,6 +42,8 @@ import {
   PinnedResult,
   AISettings,
   AISession,
+  createStreamingFlowState,
+  createStreamingAnswerState,
   InterventionState,
   DEFAULT_SETTINGS,
   PENDING_BACKEND_TRACE_KEY,
@@ -119,6 +121,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     scenesError: null,
     // Agent-Driven Architecture v2.0 - Intervention State
     interventionState: {...DEFAULT_INTERVENTION_STATE},
+    // Progressive streaming transcript state
+    streamingFlow: createStreamingFlowState(),
+    // Incremental final answer stream state
+    streamingAnswer: createStreamingAnswerState(),
   };
 
   private onClearChat?: () => void;
@@ -1544,6 +1550,14 @@ Click ⚙️ to change settings.`;
     }
   }
 
+  private resetStreamingFlow() {
+    this.state.streamingFlow = createStreamingFlowState();
+  }
+
+  private resetStreamingAnswer() {
+    this.state.streamingAnswer = createStreamingAnswerState();
+  }
+
   /**
    * Send a preset question - triggered by quick action buttons
    */
@@ -1568,12 +1582,19 @@ Click ⚙️ to change settings.`;
   private createSSEHandlerContext(): SSEHandlerContext {
     return {
       addMessage: (msg: Message) => this.addMessage(msg),
+      updateMessage: (
+        messageId: string,
+        updates: Partial<Message>,
+        options?: {persist?: boolean}
+      ) => this.updateMessage(messageId, updates, options),
       generateId: () => this.generateId(),
       getMessages: () => this.state.messages,
       removeLastMessageIf: (predicate: (msg: Message) => boolean) => {
         const lastMsg = this.state.messages[this.state.messages.length - 1];
         if (lastMsg && predicate(lastMsg)) {
           this.state.messages.pop();
+          this.saveHistory();
+          this.saveCurrentSession();
           return true;
         }
         return false;
@@ -1588,6 +1609,8 @@ Click ⚙️ to change settings.`;
         this.state.completionHandled = handled;
       },
       backendUrl: this.state.settings.backendUrl,
+      streamingFlow: this.state.streamingFlow,
+      streamingAnswer: this.state.streamingAnswer,
       // Agent-Driven Architecture v2.0 - Intervention support
       setInterventionState: (state: Partial<InterventionState>) => {
         this.state.interventionState = {
@@ -2288,6 +2311,8 @@ Output MUST follow this exact markdown structure:
     this.state.completionHandled = false;  // Reset completion flag for new analysis
     this.state.displayedSkillProgress.clear();  // Clear progress tracking for new analysis
     this.state.collectedErrors = [];  // Clear error collection for new analysis
+    this.resetStreamingFlow();  // Reset progressive transcript for new analysis turn
+    this.resetStreamingAnswer();  // Reset incremental answer stream for new analysis turn
     m.redraw();
 
     try {
@@ -3300,13 +3325,21 @@ Output MUST follow this exact markdown structure:
   /**
    * Update an existing message by ID
    */
-  private updateMessage(messageId: string, updates: Partial<Message>) {
+  private updateMessage(
+    messageId: string,
+    updates: Partial<Message>,
+    options: {persist?: boolean} = {}
+  ) {
     const index = this.state.messages.findIndex(m => m.id === messageId);
     if (index !== -1) {
       this.state.messages[index] = {
         ...this.state.messages[index],
         ...updates,
       };
+      if (options.persist !== false) {
+        this.saveHistory();
+        this.saveCurrentSession();
+      }
     }
   }
 
@@ -3853,6 +3886,8 @@ Output MUST follow this exact markdown structure:
     this.state.backendTraceId = null;  // Clear backend trace ID
     this.state.pinnedResults = [];  // Clear pinned results
     this.state.agentSessionId = null;  // Clear Agent session for multi-turn dialogue
+    this.resetStreamingFlow();
+    this.resetStreamingAnswer();
     this.saveHistory();
 
     // Show welcome message
