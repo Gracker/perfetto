@@ -25,11 +25,14 @@
 #include "perfetto/base/time.h"
 #include "perfetto/trace_processor/trace_blob.h"
 #include "perfetto/trace_processor/trace_blob_view.h"
+#include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/trace/clock_snapshot.pbzero.h"
 #include "src/trace_processor/importers/android_bugreport/android_bugreport_reader.h"
 #include "src/trace_processor/importers/android_bugreport/android_log_event.h"
 #include "src/trace_processor/importers/android_bugreport/android_log_event_parser.h"
 #include "src/trace_processor/importers/common/clock_tracker.h"
+#include "src/trace_processor/importers/common/global_metadata_tracker.h"
+#include "src/trace_processor/importers/common/machine_tracker.h"
 #include "src/trace_processor/importers/common/metadata_tracker.h"
 #include "src/trace_processor/sorter/trace_sorter.h"
 #include "src/trace_processor/storage/stats.h"
@@ -63,14 +66,20 @@ class AndroidLogReaderTest : public ::testing::Test {
  public:
   AndroidLogReaderTest() {
     context_.storage = std::make_unique<TraceStorage>();
-    std::unique_ptr<ClockSynchronizerListenerImpl> clock_tracker_listener =
-        std::make_unique<ClockSynchronizerListenerImpl>(&context_);
-    context_.clock_tracker =
-        std::make_unique<ClockTracker>(std::move(clock_tracker_listener));
-    context_.metadata_tracker =
-        std::make_unique<MetadataTracker>(context_.storage.get());
+    context_.machine_tracker =
+        std::make_unique<MachineTracker>(&context_, kDefaultMachineId);
+    context_.global_metadata_tracker =
+        std::make_unique<GlobalMetadataTracker>(context_.storage.get());
+    context_.trace_state =
+        TraceProcessorContextPtr<TraceProcessorContext::TraceState>::MakeRoot(
+            TraceProcessorContext::TraceState{TraceId(0)});
+    context_.metadata_tracker = std::make_unique<MetadataTracker>(&context_);
+    context_.trace_time_state = std::make_unique<TraceTimeState>(TraceTimeState{
+        ClockTracker::ClockId(protos::pbzero::BUILTIN_CLOCK_BOOTTIME), false});
+    context_.clock_tracker = std::make_unique<ClockTracker>(
+        &context_, std::make_unique<ClockSynchronizerListenerImpl>(&context_));
     context_.clock_tracker->SetTraceTimeClock(
-        protos::pbzero::ClockSnapshot::Clock::REALTIME);
+        ClockTracker::ClockId(protos::pbzero::ClockSnapshot::Clock::REALTIME));
     context_.sorter = std::make_unique<TraceSorter>(
         &context_, TraceSorter::SortingMode::kDefault);
   }

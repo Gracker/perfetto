@@ -41,6 +41,7 @@ enum class ThreadNamePriority : uint8_t {
   kEtwTrace = 1,
   kGenericKernelTask = 1,
   kProcessTree = 2,
+  kPerfComm = 2,
   kTrackDescriptorThreadType = 3,
   kTrackDescriptor = 4,
 
@@ -48,6 +49,17 @@ enum class ThreadNamePriority : uint8_t {
   // the idle thread "swapper" when parsing ftrace).
   // Keep this last.
   kTraceProcessorConstant = 5,
+};
+
+// Process names can come from different sources, and we don't always want to
+// overwrite the previously set name. This enum determines the priority of
+// different sources.
+enum class ProcessNamePriority : uint8_t {
+  kOther = 0,
+  kChromeProcessLabel = 1,
+  kTrackDescriptor = 2,
+  kChromeProcessLabelRenderer = 3,
+  kSystem = 4,
 };
 
 class ProcessTracker {
@@ -164,9 +176,11 @@ class ProcessTracker {
   // Sets the process user id.
   void SetProcessUid(UniquePid upid, uint32_t uid);
 
-  // Assigns the given name to the process identified by |upid| if it does not
-  // have a name yet.
-  virtual void SetProcessNameIfUnset(UniquePid upid, StringId process_name_id);
+  // Assigns the given name to the process if the new name has a higher or
+  // equal priority than the existing one.
+  virtual void UpdateProcessName(UniquePid upid,
+                                 StringId process_name_id,
+                                 ProcessNamePriority priority);
 
   // Sets the start timestamp to the process identified by |upid| if it doesn't
   // have a timestamp yet.
@@ -224,7 +238,7 @@ class ProcessTracker {
   ArgsTracker::BoundInserter AddArgsToThread(UniqueTid utid);
 
   // Called when the trace was fully loaded.
-  void NotifyEndOfFile();
+  void OnEventsFullyExtracted();
 
   // Tracks the namespace-local pids for a process running in a pid namespace.
   void UpdateNamespacedProcess(int64_t pid, std::vector<int64_t> nspid);
@@ -305,6 +319,9 @@ class ProcessTracker {
 
   // A mapping from utid to the priority of a thread name source.
   std::vector<ThreadNamePriority> thread_name_priorities_;
+
+  // A mapping from upid to the priority of a process name source.
+  std::vector<ProcessNamePriority> process_name_priorities_;
 
   // A mapping from track UUIDs to trusted pids.
   std::unordered_map<uint64_t, int64_t> trusted_pids_;

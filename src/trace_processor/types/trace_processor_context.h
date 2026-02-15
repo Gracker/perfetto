@@ -19,7 +19,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <utility>
 
 #include "perfetto/ext/base/flat_hash_map.h"
@@ -31,17 +30,17 @@
 
 namespace perfetto::trace_processor {
 
-class ClockSynchronizerListenerImpl;
 class ArgsTranslationTable;
 class ClockConverter;
-template <typename T>
-class ClockSynchronizer;
+class ClockTracker;
 class CpuTracker;
 class DescriptorPool;
 class EventTracker;
 class FileIoTracker;
 class FlowTracker;
+class BlobPacketWriter;
 class GlobalArgsTracker;
+class GlobalMetadataTracker;
 class ImportLogsTracker;
 class MachineTracker;
 class MappingTracker;
@@ -62,10 +61,11 @@ class TraceStorage;
 class TrackCompressor;
 class TrackTracker;
 struct ProtoImporterModuleContext;
+struct TraceTimeState;
 struct TrackCompressorGroupIdxState;
 
 using MachineId = tables::MachineTable::Id;
-using ClockTracker = ClockSynchronizer<ClockSynchronizerListenerImpl>;
+using TraceId = tables::TraceFileTable::Id;
 
 class TraceProcessorContext {
  public:
@@ -87,7 +87,7 @@ class TraceProcessorContext {
   class ForkedContextState;
 
   struct TraceState {
-    uint32_t raw_trace_id = 0;
+    TraceId trace_id;
   };
 
   struct UuidState {
@@ -118,7 +118,7 @@ class TraceProcessorContext {
   // trace with the given trace id and for adding events for the given machine
   // id.
   TraceProcessorContext* ForkContextForTrace(
-      uint32_t raw_trace_id,
+      TraceId trace_id,
       uint32_t default_raw_machine_id) const;
 
   // Forks the current TraceProcessorContext into a context for parsing a new
@@ -138,13 +138,16 @@ class TraceProcessorContext {
   GlobalPtr<TraceSorter> sorter;
   GlobalPtr<TraceReaderRegistry> reader_registry;
   GlobalPtr<GlobalArgsTracker> global_args_tracker;
+  GlobalPtr<GlobalMetadataTracker> global_metadata_tracker;
   GlobalPtr<TraceFileTracker> trace_file_tracker;
   GlobalPtr<DescriptorPool> descriptor_pool_;
   GlobalPtr<ForkedContextState> forked_context_state;
   GlobalPtr<ClockConverter> clock_converter;
+  GlobalPtr<TraceTimeState> trace_time_state;
   GlobalPtr<TrackCompressorGroupIdxState> track_group_idx_state;
   GlobalPtr<StackProfileTracker> stack_profile_tracker;
   GlobalPtr<Destructible> deobfuscation_tracker;  // DeobfuscationTracker
+  GlobalPtr<BlobPacketWriter> blob_packet_writer;
 
   // The registration function for additional proto modules.
   // This is populated by TraceProcessorImpl to allow for late registration of
@@ -162,7 +165,6 @@ class TraceProcessorContext {
   // TODO(lalitm): this is miscategorized due to legacy reasons. It needs to be
   // moved to a "per-trace" category.
 
-  GlobalPtr<MetadataTracker> metadata_tracker;
   GlobalPtr<RegisteredFileTracker> registered_file_tracker;
   GlobalPtr<UuidState> uuid_state;
   GlobalPtr<Destructible> heap_graph_tracker;  // HeapGraphTracker
@@ -207,6 +209,7 @@ class TraceProcessorContext {
   PerTraceAndMachinePtr<FlowTracker> flow_tracker;
   PerTraceAndMachinePtr<EventTracker> event_tracker;
   PerTraceAndMachinePtr<SchedEventTracker> sched_event_tracker;
+  PerTraceAndMachinePtr<MetadataTracker> metadata_tracker;
 
   // These fields are stored as pointers to Destructible objects rather than
   // their actual type (a subclass of Destructible), as the concrete subclass
@@ -222,7 +225,8 @@ class TraceProcessorContext {
   PerTraceAndMachinePtr<Destructible>
       ftrace_sched_tracker;  // FtraceSchedEventTracker
 
-  std::optional<MachineId> machine_id() const;
+  MachineId machine_id() const;
+  TraceId trace_id() const;
 
  private:
   explicit TraceProcessorContext(const Config& config);

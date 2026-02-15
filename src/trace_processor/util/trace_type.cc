@@ -290,12 +290,46 @@ const char* TraceTypeToString(TraceType trace_type) {
       return "art_hprof";
     case kPerfTextTraceType:
       return "perf_text";
+    case kPrimesTraceType:
+      return "primes";
     case kSimpleperfProtoTraceType:
       return "simpleperf_proto";
     case kUnknownTraceType:
       return "unknown";
     case kTarTraceType:
       return "tar";
+  }
+  PERFETTO_FATAL("For GCC");
+}
+
+bool IsContainerTraceType(TraceType trace_type) {
+  switch (trace_type) {
+    case kGzipTraceType:
+    case kCtraceTraceType:
+    case kZipFile:
+    case kAndroidBugreportTraceType:
+    case kTarTraceType:
+      return true;
+    case kJsonTraceType:
+    case kPrimesTraceType:
+    case kProtoTraceType:
+    case kSymbolsTraceType:
+    case kNinjaLogTraceType:
+    case kFuchsiaTraceType:
+    case kSystraceTraceType:
+    case kPerfDataTraceType:
+    case kPprofTraceType:
+    case kCollapsedStackTraceType:
+    case kInstrumentsXmlTraceType:
+    case kAndroidLogcatTraceType:
+    case kAndroidDumpstateTraceType:
+    case kGeckoTraceType:
+    case kArtMethodTraceType:
+    case kArtHprofTraceType:
+    case kPerfTextTraceType:
+    case kSimpleperfProtoTraceType:
+    case kUnknownTraceType:
+      return false;
   }
   PERFETTO_FATAL("For GCC");
 }
@@ -416,6 +450,11 @@ TraceType GuessTraceType(const uint8_t* data, size_t size) {
 
   if (base::StartsWith(start, "\x0a"))
     return kProtoTraceType;
+
+  // TODO(leemh): This is not robust enough. Chat elkurdi@/lalitm@ to determine
+  // better way.
+  if (base::StartsWith(start, "\x09"))
+    return kPrimesTraceType;
 
   if (base::StartsWith(start, "9,0,i,vers,")) {
     return kAndroidDumpstateTraceType;  // BatteryStats Checkin format.

@@ -51,6 +51,7 @@ import {base64Decode} from '../base/string_utils';
 import {parseUrlCommands} from './command_manager';
 import {HighPrecisionTimeSpan} from '../base/high_precision_time_span';
 import {getBackendUploader} from './backend_uploader';
+import {sha1} from '../base/hash';
 
 const ENABLE_CHROME_RELIABLE_RANGE_ZOOM_FLAG = featureFlags.register({
   id: 'enableChromeReliableRangeZoom',
@@ -315,10 +316,12 @@ async function loadTraceIntoEngine(
   const trace = new TraceImpl(app, engine, traceDetails);
   app.setActiveTrace(trace);
 
+  const hasJsonTrace = traceDetails.traceTypes.includes('json');
+
   const visibleTimeSpan = await computeVisibleTime(
     traceDetails.start,
     traceDetails.end,
-    trace.traceInfo.traceType === 'json',
+    hasJsonTrace,
     engine,
   );
 
@@ -351,10 +354,7 @@ async function loadTraceIntoEngine(
 
   // Trace Processor doesn't support the reliable range feature for JSON
   // traces.
-  if (
-    trace.traceInfo.traceType !== 'json' &&
-    ENABLE_CHROME_RELIABLE_RANGE_ANNOTATION_FLAG.get()
-  ) {
+  if (!hasJsonTrace && ENABLE_CHROME_RELIABLE_RANGE_ANNOTATION_FLAG.get()) {
     const reliableRangeStart = await computeTraceReliableRangeStart(engine);
     if (reliableRangeStart > 0) {
       trace.notes.addNote({
@@ -514,6 +514,18 @@ async function computeVisibleTime(
   return new TimeSpan(visibleStart, visibleEnd);
 }
 
+// TODO(sashwinbalaji): Move session UUID generation to TraceProcessor.
+// computeGlobalUuid is a temporary measure to ensure multi-trace sessions
+// have a unique cache key. This prevents collisions where a multi-trace
+// session (e.g. a ZIP) would otherwise reuse the cache entry of its first
+// component trace if that trace was previously opened individually.
+async function computeGlobalUuid(uuids: string[]): Promise<string> {
+  if (uuids.length === 0) return '';
+  if (uuids.length === 1) return uuids[0];
+  const sortedUuids = [...uuids].sort();
+  return await sha1(sortedUuids.join(';'));
+}
+
 async function getTraceInfo(
   engine: Engine,
   app: AppImpl,
@@ -602,16 +614,27 @@ async function getTraceInfo(
       break;
   }
 
-  const traceType = await getTraceType(engine);
+  const traceTypes = await getTraceTypes(engine);
 
   const hasFtrace =
     (await engine.query(`select * from ftrace_event limit 1`)).numRows() > 0;
 
-  const uuidRes = await engine.query(`select str_value as uuid from metadata
-    where name = 'trace_uuid'`);
-  // trace_uuid can be missing from the TP tables if the trace is empty or in
-  // other similar edge cases.
-  const uuid = uuidRes.numRows() > 0 ? uuidRes.firstRow({uuid: STR}).uuid : '';
+  // UUIDs are not always present. We fall back to a combination of trace_id and trace_type
+  // to ensure we still have a unique component for the session hash.
+  const uuidRes = await engine.query(`
+    INCLUDE PERFETTO MODULE std.traceinfo.trace;
+    select ifnull(trace_uuid, trace_id || '-' || trace_type) as uuid from _metadata_by_trace
+  `);
+  const uuids: string[] = [];
+  for (
+    const itUuid = uuidRes.iter({uuid: STR});
+    itUuid.valid();
+    itUuid.next()
+  ) {
+    uuids.push(itUuid.uuid);
+  }
+  const uuid = await computeGlobalUuid(uuids);
+
   updateStatus(app, 'Caching trace...');
   const cached = await cacheTrace(traceSource, uuid);
 
@@ -628,7 +651,7 @@ async function getTraceInfo(
     unixOffset,
     importErrors: await getTraceErrors(engine),
     source: traceSource,
-    traceType,
+    traceTypes,
     hasFtrace,
     uuid,
     cached,
@@ -636,13 +659,19 @@ async function getTraceInfo(
   };
 }
 
-async function getTraceType(engine: Engine) {
-  const result = await engine.query(
-    `select str_value from metadata where name = 'trace_type'`,
-  );
+async function getTraceTypes(engine: Engine): Promise<string[]> {
+  const result = await engine.query(`
+    INCLUDE PERFETTO MODULE std.traceinfo.trace;
+    select distinct trace_type as str_value
+    from _metadata_by_trace
+  `);
 
-  if (result.numRows() === 0) return undefined;
-  return result.firstRow({str_value: STR}).str_value;
+  const traceTypes: string[] = [];
+  const it = result.iter({str_value: STR});
+  for (; it.valid(); it.next()) {
+    traceTypes.push(it.str_value);
+  }
+  return traceTypes;
 }
 
 async function getTraceTimeBounds(engine: Engine): Promise<TimeSpan> {

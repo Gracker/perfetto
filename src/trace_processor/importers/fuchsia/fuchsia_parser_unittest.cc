@@ -34,6 +34,7 @@
 #include "src/trace_processor/importers/common/event_tracker.h"
 #include "src/trace_processor/importers/common/flow_tracker.h"
 #include "src/trace_processor/importers/common/global_args_tracker.h"
+#include "src/trace_processor/importers/common/global_metadata_tracker.h"
 #include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/machine_tracker.h"
 #include "src/trace_processor/importers/common/metadata_tracker.h"
@@ -58,6 +59,7 @@
 #include "src/trace_processor/util/descriptors.h"
 #include "test/gtest_and_gmock.h"
 
+#include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/trace/trace.pbzero.h"
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
 #include "protos/perfetto/trace/track_event/thread_descriptor.pbzero.h"
@@ -117,8 +119,10 @@ class MockProcessTracker : public ProcessTracker {
 
   MOCK_METHOD(UniquePid, GetOrCreateProcess, (int64_t pid), (override));
   MOCK_METHOD(void,
-              SetProcessNameIfUnset,
-              (UniquePid upid, StringId process_name_id),
+              UpdateProcessName,
+              (UniquePid upid,
+               StringId process_name_id,
+               ProcessNamePriority priority),
               (override));
 };
 class MockBoundInserter : public ArgsTracker::BoundInserter {
@@ -170,16 +174,21 @@ class FuchsiaTraceParserTest : public ::testing::Test {
   FuchsiaTraceParserTest() {
     context_.storage = std::make_unique<TraceStorage>();
     storage_ = context_.storage.get();
+    context_.machine_tracker =
+        std::make_unique<MachineTracker>(&context_, kDefaultMachineId);
     context_.track_tracker = std::make_unique<TrackTracker>(&context_);
     context_.global_args_tracker =
         std::make_unique<GlobalArgsTracker>(context_.storage.get());
+    context_.global_metadata_tracker =
+        std::make_unique<GlobalMetadataTracker>(context_.storage.get());
+    context_.trace_state =
+        TraceProcessorContextPtr<TraceProcessorContext::TraceState>::MakeRoot(
+            TraceProcessorContext::TraceState{TraceId(0)});
     context_.import_logs_tracker =
-        std::make_unique<ImportLogsTracker>(&context_, 1);
+        std::make_unique<ImportLogsTracker>(&context_, TraceId(1));
     context_.stack_profile_tracker.reset(new StackProfileTracker(&context_));
     context_.args_translation_table.reset(new ArgsTranslationTable(storage_));
-    context_.metadata_tracker =
-        std::make_unique<MetadataTracker>(context_.storage.get());
-    context_.machine_tracker = std::make_unique<MachineTracker>(&context_, 0);
+    context_.metadata_tracker = std::make_unique<MetadataTracker>(&context_);
     context_.cpu_tracker = std::make_unique<CpuTracker>(&context_);
     event_ = new MockEventTracker(&context_);
     context_.event_tracker.reset(event_);
@@ -192,8 +201,10 @@ class FuchsiaTraceParserTest : public ::testing::Test {
     context_.slice_tracker = std::make_unique<SliceTracker>(&context_);
     context_.slice_translation_table =
         std::make_unique<SliceTranslationTable>(storage_);
+    context_.trace_time_state = std::make_unique<TraceTimeState>(TraceTimeState{
+        ClockTracker::ClockId(protos::pbzero::BUILTIN_CLOCK_BOOTTIME), false});
     context_.clock_tracker = std::make_unique<ClockTracker>(
-        std::make_unique<ClockSynchronizerListenerImpl>(&context_));
+        &context_, std::make_unique<ClockSynchronizerListenerImpl>(&context_));
     clock_ = context_.clock_tracker.get();
     context_.flow_tracker = std::make_unique<FlowTracker>(&context_);
     context_.sorter = std::make_unique<TraceSorter>(

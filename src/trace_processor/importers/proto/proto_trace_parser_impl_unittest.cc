@@ -41,6 +41,7 @@
 #include "src/trace_processor/importers/common/event_tracker.h"
 #include "src/trace_processor/importers/common/flow_tracker.h"
 #include "src/trace_processor/importers/common/global_args_tracker.h"
+#include "src/trace_processor/importers/common/global_metadata_tracker.h"
 #include "src/trace_processor/importers/common/import_logs_tracker.h"
 #include "src/trace_processor/importers/common/machine_tracker.h"
 #include "src/trace_processor/importers/common/mapping_tracker.h"
@@ -217,8 +218,10 @@ class MockProcessTracker : public ProcessTracker {
   MOCK_METHOD(UniquePid, GetOrCreateProcess, (int64_t pid), (override));
 
   MOCK_METHOD(void,
-              SetProcessNameIfUnset,
-              (UniquePid upid, StringId process_name_id),
+              UpdateProcessName,
+              (UniquePid upid,
+               StringId process_name_id,
+               ProcessNamePriority priority),
               (override));
 };
 
@@ -248,18 +251,23 @@ class ProtoTraceParserTest : public ::testing::Test {
     context_.register_additional_proto_modules = &RegisterAdditionalModules;
     storage_ = new TraceStorage();
     context_.storage.reset(storage_);
+    context_.machine_tracker.reset(
+        new MachineTracker(&context_, kDefaultMachineId));
     context_.track_tracker = std::make_unique<TrackTracker>(&context_);
     context_.global_args_tracker =
         std::make_unique<GlobalArgsTracker>(context_.storage.get());
+    context_.global_metadata_tracker =
+        std::make_unique<GlobalMetadataTracker>(context_.storage.get());
     context_.import_logs_tracker =
-        std::make_unique<ImportLogsTracker>(&context_, 1);
+        std::make_unique<ImportLogsTracker>(&context_, TraceId(1));
     context_.mapping_tracker.reset(new MappingTracker(&context_));
+    context_.trace_state =
+        TraceProcessorContextPtr<TraceProcessorContext::TraceState>::MakeRoot(
+            TraceProcessorContext::TraceState{TraceId(0)});
     context_.stack_profile_tracker =
         std::make_unique<StackProfileTracker>(&context_);
     context_.args_translation_table.reset(new ArgsTranslationTable(storage_));
-    context_.metadata_tracker.reset(
-        new MetadataTracker(context_.storage.get()));
-    context_.machine_tracker.reset(new MachineTracker(&context_, 0));
+    context_.metadata_tracker.reset(new MetadataTracker(&context_));
     context_.cpu_tracker.reset(new CpuTracker(&context_));
     event_ = new MockEventTracker(&context_);
     context_.event_tracker.reset(event_);
@@ -272,8 +280,10 @@ class ProtoTraceParserTest : public ::testing::Test {
     context_.slice_tracker = std::make_unique<SliceTracker>(&context_);
     context_.slice_translation_table =
         std::make_unique<SliceTranslationTable>(storage_);
+    context_.trace_time_state = std::make_unique<TraceTimeState>(TraceTimeState{
+        ClockTracker::ClockId(protos::pbzero::BUILTIN_CLOCK_BOOTTIME), false});
     context_.clock_tracker = std::make_unique<ClockTracker>(
-        std::make_unique<ClockSynchronizerListenerImpl>(&context_));
+        &context_, std::make_unique<ClockSynchronizerListenerImpl>(&context_));
     context_.flow_tracker = std::make_unique<FlowTracker>(&context_);
     context_.sorter = std::make_unique<TraceSorter>(
         &context_, TraceSorter::SortingMode::kFullSort);
@@ -302,7 +312,10 @@ class ProtoTraceParserTest : public ::testing::Test {
     auto status = reader_->Parse(TraceBlobView(
         TraceBlob::TakeOwnership(std::move(raw_trace), trace_bytes.size())));
     if (status.ok()) {
-      status = reader_->NotifyEndOfFile();
+      status = reader_->OnPushDataToSorter();
+    }
+    if (status.ok()) {
+      reader_->OnEventsFullyExtracted();
     }
 
     ResetTraceBuffers();
@@ -863,14 +876,16 @@ TEST_F(ProtoTraceParserTest, ProcessNameFromProcessDescriptor) {
       .WillRepeatedly(testing::Return(1u));
   EXPECT_CALL(*process_, GetOrCreateProcess(16)).WillOnce(testing::Return(2u));
 
-  EXPECT_CALL(*process_, SetProcessNameIfUnset(
-                             1u, storage_->InternString("OldProcessName")));
-  // Packet with same thread, but different name should update the name.
-  EXPECT_CALL(*process_, SetProcessNameIfUnset(
-                             1u, storage_->InternString("NewProcessName")));
   EXPECT_CALL(*process_,
-              SetProcessNameIfUnset(
-                  2u, storage_->InternString("DifferentProcessName")));
+              UpdateProcessName(1u, storage_->InternString("OldProcessName"),
+                                ProcessNamePriority::kTrackDescriptor));
+  // Packet with same thread, but different name should update the name.
+  EXPECT_CALL(*process_,
+              UpdateProcessName(1u, storage_->InternString("NewProcessName"),
+                                ProcessNamePriority::kTrackDescriptor));
+  EXPECT_CALL(*process_, UpdateProcessName(
+                             2u, storage_->InternString("DifferentProcessName"),
+                             ProcessNamePriority::kTrackDescriptor));
 
   Tokenize();
   context_.sorter->ExtractEventsForced();
@@ -2407,8 +2422,10 @@ TEST_F(ProtoTraceParserTest, TrackEventParseLegacyEventIntoRawTable) {
 }
 
 TEST_F(ProtoTraceParserTest, TrackEventLegacyTimestampsWithClockSnapshot) {
-  clock_->AddSnapshot({{protos::pbzero::BUILTIN_CLOCK_BOOTTIME, 0},
-                       {protos::pbzero::BUILTIN_CLOCK_MONOTONIC, 1000000}});
+  clock_->AddSnapshot(
+      {{ClockTracker::ClockId(protos::pbzero::BUILTIN_CLOCK_BOOTTIME), 0},
+       {ClockTracker::ClockId(protos::pbzero::BUILTIN_CLOCK_MONOTONIC),
+        1000000}});
 
   {
     auto* packet = trace_->add_packet();
