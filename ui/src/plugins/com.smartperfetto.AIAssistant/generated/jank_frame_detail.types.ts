@@ -114,7 +114,7 @@ export const RenderSlicesItemSchema = z.object({
 
 // ===== Combined Result =====
 export interface JankFrameDetailResult {
-  quadrant_data: QuadrantDataItem[];
+  quadrant_data?: QuadrantDataItem[];
   binder_data?: BinderDataItem[];
   freq_data?: FreqDataItem[];
   main_slices?: MainSlicesItem[];
@@ -122,7 +122,7 @@ export interface JankFrameDetailResult {
 }
 
 export const JankFrameDetailResultSchema = z.object({
-  quadrant_data: z.array(QuadrantDataItemSchema),
+  quadrant_data: z.array(QuadrantDataItemSchema).optional(),
   binder_data: z.array(BinderDataItemSchema).optional(),
   freq_data: z.array(FreqDataItemSchema).optional(),
   main_slices: z.array(MainSlicesItemSchema).optional(),
