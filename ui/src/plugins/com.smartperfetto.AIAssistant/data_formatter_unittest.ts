@@ -408,7 +408,9 @@ describe('formatMessage', () => {
     });
 
     it('should format blockquotes', () => {
-      expect(formatMessage('> quote')).toContain('<blockquote>quote</blockquote>');
+      const result = formatMessage('> quote');
+      expect(result).toContain('<blockquote>');
+      expect(result).toContain('quote');
     });
 
     it('should format links', () => {
@@ -440,6 +442,20 @@ describe('formatMessage', () => {
       expect(result).toContain('<li>First</li>');
       expect(result).toContain('<li>Second</li>');
       expect(result).toContain('</ol>');
+    });
+
+    it('should preserve nested list hierarchy for indented list items', () => {
+      const input = [
+        '## 掉帧聚类（先看大头）',
+        '- 聚类帧分组（全量帧，覆盖 63 帧）',
+        '  - 第1类（36帧）: 1435500 / 1435508',
+        '  - 第2类（18帧）: 1435930 / 1435938',
+      ].join('\n');
+      const result = formatMessage(input);
+      const ulCount = (result.match(/<ul>/g) || []).length;
+      expect(ulCount).toBeGreaterThanOrEqual(2);
+      expect(result).toContain('<li>聚类帧分组（全量帧，覆盖 63 帧）');
+      expect(result).toContain('<li>第1类（36帧）: 1435500 / 1435508</li>');
     });
 
     it('should convert newlines to br tags', () => {

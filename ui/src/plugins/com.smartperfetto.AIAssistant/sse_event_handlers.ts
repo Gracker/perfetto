@@ -848,6 +848,7 @@ export function handleProgressEvent(
       role: 'assistant',
       content: formatAnalysisPlanMessage(payload.plan, readStringField(payload, 'message')),
       timestamp: Date.now(),
+      flowTag: 'progress_note',
     });
     return {};
   }
@@ -2100,6 +2101,7 @@ export function handleRoundStartEvent(
       role: 'assistant',
       content: `⏳ 🔄 ${message} (${round}/${maxRounds})`,
       timestamp: Date.now(),
+      flowTag: 'progress_note',
     });
   }
   return {};
@@ -2130,6 +2132,7 @@ export function handleAgentTaskDispatchedEvent(
       role: 'assistant',
       content,
       timestamp: Date.now(),
+      flowTag: 'progress_note',
     });
   }
   return {};
@@ -2155,6 +2158,7 @@ export function handleSynthesisCompleteEvent(
       role: 'assistant',
       content: `⏳ 📝 ${message}\n\n确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
       timestamp: Date.now(),
+      flowTag: 'progress_note',
     });
   }
   return {};
@@ -2183,6 +2187,7 @@ export function handleStrategyDecisionEvent(
       role: 'assistant',
       content: `⏳ ${strategyEmoji} ${message} (置信度: ${(confidence * 100).toFixed(0)}%)`,
       timestamp: Date.now(),
+      flowTag: 'progress_note',
     });
   }
   return {};
@@ -2589,6 +2594,7 @@ export function handleInterventionResolvedEvent(
     role: 'assistant',
     content: `${actionEmoji} 已收到您的决定: **${action}**\n\n_分析继续中..._`,
     timestamp: Date.now(),
+    flowTag: 'progress_note',
   });
 
   return {};
@@ -2659,6 +2665,7 @@ export function handleStrategySelectedEvent(
     role: 'assistant',
     content: `⏳ ${methodEmoji} 选择策略: **${strategyName}** (${confidencePercent}%)\n\n_${reasoning}_`,
     timestamp: Date.now(),
+    flowTag: 'progress_note',
   });
 
   return {};
@@ -2683,6 +2690,7 @@ export function handleStrategyFallbackEvent(
     role: 'assistant',
     content: `⏳ 🔄 使用假设驱动分析\n\n_${reason || '未匹配到预设策略，启动自适应分析...'}_`,
     timestamp: Date.now(),
+    flowTag: 'progress_note',
   });
 
   return {};

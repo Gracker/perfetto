@@ -30,7 +30,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
-  flowTag?: 'streaming_flow' | 'answer_stream';
+  flowTag?: 'streaming_flow' | 'answer_stream' | 'progress_note';
   sqlResult?: SqlQueryResult;
   query?: string;
   reportUrl?: string;  // HTML report link

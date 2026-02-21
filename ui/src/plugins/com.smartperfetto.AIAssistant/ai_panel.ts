@@ -813,9 +813,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               const reportLinkLabel = msg.reportUrl
                 ? `查看详细分析报告 #${++reportLinkSequence} (${new Date(msg.timestamp).toLocaleTimeString('zh-CN', {hour12: false})})`
                 : '';
+              const isProgressMessage = msg.flowTag === 'streaming_flow' || msg.flowTag === 'progress_note';
+              const messageClass = [
+                msg.role === 'user' ? 'ai-message-user' : 'ai-message-assistant',
+                msg.flowTag ? `ai-message-${msg.flowTag}` : '',
+                isProgressMessage ? 'ai-message-progress' : '',
+              ].filter(Boolean).join(' ');
+              const bubbleClass = [
+                msg.role === 'user' ? 'ai-bubble-user' : 'ai-bubble-assistant',
+                isProgressMessage ? 'ai-bubble-progress' : '',
+              ].filter(Boolean).join(' ');
+              const contentClass = isProgressMessage ? 'ai-message-content-progress' : '';
 
               return m('div.ai-message', {
-              class: msg.role === 'user' ? 'ai-message-user' : 'ai-message-assistant',
+              class: messageClass,
             }, [
               // Avatar
               m('div.ai-avatar', {
@@ -826,13 +837,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
               // Message Content
               m('div.ai-bubble', {
-                class: msg.role === 'user' ? 'ai-bubble-user' : 'ai-bubble-assistant',
+                class: bubbleClass,
               }, [
                 // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
                 // reconciliation for m.trust() content. This avoids removeChild errors
                 // that occur when multiple SSE events trigger rapid redraws.
                 m('div.ai-message-content', {
+                  class: contentClass,
                   onclick: (e: MouseEvent) => {
+                    const selection = window.getSelection();
+                    if (selection && !selection.isCollapsed) {
+                      // Don't trigger click actions while user is selecting text to copy.
+                      return;
+                    }
                     const target = e.target as HTMLElement;
                     const copyBtn = target.closest?.('.ai-mermaid-copy') as HTMLElement | null;
                     if (copyBtn) {

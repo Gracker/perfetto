@@ -29,6 +29,64 @@ import {
   ExpandableSections,
   isFrameDetailData,
 } from './generated';
+import markdownit from 'markdown-it';
+
+const TIMESTAMP_LINK_SCHEME = 'ai-ts://';
+
+const markdownRenderer = markdownit({
+  html: false,
+  linkify: true,
+  breaks: true,
+});
+
+const defaultLinkOpenRenderer = markdownRenderer.renderer.rules.link_open ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+markdownRenderer.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const hrefIdx = token.attrIndex('href');
+  const href = hrefIdx >= 0 ? token.attrs?.[hrefIdx]?.[1] || '' : '';
+  if (!href.startsWith(TIMESTAMP_LINK_SCHEME)) {
+    token.attrSet('target', '_blank');
+    token.attrSet('rel', 'noopener noreferrer');
+  }
+  return defaultLinkOpenRenderer(tokens, idx, options, env, self);
+};
+
+const defaultImageRenderer = markdownRenderer.renderer.rules.image ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+markdownRenderer.renderer.rules.image = (tokens, idx, options, env, self) => {
+  tokens[idx].attrJoin('class', 'ai-markdown-image');
+  return defaultImageRenderer(tokens, idx, options, env, self);
+};
+
+const defaultTableOpenRenderer = markdownRenderer.renderer.rules.table_open ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+markdownRenderer.renderer.rules.table_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrJoin('class', 'ai-md-table');
+  return defaultTableOpenRenderer(tokens, idx, options, env, self);
+};
+
+function normalizeMarkdownSpacing(content: string): string {
+  return String(content || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
+    .trim();
+}
+
+function encodeTimestampMarkers(content: string): string {
+  return content.replace(
+    /@ts\[(\d+)\|([^\]]+)\]/g,
+    (_match: string, ts: string, label: string) => `[${label}](${TIMESTAMP_LINK_SCHEME}${ts})`
+  );
+}
+
+function decodeTimestampLinks(html: string): string {
+  return html.replace(
+    /<a\b[^>]*href="ai-ts:\/\/(\d+)"[^>]*>(.*?)<\/a>/g,
+    '<span class="ai-clickable-timestamp" data-ts="$1" title="点击跳转到此时间点">$2</span>'
+  );
+}
 
 /**
  * Encode a Unicode string to Base64.
@@ -234,92 +292,21 @@ export function formatDisplayValue(val: any, columnName?: string): string {
 }
 
 /**
- * Format message content with Markdown-like syntax.
- * Processes clickable timestamps, tables, headers, links, lists, etc.
+ * Format message content with Markdown syntax.
+ * Supports clickable timestamps, nested lists, links, tables and inline styles.
  *
  * @param content - The content string to format
  * @returns Formatted HTML string, or empty string if content is falsy
  */
 export function formatMessage(content: string): string {
-  // Defensive check for null/undefined/empty content
   if (!content) {
     return '';
   }
 
-  // Process clickable timestamps: @ts[timestampNs|label]
-  // Convert to clickable span elements with data attributes
-  let processedContent = content.replace(
-    /@ts\[(\d+)\|([^\]]+)\]/g,
-    '<span class="ai-clickable-timestamp" data-ts="$1" title="点击跳转到此时间点">$2</span>'
-  );
-
-  // Process Markdown tables BEFORE other formatting
-  // Match table blocks: header row, separator row, and data rows
-  processedContent = processedContent.replace(
-    /(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n?)+)/g,
-    (tableBlock) => {
-      const lines = tableBlock.trim().split('\n');
-      if (lines.length < 2) return tableBlock;
-
-      // Parse header
-      const headerCells = lines[0]
-        .split('|')
-        .filter((cell) => cell.trim() !== '')
-        .map((cell) => `<th>${cell.trim()}</th>`)
-        .join('');
-
-      // Skip separator line (line 1), parse data rows
-      const dataRows = lines
-        .slice(2)
-        .map((line) => {
-          const cells = line
-            .split('|')
-            .filter((cell) => cell.trim() !== '')
-            .map((cell) => `<td>${cell.trim()}</td>`)
-            .join('');
-          return `<tr>${cells}</tr>`;
-        })
-        .join('');
-
-      return `<table class="ai-md-table"><thead><tr>${headerCells}</tr></thead><tbody>${dataRows}</tbody></table>`;
-    }
-  );
-
-  // Markdown-like formatting with extended support
-  processedContent = processedContent
-    .replace(/^## (.*?)$/gm, '<h2>$1</h2>')
-    .replace(/^### (.*?)$/gm, '<h3>$1</h3>')
-    // Image markdown: ![alt](url) - must be before link processing
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="ai-markdown-image" />')
-    // Link markdown: [text](url)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.*?)\*/g, '<em>$1</em>')
-    .replace(/`(.*?)`/g, '<code>$1</code>')
-    .replace(/^> (.*?)$/gm, '<blockquote>$1</blockquote>')
-    // Unordered list items
-    .replace(/^- (.*?)$/gm, '<li class="ul-item">$1</li>')
-    // Ordered list items (1. 2. 3. etc.)
-    .replace(/^\d+\. (.*?)$/gm, '<li class="ol-item">$1</li>')
-    .replace(/\n/g, '<br>');
-
-  // Wrap consecutive unordered <li> elements in <ul>
-  processedContent = processedContent.replace(
-    /(<li class="ul-item">.*?<\/li>(?:<br>)?)+/g,
-    (match) => '<ul>' + match.replace(/<br>/g, '').replace(/ class="ul-item"/g, '') + '</ul>'
-  );
-
-  // Wrap consecutive ordered <li> elements in <ol>
-  processedContent = processedContent.replace(
-    /(<li class="ol-item">.*?<\/li>(?:<br>)?)+/g,
-    (match) => '<ol>' + match.replace(/<br>/g, '').replace(/ class="ol-item"/g, '') + '</ol>'
-  );
-
-  // Fix: Merge consecutive <br> tags to avoid excessive whitespace
-  // Merge 3 or more consecutive <br> into 2
-  processedContent = processedContent.replace(/(<br>){3,}/g, '<br><br>');
-
-  return processedContent;
+  const normalized = normalizeMarkdownSpacing(content);
+  const withTimestampLinks = encodeTimestampMarkers(normalized);
+  const rendered = markdownRenderer.render(withTimestampLinks).trim();
+  return decodeTimestampLinks(rendered);
 }
 
 /**

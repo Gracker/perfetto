@@ -447,7 +447,22 @@
 
   &.ai-message-assistant {
     align-self: flex-start;
-    max-width: 100%;
+    max-width: 96%;
+  }
+}
+
+.ai-message-progress {
+  gap: 4px;
+  max-width: 88%;
+  animation-duration: 0.15s;
+
+  .ai-avatar {
+    width: 20px;
+    height: 20px;
+
+    .pf-icon {
+      font-size: 12px;
+    }
   }
 }
 
@@ -511,8 +526,9 @@
   padding: 6px 10px;
   border-radius: 10px;
   word-wrap: break-word;
+  overflow-wrap: anywhere;
   position: relative;
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   font-size: 13px;
   line-height: 1.4;
@@ -547,13 +563,58 @@
   color: var(--chat-text) !important;
 }
 
+.ai-bubble-progress {
+  padding: 4px 8px !important;
+  background: var(--chat-bg-secondary) !important;
+  border: 1px solid var(--chat-border-light) !important;
+  box-shadow: none !important;
+}
+
+.ai-message-content-progress {
+  font-size: 12px;
+  line-height: 1.35;
+
+  p {
+    margin: 0 0 2px;
+  }
+
+  h2 {
+    margin: 2px 0 3px;
+    font-size: 1.02em;
+  }
+
+  h3 {
+    margin: 2px 0;
+    font-size: 0.92em;
+  }
+
+  ul, ol {
+    margin: 2px 0;
+  }
+
+  li {
+    margin: 1px 0;
+  }
+}
+
+// Force transcript text to remain selectable even if outer containers disable selection.
+.ai-messages,
+.ai-message,
+.ai-bubble,
+.ai-msg-text,
+.ai-message-content,
+.ai-message-content * {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
 // Alias for message content text
 .ai-msg-text,
 .ai-message-content {
-  line-height: 1.6;
+  line-height: 1.52;
 
   p {
-    margin: 0 0 8px;
+    margin: 0 0 6px;
 
     &:last-child {
       margin-bottom: 0;
@@ -614,6 +675,14 @@
   li {
     margin: 4px 0;
   }
+}
+
+// Keep interactive controls non-selectable while allowing text copy in message body.
+.ai-message-content button,
+.ai-message-content summary,
+.ai-message-content .ai-clickable-timestamp {
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 // Message Meta (timestamp, actions)
@@ -2606,7 +2675,7 @@ tr.detail-row {
   h3 {
     font-size: 0.95em;
     font-weight: 600;
-    margin: 8px 0 4px 0;
+    margin: 7px 0 5px 0;
     color: var(--chat-text);
   }
 
@@ -2622,7 +2691,7 @@ tr.detail-row {
   }
 
   ul {
-    margin: 6px 0;
+    margin: 5px 0;
     padding-left: 18px;
     list-style-type: disc;
 
@@ -2634,7 +2703,7 @@ tr.detail-row {
 
   // 有序列表样式
   ol {
-    margin: 4px 0;
+    margin: 5px 0;
     padding-left: 20px;
     list-style-type: decimal;
 
@@ -2714,7 +2783,11 @@ tr.detail-row {
   // 行内代码在受影响帧列表中
   p {
     margin: 4px 0;
-    line-height: 1.5;
+    line-height: 1.52;
+  }
+
+  p:empty {
+    display: none;
   }
 
   // Markdown images (mermaid diagrams, etc.)
