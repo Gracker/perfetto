@@ -8,8 +8,63 @@
  *
  * @module dataContract.types
  * @version 2.0.0 - DataEnvelope refactoring
- * @generated 2026-02-10T16:14:31.416Z
+ * @generated 2026-02-21T09:21:07.858Z
  */
+
+// =============================================================================
+// Conclusion Contract Types
+// =============================================================================
+
+export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
+export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
+export type ConclusionClusterFrameListMode = 'none' | 'top' | 'full';
+
+export interface ConclusionContractConclusionItem {
+  rank: number;
+  statement: string;
+  confidencePercent?: number;
+  trigger?: string;
+  supply?: string;
+  amplification?: string;
+}
+
+export interface ConclusionContractClusterItem {
+  cluster: string;
+  description?: string;
+  frames?: number;
+  percentage?: number;
+  frameRefs?: string[];
+  omittedFrameRefs?: number;
+}
+
+export interface ConclusionContractClusterPolicy {
+  outputMode: ConclusionClusterOutputMode;
+  frameListMode: ConclusionClusterFrameListMode;
+  maxFramesPerCluster?: number;
+}
+
+export interface ConclusionContractEvidenceItem {
+  conclusionId: string;
+  text: string;
+}
+
+export interface ConclusionContractMetadata {
+  confidencePercent?: number;
+  rounds?: number;
+  clusterPolicy?: ConclusionContractClusterPolicy;
+  sceneId?: string;
+}
+
+export interface ConclusionContract {
+  schemaVersion: 'conclusion_contract_v1';
+  mode: ConclusionOutputMode;
+  conclusions: ConclusionContractConclusionItem[];
+  clusters: ConclusionContractClusterItem[];
+  evidenceChain: ConclusionContractEvidenceItem[];
+  uncertainties: string[];
+  nextSteps: string[];
+  metadata?: ConclusionContractMetadata;
+}
 
 // =============================================================================
 // Column Definition System
@@ -451,13 +506,38 @@ export interface ProgressEvent {
 }
 
 /**
+ * Conversation Step Event - Strictly ordered timeline step for assistant-like UX
+ */
+export interface ConversationStepEvent {
+  type: 'conversation_step';
+  id: string;
+  data: {
+    eventId: string;
+    sessionId: string;
+    traceId: string;
+    phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+    role: 'agent' | 'system';
+    ordinal: number;
+    content: {
+      text: string;
+    };
+    metadata?: Record<string, unknown>;
+    source?: {
+      eventType?: string;
+      phase?: string;
+    };
+  };
+  timestamp: number;
+}
+
+/**
  * Analysis Completed Event - SSE payload for final result
  */
 export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
   data: {
     summary: string;
-    conclusionContract?: unknown;
+    conclusionContract?: ConclusionContract;
     reportUrl?: string;
     findings: DiagnosticFinding[];
     suggestions: string[];
@@ -473,6 +553,7 @@ export type SSEEvent =
   | SkillDataEvent
   | FindingEvent
   | ProgressEvent
+  | ConversationStepEvent
   | AnalysisCompletedEvent;
 
 // =============================================================================

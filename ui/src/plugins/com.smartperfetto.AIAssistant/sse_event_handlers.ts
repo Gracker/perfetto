@@ -26,7 +26,14 @@
  * - analysis_completed/error: Terminal events
  */
 
-import {Message, InterventionPoint, InterventionState, StreamingAnswerState, StreamingFlowState} from './types';
+import {
+  ConversationStepTimelineItem,
+  Message,
+  InterventionPoint,
+  InterventionState,
+  StreamingAnswerState,
+  StreamingFlowState,
+} from './types';
 import {
   formatLayerName,
   translateCategory,
@@ -36,11 +43,297 @@ import {
   parseSummaryToTable,
 } from './data_formatter';
 import {
+  ConclusionContract,
   DataEnvelope,
   DataPayload,
   isDataEnvelope,
   envelopeToSqlQueryResult,
 } from './generated';
+import {CONTRACT_ALIASES} from './conclusion_contract_aliases';
+
+type AnalysisHypothesisItem = {
+  status?: string;
+  description?: string;
+};
+
+type AnalysisCompletedPayload = {
+  summary?: string;
+  conclusionContract?: ConclusionContract | Record<string, unknown>;
+  reportUrl?: string;
+  findings?: unknown[];
+  suggestions?: string[];
+  answer?: string;
+  conclusion?: string;
+  confidence?: number;
+  rounds?: number;
+  reportError?: string;
+  hypotheses?: AnalysisHypothesisItem[];
+};
+
+type RawSSEEvent = Record<string, unknown> | null | undefined;
+type SqlResultData = NonNullable<Message['sqlResult']>;
+type SqlColumnDefinition = NonNullable<SqlResultData['columnDefinitions']>[number];
+type InterventionOptionValue = InterventionPoint['options'][number];
+
+const INTERVENTION_TYPES: ReadonlyArray<InterventionPoint['type']> = [
+  'low_confidence',
+  'ambiguity',
+  'timeout',
+  'agent_request',
+  'circuit_breaker',
+  'validation_required',
+];
+
+const INTERVENTION_ACTIONS: ReadonlyArray<InterventionOptionValue['action']> = [
+  'continue',
+  'focus',
+  'abort',
+  'custom',
+  'select_option',
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function readOptionalNumberField(source: Record<string, unknown>, key: string): number | undefined {
+  const value = source[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | undefined {
+  const source = asRecord(value);
+  if (Object.keys(source).length === 0) return undefined;
+
+  const payload: AnalysisCompletedPayload = {};
+
+  const summary = readStringField(source, 'summary');
+  if (summary) payload.summary = summary;
+
+  const conclusionContract = source.conclusionContract;
+  if (isRecord(conclusionContract)) {
+    payload.conclusionContract = conclusionContract;
+  }
+
+  const reportUrl = readStringField(source, 'reportUrl');
+  if (reportUrl) payload.reportUrl = reportUrl;
+
+  if (Array.isArray(source.findings)) {
+    payload.findings = source.findings;
+  }
+
+  const suggestions = readStringArrayField(source, 'suggestions');
+  if (suggestions.length > 0) payload.suggestions = suggestions;
+
+  const answer = readStringField(source, 'answer');
+  if (answer) payload.answer = answer;
+
+  const conclusion = readStringField(source, 'conclusion');
+  if (conclusion) payload.conclusion = conclusion;
+
+  const confidence = readOptionalNumberField(source, 'confidence');
+  if (confidence !== undefined) payload.confidence = confidence;
+
+  const rounds = readOptionalNumberField(source, 'rounds');
+  if (rounds !== undefined) payload.rounds = rounds;
+
+  const reportError = readStringField(source, 'reportError');
+  if (reportError) payload.reportError = reportError;
+
+  if (Array.isArray(source.hypotheses)) {
+    const hypotheses: AnalysisHypothesisItem[] = [];
+    for (const item of source.hypotheses) {
+      const hypothesis = asRecord(item);
+      const status = readStringField(hypothesis, 'status');
+      const description = readStringField(hypothesis, 'description');
+      if (!status && !description) continue;
+      hypotheses.push({
+        status: status || undefined,
+        description: description || undefined,
+      });
+    }
+    if (hypotheses.length > 0) payload.hypotheses = hypotheses;
+  }
+
+  return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function eventPayload(event: RawSSEEvent): Record<string, unknown> {
+  const eventRecord = asRecord(event);
+  return asRecord(eventRecord.data);
+}
+
+function readStringField(source: Record<string, unknown>, key: string, fallback = ''): string {
+  const value = source[key];
+  return typeof value === 'string' ? value : fallback;
+}
+
+function readNumberField(source: Record<string, unknown>, key: string, fallback = 0): number {
+  const value = source[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function readBooleanField(source: Record<string, unknown>, key: string, fallback = false): boolean {
+  const value = source[key];
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function readStringArrayField(source: Record<string, unknown>, key: string): string[] {
+  const value = source[key];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => item.length > 0);
+}
+
+function readAliasedValue(source: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    if (key in source) return source[key];
+  }
+  return undefined;
+}
+
+function readAliasedUnknownArray(source: Record<string, unknown>, keys: readonly string[]): unknown[] {
+  const value = readAliasedValue(source, keys);
+  return Array.isArray(value) ? value : [];
+}
+
+function readAliasedRecord(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  return asRecord(readAliasedValue(source, keys));
+}
+
+function readAliasedRecordArray(
+  source: Record<string, unknown>,
+  keys: readonly string[]
+): Record<string, unknown>[] {
+  return readAliasedUnknownArray(source, keys)
+    .filter((item): item is Record<string, unknown> => isRecord(item));
+}
+
+function readLegacySummary(value: unknown): {title: string; content: string} | undefined {
+  if (!isRecord(value)) return undefined;
+  const title = readStringField(value, 'title');
+  const content = readStringField(value, 'content');
+  if (!title && !content) return undefined;
+  return {
+    title: title || '摘要',
+    content,
+  };
+}
+
+function readSummaryReport(value: unknown): SqlResultData['summaryReport'] | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const title = readStringField(value, 'title');
+  const content = readStringField(value, 'content');
+  if (!title && !content) return undefined;
+
+  const summaryReport: NonNullable<SqlResultData['summaryReport']> = {
+    title: title || '摘要',
+    content,
+  };
+
+  const keyMetricsRaw = value.keyMetrics;
+  if (Array.isArray(keyMetricsRaw)) {
+    type SummaryKeyMetric = {
+      name: string;
+      value: string;
+      status?: 'good' | 'warning' | 'critical';
+    };
+
+    const keyMetrics: SummaryKeyMetric[] = [];
+    for (const item of keyMetricsRaw) {
+      const metric = asRecord(item);
+      const name = readStringField(metric, 'name');
+      const metricValue = readStringField(metric, 'value');
+      if (!name && !metricValue) continue;
+
+      const statusRaw = readStringField(metric, 'status');
+      const status = statusRaw === 'good' || statusRaw === 'warning' || statusRaw === 'critical'
+        ? statusRaw
+        : undefined;
+
+      keyMetrics.push({
+        name,
+        value: metricValue,
+        status,
+      });
+    }
+
+    if (keyMetrics.length > 0) {
+      summaryReport.keyMetrics = keyMetrics;
+    }
+  }
+
+  return summaryReport;
+}
+
+function readExpandableData(value: unknown): SqlResultData['expandableData'] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const entries: NonNullable<SqlResultData['expandableData']> = [];
+  for (const entry of value) {
+    const entryRecord = asRecord(entry);
+    const item = asRecord(entryRecord.item);
+    if (Object.keys(item).length === 0) continue;
+
+    const result = asRecord(entryRecord.result);
+    const sections = isRecord(result.sections) ? result.sections : undefined;
+    const error = readStringField(result, 'error') || undefined;
+    const success = readBooleanField(result, 'success', sections !== undefined && !error);
+
+    entries.push({
+      item,
+      result: {
+        success,
+        sections,
+        error,
+      },
+    });
+  }
+
+  return entries.length > 0 ? entries : undefined;
+}
+
+function readInterventionType(value: unknown): InterventionPoint['type'] {
+  if (typeof value === 'string') {
+    for (const candidate of INTERVENTION_TYPES) {
+      if (candidate === value) return candidate;
+    }
+  }
+  return 'agent_request';
+}
+
+function readInterventionAction(value: unknown): InterventionOptionValue['action'] {
+  if (typeof value === 'string') {
+    for (const candidate of INTERVENTION_ACTIONS) {
+      if (candidate === value) return candidate;
+    }
+  }
+  return 'continue';
+}
+
+function readInterventionOptions(value: unknown): InterventionPoint['options'] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((entry, index) => {
+      const option = asRecord(entry);
+      const id = readStringField(option, 'id') || `option_${index + 1}`;
+      const label = readStringField(option, 'label') || `选项 ${index + 1}`;
+      return {
+        id,
+        label,
+        description: readStringField(option, 'description', label),
+        action: readInterventionAction(option.action),
+        recommended: readBooleanField(option, 'recommended', false) || undefined,
+      };
+    });
+}
 
 /**
  * Context object passed to SSE event handlers.
@@ -105,18 +398,22 @@ const STREAM_FLOW_LIMITS = {
   thoughts: 6,
   tools: 8,
   outputs: 8,
+  conversation: 20,
 } as const;
 
-const ANSWER_STREAM_RENDER_INTERVAL_MS = 48;
+const ANSWER_STREAM_RENDER_INTERVAL_MS = 16;
+const ANSWER_STREAM_PENDING_CHUNK_SIZE = 24;
 
-function normalizeFlowLine(value: any): string {
+type StreamingFlowSection = 'phase' | 'thought' | 'tool' | 'output' | 'conversation';
+
+function normalizeFlowLine(value: unknown): string {
   return String(value ?? '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 240);
 }
 
-function appendFlowLine(lines: string[], rawLine: any, max: number): boolean {
+function appendFlowLine(lines: string[], rawLine: unknown, max: number): boolean {
   const line = normalizeFlowLine(rawLine);
   if (!line) return false;
   if (lines[lines.length - 1] === line) return false;
@@ -127,122 +424,332 @@ function appendFlowLine(lines: string[], rawLine: any, max: number): boolean {
   return true;
 }
 
-function buildStreamingFlowContent(flow: StreamingFlowState): string {
-  const lines: string[] = ['### 🧭 分析实时进展'];
-
-  if (flow.phases.length > 0) {
-    lines.push('', '**阶段**');
-    for (const phase of flow.phases) {
-      lines.push(`- ${phase}`);
-    }
+function flowSectionLines(flow: StreamingFlowState, section: StreamingFlowSection): string[] {
+  switch (section) {
+    case 'phase':
+      return flow.phases;
+    case 'thought':
+      return flow.thoughts;
+    case 'tool':
+      return flow.tools;
+    case 'output':
+      return flow.outputs;
+    case 'conversation':
+      return flow.conversationLines;
   }
+}
 
-  if (flow.thoughts.length > 0) {
-    lines.push('', '**思考**');
-    for (const thought of flow.thoughts) {
-      lines.push(`- ${thought}`);
-    }
+function getFlowSectionMessageId(
+  flow: StreamingFlowState,
+  section: StreamingFlowSection
+): string | null {
+  switch (section) {
+    case 'phase':
+      return flow.phaseMessageId || flow.messageId;
+    case 'thought':
+      return flow.thoughtMessageId;
+    case 'tool':
+      return flow.toolMessageId;
+    case 'output':
+      return flow.outputMessageId;
+    case 'conversation':
+      return flow.conversationMessageId;
   }
+}
 
-  if (flow.tools.length > 0) {
-    lines.push('', '**工具与动作**');
-    for (const tool of flow.tools) {
-      lines.push(`- ${tool}`);
-    }
+function setFlowSectionMessageId(
+  flow: StreamingFlowState,
+  section: StreamingFlowSection,
+  messageId: string | null
+): void {
+  switch (section) {
+    case 'phase':
+      flow.phaseMessageId = messageId;
+      flow.messageId = messageId;
+      break;
+    case 'thought':
+      flow.thoughtMessageId = messageId;
+      break;
+    case 'tool':
+      flow.toolMessageId = messageId;
+      break;
+    case 'output':
+      flow.outputMessageId = messageId;
+      break;
+    case 'conversation':
+      flow.conversationMessageId = messageId;
+      break;
   }
+}
 
-  if (flow.outputs.length > 0) {
-    lines.push('', '**中间产出**');
-    for (const output of flow.outputs) {
-      lines.push(`- ${output}`);
-    }
-  }
-
-  lines.push('');
+function flowStatusHint(flow: StreamingFlowState): string {
   if (flow.status === 'running') {
-    lines.push('_持续更新中..._');
-  } else if (flow.status === 'completed') {
-    lines.push('_流程完成，结论已生成。_');
-  } else if (flow.status === 'failed') {
-    lines.push(`_流程中断: ${flow.error || '发生错误'}_`);
-  } else {
-    lines.push('_等待后端事件..._');
+    return '_持续更新中..._';
+  }
+  if (flow.status === 'completed') {
+    return '_流程完成，结论已生成。_';
+  }
+  if (flow.status === 'failed') {
+    return `_流程中断: ${flow.error || '发生错误'}_`;
+  }
+  return '_等待后端事件..._';
+}
+
+function buildStreamingFlowContent(flow: StreamingFlowState, section: StreamingFlowSection): string {
+  const lines: string[] = [];
+  switch (section) {
+    case 'phase':
+      lines.push('### 🧭 分析步骤');
+      break;
+    case 'thought':
+      lines.push('### 💭 思考');
+      break;
+    case 'tool':
+      lines.push('### 🛠 工具与动作');
+      break;
+    case 'output':
+      lines.push('### 📤 中间产出');
+      break;
+    case 'conversation':
+      lines.push('### 🧵 对话时间线');
+      break;
+  }
+
+  const sectionLines = flowSectionLines(flow, section);
+  if (sectionLines.length > 0) {
+    lines.push('');
+    for (const item of sectionLines) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  if (section === 'phase' || section === 'conversation') {
+    lines.push('');
+    lines.push(flowStatusHint(flow));
   }
 
   return lines.join('\n');
 }
 
-function ensureStreamingFlowMessage(ctx: SSEHandlerContext): string {
+function resolveStreamingFlowMessageId(
+  ctx: SSEHandlerContext,
+  section: StreamingFlowSection
+): string | null {
+  const flow = ctx.streamingFlow;
+  const messageId = getFlowSectionMessageId(flow, section);
+  if (!messageId) return null;
+  const exists = ctx.getMessages().some((msg) => msg.id === messageId);
+  if (!exists) {
+    setFlowSectionMessageId(flow, section, null);
+    return null;
+  }
+  return messageId;
+}
+
+function ensureStreamingFlowMessage(
+  ctx: SSEHandlerContext,
+  section: StreamingFlowSection
+): string | null {
   const flow = ctx.streamingFlow;
   if (flow.status === 'idle') {
     flow.status = 'running';
     flow.startedAt = Date.now();
   }
 
-  const hasExisting = flow.messageId
-    ? ctx.getMessages().some((msg) => msg.id === flow.messageId)
-    : false;
+  const lines = flowSectionLines(flow, section);
+  if (
+    lines.length === 0 &&
+    section !== 'phase' &&
+    !(section === 'conversation' && flow.conversationEnabled)
+  ) {
+    return null;
+  }
 
-  if (!hasExisting) {
-    flow.messageId = ctx.generateId();
+  let messageId = resolveStreamingFlowMessageId(ctx, section);
+  if (!messageId) {
+    messageId = ctx.generateId();
+    setFlowSectionMessageId(flow, section, messageId);
     ctx.addMessage({
-      id: flow.messageId,
+      id: messageId,
       role: 'assistant',
-      content: buildStreamingFlowContent(flow),
+      content: buildStreamingFlowContent(flow, section),
       timestamp: Date.now(),
       flowTag: 'streaming_flow',
     });
   }
 
-  return flow.messageId!;
+  return messageId;
 }
 
-function refreshStreamingFlowMessage(ctx: SSEHandlerContext): void {
+function refreshStreamingFlowMessage(
+  ctx: SSEHandlerContext,
+  section: StreamingFlowSection,
+  options: {createIfMissing?: boolean} = {}
+): void {
   const flow = ctx.streamingFlow;
-  const messageId = ensureStreamingFlowMessage(ctx);
+  const messageId = options.createIfMissing === false
+    ? resolveStreamingFlowMessageId(ctx, section)
+    : ensureStreamingFlowMessage(ctx, section);
+  if (!messageId) return;
   flow.lastUpdatedAt = Date.now();
   ctx.updateMessage(messageId, {
-    content: buildStreamingFlowContent(flow),
+    content: buildStreamingFlowContent(flow, section),
     timestamp: flow.lastUpdatedAt,
     flowTag: 'streaming_flow',
   }, {persist: false});
 }
 
+function isConversationTimelineEnabled(ctx: SSEHandlerContext): boolean {
+  return ctx.streamingFlow.conversationEnabled;
+}
+
 function pushStreamingPhase(ctx: SSEHandlerContext, line: string): void {
+  if (isConversationTimelineEnabled(ctx)) return;
   if (appendFlowLine(ctx.streamingFlow.phases, line, STREAM_FLOW_LIMITS.phases)) {
-    refreshStreamingFlowMessage(ctx);
+    refreshStreamingFlowMessage(ctx, 'phase');
   }
 }
 
 function pushStreamingThought(ctx: SSEHandlerContext, line: string): void {
+  if (isConversationTimelineEnabled(ctx)) return;
   if (appendFlowLine(ctx.streamingFlow.thoughts, line, STREAM_FLOW_LIMITS.thoughts)) {
-    refreshStreamingFlowMessage(ctx);
+    refreshStreamingFlowMessage(ctx, 'thought');
   }
 }
 
 function pushStreamingTool(ctx: SSEHandlerContext, line: string): void {
+  if (isConversationTimelineEnabled(ctx)) return;
   if (appendFlowLine(ctx.streamingFlow.tools, line, STREAM_FLOW_LIMITS.tools)) {
-    refreshStreamingFlowMessage(ctx);
+    refreshStreamingFlowMessage(ctx, 'tool');
   }
 }
 
 function pushStreamingOutput(ctx: SSEHandlerContext, line: string): void {
+  if (isConversationTimelineEnabled(ctx)) return;
   if (appendFlowLine(ctx.streamingFlow.outputs, line, STREAM_FLOW_LIMITS.outputs)) {
-    refreshStreamingFlowMessage(ctx);
+    refreshStreamingFlowMessage(ctx, 'output');
   }
+}
+
+function getConversationPhaseLabel(phase: ConversationStepTimelineItem['phase']): string {
+  switch (phase) {
+    case 'progress':
+      return '进度';
+    case 'thinking':
+      return '思考';
+    case 'tool':
+      return '工具';
+    case 'result':
+      return '结果';
+    case 'error':
+      return '错误';
+  }
+}
+
+function getConversationRoleLabel(role: ConversationStepTimelineItem['role']): string {
+  return role === 'system' ? '系统' : '助手';
+}
+
+function renderConversationStepLine(step: ConversationStepTimelineItem): string {
+  const phaseLabel = getConversationPhaseLabel(step.phase);
+  const roleLabel = getConversationRoleLabel(step.role);
+  return `#${step.ordinal} [${phaseLabel}/${roleLabel}] ${step.text}`;
+}
+
+function getConversationPhaseMinGapMs(phase: ConversationStepTimelineItem['phase']): number {
+  switch (phase) {
+    case 'thinking':
+      return 220;
+    case 'tool':
+      return 160;
+    case 'result':
+      return 120;
+    case 'error':
+      return 0;
+    case 'progress':
+    default:
+      return 120;
+  }
+}
+
+function flushConversationTimeline(
+  ctx: SSEHandlerContext,
+  options: {force?: boolean} = {}
+): boolean {
+  const flow = ctx.streamingFlow;
+  let changed = false;
+  let flushed = 0;
+  while (true) {
+    const nextOrdinal = flow.conversationLastOrdinal + 1;
+    const step = flow.conversationPendingSteps[nextOrdinal];
+    if (!step) break;
+
+    if (options.force !== true) {
+      const lastRenderedAt = flow.conversationLastRenderedAt || 0;
+      const minGapMs = getConversationPhaseMinGapMs(step.phase);
+      const now = Date.now();
+      if (lastRenderedAt > 0 && now - lastRenderedAt < minGapMs) {
+        break;
+      }
+    }
+
+    delete flow.conversationPendingSteps[nextOrdinal];
+    const line = renderConversationStepLine(step);
+    if (appendFlowLine(flow.conversationLines, line, STREAM_FLOW_LIMITS.conversation)) {
+      changed = true;
+    }
+    flow.conversationLastOrdinal = nextOrdinal;
+    flow.conversationLastRenderedAt = Date.now();
+    flushed += 1;
+    if (options.force !== true && flushed >= 1) {
+      break;
+    }
+  }
+  if (changed) {
+    refreshStreamingFlowMessage(ctx, 'conversation');
+  }
+  return changed;
 }
 
 function completeStreamingFlow(ctx: SSEHandlerContext): void {
   if (ctx.streamingFlow.status === 'running' || ctx.streamingFlow.status === 'idle') {
     ctx.streamingFlow.status = 'completed';
-    refreshStreamingFlowMessage(ctx);
+    if (ctx.streamingFlow.conversationEnabled) {
+      flushConversationTimeline(ctx, {force: true});
+    }
+    const hasLegacyFlow = (
+      ctx.streamingFlow.phases.length > 0 ||
+      ctx.streamingFlow.thoughts.length > 0 ||
+      ctx.streamingFlow.tools.length > 0 ||
+      ctx.streamingFlow.outputs.length > 0
+    );
+    refreshStreamingFlowMessage(ctx, 'phase', {createIfMissing: hasLegacyFlow});
+    if (ctx.streamingFlow.conversationEnabled) {
+      refreshStreamingFlowMessage(ctx, 'conversation', {
+        createIfMissing: ctx.streamingFlow.conversationLines.length > 0,
+      });
+    }
   }
 }
 
 function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
   ctx.streamingFlow.status = 'failed';
   ctx.streamingFlow.error = normalizeFlowLine(error || 'unknown_error');
-  refreshStreamingFlowMessage(ctx);
+  if (ctx.streamingFlow.conversationEnabled) {
+    flushConversationTimeline(ctx, {force: true});
+  }
+  const hasLegacyFlow = (
+    ctx.streamingFlow.phases.length > 0 ||
+    ctx.streamingFlow.thoughts.length > 0 ||
+    ctx.streamingFlow.tools.length > 0 ||
+    ctx.streamingFlow.outputs.length > 0
+  );
+  refreshStreamingFlowMessage(ctx, 'phase', {createIfMissing: hasLegacyFlow});
+  if (ctx.streamingFlow.conversationEnabled) {
+    refreshStreamingFlowMessage(ctx, 'conversation', {
+      createIfMissing: ctx.streamingFlow.conversationLines.length > 0,
+    });
+  }
 }
 
 function ensureStreamingAnswerMessage(ctx: SSEHandlerContext): string {
@@ -315,7 +822,7 @@ function failStreamingAnswer(ctx: SSEHandlerContext): void {
 
 function describeEnvelopeOutput(envelope: DataEnvelope): string {
   const title = envelope.display?.title || envelope.meta?.stepId || envelope.meta?.skillId || '数据更新';
-  const payload = envelope.data as DataPayload;
+  const payload = envelope.data;
   const rowCount = Array.isArray(payload?.rows) ? payload.rows.length : undefined;
   if (typeof rowCount === 'number') {
     return `${title} (${rowCount} 行)`;
@@ -327,18 +834,19 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
  * Process a progress event - shows analysis phase updates.
  */
 export function handleProgressEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  const phase = normalizeFlowLine(data?.data?.phase);
-  const phaseMessage = normalizeFlowLine(data?.data?.message);
+  const payload = eventPayload(data);
+  const phase = normalizeFlowLine(readStringField(payload, 'phase'));
+  const phaseMessage = normalizeFlowLine(readStringField(payload, 'message'));
 
-  if (data?.data?.phase === 'analysis_plan') {
+  if (readStringField(payload, 'phase') === 'analysis_plan') {
     pushStreamingPhase(ctx, phaseMessage || '分析计划已确认');
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: formatAnalysisPlanMessage(data.data.plan, data.data.message),
+      content: formatAnalysisPlanMessage(payload.plan, readStringField(payload, 'message')),
       timestamp: Date.now(),
     });
     return {};
@@ -355,39 +863,45 @@ export function handleProgressEvent(
   return {};
 }
 
-function formatAnalysisPlanMessage(plan: any, fallbackMessage?: string): string {
-  if (!plan || typeof plan !== 'object') {
+function formatAnalysisPlanMessage(plan: unknown, fallbackMessage?: string): string {
+  if (!isRecord(plan)) {
     return `### 🧭 分析计划已确认\n\n${fallbackMessage || '先收集证据，再给根因假设。'}`;
   }
 
+  const planRecord = plan;
+
   const lines: string[] = ['### 🧭 分析计划已确认'];
 
-  if (typeof plan.objective === 'string' && plan.objective.trim()) {
-    lines.push('', `目标: ${plan.objective.trim()}`);
+  const objective = readStringField(planRecord, 'objective').trim();
+  if (objective) {
+    lines.push('', `目标: ${objective}`);
   }
 
-  if (typeof plan.mode === 'string' && plan.mode.trim()) {
-    lines.push('', `模式: \`${plan.mode.trim()}\``);
+  const mode = readStringField(planRecord, 'mode').trim();
+  if (mode) {
+    lines.push('', `模式: \`${mode}\``);
   }
 
-  if (plan.strategy && typeof plan.strategy === 'object') {
-    const strategyName = plan.strategy.name || plan.strategy.id || 'unknown';
+  const strategy = asRecord(planRecord.strategy);
+  if (Object.keys(strategy).length > 0) {
+    const strategyName = readStringField(strategy, 'name') || readStringField(strategy, 'id') || 'unknown';
     lines.push('', `策略: **${strategyName}**`);
   }
 
-  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const rawSteps = Array.isArray(planRecord.steps) ? planRecord.steps : [];
+  const steps = rawSteps.map((step) => asRecord(step));
   if (steps.length > 0) {
     lines.push('', '**步骤**');
-    const sorted = [...steps].sort((a: any, b: any) => (Number(a?.order) || 0) - (Number(b?.order) || 0));
+    const sorted = [...steps].sort((a, b) => (readNumberField(a, 'order', 0)) - (readNumberField(b, 'order', 0)));
     for (const step of sorted) {
-      const order = Number(step?.order) || 0;
-      const title = String(step?.title || '步骤');
-      const action = String(step?.action || '');
+      const order = readNumberField(step, 'order', 0);
+      const title = readStringField(step, 'title', '步骤');
+      const action = readStringField(step, 'action');
       lines.push(`${order}. **${title}**: ${action}`);
     }
   }
 
-  const evidence = Array.isArray(plan.evidence) ? plan.evidence : [];
+  const evidence = Array.isArray(planRecord.evidence) ? planRecord.evidence : [];
   if (evidence.length > 0) {
     lines.push('', '**证据清单**');
     for (const item of evidence) {
@@ -411,20 +925,29 @@ function normalizeMarkdownSpacing(content: string): string {
     .trim();
 }
 
-function normalizeColumnDefinitions(columns: any): Array<Record<string, any>> | undefined {
+function normalizeColumnDefinitions(columns: unknown): SqlColumnDefinition[] | undefined {
   if (!Array.isArray(columns)) return undefined;
 
   const definitions = columns
-    .map((col: any) => {
+    .map((col): SqlColumnDefinition | null => {
       if (typeof col === 'string') {
         return {name: col};
       }
-      if (col && typeof col === 'object' && typeof col.name === 'string') {
-        return col;
+      if (isRecord(col) && typeof col.name === 'string') {
+        const normalized: SqlColumnDefinition = {name: col.name};
+        if (typeof col.type === 'string') normalized.type = col.type;
+        if (typeof col.format === 'string') normalized.format = col.format;
+        if (typeof col.clickAction === 'string') normalized.clickAction = col.clickAction;
+        if (typeof col.durationColumn === 'string') normalized.durationColumn = col.durationColumn;
+        if (col.unit === 'ns' || col.unit === 'us' || col.unit === 'ms' || col.unit === 's') {
+          normalized.unit = col.unit;
+        }
+        if (typeof col.hidden === 'boolean') normalized.hidden = col.hidden;
+        return normalized;
       }
       return null;
     })
-    .filter(Boolean) as Array<Record<string, any>>;
+    .filter((col): col is SqlColumnDefinition => col !== null);
 
   return definitions.length > 0 ? definitions : undefined;
 }
@@ -433,11 +956,18 @@ function normalizeColumnDefinitions(columns: any): Array<Record<string, any>> | 
  * Process sql_executed event - shows query results.
  */
 export function handleSqlExecutedEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data?.result) {
-    const rowCount = data.data.result.rowCount || 0;
+  const payload = eventPayload(data);
+  const result = asRecord(payload.result);
+  if (Object.keys(result).length > 0) {
+    const rowCount = readNumberField(result, 'rowCount', 0);
+    const columns = Array.isArray(result.columns) ? result.columns : [];
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    const sql = readStringField(payload, 'sql');
+    const expandableData = readExpandableData(result.expandableData);
+    const summary = readLegacySummary(result.summary);
     pushStreamingTool(ctx, '执行 SQL 查询');
     pushStreamingOutput(ctx, `SQL 结果返回 ${rowCount} 行`);
     ctx.addMessage({
@@ -446,12 +976,12 @@ export function handleSqlExecutedEvent(
       content: `📊 查询到 **${rowCount}** 条记录`,
       timestamp: Date.now(),
       sqlResult: {
-        columns: data.data.result.columns || [],
-        rows: data.data.result.rows || [],
+        columns,
+        rows,
         rowCount,
-        query: data.data.sql || '',
-        expandableData: data.data.result.expandableData,
-        summary: data.data.result.summary,
+        query: sql,
+        expandableData,
+        summary,
       },
     });
   }
@@ -462,14 +992,22 @@ export function handleSqlExecutedEvent(
  * Process skill_section event - displays skill step data as a table.
  */
 export function handleSkillSectionEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data) {
-    const section = data.data;
+  const section = eventPayload(data);
+  if (Object.keys(section).length > 0) {
+    const sectionTitle = readStringField(section, 'sectionTitle', 'Skill Section');
+    const rowCount = readNumberField(section, 'rowCount', 0);
+    const sectionIndex = readNumberField(section, 'sectionIndex', 0);
+    const totalSections = readNumberField(section, 'totalSections', 0);
+    const columns = Array.isArray(section.columns) ? section.columns : [];
+    const rows = Array.isArray(section.rows) ? section.rows : [];
+    const expandableData = readExpandableData(section.expandableData);
+    const summary = readLegacySummary(section.summary);
     pushStreamingOutput(
       ctx,
-      `${section.sectionTitle || 'Skill Section'} (${section.rowCount || 0} 行)`
+      `${sectionTitle} (${rowCount} 行)`
     );
     // Show progress for this section - use sectionTitle for compact display
     ctx.addMessage({
@@ -477,14 +1015,14 @@ export function handleSkillSectionEvent(
       role: 'assistant',
       content: '',  // No message content, title is in table header
       timestamp: Date.now(),
-      sqlResult: section.rowCount > 0 ? {
-        columns: section.columns,
-        rows: section.rows,
-        rowCount: section.rowCount,
+      sqlResult: rowCount > 0 ? {
+        columns,
+        rows,
+        rowCount,
         query: '',  // No SQL display
-        sectionTitle: `${section.sectionTitle} (${section.sectionIndex}/${section.totalSections})`,
-        expandableData: section.expandableData,
-        summary: section.summary,
+        sectionTitle: `${sectionTitle} (${sectionIndex}/${totalSections})`,
+        expandableData,
+        summary,
       } : undefined,
     });
   }
@@ -495,37 +1033,41 @@ export function handleSkillSectionEvent(
  * Process skill_diagnostics event - shows diagnostic messages.
  */
 export function handleSkillDiagnosticsEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data?.diagnostics && data.data.diagnostics.length > 0) {
-    const diagnostics = data.data.diagnostics;
-    const criticalItems = diagnostics.filter((d: any) => d.severity === 'critical');
-    const warningItems = diagnostics.filter((d: any) => d.severity === 'warning');
-    const infoItems = diagnostics.filter((d: any) => d.severity === 'info');
+  const payload = eventPayload(data);
+  const diagnostics = Array.isArray(payload.diagnostics)
+    ? payload.diagnostics.map((item) => asRecord(item))
+    : [];
+  if (diagnostics.length > 0) {
+    const criticalItems = diagnostics.filter((d) => readStringField(d, 'severity') === 'critical');
+    const warningItems = diagnostics.filter((d) => readStringField(d, 'severity') === 'warning');
+    const infoItems = diagnostics.filter((d) => readStringField(d, 'severity') === 'info');
 
     let content = '**🔍 诊断结果**\n\n';
     if (criticalItems.length > 0) {
       content += '🔴 **严重问题:**\n';
-      criticalItems.forEach((d: any) => {
-        content += `- ${d.message}\n`;
-        if (d.suggestions && d.suggestions.length > 0) {
-          content += `  *建议: ${d.suggestions.join('; ')}*\n`;
+      criticalItems.forEach((d) => {
+        content += `- ${readStringField(d, 'message')}\n`;
+        const suggestions = readStringArrayField(d, 'suggestions');
+        if (suggestions.length > 0) {
+          content += `  *建议: ${suggestions.join('; ')}*\n`;
         }
       });
       content += '\n';
     }
     if (warningItems.length > 0) {
       content += '🟡 **警告:**\n';
-      warningItems.forEach((d: any) => {
-        content += `- ${d.message}\n`;
+      warningItems.forEach((d) => {
+        content += `- ${readStringField(d, 'message')}\n`;
       });
       content += '\n';
     }
     if (infoItems.length > 0) {
       content += '🔵 **提示:**\n';
-      infoItems.forEach((d: any) => {
-        content += `- ${d.message}\n`;
+      infoItems.forEach((d) => {
+        content += `- ${readStringField(d, 'message')}\n`;
       });
     }
 
@@ -545,14 +1087,22 @@ export function handleSkillDiagnosticsEvent(
  * Handles overview (L1), list (L2), and deep (L4) layer data.
  */
 export function handleSkillLayeredResultEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  const layeredResult = data?.data?.result?.layers || data?.data?.layers;
-  if (!layeredResult) return {};
+  const payload = eventPayload(data);
+  const result = asRecord(payload.result);
+  const resultLayers = asRecord(result.layers);
+  const directLayers = asRecord(payload.layers);
+  const layeredResult = Object.keys(resultLayers).length > 0 ? resultLayers : directLayers;
+  if (Object.keys(layeredResult).length === 0) return {};
 
   // Deduplication check
-  const skillId = data.data.skillId || data.data.result?.metadata?.skillId || 'unknown';
+  const resultMetadata = asRecord(result.metadata);
+  const skillId =
+    readStringField(payload, 'skillId') ||
+    readStringField(resultMetadata, 'skillId') ||
+    'unknown';
   const deduplicationKey = `skill_layered_result:${skillId}`;
   if (ctx.displayedSkillProgress.has(deduplicationKey)) {
     console.log('[SSEHandlers] Skipping duplicate skill_layered_result:', deduplicationKey);
@@ -560,36 +1110,38 @@ export function handleSkillLayeredResultEvent(
   }
   ctx.displayedSkillProgress.add(deduplicationKey);
 
-  console.log('[SSEHandlers] skill_layered_result received:', data.data);
+  console.log('[SSEHandlers] skill_layered_result received:', payload);
   const layers = layeredResult;
-  const metadata = data.data.result?.metadata || {
-    skillName: data.data.skillName || data.data.skillId,
+  const metadata = Object.keys(resultMetadata).length > 0 ? resultMetadata : {
+    skillName: readStringField(payload, 'skillName') || readStringField(payload, 'skillId'),
   };
 
-  pushStreamingOutput(ctx, `技能结果: ${metadata.skillName || skillId}`);
+  pushStreamingOutput(ctx, `技能结果: ${readStringField(metadata, 'skillName', skillId)}`);
 
   // Process overview layer (L1)
-  const overview = layers.overview || layers.L1;
+  const overview = asRecord(layers.overview ?? layers.L1);
   if (overview && Object.keys(overview).length > 0) {
     processOverviewLayer(overview, metadata, ctx);
   }
 
   // Process list layer (L2)
-  const deep = layers.deep || layers.L4;
-  const list = layers.list || layers.L2;
+  const deep = asRecord(layers.deep ?? layers.L4);
+  const list = asRecord(layers.list ?? layers.L2);
   if (list && typeof list === 'object') {
     processListLayer(list, deep, ctx);
   }
 
   // Show conclusion card if available
-  const conclusion = data.data.result?.conclusion || extractConclusionFromOverview(overview);
-  if (conclusion && conclusion.category && conclusion.category !== 'UNKNOWN') {
+  const conclusionCandidate = result.conclusion ?? extractConclusionFromOverview(overview);
+  const conclusion = asRecord(conclusionCandidate);
+  if (readStringField(conclusion, 'category') && readStringField(conclusion, 'category') !== 'UNKNOWN') {
     renderConclusionCard(conclusion, ctx);
   }
 
   // Show summary if available
-  if (data.data.summary) {
-    renderSummary(data.data.summary, ctx);
+  const summary = readStringField(payload, 'summary');
+  if (summary) {
+    renderSummary(summary, ctx);
   }
 
   return {};
@@ -599,35 +1151,41 @@ export function handleSkillLayeredResultEvent(
  * Process overview (L1) layer data.
  */
 function processOverviewLayer(
-  overview: Record<string, any>,
-  metadata: any,
+  overview: Record<string, unknown>,
+  metadata: Record<string, unknown>,
   ctx: SSEHandlerContext
 ): void {
   // Helper to check if object is a StepResult format
-  const isStepResult = (obj: any): boolean => {
-    return obj && typeof obj === 'object' && 'data' in obj && Array.isArray(obj.data);
+  const isStepResult = (obj: unknown): obj is {data: unknown[]; display?: Record<string, unknown>} => {
+    const record = asRecord(obj);
+    return Array.isArray(record.data);
   };
 
   // Helper to extract data from StepResult
-  const extractData = (obj: any): any[] | null => {
+  const extractData = (obj: unknown): Record<string, unknown>[] | null => {
     if (isStepResult(obj)) {
-      return obj.data;
+      return obj.data.filter((item): item is Record<string, unknown> => isRecord(item));
     }
     return null;
   };
 
   // Helper to get display title
-  const getDisplayTitle = (key: string, obj: any): string => {
-    if (isStepResult(obj) && obj.display?.title) {
-      return obj.display.title;
+  const getDisplayTitle = (key: string, obj: unknown): string => {
+    if (isStepResult(obj)) {
+      const display = asRecord(obj.display);
+      const displayTitle = readStringField(display, 'title');
+      if (displayTitle) return displayTitle;
     }
-    const skillContext = metadata.skillName ? ` (${metadata.skillName})` : '';
+    const skillName = readStringField(metadata, 'skillName');
+    const skillContext = skillName ? ` (${skillName})` : '';
     return formatLayerName(key) + skillContext;
   };
 
   // Helper to get display format
-  const getDisplayFormat = (obj: any): string => {
-    return (obj?.display?.format || 'table').toLowerCase();
+  const getDisplayFormat = (obj: unknown): string => {
+    const record = asRecord(obj);
+    const display = asRecord(record.display);
+    return readStringField(display, 'format', 'table').toLowerCase();
   };
 
   // Process each entry in overview layer
@@ -668,23 +1226,25 @@ function processOverviewLayer(
     const dataArray = extractData(val);
     if (dataArray && dataArray.length > 0) {
       const firstRow = dataArray[0];
-      if (typeof firstRow === 'object' && firstRow !== null) {
-        const displayColumnDefs = normalizeColumnDefinitions((val as any)?.display?.columns);
+      if (isRecord(firstRow)) {
+        const valRecord = asRecord(val);
+        const display = asRecord(valRecord.display);
+        const displayColumnDefs = normalizeColumnDefinitions(display.columns);
         const rowColumns = Object.keys(firstRow);
         const orderedColumns = displayColumnDefs
           ? [
               ...displayColumnDefs
-                .map((def: any) => def.name)
+                .map((def) => def.name)
                 .filter((name: string) => rowColumns.includes(name)),
               ...rowColumns.filter((name) =>
-                !displayColumnDefs.some((def: any) => def.name === name)
+                !displayColumnDefs.some((def) => def.name === name)
               ),
             ]
           : rowColumns;
         const filteredColumnDefs = displayColumnDefs
-          ? displayColumnDefs.filter((def: any) => orderedColumns.includes(def.name))
+          ? displayColumnDefs.filter((def) => orderedColumns.includes(def.name))
           : undefined;
-        const rows = dataArray.map((item: any) =>
+        const rows = dataArray.map((item) =>
           orderedColumns.map(col => item[col])
         );
 
@@ -697,15 +1257,15 @@ function processOverviewLayer(
             columns: orderedColumns,
             rows,
             rowCount: rows.length,
-            columnDefinitions: filteredColumnDefs as any,
+            columnDefinitions: filteredColumnDefs,
             sectionTitle: `📊 ${title}`,
           },
         });
       }
-    } else if (typeof val === 'object' && !Array.isArray(val)) {
+    } else if (isRecord(val)) {
       // Nested object: display as single-row table
       const objColumns = Object.keys(val);
-      const objRow = objColumns.map(col => (val as any)[col]);
+      const objRow = objColumns.map(col => val[col]);
 
       ctx.addMessage({
         id: ctx.generateId(),
@@ -726,12 +1286,12 @@ function processOverviewLayer(
 /**
  * Build chart data from step result.
  */
-function buildChartData(obj: any, title: string): Message['chartData'] | null {
-  const dataArray = obj?.data;
+function buildChartData(obj: unknown, title: string): Message['chartData'] | null {
+  const dataArray = asRecord(obj).data;
   if (!Array.isArray(dataArray) || dataArray.length === 0) return null;
 
   const firstRow = dataArray[0];
-  if (!firstRow || typeof firstRow !== 'object') return null;
+  if (!isRecord(firstRow)) return null;
 
   const keys = Object.keys(firstRow);
   const labelKey = keys.find(k =>
@@ -750,22 +1310,24 @@ function buildChartData(obj: any, title: string): Message['chartData'] | null {
   return {
     type: 'bar',
     title: title,
-    data: dataArray.map((item: any) => ({
-      label: String(item[labelKey] || 'Unknown'),
-      value: Number(item[valueKey]) || 0,
-    })),
+    data: dataArray
+      .filter((item): item is Record<string, unknown> => isRecord(item))
+      .map((item) => ({
+        label: String(item[labelKey] || 'Unknown'),
+        value: Number(item[valueKey]) || 0,
+      })),
   };
 }
 
 /**
  * Build metric data from step result.
  */
-function buildMetricData(obj: any, title: string): Message['metricData'] | null {
-  const dataArray = obj?.data;
+function buildMetricData(obj: unknown, title: string): Message['metricData'] | null {
+  const dataArray = asRecord(obj).data;
   if (!Array.isArray(dataArray) || dataArray.length === 0) return null;
 
   const firstRow = dataArray[0];
-  if (!firstRow || typeof firstRow !== 'object') return null;
+  if (!isRecord(firstRow)) return null;
 
   const keys = Object.keys(firstRow);
   const valueKey = keys.find(k =>
@@ -776,10 +1338,14 @@ function buildMetricData(obj: any, title: string): Message['metricData'] | null 
 
   if (valueKey) {
     const value = firstRow[valueKey];
+    const rawStatus = firstRow.status;
+    const status = rawStatus === 'good' || rawStatus === 'warning' || rawStatus === 'critical'
+      ? rawStatus
+      : undefined;
     return {
       title: title,
       value: typeof value === 'number' ? value.toFixed(2) : String(value),
-      status: firstRow.status || undefined,
+      status,
     };
   }
 
@@ -798,31 +1364,32 @@ function buildMetricData(obj: any, title: string): Message['metricData'] | null 
  * Process list (L2) layer data with optional deep (L4) expandable content.
  */
 function processListLayer(
-  list: Record<string, any>,
-  deep: Record<string, any> | undefined,
+  list: Record<string, unknown>,
+  deep: Record<string, unknown> | undefined,
   ctx: SSEHandlerContext
 ): void {
   // Helper to check if object is a StepResult format
-  const isStepResult = (obj: any): boolean => {
-    if (!obj || typeof obj !== 'object' || !('data' in obj)) return false;
-    if (Array.isArray(obj.data)) return true;
-    if (obj.data && typeof obj.data === 'object' &&
-        (Array.isArray(obj.data.columns) || Array.isArray(obj.data.rows))) {
+  const isStepResult = (obj: unknown): obj is {data: unknown; display?: unknown} => {
+    const record = asRecord(obj);
+    if (!('data' in record)) return false;
+    if (Array.isArray(record.data)) return true;
+    const dataRecord = asRecord(record.data);
+    if (Object.keys(dataRecord).length > 0 &&
+        (Array.isArray(dataRecord.columns) || Array.isArray(dataRecord.rows))) {
       return true;
     }
     return false;
   };
 
   // Helper to check if data is in DataPayload format
-  const isDataPayloadFormat = (data: any): boolean => {
-    return data && typeof data === 'object' &&
-      !Array.isArray(data) &&
-      (Array.isArray(data.columns) || Array.isArray(data.rows));
+  const isDataPayloadFormat = (data: unknown): data is DataPayload => {
+    const record = asRecord(data);
+    return Array.isArray(record.columns) || Array.isArray(record.rows);
   };
 
   // Helper to find frame detail in deep layer
-  const findFrameDetail = (frameId: string | number, sessionId?: string | number): any => {
-    if (!deep || typeof deep !== 'object') return null;
+  const findFrameDetail = (frameId: string | number, sessionId?: string | number): Record<string, unknown> | null => {
+    if (!deep || !isRecord(deep)) return null;
 
     const sessionKeys = sessionId !== undefined
       ? [String(sessionId), `session_${sessionId}`]
@@ -835,10 +1402,10 @@ function processListLayer(
         if (!sessionMatches) continue;
       }
 
-      if (frames && typeof frames === 'object') {
+      if (isRecord(frames)) {
         for (const fk of frameKeys) {
-          const frameData = (frames as any)[fk];
-          if (frameData) return frameData;
+          const frameData = frames[fk];
+          if (isRecord(frameData)) return frameData;
         }
       }
     }
@@ -846,61 +1413,84 @@ function processListLayer(
   };
 
   for (const [key, value] of Object.entries(list)) {
-    let items: any[] = [];
+    let items: Record<string, unknown>[] = [];
     let columns: string[] = [];
-    let rows: any[][] = [];
+    let rows: unknown[][] = [];
     let displayTitle = formatLayerName(key);
     let isExpandable = false;
     let metadataColumns: string[] = [];
     let hiddenColumns: string[] = [];
-    let displayColumnDefs: Array<Record<string, any>> | undefined;
-    let filteredColumnDefs: Array<Record<string, any>> | undefined;
-    let preBindedExpandableData: any[] | undefined;
-    let summaryReport: any | undefined;
+    let displayColumnDefs: SqlColumnDefinition[] | undefined;
+    let filteredColumnDefs: SqlColumnDefinition[] | undefined;
+    let preBindedExpandableData: SqlResultData['expandableData'] | undefined;
+    let summaryReport: unknown;
 
     if (isStepResult(value)) {
-      const stepData = (value as any).data;
-      const displayConfig = (value as any).display;
+      const stepValue = asRecord(value);
+      const stepData = stepValue.data;
+      const displayConfig = asRecord(stepValue.display);
 
-      if (displayConfig?.title) {
-        displayTitle = displayConfig.title;
+      const displayTitleCandidate = readStringField(displayConfig, 'title');
+      if (displayTitleCandidate) {
+        displayTitle = displayTitleCandidate;
       }
-      isExpandable = displayConfig?.expandable === true;
-      metadataColumns = displayConfig?.metadataFields || displayConfig?.metadata_columns || [];
-      hiddenColumns = displayConfig?.hidden_columns || displayConfig?.hiddenColumns || [];
-      displayColumnDefs = normalizeColumnDefinitions(displayConfig?.columns);
+      isExpandable = readBooleanField(displayConfig, 'expandable');
+
+      const metadataCandidates = [displayConfig.metadataFields, displayConfig.metadata_columns];
+      for (const candidate of metadataCandidates) {
+        if (Array.isArray(candidate)) {
+          metadataColumns = candidate
+            .map((item) => (typeof item === 'string' ? item : ''))
+            .filter((item) => item.length > 0);
+          if (metadataColumns.length > 0) break;
+        }
+      }
+
+      const hiddenCandidates = [displayConfig.hidden_columns, displayConfig.hiddenColumns];
+      for (const candidate of hiddenCandidates) {
+        if (Array.isArray(candidate)) {
+          hiddenColumns = candidate
+            .map((item) => (typeof item === 'string' ? item : ''))
+            .filter((item) => item.length > 0);
+          if (hiddenColumns.length > 0) break;
+        }
+      }
+
+      displayColumnDefs = normalizeColumnDefinitions(displayConfig.columns);
 
       // Keep duration columns that are required by navigate_range bindings.
       if (displayColumnDefs && hiddenColumns.length > 0) {
         const durationDeps = new Set(
           displayColumnDefs
-            .filter((def: any) =>
+            .flatMap((def) => (
               def?.clickAction === 'navigate_range' &&
               typeof def?.durationColumn === 'string' &&
               def.durationColumn.length > 0
-            )
-            .map((def: any) => def.durationColumn)
+                ? [def.durationColumn]
+                : []
+            ))
         );
         hiddenColumns = hiddenColumns.filter((name) => !durationDeps.has(name));
       }
 
       // Extract hidden columns from column definitions
-      if (displayConfig?.columns && Array.isArray(displayConfig.columns)) {
-        const hiddenFromDefs = displayConfig.columns
-          .filter((c: any) => c.hidden === true)
-          .map((c: any) => c.name);
+      if (displayColumnDefs && displayColumnDefs.length > 0) {
+        const hiddenFromDefs = displayColumnDefs
+          .filter((c) => c.hidden === true)
+          .map((c) => c.name);
         hiddenColumns = [...new Set([...hiddenColumns, ...hiddenFromDefs])];
       }
 
       if (displayColumnDefs && hiddenColumns.length > 0) {
         const durationDeps = new Set(
           displayColumnDefs
-            .filter((def: any) =>
+            .flatMap((def) => (
               def?.clickAction === 'navigate_range' &&
               typeof def?.durationColumn === 'string' &&
               def.durationColumn.length > 0
-            )
-            .map((def: any) => def.durationColumn)
+                ? [def.durationColumn]
+                : []
+            ))
         );
         hiddenColumns = hiddenColumns.filter((name) => !durationDeps.has(name));
       }
@@ -908,12 +1498,12 @@ function processListLayer(
       if (isDataPayloadFormat(stepData)) {
         // NEW DataPayload format
         const allColumns = stepData.columns || [];
-        const allRows = stepData.rows || [];
-        preBindedExpandableData = stepData.expandableData;
+        const allRows = (stepData.rows || []).filter((row): row is unknown[] => Array.isArray(row));
+        preBindedExpandableData = readExpandableData(stepData.expandableData);
         summaryReport = stepData.summary;
 
-        items = allRows.map((row: any[]) => {
-          const obj: Record<string, any> = {};
+        items = allRows.map((row) => {
+          const obj: Record<string, unknown> = {};
           allColumns.forEach((col: string, i: number) => { obj[col] = row[i]; });
           return obj;
         });
@@ -929,12 +1519,12 @@ function processListLayer(
             }
             return false;
           });
-          rows = allRows.map((row: any[]) =>
+          rows = allRows.map((row) =>
             visibleIndices.map(idx => row[idx])
           );
         } else {
           columns = allColumns;
-          rows = allRows.map((row: any[]) =>
+          rows = allRows.map((row) =>
             row.map((val) => val)
           );
         }
@@ -942,29 +1532,31 @@ function processListLayer(
         if (displayColumnDefs && displayColumnDefs.length > 0) {
           const ordered = [
             ...displayColumnDefs
-              .map((def: any) => def.name)
+              .map((def) => def.name)
               .filter((name: string) => columns.includes(name)),
             ...columns.filter((name) =>
-              !displayColumnDefs!.some((def: any) => def.name === name)
+              !displayColumnDefs!.some((def) => def.name === name)
             ),
           ];
 
           const indexMap = new Map(columns.map((name: string, idx: number) => [name, idx]));
           columns = ordered;
-          rows = rows.map((row: any[]) =>
+          rows = rows.map((row) =>
             ordered.map((name: string) => row[indexMap.get(name) ?? -1])
           );
 
-          filteredColumnDefs = displayColumnDefs.filter((def: any) =>
+          filteredColumnDefs = displayColumnDefs.filter((def) =>
             columns.includes(def.name)
           );
         }
       } else {
         // Legacy format: data is array of row objects
-        items = stepData;
+        items = Array.isArray(stepData)
+          ? stepData.filter((item): item is Record<string, unknown> => isRecord(item))
+          : [];
       }
     } else if (Array.isArray(value)) {
-      items = value;
+      items = value.filter((item): item is Record<string, unknown> => isRecord(item));
     }
 
     // Skip if no data
@@ -978,44 +1570,52 @@ function processListLayer(
       if (displayColumnDefs && displayColumnDefs.length > 0) {
         columns = [
           ...displayColumnDefs
-            .map((def: any) => def.name)
+            .map((def) => def.name)
             .filter((name: string) => visibleColumns.includes(name)),
           ...visibleColumns.filter((name) =>
-            !displayColumnDefs!.some((def: any) => def.name === name)
+            !displayColumnDefs!.some((def) => def.name === name)
           ),
         ];
-        filteredColumnDefs = displayColumnDefs.filter((def: any) =>
+        filteredColumnDefs = displayColumnDefs.filter((def) =>
           columns.includes(def.name)
         );
       } else {
         columns = visibleColumns;
       }
-      rows = items.map((item: any) => columns.map(col => item[col]));
+      rows = items.map((item) => columns.map(col => item[col]));
     }
 
     // Build expandable data
-    let expandableData: any[] | undefined;
+    let expandableData: SqlResultData['expandableData'] | undefined;
     if (preBindedExpandableData && preBindedExpandableData.length > 0) {
       expandableData = preBindedExpandableData;
     } else if (isExpandable && deep) {
-      expandableData = items.map((item: any) => {
-        const frameId = item.frame_id || item.frameId || item.id;
-        const sessionId = item.session_id || item.sessionId;
-        const frameDetail = findFrameDetail(frameId, sessionId);
+      const generatedExpandableData: NonNullable<SqlResultData['expandableData']> = [];
+      for (const item of items) {
+        const rawFrameId = item.frame_id ?? item.frameId ?? item.id;
+        if (typeof rawFrameId !== 'string' && typeof rawFrameId !== 'number') continue;
 
-        if (frameDetail) {
-          const sections = convertToExpandableSections(frameDetail.data);
-          return {
-            item: frameDetail.item || item,
-            result: { success: true, sections },
-          };
-        }
-        return null;
-      });
+        const rawSessionId = item.session_id ?? item.sessionId;
+        const sessionId = (typeof rawSessionId === 'string' || typeof rawSessionId === 'number')
+          ? rawSessionId
+          : undefined;
+
+        const frameDetail = findFrameDetail(rawFrameId, sessionId);
+        if (!frameDetail) continue;
+
+        const sections = convertToExpandableSections(frameDetail.data);
+        const detailItem = isRecord(frameDetail.item) ? frameDetail.item : item;
+        generatedExpandableData.push({
+          item: detailItem,
+          result: { success: true, sections },
+        });
+      }
+
+      expandableData = generatedExpandableData.length > 0 ? generatedExpandableData : undefined;
     }
 
     // Extract metadata for header display
-    const extractedMetadata: Record<string, any> = {};
+    const extractedMetadata: Record<string, unknown> = {};
     if (metadataColumns.length > 0 && items.length > 0) {
       for (const col of metadataColumns) {
         if (items[0][col] !== undefined) {
@@ -1033,13 +1633,11 @@ function processListLayer(
         columns,
         rows,
         rowCount: rows.length,
-        columnDefinitions: filteredColumnDefs as any,
+        columnDefinitions: filteredColumnDefs,
         sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
-        expandableData: expandableData && expandableData.filter(Boolean).length > 0
-          ? expandableData
-          : undefined,
+        expandableData,
         metadata: Object.keys(extractedMetadata).length > 0 ? extractedMetadata : undefined,
-        summaryReport: summaryReport,
+        summaryReport: readSummaryReport(summaryReport),
       },
     });
   }
@@ -1048,27 +1646,33 @@ function processListLayer(
 /**
  * Render conclusion card from analysis result.
  */
-function renderConclusionCard(conclusion: any, ctx: SSEHandlerContext): void {
-  const categoryEmoji = conclusion.category === 'APP' ? '📱' :
-                        conclusion.category === 'SYSTEM' ? '⚙️' :
-                        conclusion.category === 'MIXED' ? '🔄' : '❓';
-  const confidencePercent = Math.round((conclusion.confidence || 0.5) * 100);
+function renderConclusionCard(conclusion: Record<string, unknown>, ctx: SSEHandlerContext): void {
+  const category = readStringField(conclusion, 'category', 'UNKNOWN');
+  const component = readStringField(conclusion, 'component', 'unknown');
+  const summary = readStringField(conclusion, 'summary', '暂无总结');
+  const suggestion = readStringField(conclusion, 'suggestion');
+  const evidence = readStringArrayField(conclusion, 'evidence');
+  const confidencePercent = Math.round(readNumberField(conclusion, 'confidence', 0.5) * 100);
+
+  const categoryEmoji = category === 'APP' ? '📱' :
+                        category === 'SYSTEM' ? '⚙️' :
+                        category === 'MIXED' ? '🔄' : '❓';
   const confidenceBar = '█'.repeat(Math.floor(confidencePercent / 10)) +
                         '░'.repeat(10 - Math.floor(confidencePercent / 10));
 
   let conclusionContent = `## 🎯 分析结论\n\n`;
-  conclusionContent += `**问题分类:** ${categoryEmoji} **${translateCategory(conclusion.category)}**\n`;
-  conclusionContent += `**问题组件:** \`${translateComponent(conclusion.component)}\`\n`;
+  conclusionContent += `**问题分类:** ${categoryEmoji} **${translateCategory(category)}**\n`;
+  conclusionContent += `**问题组件:** \`${translateComponent(component)}\`\n`;
   conclusionContent += `**置信度:** ${confidenceBar} ${confidencePercent}%\n\n`;
-  conclusionContent += `### 📋 根因分析\n${conclusion.summary}\n\n`;
+  conclusionContent += `### 📋 根因分析\n${summary}\n\n`;
 
-  if (conclusion.suggestion) {
-    conclusionContent += `### 💡 优化建议\n${conclusion.suggestion}\n\n`;
+  if (suggestion) {
+    conclusionContent += `### 💡 优化建议\n${suggestion}\n\n`;
   }
 
-  if (conclusion.evidence && Array.isArray(conclusion.evidence) && conclusion.evidence.length > 0) {
+  if (evidence.length > 0) {
     conclusionContent += `### 📊 证据\n`;
-    conclusion.evidence.forEach((e: string) => {
+    evidence.forEach((e: string) => {
       conclusionContent += `- ${e}\n`;
     });
   }
@@ -1109,10 +1713,13 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
   }
 }
 
-function renderConclusionContract(contract: any): string | null {
+function renderConclusionContract(
+  contract: ConclusionContract | Record<string, unknown> | null | undefined
+): string | null {
   if (!contract || typeof contract !== 'object') return null;
 
-  const toNumber = (value: any): number | undefined => {
+  const contractRecord = asRecord(contract);
+  const toNumber = (value: unknown): number | undefined => {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
     if (typeof value === 'string') {
       const n = Number(value.replace(/[%％]/g, '').trim());
@@ -1120,25 +1727,67 @@ function renderConclusionContract(contract: any): string | null {
     }
     return undefined;
   };
-  const toPercent = (value: any): number | undefined => {
+  const toPercent = (value: unknown): number | undefined => {
     const n = toNumber(value);
     if (n === undefined) return undefined;
     return n <= 1 ? n * 100 : n;
   };
-  const toText = (value: any): string => String(value ?? '').trim();
+  const toText = (value: unknown): string => String(value ?? '').trim();
 
-  const conclusions = Array.isArray(contract.conclusion)
-    ? contract.conclusion
-    : (Array.isArray(contract.conclusions) ? contract.conclusions : []);
-  const clusters = Array.isArray(contract.clusters) ? contract.clusters : [];
-  const evidenceChain = Array.isArray(contract.evidence_chain)
-    ? contract.evidence_chain
-    : (Array.isArray(contract.evidenceChain) ? contract.evidenceChain : []);
-  const uncertainties = Array.isArray(contract.uncertainties) ? contract.uncertainties : [];
-  const nextSteps = Array.isArray(contract.next_steps)
-    ? contract.next_steps
-    : (Array.isArray(contract.nextSteps) ? contract.nextSteps : []);
-  const metadata = contract.metadata && typeof contract.metadata === 'object' ? contract.metadata : {};
+  const readFrameRefs = (value: unknown): string[] => {
+    if (Array.isArray(value)) {
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const item of value) {
+        const token = toText(item);
+        if (!token || seen.has(token)) continue;
+        seen.add(token);
+        out.push(token);
+      }
+      return out;
+    }
+
+    if (typeof value !== 'string') return [];
+    const normalized = String(value)
+      .replace(/[（(]\s*其余\s*\d+\s*帧省略\s*[）)]/g, '')
+      .trim();
+    if (!normalized) return [];
+
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const part of normalized.split(/[\/|,，;；\s]+/g)) {
+      const token = toText(part);
+      if (!token || seen.has(token)) continue;
+      seen.add(token);
+      out.push(token);
+    }
+    return out;
+  };
+
+  const conclusions = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.conclusions);
+  const clusters = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.clusters);
+  const evidenceChain = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.evidenceChain);
+  const uncertainties = readAliasedUnknownArray(contractRecord, CONTRACT_ALIASES.root.uncertainties);
+  const nextSteps = readAliasedUnknownArray(contractRecord, CONTRACT_ALIASES.root.nextSteps);
+  const metadata = readAliasedRecord(contractRecord, CONTRACT_ALIASES.root.metadata);
+
+  const resolveClusterHeading = (): string => {
+    const sceneId = toText(
+      readAliasedValue(contractRecord, CONTRACT_ALIASES.root.sceneId) ??
+      readAliasedValue(metadata, CONTRACT_ALIASES.metadata.sceneId)
+    ).toLowerCase();
+    return sceneId === 'jank' ? '## 掉帧聚类（先看大头）' : '## 聚类（先看大头）';
+  };
+
+  const resolveClusterLimit = (): number | undefined => {
+    const clusterPolicy = readAliasedRecord(metadata, CONTRACT_ALIASES.metadata.clusterPolicy);
+    const maxClusters = toNumber(
+      readAliasedValue(clusterPolicy, CONTRACT_ALIASES.metadata.maxClusters) ??
+      readAliasedValue(metadata, CONTRACT_ALIASES.metadata.maxClusters)
+    );
+    if (maxClusters === undefined || maxClusters <= 0) return undefined;
+    return Math.round(maxClusters);
+  };
 
   const hasSignal =
     conclusions.length > 0 ||
@@ -1153,11 +1802,11 @@ function renderConclusionContract(contract: any): string | null {
   if (conclusions.length === 0) {
     lines.push('1. 结论信息缺失（证据不足）');
   } else {
-    conclusions.slice(0, 3).forEach((item: any, idx: number) => {
-      const statement = toText(item?.statement);
-      const trigger = toText(item?.trigger);
-      const supply = toText(item?.supply);
-      const amplification = toText(item?.amplification);
+    conclusions.slice(0, 3).forEach((item, idx: number) => {
+      const statement = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.statement));
+      const trigger = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.trigger));
+      const supply = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.supply));
+      const amplification = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.amplification));
       let resolved = statement;
       if (!resolved && (trigger || supply || amplification)) {
         const parts: string[] = [];
@@ -1166,27 +1815,39 @@ function renderConclusionContract(contract: any): string | null {
         if (amplification) parts.push(`放大路径（问题放大环节）: ${amplification}`);
         resolved = parts.join('；');
       }
-      const confidence = toPercent(item?.confidencePercent ?? item?.confidence);
+      const confidence = toPercent(
+        readAliasedValue(item, CONTRACT_ALIASES.conclusion.confidence)
+      );
       const suffix = confidence !== undefined ? `（置信度: ${Math.round(confidence)}%）` : '';
       lines.push(`${idx + 1}. ${resolved || '结论信息缺失'}${suffix}`);
     });
   }
   lines.push('');
 
-  lines.push('## 掉帧聚类（先看大头）');
+  lines.push(resolveClusterHeading());
   if (clusters.length === 0) {
     lines.push('- 暂无');
   } else {
-    clusters.slice(0, 5).forEach((item: any) => {
-      const cluster = toText(item?.cluster);
-      const description = toText(item?.description);
-      const frames = toNumber(item?.frames);
-      const percentage = toPercent(item?.percentage);
+    const clusterLimit = resolveClusterLimit();
+    const clusterItems = clusterLimit !== undefined ? clusters.slice(0, clusterLimit) : clusters;
+    clusterItems.forEach((item) => {
+      const cluster = toText(readAliasedValue(item, CONTRACT_ALIASES.cluster.cluster));
+      const description = toText(readAliasedValue(item, CONTRACT_ALIASES.cluster.description));
+      const frames = toNumber(readAliasedValue(item, CONTRACT_ALIASES.cluster.frames));
+      const percentage = toPercent(readAliasedValue(item, CONTRACT_ALIASES.cluster.percentage));
       const label = description ? `${cluster || 'K?'}: ${description}` : (cluster || 'K?');
       const metrics: string[] = [];
       if (frames !== undefined) metrics.push(`${Math.round(frames)}帧`);
       if (percentage !== undefined) metrics.push(`${percentage.toFixed(1)}%`);
-      lines.push(`- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}`);
+      const frameRefs = readFrameRefs(
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.frameRefs)
+      );
+      const omittedFrames = toNumber(
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.omittedFrames)
+      );
+      const frameRefText = frameRefs.length > 0 ? `；帧: ${frameRefs.join(' / ')}` : '';
+      const omittedHint = omittedFrames && omittedFrames > 0 ? `（其余 ${Math.round(omittedFrames)} 帧省略）` : '';
+      lines.push(`- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}${omittedHint}`);
     });
   }
   lines.push('');
@@ -1195,16 +1856,23 @@ function renderConclusionContract(contract: any): string | null {
   if (evidenceChain.length === 0) {
     lines.push('- 证据链信息缺失');
   } else {
-    evidenceChain.slice(0, 12).forEach((item: any, idx: number) => {
-      const cid = toText(item?.conclusionId || item?.conclusion_id || item?.conclusion || `C${idx + 1}`);
-      const evidence = item?.evidence;
+    evidenceChain.slice(0, 12).forEach((item, idx: number) => {
+      const cid = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.evidence.conclusionId) || `C${idx + 1}`
+      );
+      const evidence = readAliasedValue(item, CONTRACT_ALIASES.evidence.evidence);
       if (Array.isArray(evidence)) {
-        evidence.forEach((entry: any) => {
+        for (const entry of evidence) {
           const text = toText(entry);
           if (text) lines.push(`- ${cid}: ${text}`);
-        });
+        }
       } else {
-        const text = toText(item?.text || evidence || item?.statement || item?.data);
+        const text = toText(
+          readAliasedValue(item, CONTRACT_ALIASES.evidence.text) ||
+          evidence ||
+          readAliasedValue(item, CONTRACT_ALIASES.evidence.statement) ||
+          readAliasedValue(item, CONTRACT_ALIASES.evidence.data)
+        );
         if (text) lines.push(`- ${cid}: ${text}`);
       }
     });
@@ -1215,7 +1883,7 @@ function renderConclusionContract(contract: any): string | null {
   if (uncertainties.length === 0) {
     lines.push('- 暂无');
   } else {
-    uncertainties.slice(0, 6).forEach((item: any) => {
+    uncertainties.slice(0, 6).forEach((item: unknown) => {
       const text = toText(item);
       if (text) lines.push(`- ${text}`);
     });
@@ -1226,14 +1894,20 @@ function renderConclusionContract(contract: any): string | null {
   if (nextSteps.length === 0) {
     lines.push('- 暂无');
   } else {
-    nextSteps.slice(0, 6).forEach((item: any) => {
+    nextSteps.slice(0, 6).forEach((item: unknown) => {
       const text = toText(item);
       if (text) lines.push(`- ${text}`);
     });
   }
 
-  const confidence = toPercent(metadata?.confidencePercent ?? metadata?.confidence ?? contract?.confidence);
-  const rounds = toNumber(metadata?.rounds ?? contract?.rounds);
+  const metadataConfidence = readAliasedValue(metadata, CONTRACT_ALIASES.metadata.confidencePercent);
+  const metadataRounds = readAliasedValue(metadata, CONTRACT_ALIASES.metadata.rounds);
+  const confidence =
+    toPercent(
+      metadataConfidence ??
+      readAliasedValue(contractRecord, CONTRACT_ALIASES.root.confidence)
+    );
+  const rounds = toNumber(metadataRounds ?? readAliasedValue(contractRecord, CONTRACT_ALIASES.root.rounds));
   if (confidence !== undefined || rounds !== undefined) {
     lines.push('');
     lines.push('## 分析元数据');
@@ -1248,10 +1922,16 @@ function renderConclusionContract(contract: any): string | null {
  * Process analysis_completed event - final analysis result.
  */
 export function handleAnalysisCompletedEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] analysis_completed received, architecture:', data?.architecture);
+  const eventRecord = asRecord(data);
+  const architecture = readStringField(eventRecord, 'architecture');
+  const rawPayload = asRecord(eventRecord.data);
+  const payload = toAnalysisCompletedPayload(eventRecord.data);
+  console.log('[SSEHandlers] analysis_completed received, architecture:', architecture || 'unknown');
+
+  mergeConversationTimelineFromAnalysisCompleted(rawPayload, ctx);
 
   // Guard against duplicate handling
   if (ctx.completionHandled) {
@@ -1261,8 +1941,8 @@ export function handleAnalysisCompletedEvent(
 
   // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
   // and fall back to structured conclusionContract when narrative text is absent.
-  const contractContent = renderConclusionContract(data?.data?.conclusionContract);
-  const answerContent = data?.data?.answer || data?.data?.conclusion || contractContent;
+  const contractContent = renderConclusionContract(payload?.conclusionContract);
+  const answerContent = payload?.answer || payload?.conclusion || contractContent;
 
   if (answerContent) {
     ctx.setCompletionHandled(true);
@@ -1275,26 +1955,26 @@ export function handleAnalysisCompletedEvent(
     // Build content with agent-driven metadata if available
     let content = answerContent;
 
-    const isAgentDriven = data?.architecture === 'v2-agent-driven' || data?.architecture === 'agent-driven';
-    if (isAgentDriven && data?.data?.hypotheses) {
-      const hypotheses = data.data.hypotheses;
-      const confirmed = hypotheses.filter((h: any) => h.status === 'confirmed');
-      const confidence = data.data.confidence || 0;
+    const isAgentDriven = architecture === 'v2-agent-driven' || architecture === 'agent-driven';
+    if (isAgentDriven && payload?.hypotheses) {
+      const hypotheses = payload.hypotheses;
+      const confirmed = hypotheses.filter((h: AnalysisHypothesisItem) => h.status === 'confirmed');
+      const confidence = payload.confidence || 0;
 
       const hasMetadataSection = /(?:^|\n)(?:##\s*分析元数据|\*\*分析元数据\*\*)/m.test(content);
       if (!hasMetadataSection && (confirmed.length > 0 || confidence > 0)) {
         content += `\n\n---\n**分析元数据**\n`;
         content += `- 置信度: ${(confidence * 100).toFixed(0)}%\n`;
-        content += `- 分析轮次: ${data.data.rounds || 1}\n`;
+        content += `- 分析轮次: ${payload.rounds || 1}\n`;
         if (confirmed.length > 0) {
-          content += `- 确认假设: ${confirmed.map((h: any) => h.description).join(', ')}\n`;
+          content += `- 确认假设: ${confirmed.map((h: AnalysisHypothesisItem) => h.description).join(', ')}\n`;
         }
       }
     }
 
-    const reportUrl = data.data.reportUrl;
-    if (!reportUrl && data.data.reportError) {
-      console.warn('[SSEHandlers] HTML report generation failed:', data.data.reportError);
+    const reportUrl = payload?.reportUrl;
+    if (!reportUrl && payload?.reportError) {
+      console.warn('[SSEHandlers] HTML report generation failed:', payload.reportError);
     }
 
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
@@ -1354,15 +2034,14 @@ export function handleAnalysisCompletedEvent(
  * Process hypothesis_generated event - initial hypotheses from AI.
  */
 export function handleHypothesisGeneratedEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (Array.isArray(data?.data?.hypotheses) && data.data.hypotheses.length > 0) {
-    const hypotheses = data.data.hypotheses;
-    const evidenceBased = data?.data?.evidenceBased === true;
-    const evidenceSummary = Array.isArray(data?.data?.evidenceSummary)
-      ? data.data.evidenceSummary
-      : [];
+  const payload = eventPayload(data);
+  const hypotheses = readStringArrayField(payload, 'hypotheses');
+  if (hypotheses.length > 0) {
+    const evidenceBased = readBooleanField(payload, 'evidenceBased', false);
+    const evidenceSummary = readStringArrayField(payload, 'evidenceSummary');
     pushStreamingThought(ctx, `形成 ${hypotheses.length} 个待验证假设`);
     for (const hypothesis of hypotheses.slice(0, 3)) {
       pushStreamingThought(ctx, hypothesis);
@@ -1406,13 +2085,14 @@ export function handleHypothesisGeneratedEvent(
  * Process round_start event - analysis round started.
  */
 export function handleRoundStartEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data) {
-    const round = data.data.round || 1;
-    const maxRounds = data.data.maxRounds || 5;
-    const message = data.data.message || `分析轮次 ${round}`;
+  const payload = eventPayload(data);
+  if (Object.keys(payload).length > 0) {
+    const round = readNumberField(payload, 'round', 1);
+    const maxRounds = readNumberField(payload, 'maxRounds', 5);
+    const message = readStringField(payload, 'message') || `分析轮次 ${round}`;
     pushStreamingPhase(ctx, `${message} (${round}/${maxRounds})`);
 
     ctx.addMessage({
@@ -1429,13 +2109,14 @@ export function handleRoundStartEvent(
  * Process agent_task_dispatched event - tasks sent to domain agents.
  */
 export function handleAgentTaskDispatchedEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data) {
-    const taskCount = data.data.taskCount || 0;
-    const agents = data.data.agents || [];
-    const message = data.data.message || `派发 ${taskCount} 个任务`;
+  const payload = eventPayload(data);
+  if (Object.keys(payload).length > 0) {
+    const taskCount = readNumberField(payload, 'taskCount', 0);
+    const agents = readStringArrayField(payload, 'agents');
+    const message = readStringField(payload, 'message') || `派发 ${taskCount} 个任务`;
     const agentText = agents.length > 0 ? ` -> ${agents.join(', ')}` : '';
     pushStreamingTool(ctx, `${message}${agentText}`);
 
@@ -1458,13 +2139,14 @@ export function handleAgentTaskDispatchedEvent(
  * Process synthesis_complete event - feedback synthesis complete.
  */
 export function handleSynthesisCompleteEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data) {
-    const confirmedFindings = data.data.confirmedFindings || 0;
-    const updatedHypotheses = data.data.updatedHypotheses || 0;
-    const message = data.data.message || '综合分析结果';
+  const payload = eventPayload(data);
+  if (Object.keys(payload).length > 0) {
+    const confirmedFindings = readNumberField(payload, 'confirmedFindings', 0);
+    const updatedHypotheses = readNumberField(payload, 'updatedHypotheses', 0);
+    const message = readStringField(payload, 'message') || '综合分析结果';
     pushStreamingPhase(ctx, message);
     pushStreamingOutput(ctx, `确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`);
 
@@ -1482,13 +2164,14 @@ export function handleSynthesisCompleteEvent(
  * Process strategy_decision event - next iteration strategy decided.
  */
 export function handleStrategyDecisionEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data?.data) {
-    const strategy = data.data.strategy || 'continue';
-    const confidence = data.data.confidence || 0;
-    const message = data.data.message || `策略: ${strategy}`;
+  const payload = eventPayload(data);
+  if (Object.keys(payload).length > 0) {
+    const strategy = readStringField(payload, 'strategy') || 'continue';
+    const confidence = readNumberField(payload, 'confidence', 0);
+    const message = readStringField(payload, 'message') || `策略: ${strategy}`;
     pushStreamingPhase(ctx, `${message} (置信度 ${(confidence * 100).toFixed(0)}%)`);
 
     const strategyEmoji = strategy === 'conclude' ? '✅' :
@@ -1509,22 +2192,26 @@ export function handleStrategyDecisionEvent(
  * Process data event - v2.0 DataEnvelope format.
  */
 export function handleDataEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (!data) return {};
+  const eventRecord = asRecord(data);
+  if (Object.keys(eventRecord).length === 0) return {};
 
-  console.log('[SSEHandlers] v2.0 data event received:', data.id, data.envelope);
+  console.log('[SSEHandlers] v2.0 data event received:', eventRecord.id, eventRecord.envelope);
 
-  const envelopes: DataEnvelope[] = Array.isArray(data.envelope)
-    ? data.envelope
-    : [data.envelope];
+  const rawEnvelope = eventRecord.envelope;
+  const envelopeCandidates = Array.isArray(rawEnvelope)
+    ? rawEnvelope
+    : (rawEnvelope ? [rawEnvelope] : []);
 
-  for (const envelope of envelopes) {
-    if (!isDataEnvelope(envelope)) {
-      console.warn('[SSEHandlers] Invalid DataEnvelope:', envelope);
+  for (const candidate of envelopeCandidates) {
+    if (!isDataEnvelope(candidate)) {
+      console.warn('[SSEHandlers] Invalid DataEnvelope:', candidate);
       continue;
     }
+
+    const envelope = candidate;
 
     // Generate deduplication key
     const deduplicationKey = envelope.meta.source ||
@@ -1548,7 +2235,7 @@ export function handleDataEvent(
  */
 function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): void {
   const format = envelope.display.format || 'table';
-  const payload = envelope.data as DataPayload;
+  const payload = envelope.data;
   const title = envelope.display.title;
 
   switch (format) {
@@ -1646,8 +2333,8 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
 
       if (rawResult.columnDefinitions && Array.isArray(rawResult.columnDefinitions)) {
         const hiddenFromDefs = rawResult.columnDefinitions
-          .filter((c: any) => c.hidden === true)
-          .map((c: any) => c.name);
+          .filter((c) => c.hidden === true)
+          .map((c) => c.name);
         const metadataFields = envelope.display.metadataFields || [];
         const columnsToHide = new Set([...hiddenFromDefs, ...metadataFields]);
 
@@ -1661,12 +2348,12 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             return false;
           });
 
-          filteredRows = rawResult.rows.map((row: any[]) =>
+          filteredRows = rawResult.rows.map((row) =>
             visibleIndices.map(idx => row[idx])
           );
 
           filteredColumnDefs = rawResult.columnDefinitions.filter(
-            (def: any) => !columnsToHide.has(def.name)
+            (def) => !columnsToHide.has(def.name)
           );
         }
       }
@@ -1699,14 +2386,19 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
  * Process skill_error event - collect non-fatal skill errors.
  */
 export function handleSkillErrorEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  if (data) {
+  const eventRecord = asRecord(data);
+  if (Object.keys(eventRecord).length > 0) {
+    const payload = eventPayload(data);
+    const skillId = readStringField(eventRecord, 'skillId', 'unknown');
+    const stepId = readStringField(payload, 'stepId') || undefined;
+    const error = readStringField(payload, 'error', 'Unknown error');
     const errorInfo = {
-      skillId: data.skillId || 'unknown',
-      stepId: data.data?.stepId,
-      error: data.data?.error || 'Unknown error',
+      skillId,
+      stepId,
+      error,
       timestamp: Date.now(),
     };
     console.log('[SSEHandlers] Skill error collected:', errorInfo);
@@ -1720,17 +2412,20 @@ export function handleSkillErrorEvent(
  * Process error event - fatal error occurred.
  */
 export function handleErrorEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
   failStreamingAnswer(ctx);
 
-  if (data?.data?.error) {
-    failStreamingFlow(ctx, data.data.error);
+  const payload = eventPayload(data);
+  const error = readStringField(payload, 'error');
+
+  if (error) {
+    failStreamingFlow(ctx, error);
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: `**错误:** ${data.data.error}`,
+      content: `**错误:** ${error}`,
       timestamp: Date.now(),
     });
   } else {
@@ -1793,36 +2488,38 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
  * Shows the intervention panel with options for the user.
  */
 export function handleInterventionRequiredEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] intervention_required received:', data?.data);
+  const interventionData = eventPayload(data);
+  console.log('[SSEHandlers] intervention_required received:', interventionData);
 
   if (!ctx.setInterventionState) {
     console.warn('[SSEHandlers] Intervention state handler not available');
     return {};
   }
 
-  const interventionData = data?.data;
-  if (!interventionData?.interventionId) {
+  if (!readStringField(interventionData, 'interventionId')) {
     console.warn('[SSEHandlers] Invalid intervention_required event:', data);
     return {};
   }
 
+  const rawContext = asRecord(interventionData.context);
+
   // Build intervention point
   const intervention: InterventionPoint = {
-    interventionId: interventionData.interventionId,
-    type: interventionData.type || 'agent_request',
-    options: interventionData.options || [],
-    context: interventionData.context || {
-      confidence: 0,
-      elapsedTimeMs: 0,
-      roundsCompleted: 0,
-      progressSummary: '',
-      triggerReason: '',
-      findingsCount: 0,
+    interventionId: readStringField(interventionData, 'interventionId'),
+    type: readInterventionType(interventionData.type),
+    options: readInterventionOptions(interventionData.options),
+    context: {
+      confidence: readNumberField(rawContext, 'confidence', 0),
+      elapsedTimeMs: readNumberField(rawContext, 'elapsedTimeMs', 0),
+      roundsCompleted: readNumberField(rawContext, 'roundsCompleted', 0),
+      progressSummary: readStringField(rawContext, 'progressSummary', ''),
+      triggerReason: readStringField(rawContext, 'triggerReason', ''),
+      findingsCount: readNumberField(rawContext, 'findingsCount', 0),
     },
-    timeout: interventionData.timeout || 60000,
+    timeout: readNumberField(interventionData, 'timeout', 60000),
   };
 
   // Update intervention state to show panel
@@ -1857,17 +2554,19 @@ export function handleInterventionRequiredEvent(
  * Process intervention_resolved event - user responded to intervention.
  */
 export function handleInterventionResolvedEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] intervention_resolved received:', data?.data);
+  const resolvedData = eventPayload(data);
+  console.log('[SSEHandlers] intervention_resolved received:', resolvedData);
 
   if (!ctx.setInterventionState) {
     return {};
   }
 
-  const resolvedData = data?.data;
-  if (!resolvedData) return {};
+  if (Object.keys(resolvedData).length === 0) return {};
+
+  const action = readStringField(resolvedData, 'action', 'continue');
 
   // Clear intervention state
   ctx.setInterventionState({
@@ -1880,15 +2579,15 @@ export function handleInterventionResolvedEvent(
   });
 
   // Add confirmation message
-  const actionEmoji = resolvedData.action === 'continue' ? '▶️' :
-                      resolvedData.action === 'focus' ? '🎯' :
-                      resolvedData.action === 'abort' ? '🛑' : '✅';
-  pushStreamingPhase(ctx, `用户决策: ${resolvedData.action || 'continue'}`);
+  const actionEmoji = action === 'continue' ? '▶️' :
+                      action === 'focus' ? '🎯' :
+                      action === 'abort' ? '🛑' : '✅';
+  pushStreamingPhase(ctx, `用户决策: ${action}`);
 
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'assistant',
-    content: `${actionEmoji} 已收到您的决定: **${resolvedData.action}**\n\n_分析继续中..._`,
+    content: `${actionEmoji} 已收到您的决定: **${action}**\n\n_分析继续中..._`,
     timestamp: Date.now(),
   });
 
@@ -1899,16 +2598,17 @@ export function handleInterventionResolvedEvent(
  * Process intervention_timeout event - user didn't respond in time.
  */
 export function handleInterventionTimeoutEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] intervention_timeout received:', data?.data);
+  const timeoutData = eventPayload(data);
+  console.log('[SSEHandlers] intervention_timeout received:', timeoutData);
 
   if (!ctx.setInterventionState) {
     return {};
   }
 
-  const timeoutData = data?.data;
+  const defaultAction = readStringField(timeoutData, 'defaultAction', 'abort');
 
   // Clear intervention state
   ctx.setInterventionState({
@@ -1921,11 +2621,11 @@ export function handleInterventionTimeoutEvent(
   });
 
   // Add timeout message
-  pushStreamingPhase(ctx, `用户响应超时，执行默认动作 ${timeoutData?.defaultAction || 'abort'}`);
+  pushStreamingPhase(ctx, `用户响应超时，执行默认动作 ${defaultAction}`);
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'system',
-    content: `⏰ **响应超时**\n\n已自动执行默认操作: **${timeoutData?.defaultAction || 'abort'}**`,
+    content: `⏰ **响应超时**\n\n已自动执行默认操作: **${defaultAction}**`,
     timestamp: Date.now(),
   });
 
@@ -1936,25 +2636,28 @@ export function handleInterventionTimeoutEvent(
  * Process strategy_selected event - strategy was matched.
  */
 export function handleStrategySelectedEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] strategy_selected received:', data?.data);
+  const strategyData = eventPayload(data);
+  console.log('[SSEHandlers] strategy_selected received:', strategyData);
 
-  const strategyData = data?.data;
-  if (!strategyData) return {};
+  if (Object.keys(strategyData).length === 0) return {};
 
-  const methodEmoji = strategyData.selectionMethod === 'llm' ? '🧠' : '🔑';
-  const confidencePercent = Math.round((strategyData.confidence || 0) * 100);
+  const selectionMethod = readStringField(strategyData, 'selectionMethod', 'keyword');
+  const strategyName = readStringField(strategyData, 'strategyName', 'unknown');
+  const confidencePercent = Math.round(readNumberField(strategyData, 'confidence', 0) * 100);
+  const reasoning = readStringField(strategyData, 'reasoning', '开始执行分析流水线...');
+  const methodEmoji = selectionMethod === 'llm' ? '🧠' : '🔑';
   pushStreamingPhase(
     ctx,
-    `选择策略 ${strategyData.strategyName} (${confidencePercent}%, ${strategyData.selectionMethod || 'keyword'})`
+    `选择策略 ${strategyName} (${confidencePercent}%, ${selectionMethod})`
   );
 
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'assistant',
-    content: `⏳ ${methodEmoji} 选择策略: **${strategyData.strategyName}** (${confidencePercent}%)\n\n_${strategyData.reasoning || '开始执行分析流水线...'}_`,
+    content: `⏳ ${methodEmoji} 选择策略: **${strategyName}** (${confidencePercent}%)\n\n_${reasoning}_`,
     timestamp: Date.now(),
   });
 
@@ -1965,19 +2668,20 @@ export function handleStrategySelectedEvent(
  * Process strategy_fallback event - no strategy matched, using hypothesis-driven.
  */
 export function handleStrategyFallbackEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] strategy_fallback received:', data?.data);
+  const fallbackData = eventPayload(data);
+  console.log('[SSEHandlers] strategy_fallback received:', fallbackData);
 
-  const fallbackData = data?.data;
-  if (!fallbackData) return {};
-  pushStreamingPhase(ctx, `回退到假设驱动分析: ${fallbackData.reason || '未命中预设策略'}`);
+  if (Object.keys(fallbackData).length === 0) return {};
+  const reason = readStringField(fallbackData, 'reason', '未命中预设策略');
+  pushStreamingPhase(ctx, `回退到假设驱动分析: ${reason}`);
 
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'assistant',
-    content: `⏳ 🔄 使用假设驱动分析\n\n_${fallbackData.reason || '未匹配到预设策略，启动自适应分析...'}_`,
+    content: `⏳ 🔄 使用假设驱动分析\n\n_${reason || '未匹配到预设策略，启动自适应分析...'}_`,
     timestamp: Date.now(),
   });
 
@@ -1988,11 +2692,11 @@ export function handleStrategyFallbackEvent(
  * Process focus_updated event - user focus tracking updated.
  */
 export function handleFocusUpdatedEvent(
-  data: any,
+  data: RawSSEEvent,
   _ctx: SSEHandlerContext  // eslint-disable-line @typescript-eslint/no-unused-vars
 ): SSEHandlerResult {
   // Focus updates are typically silent - just log for debugging
-  console.log('[SSEHandlers] focus_updated:', data?.data);
+  console.log('[SSEHandlers] focus_updated:', eventPayload(data));
   return {};
 }
 
@@ -2000,15 +2704,17 @@ export function handleFocusUpdatedEvent(
  * Process thought / worker_thought event - progressive reasoning output.
  */
 export function handleThoughtEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext,
   source: 'assistant' | 'worker'
 ): SSEHandlerResult {
+  const eventRecord = asRecord(data);
+  const payload = eventPayload(data);
   const content = normalizeFlowLine(
-    data?.data?.content ??
-    data?.data?.message ??
-    data?.content ??
-    data?.message
+    readStringField(payload, 'content') ||
+    readStringField(payload, 'message') ||
+    readStringField(eventRecord, 'content') ||
+    readStringField(eventRecord, 'message')
   );
   if (!content) return {};
 
@@ -2021,17 +2727,18 @@ export function handleThoughtEvent(
  * Process agent_dialogue event - tool/task dispatch details.
  */
 export function handleAgentDialogueEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  const payload = data?.data || {};
+  const payload = eventPayload(data);
+  const task = asRecord(payload.task);
   const phase = normalizeFlowLine(payload.phase || payload.type || 'task_dispatched');
   const agentId = normalizeFlowLine(payload.agentId || payload.agent || 'agent');
   const taskId = normalizeFlowLine(payload.taskId || payload.task_id || '');
   const title = normalizeFlowLine(
     payload.taskTitle ||
-    payload.task?.title ||
-    payload.task?.description ||
+    task.title ||
+    task.description ||
     payload.message ||
     ''
   );
@@ -2046,17 +2753,18 @@ export function handleAgentDialogueEvent(
  * Process agent_response event - tool/task completion details.
  */
 export function handleAgentResponseEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  const payload = data?.data || {};
+  const payload = eventPayload(data);
+  const response = asRecord(payload.response);
   const agentId = normalizeFlowLine(payload.agentId || payload.agent || 'agent');
   const taskId = normalizeFlowLine(payload.taskId || payload.task_id || '');
   const summary = normalizeFlowLine(
     payload.message ||
     payload.summary ||
-    payload.response?.summary ||
-    payload.response?.conclusion ||
+    response.summary ||
+    response.conclusion ||
     '任务完成'
   );
 
@@ -2067,13 +2775,198 @@ export function handleAgentResponseEvent(
 }
 
 /**
+ * Process tool_call event - generic tool/task lifecycle updates.
+ */
+export function handleToolCallEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const payload = eventPayload(data);
+  const phase = normalizeFlowLine(readStringField(payload, 'phase', 'task_dispatched')).toLowerCase();
+  const isCompletedPhase = (
+    phase.includes('completed') ||
+    phase.includes('done') ||
+    phase.includes('finished')
+  );
+  if (isCompletedPhase) {
+    return handleAgentResponseEvent({data: payload}, ctx);
+  }
+  return handleAgentDialogueEvent({data: payload}, ctx);
+}
+
+/**
+ * Process finding event - compact incremental findings summary.
+ */
+export function handleFindingEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const payload = eventPayload(data);
+  const findingsRaw = Array.isArray(payload.findings) ? payload.findings : [];
+  if (findingsRaw.length === 0) return {};
+
+  pushStreamingOutput(ctx, `新增发现 ${findingsRaw.length} 条`);
+  for (const item of findingsRaw.slice(0, 2)) {
+    const finding = asRecord(item);
+    const title = normalizeFlowLine(
+      readStringField(finding, 'title') ||
+      readStringField(finding, 'description')
+    );
+    if (title) {
+      pushStreamingOutput(ctx, title);
+    }
+  }
+  return {};
+}
+
+/**
+ * Process stage_transition event - strategy stage progress.
+ */
+export function handleStageTransitionEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const payload = eventPayload(data);
+  const stageName = normalizeFlowLine(readStringField(payload, 'stageName'));
+  const stageIndex = readNumberField(payload, 'stageIndex', -1);
+  const totalStages = readNumberField(payload, 'totalStages', 0);
+  const skipped = readBooleanField(payload, 'skipped', false);
+  const skipReason = normalizeFlowLine(readStringField(payload, 'skipReason'));
+
+  if (!stageName && stageIndex < 0) return {};
+
+  const stageSeq = stageIndex >= 0 && totalStages > 0
+    ? ` (${stageIndex + 1}/${totalStages})`
+    : '';
+  const label = skipped ? '跳过阶段' : '进入阶段';
+  const detail = stageName ? ` ${stageName}` : '';
+  const reason = skipped && skipReason ? `: ${skipReason}` : '';
+  pushStreamingPhase(ctx, `${label}${detail}${stageSeq}${reason}`);
+  return {};
+}
+
+function toConversationPhase(value: string): ConversationStepTimelineItem['phase'] {
+  switch (value) {
+    case 'thinking':
+    case 'tool':
+    case 'result':
+    case 'error':
+      return value;
+    case 'progress':
+    default:
+      return 'progress';
+  }
+}
+
+function toConversationRole(value: string): ConversationStepTimelineItem['role'] {
+  return value === 'system' ? 'system' : 'agent';
+}
+
+/**
+ * Process conversation_step event - strict ordinal conversational timeline.
+ */
+export function handleConversationStepEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext
+): SSEHandlerResult {
+  const eventRecord = asRecord(data);
+  const payload = eventPayload(data);
+  const content = asRecord(payload.content);
+
+  const text = normalizeFlowLine(
+    readStringField(content, 'text') ||
+    readStringField(payload, 'text') ||
+    readStringField(payload, 'message')
+  );
+  if (!text) return {};
+
+  const eventId = normalizeFlowLine(
+    readStringField(payload, 'eventId') ||
+    readStringField(eventRecord, 'id')
+  );
+  if (eventId && ctx.streamingFlow.conversationSeenEventIds.has(eventId)) {
+    return {};
+  }
+  if (eventId) {
+    ctx.streamingFlow.conversationSeenEventIds.add(eventId);
+    if (ctx.streamingFlow.conversationSeenEventIds.size > 512) {
+      const first = ctx.streamingFlow.conversationSeenEventIds.values().next().value;
+      if (typeof first === 'string') {
+        ctx.streamingFlow.conversationSeenEventIds.delete(first);
+      }
+    }
+  }
+
+  let ordinal = readNumberField(payload, 'ordinal', -1);
+  if (!Number.isFinite(ordinal) || ordinal <= 0) {
+    ordinal = ctx.streamingFlow.conversationLastOrdinal + 1;
+  }
+  if (ordinal <= ctx.streamingFlow.conversationLastOrdinal) {
+    return {};
+  }
+
+  const flow = ctx.streamingFlow;
+  flow.conversationEnabled = true;
+  if (flow.status === 'idle') {
+    flow.status = 'running';
+    flow.startedAt = Date.now();
+  }
+
+  if (!flow.conversationPendingSteps[ordinal]) {
+    flow.conversationPendingSteps[ordinal] = {
+      ordinal,
+      phase: toConversationPhase(normalizeFlowLine(readStringField(payload, 'phase', 'progress')).toLowerCase()),
+      role: toConversationRole(normalizeFlowLine(readStringField(payload, 'role', 'agent')).toLowerCase()),
+      text,
+    };
+  }
+
+  const changed = flushConversationTimeline(ctx);
+  if (!changed) {
+    refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
+  }
+  return {};
+}
+
+function mergeConversationTimelineFromAnalysisCompleted(
+  source: Record<string, unknown>,
+  ctx: SSEHandlerContext
+): void {
+  const timeline = Array.isArray(source.conversationTimeline)
+    ? source.conversationTimeline
+    : [];
+  if (timeline.length === 0) return;
+
+  for (const entry of timeline) {
+    const step = asRecord(entry);
+    const stepEvent = {
+      id: readStringField(step, 'eventId') || undefined,
+      data: {
+        eventId: readStringField(step, 'eventId'),
+        ordinal: readNumberField(step, 'ordinal', -1),
+        phase: readStringField(step, 'phase', 'progress'),
+        role: readStringField(step, 'role', 'agent'),
+        content: {
+          text: readStringField(step, 'text'),
+        },
+      },
+    };
+    handleConversationStepEvent(stepEvent, ctx);
+  }
+
+  if (ctx.streamingFlow.conversationEnabled) {
+    flushConversationTimeline(ctx, {force: true});
+  }
+}
+
+/**
  * Process answer_token event - incremental final answer stream.
  */
 export function handleAnswerTokenEvent(
-  data: any,
+  data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  const payload = data?.data || {};
+  const payload = eventPayload(data);
   const rawToken = payload.token ?? payload.delta ?? '';
   const token = String(rawToken || '');
   const done = payload.done === true;
@@ -2089,8 +2982,10 @@ export function handleAnswerTokenEvent(
     const now = Date.now();
     const lastUpdate = answer.lastUpdatedAt || 0;
     const shouldFlush =
+      !answer.messageId ||
       token.includes('\n') ||
       /[。！？!?；;：:,，]$/.test(token) ||
+      answer.pending.length >= ANSWER_STREAM_PENDING_CHUNK_SIZE ||
       now - lastUpdate >= ANSWER_STREAM_RENDER_INTERVAL_MS;
 
     if (shouldFlush) {
@@ -2112,17 +3007,21 @@ export function handleAnswerTokenEvent(
  */
 export function handleSSEEvent(
   eventType: string,
-  data: any,
+  data: unknown,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  console.log('[SSEHandlers] SSE event:', eventType, data);
+  const eventData = asRecord(data);
+  console.log('[SSEHandlers] SSE event:', eventType, eventData);
 
   switch (eventType) {
     case 'connected':
       return {};
 
+    case 'conversation_step':
+      return handleConversationStepEvent(eventData, ctx);
+
     case 'progress':
-      return handleProgressEvent(data, ctx);
+      return handleProgressEvent(eventData, ctx);
 
     case 'sql_generated':
       // SQL was generated - don't show raw SQL to user
@@ -2130,46 +3029,47 @@ export function handleSSEEvent(
       return {};
 
     case 'sql_executed':
-      return handleSqlExecutedEvent(data, ctx);
+      return handleSqlExecutedEvent(eventData, ctx);
 
     case 'step_completed':
       // A step was completed - already shown in sql_executed
       return {};
 
     case 'skill_section':
-      return handleSkillSectionEvent(data, ctx);
+      return handleSkillSectionEvent(eventData, ctx);
 
     case 'skill_diagnostics':
-      return handleSkillDiagnosticsEvent(data, ctx);
+      return handleSkillDiagnosticsEvent(eventData, ctx);
 
     case 'skill_layered_result':
-      return handleSkillLayeredResultEvent(data, ctx);
+      return handleSkillLayeredResultEvent(eventData, ctx);
 
     case 'analysis_completed':
-      return handleAnalysisCompletedEvent(data, ctx);
+      return handleAnalysisCompletedEvent(eventData, ctx);
 
     case 'thought':
-      return handleThoughtEvent(data, ctx, 'assistant');
+      return handleThoughtEvent(eventData, ctx, 'assistant');
 
     case 'worker_thought':
-      return handleThoughtEvent(data, ctx, 'worker');
+      return handleThoughtEvent(eventData, ctx, 'worker');
 
     case 'answer_token':
-      return handleAnswerTokenEvent(data, ctx);
+      return handleAnswerTokenEvent(eventData, ctx);
 
     case 'data':
-      return handleDataEvent(data, ctx);
+      return handleDataEvent(eventData, ctx);
 
     case 'skill_data':
       // DEPRECATED: Convert to skill_layered_result
       console.warn('[SSEHandlers] DEPRECATED: skill_data event received');
-      if (data?.data) {
+      if (eventData.data) {
+        const legacyData = asRecord(eventData.data);
         const transformedData = {
           data: {
-            skillId: data.data.skillId,
-            skillName: data.data.skillName,
-            layers: data.data.layers,
-            diagnostics: data.data.diagnostics,
+            skillId: legacyData.skillId,
+            skillName: legacyData.skillName,
+            layers: legacyData.layers,
+            diagnostics: legacyData.diagnostics,
           },
         };
         return handleSkillLayeredResultEvent(transformedData, ctx);
@@ -2177,37 +3077,45 @@ export function handleSSEEvent(
       return {};
 
     case 'finding':
-      // Skip finding display - data shown in tables
-      console.log('[SSEHandlers] Skipping finding display');
-      return {};
+      return handleFindingEvent(eventData, ctx);
 
     case 'hypothesis_generated':
-      return handleHypothesisGeneratedEvent(data, ctx);
+      return handleHypothesisGeneratedEvent(eventData, ctx);
 
     case 'round_start':
-      return handleRoundStartEvent(data, ctx);
+      return handleRoundStartEvent(eventData, ctx);
+
+    case 'stage_transition':
+      return handleStageTransitionEvent(eventData, ctx);
 
     case 'stage_start':
       // Stage start in strategy execution
-      if (data?.data?.message) {
-        pushStreamingPhase(ctx, data.data.message);
+      {
+        const payload = asRecord(eventData.data);
+        const message = payload.message;
+        if (typeof message === 'string') {
+          pushStreamingPhase(ctx, message);
+        }
       }
       return {};
 
     case 'agent_task_dispatched':
-      return handleAgentTaskDispatchedEvent(data, ctx);
+      return handleAgentTaskDispatchedEvent(eventData, ctx);
 
     case 'agent_dialogue':
-      return handleAgentDialogueEvent(data, ctx);
+      return handleAgentDialogueEvent(eventData, ctx);
 
     case 'agent_response':
-      return handleAgentResponseEvent(data, ctx);
+      return handleAgentResponseEvent(eventData, ctx);
+
+    case 'tool_call':
+      return handleToolCallEvent(eventData, ctx);
 
     case 'synthesis_complete':
-      return handleSynthesisCompleteEvent(data, ctx);
+      return handleSynthesisCompleteEvent(eventData, ctx);
 
     case 'strategy_decision':
-      return handleStrategyDecisionEvent(data, ctx);
+      return handleStrategyDecisionEvent(eventData, ctx);
 
     case 'conclusion':
       // Skip - let analysis_completed handle final message
@@ -2217,38 +3125,42 @@ export function handleSSEEvent(
 
     // Agent-Driven Architecture v2.0 - Intervention Events
     case 'intervention_required':
-      return handleInterventionRequiredEvent(data, ctx);
+      return handleInterventionRequiredEvent(eventData, ctx);
 
     case 'intervention_resolved':
-      return handleInterventionResolvedEvent(data, ctx);
+      return handleInterventionResolvedEvent(eventData, ctx);
 
     case 'intervention_timeout':
-      return handleInterventionTimeoutEvent(data, ctx);
+      return handleInterventionTimeoutEvent(eventData, ctx);
 
     // Agent-Driven Architecture v2.0 - Strategy Selection Events
     case 'strategy_selected':
-      return handleStrategySelectedEvent(data, ctx);
+      return handleStrategySelectedEvent(eventData, ctx);
 
     case 'strategy_fallback':
-      return handleStrategyFallbackEvent(data, ctx);
+      return handleStrategyFallbackEvent(eventData, ctx);
 
     // Agent-Driven Architecture v2.0 - Focus Tracking Events
     case 'focus_updated':
-      return handleFocusUpdatedEvent(data, ctx);
+      return handleFocusUpdatedEvent(eventData, ctx);
 
     case 'incremental_scope':
       // Incremental scope changes are internal - just log
-      console.log('[SSEHandlers] incremental_scope:', data?.data);
-      if (data?.data?.scopeType) {
-        pushStreamingPhase(ctx, `增量范围: ${data.data.scopeType}`);
+      console.log('[SSEHandlers] incremental_scope:', eventData.data);
+      {
+        const payload = asRecord(eventData.data);
+        const scopeType = payload.scopeType;
+        if (typeof scopeType === 'string' && scopeType) {
+          pushStreamingPhase(ctx, `增量范围: ${scopeType}`);
+        }
       }
       return {};
 
     case 'error':
-      return handleErrorEvent(data, ctx);
+      return handleErrorEvent(eventData, ctx);
 
     case 'skill_error':
-      return handleSkillErrorEvent(data, ctx);
+      return handleSkillErrorEvent(eventData, ctx);
 
     case 'end':
       if (ctx.streamingFlow.status === 'running') {

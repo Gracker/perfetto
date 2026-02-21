@@ -807,8 +807,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             }
           },
         },
-          this.state.messages.map((msg) =>
-            m('div.ai-message', {
+          (() => {
+            let reportLinkSequence = 0;
+            return this.state.messages.map((msg) => {
+              const reportLinkLabel = msg.reportUrl
+                ? `查看详细分析报告 #${++reportLinkSequence} (${new Date(msg.timestamp).toLocaleTimeString('zh-CN', {hour12: false})})`
+                : '';
+
+              return m('div.ai-message', {
               class: msg.role === 'user' ? 'ai-message-user' : 'ai-message-assistant',
             }, [
               // Avatar
@@ -871,7 +877,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     href: msg.reportUrl,
                     target: '_blank',
                     rel: 'noopener noreferrer',
-                  }, '查看详细分析报告 (HTML)'),
+                  }, reportLinkLabel),
                 ]) : null,
 
                 // SQL Result
@@ -1096,8 +1102,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   ]),
                 ]) : null,
               ]),
-            ])
-          ),
+            ]);
+            });
+          })(),
 
           // Intervention Panel (Agent-Driven Architecture v2.0)
           this.state.interventionState.isActive && this.state.interventionState.intervention

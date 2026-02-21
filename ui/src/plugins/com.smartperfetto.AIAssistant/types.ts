@@ -53,8 +53,26 @@ export interface Message {
 /**
  * Streaming transcript state for progressive, step-by-step output.
  */
+export interface ConversationStepTimelineItem {
+  ordinal: number;
+  phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
+  role: 'agent' | 'system';
+  text: string;
+}
+
 export interface StreamingFlowState {
   messageId: string | null;
+  phaseMessageId: string | null;
+  thoughtMessageId: string | null;
+  toolMessageId: string | null;
+  outputMessageId: string | null;
+  conversationMessageId: string | null;
+  conversationEnabled: boolean;
+  conversationLines: string[];
+  conversationLastOrdinal: number;
+  conversationLastRenderedAt: number | null;
+  conversationPendingSteps: Record<number, ConversationStepTimelineItem>;
+  conversationSeenEventIds: Set<string>;
   status: 'idle' | 'running' | 'completed' | 'failed';
   phases: string[];
   thoughts: string[];
@@ -68,6 +86,17 @@ export interface StreamingFlowState {
 export function createStreamingFlowState(): StreamingFlowState {
   return {
     messageId: null,
+    phaseMessageId: null,
+    thoughtMessageId: null,
+    toolMessageId: null,
+    outputMessageId: null,
+    conversationMessageId: null,
+    conversationEnabled: false,
+    conversationLines: [],
+    conversationLastOrdinal: 0,
+    conversationLastRenderedAt: null,
+    conversationPendingSteps: {},
+    conversationSeenEventIds: new Set<string>(),
     status: 'idle',
     phases: [],
     thoughts: [],

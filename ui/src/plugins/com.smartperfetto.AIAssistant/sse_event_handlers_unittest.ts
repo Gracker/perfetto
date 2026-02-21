@@ -50,6 +50,7 @@ import {
   handleFocusUpdatedEvent,
   handleSSEEvent,
   handleAnswerTokenEvent,
+  handleConversationStepEvent,
 } from './sse_event_handlers';
 
 import {Message, InterventionState, createStreamingAnswerState, createStreamingFlowState} from './types';
@@ -700,6 +701,41 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
   });
 
+  it('should backfill conversation timeline from analysis_completed payload', () => {
+    const data = {
+      data: {
+        conclusion: '分析完成',
+        conversationTimeline: [
+          {
+            eventId: 'evt-2',
+            ordinal: 2,
+            phase: 'tool',
+            role: 'agent',
+            text: '执行 SQL',
+          },
+          {
+            eventId: 'evt-1',
+            ordinal: 1,
+            phase: 'progress',
+            role: 'system',
+            text: '进入 discovery',
+          },
+        ],
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.flowMessages).toHaveLength(1);
+    const flowContent = ctx.flowMessages[0].content;
+    expect(flowContent).toContain('🧵 对话时间线');
+    expect(flowContent).toContain('#1');
+    expect(flowContent).toContain('#2');
+    expect(flowContent).toContain('进入 discovery');
+    expect(flowContent).toContain('执行 SQL');
+    expect(flowContent.indexOf('#1')).toBeLessThan(flowContent.indexOf('#2'));
+  });
+
   it('should add agent-driven metadata when available', () => {
     const data = {
       architecture: 'v2-agent-driven',
@@ -746,8 +782,154 @@ describe('handleAnalysisCompletedEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('## 结论（按可能性排序）');
+    expect(ctx.messages[0].content).toContain('## 聚类（先看大头）');
+    expect(ctx.messages[0].content).not.toContain('## 掉帧聚类（先看大头）');
     expect(ctx.messages[0].content).toContain('滑动过程存在明显卡顿');
     expect(ctx.messages[0].content).toContain('对K1聚类下钻');
+  });
+
+  it('should use jank cluster heading when scene id is jank', () => {
+    const data = {
+      architecture: 'agent-driven',
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '存在掉帧'}],
+          clusters: [{cluster: 'K1', description: '掉帧簇', frames: 5, percentage: 50}],
+          metadata: {scene_id: 'jank'},
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('## 掉帧聚类（先看大头）');
+  });
+
+  it('should render cluster frame refs and omission hint from contract fields', () => {
+    const data = {
+      architecture: 'agent-driven',
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '存在分组'}],
+          clusters: [
+            {
+              cluster: 'K1',
+              description: '主线程耗时',
+              frames: 12,
+              percentage: 60,
+              frame_refs: ['1435500', '1435508', '1435517'],
+              omitted_frame_refs: 9,
+            },
+          ],
+          evidence_chain: [{conclusion_id: 'C1', text: '证据'}],
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('帧: 1435500 / 1435508 / 1435517');
+    expect(ctx.messages[0].content).toContain('其余 9 帧省略');
+  });
+
+  it('should not hard-cap cluster rendering at five items', () => {
+    const clusters = Array.from({length: 6}, (_, idx) => ({
+      cluster: `K${idx + 1}`,
+      description: `簇${idx + 1}`,
+      frames: idx + 1,
+      percentage: 10,
+    }));
+
+    const data = {
+      architecture: 'agent-driven',
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '存在多个簇'}],
+          clusters,
+          evidence_chain: [{conclusion_id: 'C1', text: '证据'}],
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('K6: 簇6');
+  });
+
+  it('should normalize camelCase aliases and apply cluster policy maxClusters', () => {
+    const data = {
+      architecture: 'agent-driven',
+      data: {
+        conclusionContract: {
+          conclusions: [
+            {rank: 1, statement: '主结论', confidence: 0.9},
+          ],
+          clusters: [
+            {
+              cluster: 'K1',
+              description: '主要簇',
+              frames: 8,
+              percentage: 0.5,
+              frameRefs: ['111', '222'],
+              omittedFrames: 6,
+            },
+            {
+              cluster: 'K2',
+              description: '次要簇',
+              frames: 2,
+              percentage: 0.2,
+            },
+          ],
+          evidenceChain: [{conclusionId: 'C1', evidence: ['关键证据']}],
+          nextSteps: ['继续下钻K1'],
+          metadata: {
+            sceneId: 'jank',
+            confidencePercent: 0.9,
+            rounds: 4,
+            clusterPolicy: {maxClusters: 1},
+          },
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('## 掉帧聚类（先看大头）');
+    expect(ctx.messages[0].content).toContain('K1: 主要簇');
+    expect(ctx.messages[0].content).not.toContain('K2: 次要簇');
+    expect(ctx.messages[0].content).toContain('帧: 111 / 222');
+    expect(ctx.messages[0].content).toContain('其余 6 帧省略');
+    expect(ctx.messages[0].content).toContain('置信度: 90%');
+    expect(ctx.messages[0].content).toContain('分析轮次: 4');
+  });
+
+  it('should apply snake_case cluster policy max_clusters', () => {
+    const data = {
+      architecture: 'agent-driven',
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主结论'}],
+          clusters: [
+            {cluster: 'K1', description: '保留簇', frames: 10, percentage: 80},
+            {cluster: 'K2', description: '被裁剪簇', frames: 2, percentage: 20},
+          ],
+          evidence_chain: [{conclusion_id: 'C1', text: '证据'}],
+          metadata: {
+            cluster_policy: {max_clusters: 1},
+          },
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('K1: 保留簇');
+    expect(ctx.messages[0].content).not.toContain('K2: 被裁剪簇');
   });
 
   it('should not append metadata twice when conclusion already contains metadata section', () => {
@@ -814,6 +996,16 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).toContain('错误');
     expect(ctx.messages[1].content).toContain('test_skill');
+  });
+
+  it('should handle malformed analysis_completed payload gracefully', () => {
+    const result = handleAnalysisCompletedEvent({
+      architecture: 123,
+      data: 'invalid-payload',
+    }, ctx);
+
+    expect(result).toEqual({isTerminal: true, stopLoading: true});
+    expect(ctx.messages).toHaveLength(0);
   });
 });
 
@@ -1006,6 +1198,39 @@ describe('handleInterventionRequiredEvent', () => {
     // Should not throw
     const result = handleInterventionRequiredEvent(data, ctxWithoutIntervention);
     expect(result).toEqual({});
+  });
+
+  it('should sanitize malformed intervention type and options', () => {
+    const data = {
+      data: {
+        interventionId: 'int-sanitize',
+        type: 'unknown_type',
+        options: [
+          {id: 'opt-1', label: 'Keep going', action: 'not_valid'},
+          {label: 'Abort now', action: 'abort', recommended: true},
+          'invalid-option',
+        ],
+        context: {
+          triggerReason: 'Need user decision',
+        },
+        timeout: 15000,
+      },
+    };
+
+    expect(() => handleInterventionRequiredEvent(data, ctx)).not.toThrow();
+    expect(ctx.interventionState.intervention).not.toBe(null);
+    const intervention = ctx.interventionState.intervention!;
+    expect(intervention.type).toBe('agent_request');
+    expect(intervention.options).toHaveLength(3);
+    expect(intervention.options[0]).toEqual(
+      expect.objectContaining({id: 'opt-1', action: 'continue'})
+    );
+    expect(intervention.options[1]).toEqual(
+      expect.objectContaining({action: 'abort', recommended: true})
+    );
+    expect(intervention.options[2]).toEqual(
+      expect.objectContaining({id: 'option_3', label: '选项 3'})
+    );
   });
 });
 
@@ -1394,6 +1619,48 @@ describe('handleSkillLayeredResultEvent', () => {
       ])
     );
   });
+
+  it('should ignore malformed expandable frame identifiers without throwing', () => {
+    const data = {
+      data: {
+        skillId: 'scrolling_analysis',
+        layers: {
+          list: {
+            sessions: {
+              data: [
+                {frame_id: {bad: true}, session_id: 1, label: 'bad frame id'},
+                {frame_id: '42', session_id: 1, label: 'valid frame id'},
+              ],
+              display: {
+                title: '会话列表',
+                expandable: true,
+              },
+            },
+          },
+          deep: {
+            '1': {
+              frame_42: {
+                item: {frame_id: '42', label: 'valid frame id'},
+                data: {
+                  ui_thread: {
+                    rows: [['RenderThread', 16.7]],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    expect(() => handleSkillLayeredResultEvent(data, ctx)).not.toThrow();
+    expect(ctx.messages).toHaveLength(1);
+    const sqlResult = ctx.messages[0].sqlResult!;
+    expect(sqlResult.expandableData).toHaveLength(1);
+    expect(sqlResult.expandableData?.[0].item).toEqual(
+      expect.objectContaining({frame_id: '42'})
+    );
+  });
 });
 
 // =============================================================================
@@ -1496,6 +1763,25 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].content).toContain('This is a text message');
   });
 
+  it('should ignore malformed envelopes in a mixed envelope batch', () => {
+    const data = {
+      id: 'mixed-batch',
+      envelope: [
+        null,
+        {bad: 'shape'},
+        {
+          meta: {type: 'table', version: '2.0', source: 'valid_source'},
+          data: {columns: ['k'], rows: [['v']]},
+          display: {layer: 'list', format: 'table', title: 'Valid Table'},
+        },
+      ],
+    };
+
+    expect(() => handleDataEvent(data, ctx)).not.toThrow();
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult?.columns).toEqual(['k']);
+  });
+
   it('should normalize excessive blank lines in summary format', () => {
     const data = {
       id: 'summary-1',
@@ -1552,6 +1838,76 @@ describe('handleAnswerTokenEvent', () => {
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
     expect(ctx.messages[0].content).toBe('你好，世界');
     expect(ctx.streamingAnswer.status).toBe('completed');
+  });
+});
+
+// =============================================================================
+// Conversation Step Timeline Tests
+// =============================================================================
+
+describe('handleConversationStepEvent', () => {
+  let ctx: ReturnType<typeof createMockContext>;
+
+  beforeEach(() => {
+    ctx = createMockContext();
+  });
+
+  it('should flush conversation steps strictly by ordinal', () => {
+    handleConversationStepEvent({
+      id: 'evt-2',
+      data: {
+        ordinal: 2,
+        phase: 'tool',
+        role: 'agent',
+        content: {text: '第二步'},
+      },
+    }, ctx);
+
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).not.toContain('#2');
+
+    handleConversationStepEvent({
+      id: 'evt-1',
+      data: {
+        ordinal: 1,
+        phase: 'progress',
+        role: 'system',
+        content: {text: '第一步'},
+      },
+    }, ctx);
+
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('#1');
+    expect(ctx.flowMessages[0].content).not.toContain('#2');
+    expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
+
+    // End event forces timeline flush, including buffered out-of-order step #2.
+    handleSSEEvent('end', {}, ctx);
+
+    const content = ctx.flowMessages[0].content;
+    expect(content).toContain('#1');
+    expect(content).toContain('#2');
+    expect(content.indexOf('#1')).toBeLessThan(content.indexOf('#2'));
+    expect(ctx.streamingFlow.conversationLastOrdinal).toBe(2);
+  });
+
+  it('should deduplicate repeated events by event id', () => {
+    const step = {
+      id: 'evt-1',
+      data: {
+        ordinal: 1,
+        phase: 'progress',
+        role: 'system',
+        content: {text: '唯一步骤'},
+      },
+    };
+
+    handleConversationStepEvent(step, ctx);
+    handleConversationStepEvent(step, ctx);
+
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content.match(/#1/g)?.length || 0).toBe(1);
+    expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
   });
 });
 
@@ -1650,6 +2006,23 @@ describe('handleSSEEvent', () => {
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
     expect(ctx.messages[0].content).toBe('AB');
+  });
+
+  it('should route conversation_step events to ordered timeline flow', () => {
+    handleSSEEvent('conversation_step', {
+      id: 'evt-1',
+      data: {
+        ordinal: 1,
+        phase: 'progress',
+        role: 'system',
+        content: {text: '开始分析'},
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(0);
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('🧵 对话时间线');
+    expect(ctx.flowMessages[0].content).toContain('#1');
   });
 });
 
