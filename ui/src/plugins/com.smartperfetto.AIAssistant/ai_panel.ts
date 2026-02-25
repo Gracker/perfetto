@@ -318,7 +318,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     try {
       // 调用后端 API 注册当前 RPC 连接
-      const response = await fetch(`${this.state.settings.backendUrl}/api/traces/register-rpc`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/traces/register-rpc`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1125,11 +1125,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
           // Intervention Panel (Agent-Driven Architecture v2.0)
           this.state.interventionState.isActive && this.state.interventionState.intervention
-            ? m(InterventionPanel, {
-                state: this.state.interventionState,
-                sessionId: this.state.agentSessionId,
-                backendUrl: this.state.settings.backendUrl,
-                onStateChange: (newState: Partial<InterventionState>) => {
+              ? m(InterventionPanel, {
+                  state: this.state.interventionState,
+                  sessionId: this.state.agentSessionId,
+                  backendUrl: this.state.settings.backendUrl,
+                  backendApiKey: this.state.settings.backendApiKey,
+                  onStateChange: (newState: Partial<InterventionState>) => {
                   this.state.interventionState = {
                     ...this.state.interventionState,
                     ...newState,
@@ -1218,6 +1219,36 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.settings = sessionManager.loadSettings();
   }
 
+  private normalizeHeaders(headers?: HeadersInit): Record<string, string> {
+    if (!headers) return {};
+    if (headers instanceof Headers) {
+      return Object.fromEntries(headers.entries());
+    }
+    if (Array.isArray(headers)) {
+      return Object.fromEntries(headers);
+    }
+    return {...headers};
+  }
+
+  private buildBackendHeaders(headers?: HeadersInit): Record<string, string> {
+    const normalized = this.normalizeHeaders(headers);
+    const apiKey = (this.state.settings.backendApiKey || '').trim();
+    if (!apiKey) return normalized;
+
+    return {
+      ...normalized,
+      'x-api-key': apiKey,
+      Authorization: normalized.Authorization || `Bearer ${apiKey}`,
+    };
+  }
+
+  private fetchBackend(url: string, init: RequestInit = {}): Promise<Response> {
+    return fetch(url, {
+      ...init,
+      headers: this.buildBackendHeaders(init.headers),
+    });
+  }
+
   /**
    * 从旧的 HISTORY_KEY 迁移数据到新的 Session 格式
    * 仅在首次加载时调用，用于向后兼容
@@ -1242,7 +1273,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (!this.state.backendTraceId) return;
 
     try {
-      const response = await fetch(
+      const response = await this.fetchBackend(
         `${this.state.settings.backendUrl}/api/traces/${this.state.backendTraceId}`
       );
       if (!response.ok) {
@@ -1333,6 +1364,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   loadSession(sessionId: string): boolean {
     const session = sessionManager.loadSession(sessionId);
     if (!session) return false;
+
+    this.cancelSSEConnection();
 
     this.state.currentSessionId = session.sessionId;
     this.state.currentTraceFingerprint = session.traceFingerprint;
@@ -1437,7 +1470,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
 
     // Fire and forget - don't block UI for interaction tracking
-    fetch(`${backendUrl}/api/agent/${sessionId}/interaction`, {
+    this.fetchBackend(`${backendUrl}/api/agent/${sessionId}/interaction`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2276,7 +2309,7 @@ Output MUST follow this exact markdown structure:
 
     const sessionId = this.state.agentSessionId;
     try {
-      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/resume`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/resume`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -2365,7 +2398,7 @@ Output MUST follow this exact markdown structure:
         console.log('[AIPanel] Reusing Agent session for multi-turn dialogue:', this.state.agentSessionId);
       }
 
-      const response = await fetch(apiUrl, {
+      const response = await this.fetchBackend(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
@@ -2485,7 +2518,7 @@ Output MUST follow this exact markdown structure:
           return;
         }
 
-        const response = await fetch(apiUrl, { signal });
+        const response = await this.fetchBackend(apiUrl, { signal });
         if (!response.ok) {
           throw new Error(`Agent SSE connection failed: ${response.statusText}`);
         }
@@ -2656,7 +2689,7 @@ Output MUST follow this exact markdown structure:
     console.log('[AIPanel] Teaching pipeline request with traceId:', this.state.backendTraceId);
 
     try {
-      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/teaching/pipeline`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/teaching/pipeline`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2975,7 +3008,7 @@ Output MUST follow this exact markdown structure:
 
     try {
       // Start scene reconstruction
-      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/scene-reconstruct`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/scene-reconstruct`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3025,9 +3058,14 @@ Output MUST follow this exact markdown structure:
    */
   private async connectToSceneSSE(analysisId: string, progressMessageId: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const eventSource = new EventSource(
+      const sceneSseUrl = new URL(
         `${this.state.settings.backendUrl}/api/agent/scene-reconstruct/${analysisId}/stream`
       );
+      const apiKey = (this.state.settings.backendApiKey || '').trim();
+      if (apiKey) {
+        sceneSseUrl.searchParams.set('api_key', apiKey);
+      }
+      const eventSource = new EventSource(sceneSseUrl.toString());
 
       let scenes: any[] = [];
       let trackEvents: any[] = [];
@@ -3393,7 +3431,7 @@ Output MUST follow this exact markdown structure:
     console.log('[AIPanel] Starting quick scene detection for trace:', this.state.backendTraceId);
 
     try {
-      const response = await fetch(`${this.state.settings.backendUrl}/api/agent/scene-detect-quick`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/scene-detect-quick`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3820,6 +3858,7 @@ Output MUST follow this exact markdown structure:
       // 新建对话按钮
       m('button.ai-session-sidebar-new', {
         onclick: () => {
+          this.cancelSSEConnection();
           // 保存当前 session 再创建新的
           this.saveCurrentSession();
           this.createNewSession();
@@ -3888,10 +3927,12 @@ Output MUST follow this exact markdown structure:
   }
 
   private async clearChat() {
+    this.cancelSSEConnection();
+
     // First, cleanup backend resources if a trace was uploaded
     if (this.state.backendTraceId) {
       try {
-        const response = await fetch(
+        const response = await this.fetchBackend(
           `${this.state.settings.backendUrl}/api/traces/${this.state.backendTraceId}`,
           { method: 'DELETE' }
         );
@@ -3944,7 +3985,7 @@ Output MUST follow this exact markdown structure:
     m.redraw();
 
     try {
-      const response = await fetch(`${this.state.settings.backendUrl}/api/export/result`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/export/result`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -4024,7 +4065,7 @@ Output MUST follow this exact markdown structure:
     m.redraw();
 
     try {
-      const response = await fetch(`${this.state.settings.backendUrl}/api/export/session`, {
+      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/export/session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

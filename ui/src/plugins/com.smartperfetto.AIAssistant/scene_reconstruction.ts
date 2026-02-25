@@ -290,10 +290,19 @@ export class SceneReconstructionHandler {
     console.log('[SceneReconstruction] Request with traceId:', this.ctx.backendTraceId);
 
     try {
+      const apiKey = (this.ctx.settings.backendApiKey || '').trim();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (apiKey) {
+        headers['x-api-key'] = apiKey;
+        headers.Authorization = `Bearer ${apiKey}`;
+      }
+
       // Start scene reconstruction
       const response = await fetch(`${this.ctx.settings.backendUrl}/api/agent/scene-reconstruct`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           traceId: this.ctx.backendTraceId,
           options: {
@@ -344,9 +353,14 @@ export class SceneReconstructionHandler {
    */
   private connectToSceneSSE(analysisId: string, progressMessageId: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const eventSource = new EventSource(
+      const sceneSseUrl = new URL(
         `${this.ctx.settings.backendUrl}/api/agent/scene-reconstruct/${analysisId}/stream`
       );
+      const apiKey = (this.ctx.settings.backendApiKey || '').trim();
+      if (apiKey) {
+        sceneSseUrl.searchParams.set('api_key', apiKey);
+      }
+      const eventSource = new EventSource(sceneSseUrl.toString());
 
       let scenes: SceneData[] = [];
       let trackEvents: any[] = [];

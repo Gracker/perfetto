@@ -443,6 +443,39 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               ]),
             ]),
 
+            // Backend Configuration
+            m('div', {style: MODAL_STYLES.section}, [
+              m('h4', {style: MODAL_STYLES.sectionTitle}, 'Backend Configuration'),
+              m('div', {style: MODAL_STYLES.field}, [
+                m('label', {style: MODAL_STYLES.fieldLabel}, [
+                  m('span', {style: MODAL_STYLES.fieldIcon}, '🖥️'),
+                  'Backend URL',
+                ]),
+                m('input[type=text]', {
+                  style: MODAL_STYLES.input,
+                  value: this.settings.backendUrl,
+                  onchange: (e: Event) => {
+                    this.settings.backendUrl = (e.target as HTMLInputElement).value;
+                  },
+                  placeholder: 'http://localhost:3000',
+                }),
+              ]),
+              m('div', {style: MODAL_STYLES.field}, [
+                m('label', {style: MODAL_STYLES.fieldLabel}, [
+                  m('span', {style: MODAL_STYLES.fieldIcon}, '🔐'),
+                  'Backend API Key',
+                ]),
+                m('input[type=password]', {
+                  style: MODAL_STYLES.input,
+                  value: this.settings.backendApiKey || '',
+                  onchange: (e: Event) => {
+                    this.settings.backendApiKey = (e.target as HTMLInputElement).value;
+                  },
+                  placeholder: 'Optional: SMARTPERFETTO_API_KEY',
+                }),
+              ]),
+            ]),
+
             // Ollama Configuration
             this.settings.provider === 'ollama'
               ? m('div', {style: MODAL_STYLES.section}, [

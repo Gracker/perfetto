@@ -42,6 +42,7 @@ export interface InterventionPanelAttrs {
   state: InterventionState;
   sessionId: string | null;
   backendUrl: string;
+  backendApiKey?: string;
   onStateChange: (state: Partial<InterventionState>) => void;
   onComplete: () => void;
 }
@@ -159,17 +160,25 @@ function getActionButtonStyle(action: InterventionAction, recommended: boolean):
 async function sendInterventionResponse(
   backendUrl: string,
   sessionId: string,
+  backendApiKey: string | undefined,
   interventionId: string,
   action: InterventionAction,
   selectedOptionId?: string,
   customInput?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    const apiKey = (backendApiKey || '').trim();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+      headers['x-api-key'] = apiKey;
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
     const response = await fetch(`${backendUrl}/api/agent/${sessionId}/intervene`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         interventionId,
         action,
@@ -195,7 +204,7 @@ async function sendInterventionResponse(
  */
 export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
   view(vnode) {
-    const { state, sessionId, backendUrl, onStateChange, onComplete } = vnode.attrs;
+    const { state, sessionId, backendUrl, backendApiKey, onStateChange, onComplete } = vnode.attrs;
 
     if (!state.isActive || !state.intervention) {
       return null;
@@ -223,6 +232,7 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
       const result = await sendInterventionResponse(
         backendUrl,
         sessionId,
+        backendApiKey,
         intervention.interventionId,
         selectedOption.action,
         selectedOption.id,
@@ -254,6 +264,7 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
       await sendInterventionResponse(
         backendUrl,
         sessionId,
+        backendApiKey,
         intervention.interventionId,
         'abort',
       );

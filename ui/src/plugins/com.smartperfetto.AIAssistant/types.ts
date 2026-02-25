@@ -257,6 +257,7 @@ export interface AISettings {
   deepseekModel: string;
   deepseekApiKey: string;
   backendUrl: string;
+  backendApiKey: string;
 }
 
 /**
@@ -296,6 +297,7 @@ export const DEFAULT_SETTINGS: AISettings = {
   deepseekModel: 'deepseek-chat',
   deepseekApiKey: '',
   backendUrl: 'http://localhost:3000',
+  backendApiKey: '',
 };
 
 // Storage keys for localStorage
