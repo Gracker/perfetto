@@ -260,8 +260,7 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
 
       onStateChange({ isSending: true });
 
-      // Send abort response (result not needed for abort)
-      await sendInterventionResponse(
+      const result = await sendInterventionResponse(
         backendUrl,
         sessionId,
         backendApiKey,
@@ -269,14 +268,19 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
         'abort',
       );
 
-      onStateChange({
-        isActive: false,
-        intervention: null,
-        selectedOptionId: null,
-        customInput: '',
-        isSending: false,
-      });
-      onComplete();
+      if (result.success) {
+        onStateChange({
+          isActive: false,
+          intervention: null,
+          selectedOptionId: null,
+          customInput: '',
+          isSending: false,
+        });
+        onComplete();
+      } else {
+        console.error('[InterventionPanel] Failed to abort intervention:', result.error);
+        onStateChange({ isSending: false });
+      }
     };
 
     // Panel styles

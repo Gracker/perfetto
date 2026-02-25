@@ -597,6 +597,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.lastQuery = '';
     this.state.currentSessionId = null;
     this.state.agentSessionId = null;  // Reset Agent session for multi-turn dialogue
+    this.resetInterventionState();
 
     // 如果有有效的 trace 指纹，创建新 session
     if (this.state.currentTraceFingerprint) {
@@ -625,6 +626,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
+    this.cancelSSEConnection();
+    this.resetInterventionState();
     if (this.onClearChat) {
       window.removeEventListener('ai-assistant:clear-chat', this.onClearChat);
     }
@@ -1366,6 +1369,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (!session) return false;
 
     this.cancelSSEConnection();
+    this.resetInterventionState();
 
     this.state.currentSessionId = session.sessionId;
     this.state.currentTraceFingerprint = session.traceFingerprint;
@@ -2490,6 +2494,10 @@ Output MUST follow this exact markdown structure:
     this.state.sseConnectionState = 'disconnected';
   }
 
+  private resetInterventionState(): void {
+    this.state.interventionState = {...DEFAULT_INTERVENTION_STATE};
+  }
+
   /**
    * Listen to Agent SSE events from MasterOrchestrator
    * With automatic reconnection and exponential backoff
@@ -2588,7 +2596,7 @@ Output MUST follow this exact markdown structure:
 
                     // Check for terminal events (no need to reconnect after these)
                     if (eventType === 'analysis_completed' || eventType === 'error') {
-                      this.state.sseConnectionState = 'disconnected';
+                      this.cancelSSEConnection();
                       m.redraw();
                       return;
                     }
@@ -3859,6 +3867,7 @@ Output MUST follow this exact markdown structure:
       m('button.ai-session-sidebar-new', {
         onclick: () => {
           this.cancelSSEConnection();
+          this.resetInterventionState();
           // 保存当前 session 再创建新的
           this.saveCurrentSession();
           this.createNewSession();
@@ -3928,6 +3937,7 @@ Output MUST follow this exact markdown structure:
 
   private async clearChat() {
     this.cancelSSEConnection();
+    this.resetInterventionState();
 
     // First, cleanup backend resources if a trace was uploaded
     if (this.state.backendTraceId) {
