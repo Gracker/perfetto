@@ -207,6 +207,9 @@ export interface AIPanelState {
   isRetryingBackend: boolean;  // Retrying backend connection
   retryError: string | null;  // Retry connection error message
   agentSessionId: string | null;  // Agent multi-turn dialogue Session ID
+  agentRunId: string | null;      // Current/last agent run ID for observability
+  agentRequestId: string | null;  // Current/last request ID for observability
+  agentRunSequence: number;       // Current/last run sequence for observability
   displayedSkillProgress: Set<string>;  // Displayed skill progress (skillId:step) for deduplication
   completionHandled: boolean;  // Whether analysis completion event was handled
   // SSE Connection State (Phase 2: Reconnection Logic)
@@ -269,6 +272,9 @@ export interface AISession {
   traceName: string;              // Display name (e.g., filename)
   backendTraceId?: string;        // Backend session ID
   agentSessionId?: string;        // Backend Agent multi-turn session ID
+  agentRunId?: string;            // Backend run ID
+  agentRequestId?: string;        // Backend request ID
+  agentRunSequence?: number;      // Backend run sequence
   createdAt: number;
   lastActiveAt: number;
   messages: Message[];

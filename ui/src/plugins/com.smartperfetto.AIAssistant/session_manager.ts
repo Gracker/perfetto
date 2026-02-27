@@ -216,6 +216,9 @@ export class SessionManager {
       bookmarks?: NavigationBookmark[];
       backendTraceId?: string;
       agentSessionId?: string;
+      agentRunId?: string;
+      agentRequestId?: string;
+      agentRunSequence?: number;
       summary?: string;
     }
   ): boolean {

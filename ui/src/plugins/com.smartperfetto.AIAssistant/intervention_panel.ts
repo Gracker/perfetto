@@ -34,6 +34,7 @@ import {
   InterventionAction,
   InterventionType,
 } from './types';
+import {buildAssistantApiV1Url} from './assistant_api_v1';
 
 /**
  * Props for the InterventionPanel component.
@@ -176,7 +177,7 @@ async function sendInterventionResponse(
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    const response = await fetch(`${backendUrl}/api/agent/${sessionId}/intervene`, {
+    const response = await fetch(buildAssistantApiV1Url(backendUrl, `/${sessionId}/intervene`), {
       method: 'POST',
       headers,
       body: JSON.stringify({

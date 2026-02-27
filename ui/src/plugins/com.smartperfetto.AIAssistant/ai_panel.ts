@@ -58,6 +58,7 @@ import {
 } from './data_formatter';
 import {sessionManager} from './session_manager';
 import {mermaidRenderer} from './mermaid_renderer';
+import {buildAssistantApiV1Url} from './assistant_api_v1';
 import {
   handleSSEEvent as handleSSEEventExternal,
   SSEHandlerContext,
@@ -104,6 +105,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     isRetryingBackend: false,  // 正在重试连接后端
     retryError: null,  // 重试连接的错误信息
     agentSessionId: null,  // Agent 多轮对话 Session ID
+    agentRunId: null,
+    agentRequestId: null,
+    agentRunSequence: 0,
     displayedSkillProgress: new Set(),  // 已显示的 skill 进度
     completionHandled: false,  // 分析完成事件是否已处理
     // SSE Connection State Initialization
@@ -597,6 +601,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.lastQuery = '';
     this.state.currentSessionId = null;
     this.state.agentSessionId = null;  // Reset Agent session for multi-turn dialogue
+    this.clearAgentObservability();
     this.resetInterventionState();
 
     // 如果有有效的 trace 指纹，创建新 session
@@ -1245,6 +1250,55 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     };
   }
 
+  private clearAgentObservability(): void {
+    this.state.agentRunId = null;
+    this.state.agentRequestId = null;
+    this.state.agentRunSequence = 0;
+  }
+
+  private applyAgentObservability(payload: any): boolean {
+    const candidates: any[] = [];
+    if (payload && typeof payload === 'object') {
+      candidates.push(payload);
+      if (payload.observability && typeof payload.observability === 'object') {
+        candidates.push(payload.observability);
+      }
+      if (payload.data && typeof payload.data === 'object') {
+        candidates.push(payload.data);
+        if (payload.data.observability && typeof payload.data.observability === 'object') {
+          candidates.push(payload.data.observability);
+        }
+      }
+    }
+
+    let changed = false;
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object') continue;
+
+      const runId = typeof candidate.runId === 'string' ? candidate.runId.trim() : '';
+      if (runId && runId !== this.state.agentRunId) {
+        this.state.agentRunId = runId;
+        changed = true;
+      }
+
+      const requestId = typeof candidate.requestId === 'string' ? candidate.requestId.trim() : '';
+      if (requestId && requestId !== this.state.agentRequestId) {
+        this.state.agentRequestId = requestId;
+        changed = true;
+      }
+
+      if (typeof candidate.runSequence === 'number' && Number.isFinite(candidate.runSequence)) {
+        const runSequence = Math.max(0, Math.floor(candidate.runSequence));
+        if (runSequence !== this.state.agentRunSequence) {
+          this.state.agentRunSequence = runSequence;
+          changed = true;
+        }
+      }
+    }
+
+    return changed;
+  }
+
   private fetchBackend(url: string, init: RequestInit = {}): Promise<Response> {
     return fetch(url, {
       ...init,
@@ -1357,6 +1411,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         bookmarks: this.state.bookmarks,
         backendTraceId: this.state.backendTraceId || undefined,
         agentSessionId: this.state.agentSessionId || undefined,
+        agentRunId: this.state.agentRunId || undefined,
+        agentRequestId: this.state.agentRequestId || undefined,
+        agentRunSequence: this.state.agentRunSequence || undefined,
       }
     );
   }
@@ -1377,6 +1434,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.pinnedResults = session.pinnedResults || [];
     this.state.bookmarks = session.bookmarks || [];
     this.state.agentSessionId = session.agentSessionId || null;
+    this.state.agentRunId = session.agentRunId || null;
+    this.state.agentRequestId = session.agentRequestId || null;
+    this.state.agentRunSequence = Number.isFinite(session.agentRunSequence)
+      ? Math.max(0, Math.floor(session.agentRunSequence as number))
+      : 0;
 
     // Only restore backendTraceId if we're currently in RPC mode
     // If not in RPC mode, the old backendTraceId is stale and invalid
@@ -1474,7 +1536,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
 
     // Fire and forget - don't block UI for interaction tracking
-    this.fetchBackend(`${backendUrl}/api/agent/${sessionId}/interaction`, {
+    this.fetchBackend(buildAssistantApiV1Url(backendUrl, `/${sessionId}/interaction`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2313,7 +2375,7 @@ Output MUST follow this exact markdown structure:
 
     const sessionId = this.state.agentSessionId;
     try {
-      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/resume`, {
+      const response = await this.fetchBackend(buildAssistantApiV1Url(this.state.settings.backendUrl, '/resume'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -2323,6 +2385,19 @@ Output MUST follow this exact markdown structure:
       });
 
       if (response.ok) {
+        const resumeData = await response.json().catch(() => ({} as any));
+        const requestIdFromHeader = response.headers.get('x-request-id') || '';
+        if (this.applyAgentObservability({
+          ...resumeData,
+          requestId: resumeData.requestId || requestIdFromHeader,
+        })) {
+          this.saveCurrentSession();
+          console.log('[AIPanel] Agent observability updated from resume response:', {
+            runId: this.state.agentRunId,
+            requestId: this.state.agentRequestId,
+            runSequence: this.state.agentRunSequence,
+          });
+        }
         return;
       }
 
@@ -2342,6 +2417,7 @@ Output MUST follow this exact markdown structure:
           errorText,
         });
         this.state.agentSessionId = null;
+        this.clearAgentObservability();
         this.saveCurrentSession();
         return;
       }
@@ -2381,7 +2457,7 @@ Output MUST follow this exact markdown structure:
       await this.ensureAgentSessionReady();
 
       // Call Agent API (Agent-Driven Orchestrator)
-      const apiUrl = `${this.state.settings.backendUrl}/api/agent/analyze`;
+      const apiUrl = buildAssistantApiV1Url(this.state.settings.backendUrl, '/analyze');
       console.log('[AIPanel] Calling Agent API:', apiUrl, 'with traceId:', this.state.backendTraceId);
 
       // Build request body, include sessionId for multi-turn dialogue
@@ -2431,6 +2507,19 @@ Output MUST follow this exact markdown structure:
 
       if (!data.success) {
         throw new Error(data.error || 'Analysis failed');
+      }
+
+      const requestIdFromHeader = response.headers.get('x-request-id') || '';
+      const observabilityUpdated = this.applyAgentObservability({
+        ...data,
+        requestId: data.requestId || requestIdFromHeader,
+      });
+      if (observabilityUpdated) {
+        console.log('[AIPanel] Agent observability updated from analyze response:', {
+          runId: this.state.agentRunId,
+          requestId: this.state.agentRequestId,
+          runSequence: this.state.agentRunSequence,
+        });
       }
 
       // Use SSE for real-time progress updates
@@ -2503,7 +2592,7 @@ Output MUST follow this exact markdown structure:
    * With automatic reconnection and exponential backoff
    */
   private async listenToAgentSSE(sessionId: string): Promise<void> {
-    const apiUrl = `${this.state.settings.backendUrl}/api/agent/${sessionId}/stream`;
+    const apiUrl = buildAssistantApiV1Url(this.state.settings.backendUrl, `/${sessionId}/stream`);
 
     // Cancel any existing connection
     this.cancelSSEConnection();
@@ -2591,6 +2680,16 @@ Output MUST follow this exact markdown structure:
                   if (!eventType) {
                     console.warn('[AIPanel] SSE event with no type, skipping:', Object.keys(data));
                   } else {
+                    const observabilityUpdated = this.applyAgentObservability(data);
+                    if (observabilityUpdated) {
+                      this.saveCurrentSession();
+                      console.log('[AIPanel] Agent observability updated from SSE:', {
+                        eventType,
+                        runId: this.state.agentRunId,
+                        requestId: this.state.agentRequestId,
+                        runSequence: this.state.agentRunSequence,
+                      });
+                    }
                     console.log('[AIPanel] Agent SSE event:', eventType);
                     this.handleSSEEvent(eventType, data);
 
@@ -2697,7 +2796,7 @@ Output MUST follow this exact markdown structure:
     console.log('[AIPanel] Teaching pipeline request with traceId:', this.state.backendTraceId);
 
     try {
-      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/teaching/pipeline`, {
+      const response = await this.fetchBackend(buildAssistantApiV1Url(this.state.settings.backendUrl, '/teaching/pipeline'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3016,7 +3115,7 @@ Output MUST follow this exact markdown structure:
 
     try {
       // Start scene reconstruction
-      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/scene-reconstruct`, {
+      const response = await this.fetchBackend(buildAssistantApiV1Url(this.state.settings.backendUrl, '/scene-reconstruct'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3067,7 +3166,7 @@ Output MUST follow this exact markdown structure:
   private async connectToSceneSSE(analysisId: string, progressMessageId: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const sceneSseUrl = new URL(
-        `${this.state.settings.backendUrl}/api/agent/scene-reconstruct/${analysisId}/stream`
+        buildAssistantApiV1Url(this.state.settings.backendUrl, `/scene-reconstruct/${analysisId}/stream`)
       );
       const apiKey = (this.state.settings.backendApiKey || '').trim();
       if (apiKey) {
@@ -3439,7 +3538,7 @@ Output MUST follow this exact markdown structure:
     console.log('[AIPanel] Starting quick scene detection for trace:', this.state.backendTraceId);
 
     try {
-      const response = await this.fetchBackend(`${this.state.settings.backendUrl}/api/agent/scene-detect-quick`, {
+      const response = await this.fetchBackend(buildAssistantApiV1Url(this.state.settings.backendUrl, '/scene-detect-quick'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3873,6 +3972,7 @@ Output MUST follow this exact markdown structure:
           this.createNewSession();
           this.state.messages = [];
           this.state.agentSessionId = null;  // Reset Agent session for new conversation
+          this.clearAgentObservability();
           if (this.state.backendTraceId || this.engine?.mode === 'HTTP_RPC') {
             this.addRpcModeWelcomeMessage();
           } else {
@@ -3961,6 +4061,7 @@ Output MUST follow this exact markdown structure:
     this.state.backendTraceId = null;  // Clear backend trace ID
     this.state.pinnedResults = [];  // Clear pinned results
     this.state.agentSessionId = null;  // Clear Agent session for multi-turn dialogue
+    this.clearAgentObservability();
     this.resetStreamingFlow();
     this.resetStreamingAnswer();
     this.saveHistory();

@@ -27,6 +27,7 @@
 
 import m from 'mithril';
 import {Message, AISettings} from './types';
+import {buildAssistantApiV1Url} from './assistant_api_v1';
 
 /**
  * Scene data structure returned from backend analysis.
@@ -300,7 +301,7 @@ export class SceneReconstructionHandler {
       }
 
       // Start scene reconstruction
-      const response = await fetch(`${this.ctx.settings.backendUrl}/api/agent/scene-reconstruct`, {
+      const response = await fetch(buildAssistantApiV1Url(this.ctx.settings.backendUrl, '/scene-reconstruct'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -354,7 +355,7 @@ export class SceneReconstructionHandler {
   private connectToSceneSSE(analysisId: string, progressMessageId: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const sceneSseUrl = new URL(
-        `${this.ctx.settings.backendUrl}/api/agent/scene-reconstruct/${analysisId}/stream`
+        buildAssistantApiV1Url(this.ctx.settings.backendUrl, `/scene-reconstruct/${analysisId}/stream`)
       );
       const apiKey = (this.ctx.settings.backendApiKey || '').trim();
       if (apiKey) {
