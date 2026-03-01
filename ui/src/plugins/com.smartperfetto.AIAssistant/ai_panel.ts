@@ -74,6 +74,8 @@ import {
 // Scene reconstruction module available for future integration
 // import {SceneReconstructionHandler, SceneHandlerContext} from './scene_reconstruction';
 
+const DEBUG_AI_PANEL = false;
+
 export interface AIPanelAttrs {
   engine: Engine;
   trace: Trace;
@@ -242,7 +244,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const appBackendUploadState = backendUploadState.state;
     const appBackendUploadError = backendUploadState.error;
 
-    console.log('[AIPanel] Trace fingerprint check:', {
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Trace fingerprint check:', {
       new: newFingerprint,
       current: this.state.currentTraceFingerprint,
       backendTraceId: this.state.backendTraceId,
@@ -255,14 +257,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // If upload already completed, reuse the backend trace id.
     if (appBackendTraceId && !this.state.backendTraceId) {
-      console.log('[AIPanel] Using backendTraceId from auto-upload:', appBackendTraceId);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Using backendTraceId from auto-upload:', appBackendTraceId);
       this.state.backendTraceId = appBackendTraceId;
       // Don't call detectScenesQuick() here — defer to after welcome message below
     }
 
     // 如果指纹没变且已经有 session，不需要重新加载
     if (newFingerprint && newFingerprint === this.state.currentTraceFingerprint && this.state.currentSessionId) {
-      console.log('[AIPanel] Same trace, keeping current session');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Same trace, keeping current session');
       // 如果在 RPC 模式但没有 backendTraceId，尝试自动注册
       if (engineInRpcMode && !this.state.backendTraceId) {
         this.autoRegisterWithBackend();
@@ -284,7 +286,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // 总是创建新 Session（不自动恢复历史）
     // 用户可以通过侧边栏点击历史 Session 来恢复
-    console.log('[AIPanel] Creating new session for trace');
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Creating new session for trace');
     this.createNewSession();
 
     // 显示欢迎消息 — handle three states:
@@ -318,12 +320,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    */
   private async autoRegisterWithBackend(): Promise<void> {
     const rpcPort = HttpRpcEngine.rpcPort;
-    console.log('[AIPanel] Auto-registering with backend, RPC port:', rpcPort);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Auto-registering with backend, RPC port:', rpcPort);
 
     // First, check if there's a pending backendTraceId from a recent upload
     const pendingTraceId = this.recoverPendingBackendTrace(parseInt(rpcPort, 10));
     if (pendingTraceId) {
-      console.log('[AIPanel] Recovered pending backend traceId:', pendingTraceId);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Recovered pending backend traceId:', pendingTraceId);
       this.state.backendTraceId = pendingTraceId;
 
       this.addMessage({
@@ -353,7 +355,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         const data = await response.json();
         if (data.success && data.traceId) {
           this.state.backendTraceId = data.traceId;
-          console.log('[AIPanel] Auto-registered with backend, traceId:', data.traceId);
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] Auto-registered with backend, traceId:', data.traceId);
 
           this.addMessage({
             id: this.generateId(),
@@ -373,10 +375,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       }
 
       // 注册失败时，显示基本欢迎消息
-      console.log('[AIPanel] Auto-registration failed, showing welcome message');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Auto-registration failed, showing welcome message');
       this.addRpcModeWelcomeMessage();
     } catch (error) {
-      console.log('[AIPanel] Auto-registration error:', error);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Auto-registration error:', error);
       this.addRpcModeWelcomeMessage();
     }
   }
@@ -390,7 +392,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
-    console.log('[AIPanel] Manually retrying backend connection...');
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Manually retrying backend connection...');
     this.state.isRetryingBackend = true;
     this.state.retryError = null;
     m.redraw();
@@ -407,7 +409,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       // 获取当前 Trace 的 source
       const traceInfo = this.trace.traceInfo as unknown as {source: TraceSource};
       const traceSource = traceInfo.source;
-      console.log('[AIPanel] Retrying with trace source type:', traceSource.type);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Retrying with trace source type:', traceSource.type);
 
       // 尝试上传 Trace
       const uploadResult = await uploader.upload(traceSource);
@@ -416,7 +418,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         throw new Error(uploadResult.error || '上传 Trace 失败');
       }
 
-      console.log('[AIPanel] Upload successful, port:', uploadResult.port);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Upload successful, port:', uploadResult.port);
 
       // 上传成功，需要重新加载 Trace 以使用新的 RPC 端口
       // 显示提示信息
@@ -444,7 +446,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             }),
           );
         } catch (e) {
-          console.log('[AIPanel] Failed to store pending trace:', e);
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] Failed to store pending trace:', e);
         }
       }
 
@@ -484,14 +486,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       if (data.port === currentPort && (Date.now() - data.timestamp) < 60000) {
         // Clear the pending data after recovery
         localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
-        console.log('[AIPanel] Recovered and cleared pending backend trace');
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Recovered and cleared pending backend trace');
         return data.traceId;
       }
 
       // If too old or port mismatch, clear it
       if ((Date.now() - data.timestamp) > 60000) {
         localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
-        console.log('[AIPanel] Cleared stale pending backend trace');
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Cleared stale pending backend trace');
       }
 
       return null;
@@ -563,7 +565,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         if (!isNewReadyState) return;
 
         this.state.backendTraceId = snapshot.traceId;
-        console.log('[AIPanel] Backend upload complete, traceId:', snapshot.traceId);
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Backend upload complete, traceId:', snapshot.traceId);
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
@@ -760,7 +762,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   trace: this.trace,
                   isLoading: this.state.scenesLoading,
                   onSceneClick: (scene, index) => {
-                    console.log(`[AIPanel] Jumped to scene ${index}: ${scene.type}`);
+                    if (DEBUG_AI_PANEL) console.log(`[AIPanel] Jumped to scene ${index}: ${scene.type}`);
                   },
                   onRefresh: () => this.detectScenesQuick(),
                 })
@@ -772,7 +774,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   bookmarks: this.state.bookmarks,
                   trace: this.trace,
                   onBookmarkClick: (bookmark, index) => {
-                    console.log(`Jumped to bookmark ${index}: ${bookmark.label}`);
+                    if (DEBUG_AI_PANEL) console.log(`Jumped to bookmark ${index}: ${bookmark.label}`);
                   },
                 })
               : null,
@@ -1371,13 +1373,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         `${this.state.settings.backendUrl}/api/traces/${this.state.backendTraceId}`
       );
       if (!response.ok) {
-        console.log(`[AIPanel] Backend trace ${this.state.backendTraceId} no longer valid, clearing`);
+        if (DEBUG_AI_PANEL) console.log(`[AIPanel] Backend trace ${this.state.backendTraceId} no longer valid, clearing`);
         this.state.backendTraceId = null;
         this.saveHistory();
         m.redraw();
       }
     } catch (error) {
-      console.log('[AIPanel] Failed to verify backend trace, clearing:', error);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Failed to verify backend trace, clearing:', error);
       this.state.backendTraceId = null;
       this.saveHistory();
       m.redraw();
@@ -1494,7 +1496,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       .filter((m) => m.role === 'user')
       .map((m) => m.content);
 
-    console.log('[AIPanel] Loaded session:', sessionId, {
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Loaded session:', sessionId, {
       engineInRpcMode,
       backendTraceId: this.state.backendTraceId,
     });
@@ -1568,7 +1570,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // Only send if we have an active session
     if (!sessionId) {
-      console.log('[AIPanel] No active session, skipping interaction capture');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] No active session, skipping interaction capture');
       return;
     }
 
@@ -1589,7 +1591,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       if (!response.ok) {
         console.warn('[AIPanel] Failed to send interaction:', response.status);
       } else {
-        console.log('[AIPanel] Interaction captured:', interaction.type, interaction.target);
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Interaction captured:', interaction.type, interaction.target);
       }
     }).catch((error) => {
       console.warn('[AIPanel] Error sending interaction:', error);
@@ -1680,7 +1682,7 @@ Click ⚙️ to change settings.`;
 
   private async sendMessage() {
     const input = this.state.input.trim();
-    console.log('[AIPanel] sendMessage called, input:', input, 'isLoading:', this.state.isLoading);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] sendMessage called, input:', input, 'isLoading:', this.state.isLoading);
 
     if (!input || this.state.isLoading) return;
 
@@ -1704,9 +1706,9 @@ Click ⚙️ to change settings.`;
     if (input.startsWith('/')) {
       await this.handleCommand(input);
     } else {
-      console.log('[AIPanel] Calling handleChatMessage with:', input);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Calling handleChatMessage with:', input);
       await this.handleChatMessage(input);
-      console.log('[AIPanel] handleChatMessage completed');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] handleChatMessage completed');
     }
   }
 
@@ -2438,7 +2440,7 @@ Output MUST follow this exact markdown structure:
           requestId: resumeData.requestId || requestIdFromHeader,
         })) {
           this.saveCurrentSession();
-          console.log('[AIPanel] Agent observability updated from resume response:', {
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] Agent observability updated from resume response:', {
             runId: this.state.agentRunId,
             requestId: this.state.agentRequestId,
             runSequence: this.state.agentRunSequence,
@@ -2476,8 +2478,8 @@ Output MUST follow this exact markdown structure:
   }
 
   private async handleChatMessage(message: string) {
-    console.log('[AIPanel] handleChatMessage called with:', message);
-    console.log('[AIPanel] backendTraceId:', this.state.backendTraceId);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] handleChatMessage called with:', message);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] backendTraceId:', this.state.backendTraceId);
 
     // Check if trace is uploaded to backend
     if (!this.state.backendTraceId) {
@@ -2504,7 +2506,7 @@ Output MUST follow this exact markdown structure:
 
       // Call Agent API (Agent-Driven Orchestrator)
       const apiUrl = buildAssistantApiV1Url(this.state.settings.backendUrl, '/analyze');
-      console.log('[AIPanel] Calling Agent API:', apiUrl, 'with traceId:', this.state.backendTraceId);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Calling Agent API:', apiUrl, 'with traceId:', this.state.backendTraceId);
 
       // Build request body, include sessionId for multi-turn dialogue
       const requestBody: Record<string, any> = {
@@ -2521,7 +2523,7 @@ Output MUST follow this exact markdown structure:
       // Include agentSessionId if available for multi-turn dialogue
       if (this.state.agentSessionId) {
         requestBody.sessionId = this.state.agentSessionId;
-        console.log('[AIPanel] Reusing Agent session for multi-turn dialogue:', this.state.agentSessionId);
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Reusing Agent session for multi-turn dialogue:', this.state.agentSessionId);
       }
 
       const response = await this.fetchBackend(apiUrl, {
@@ -2530,7 +2532,7 @@ Output MUST follow this exact markdown structure:
         body: JSON.stringify(requestBody),
       });
 
-      console.log('[AIPanel] Agent API response status:', response.status);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Agent API response status:', response.status);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -2549,7 +2551,7 @@ Output MUST follow this exact markdown structure:
       }
 
       const data = await response.json();
-      console.log('[AIPanel] Agent API response data:', data);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Agent API response data:', data);
 
       if (!data.success) {
         throw new Error(data.error || 'Analysis failed');
@@ -2561,7 +2563,7 @@ Output MUST follow this exact markdown structure:
         requestId: data.requestId || requestIdFromHeader,
       });
       if (observabilityUpdated) {
-        console.log('[AIPanel] Agent observability updated from analyze response:', {
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Agent observability updated from analyze response:', {
           runId: this.state.agentRunId,
           requestId: this.state.agentRequestId,
           runSequence: this.state.agentRunSequence,
@@ -2575,17 +2577,17 @@ Output MUST follow this exact markdown structure:
         // Only save if this is a new session or reusing existing session
         const isNewSession = data.isNewSession !== false;
         if (isNewSession) {
-          console.log('[AIPanel] Saving new Agent session for multi-turn dialogue:', sessionId);
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] Saving new Agent session for multi-turn dialogue:', sessionId);
         } else {
-          console.log('[AIPanel] Continuing existing Agent session:', sessionId);
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] Continuing existing Agent session:', sessionId);
         }
         this.state.agentSessionId = sessionId;
         this.saveCurrentSession();
 
-        console.log('[AIPanel] Starting Agent SSE listener for session:', sessionId);
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Starting Agent SSE listener for session:', sessionId);
         await this.listenToAgentSSE(sessionId);
       } else {
-        console.log('[AIPanel] No sessionId in response, data:', data);
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] No sessionId in response, data:', data);
       }
 
     } catch (e: any) {
@@ -2675,7 +2677,7 @@ Output MUST follow this exact markdown structure:
       try {
         // Check if aborted before attempting connection
         if (signal.aborted) {
-          console.log('[AIPanel] SSE connection aborted');
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE connection aborted');
           return;
         }
 
@@ -2693,7 +2695,7 @@ Output MUST follow this exact markdown structure:
         this.state.sseConnectionState = 'connected';
         this.state.sseRetryCount = 0;
         this.state.sseLastEventTime = Date.now();
-        console.log('[AIPanel] SSE connected successfully');
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE connected successfully');
         m.redraw();
 
         const decoder = new TextDecoder();
@@ -2706,14 +2708,14 @@ Output MUST follow this exact markdown structure:
         while (true) {
           // Check if aborted
           if (signal.aborted) {
-            console.log('[AIPanel] SSE reader aborted');
+            if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE reader aborted');
             reader.releaseLock();
             return;
           }
 
           const {done, value} = await reader.read();
           if (done) {
-            console.log('[AIPanel] SSE stream ended normally');
+            if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE stream ended normally');
             reader.releaseLock();
             // Stream ended normally (server closed), no need to reconnect
             this.state.sseConnectionState = 'disconnected';
@@ -2747,14 +2749,14 @@ Output MUST follow this exact markdown structure:
                     const observabilityUpdated = this.applyAgentObservability(data);
                     if (observabilityUpdated) {
                       this.saveCurrentSession();
-                      console.log('[AIPanel] Agent observability updated from SSE:', {
+                      if (DEBUG_AI_PANEL) console.log('[AIPanel] Agent observability updated from SSE:', {
                         eventType,
                         runId: this.state.agentRunId,
                         requestId: this.state.agentRequestId,
                         runSequence: this.state.agentRunSequence,
                       });
                     }
-                    console.log('[AIPanel] Agent SSE event:', eventType);
+                    if (DEBUG_AI_PANEL) console.log('[AIPanel] Agent SSE event:', eventType);
                     this.handleSSEEvent(eventType, data);
 
                     // Check for terminal events (no need to reconnect after these)
@@ -2775,7 +2777,7 @@ Output MUST follow this exact markdown structure:
       } catch (e: any) {
         // Check if this was an intentional abort
         if (signal.aborted || e.name === 'AbortError') {
-          console.log('[AIPanel] SSE connection intentionally aborted');
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE connection intentionally aborted');
           this.state.sseConnectionState = 'disconnected';
           return;
         }
@@ -2802,7 +2804,7 @@ Output MUST follow this exact markdown structure:
         this.state.sseRetryCount++;
         this.state.sseConnectionState = 'reconnecting';
         const delay = this.calculateBackoffDelay(this.state.sseRetryCount - 1);
-        console.log(`[AIPanel] SSE reconnecting in ${delay}ms (attempt ${this.state.sseRetryCount}/${this.state.sseMaxRetries})`);
+        if (DEBUG_AI_PANEL) console.log(`[AIPanel] SSE reconnecting in ${delay}ms (attempt ${this.state.sseRetryCount}/${this.state.sseMaxRetries})`);
 
         // Update UI to show reconnecting status
         // Find and update any existing reconnecting message, or add new one
@@ -2831,7 +2833,7 @@ Output MUST follow this exact markdown structure:
         });
 
         if (signal.aborted) {
-          console.log('[AIPanel] SSE retry wait aborted');
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE retry wait aborted');
           return;
         }
       }
@@ -2857,7 +2859,7 @@ Output MUST follow this exact markdown structure:
     this.state.isLoading = true;
     m.redraw();
 
-    console.log('[AIPanel] Teaching pipeline request with traceId:', this.state.backendTraceId);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Teaching pipeline request with traceId:', this.state.backendTraceId);
 
     try {
       const response = await this.fetchBackend(buildAssistantApiV1Url(this.state.settings.backendUrl, '/teaching/pipeline'), {
@@ -3166,7 +3168,7 @@ Output MUST follow this exact markdown structure:
       timestamp: Date.now(),
     });
 
-    console.log('[AIPanel] Scene reconstruction request with traceId:', this.state.backendTraceId);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene reconstruction request with traceId:', this.state.backendTraceId);
 
     try {
       // Start scene reconstruction
@@ -3198,7 +3200,7 @@ Output MUST follow this exact markdown structure:
       }
 
       const analysisId = data.analysisId;
-      console.log('[AIPanel] Scene reconstruction started with analysisId:', analysisId);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene reconstruction started with analysisId:', analysisId);
 
       // Connect to SSE for real-time updates
       await this.connectToSceneSSE(analysisId, progressMessageId);
@@ -3216,212 +3218,246 @@ Output MUST follow this exact markdown structure:
   }
 
   /**
-   * Connect to SSE endpoint for scene reconstruction updates
+   * Connect to SSE endpoint for scene reconstruction updates.
+   * Uses fetch + manual SSE parsing (consistent with listenToAgentSSE)
+   * to send the API key via headers instead of exposing it in the URL.
    */
   private async connectToSceneSSE(analysisId: string, progressMessageId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const sceneSseUrl = new URL(
-        buildAssistantApiV1Url(this.state.settings.backendUrl, `/scene-reconstruct/${analysisId}/stream`)
-      );
-      const apiKey = (this.state.settings.backendApiKey || '').trim();
-      if (apiKey) {
-        sceneSseUrl.searchParams.set('api_key', apiKey);
+    const sceneSseUrl = buildAssistantApiV1Url(
+      this.state.settings.backendUrl,
+      `/scene-reconstruct/${analysisId}/stream`,
+    );
+
+    let scenes: any[] = [];
+    let trackEvents: any[] = [];
+    let narrative = '';
+    let findings: any[] = [];
+
+    const unwrapEventData = (raw: any): any => {
+      if (!raw || typeof raw !== 'object') return {};
+      // Agent-driven backend wraps payload as: { type, data, timestamp }.
+      if (raw.data && typeof raw.data === 'object') return raw.data;
+      return raw;
+    };
+
+    const applyScenePayload = (payload: any) => {
+      if (!payload || typeof payload !== 'object') return;
+      if (Array.isArray(payload.scenes)) scenes = payload.scenes;
+      if (Array.isArray(payload.trackEvents)) trackEvents = payload.trackEvents;
+      if (Array.isArray(payload.tracks) && trackEvents.length === 0) trackEvents = payload.tracks;
+      if (typeof payload.narrative === 'string' && payload.narrative) narrative = payload.narrative;
+      if (typeof payload.conclusion === 'string' && payload.conclusion && !narrative) narrative = payload.conclusion;
+      if (Array.isArray(payload.findings)) findings = payload.findings;
+    };
+
+    // Use AbortController for timeout (5 minutes)
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn('[AIPanel] Scene SSE timeout');
+      abortController.abort();
+    }, 5 * 60 * 1000);
+
+    try {
+      // fetchBackend sends API key via x-api-key header (no URL exposure)
+      const response = await this.fetchBackend(sceneSseUrl, {
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Scene SSE connection failed: ${response.statusText}`);
       }
-      const eventSource = new EventSource(sceneSseUrl.toString());
 
-      let scenes: any[] = [];
-      let trackEvents: any[] = [];
-      let narrative = '';
-      let findings: any[] = [];
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body for scene SSE');
+      }
 
-      const unwrapEventData = (raw: any): any => {
-        if (!raw || typeof raw !== 'object') return {};
-        // Agent-driven backend wraps payload as: { type, data, timestamp }.
-        if (raw.data && typeof raw.data === 'object') return raw.data;
-        return raw;
-      };
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE connected');
 
-      const applyScenePayload = (payload: any) => {
-        if (!payload || typeof payload !== 'object') return;
-        if (Array.isArray(payload.scenes)) scenes = payload.scenes;
-        if (Array.isArray(payload.trackEvents)) trackEvents = payload.trackEvents;
-        if (Array.isArray(payload.tracks) && trackEvents.length === 0) trackEvents = payload.tracks;
-        if (typeof payload.narrative === 'string' && payload.narrative) narrative = payload.narrative;
-        if (typeof payload.conclusion === 'string' && payload.conclusion && !narrative) narrative = payload.conclusion;
-        if (Array.isArray(payload.findings)) findings = payload.findings;
-      };
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEventType = '';
 
-      eventSource.onopen = () => {
-        console.log('[AIPanel] Scene SSE connected');
-      };
+      while (true) {
+        if (abortController.signal.aborted) break;
 
-      eventSource.onerror = (error) => {
-        console.error('[AIPanel] Scene SSE error:', error);
-        eventSource.close();
-        reject(new Error('SSE connection failed'));
-      };
-
-      // Handle different event types
-      eventSource.addEventListener('connected', () => {
-        console.log('[AIPanel] Scene SSE: connected event received');
-      });
-
-      eventSource.addEventListener('progress', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          const phase = data.phase || raw.phase;
-          if (!phase) return;
-          console.log('[AIPanel] Scene progress:', phase, data);
-          this.updateMessage(progressMessageId, {
-            content: `🎬 **场景还原中...**\n\n${phase}...`,
-          });
-          m.redraw();
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse progress event:', e);
+        const {done, value} = await reader.read();
+        if (done) {
+          if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE stream ended normally');
+          reader.releaseLock();
+          break;
         }
-      });
 
-      // Backward compatibility with legacy scene SSE.
-      eventSource.addEventListener('phase_start', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log('[AIPanel] Scene phase start:', data);
-          this.updateMessage(progressMessageId, {
-            content: `🎬 **场景还原中...**\n\n${data.phase || '正在分析'}...`,
-          });
-          m.redraw();
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse phase_start event:', e);
-        }
-      });
+        buffer += decoder.decode(value, {stream: true});
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      eventSource.addEventListener('scene_detected', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Scene detected:', data);
-          if (data.scene) {
-            scenes.push(data.scene);
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          if (line.startsWith(':')) continue; // Skip keep-alive comments
+
+          if (line.startsWith('event:')) {
+            currentEventType = line.replace('event:', '').trim();
+          } else if (line.startsWith('data:')) {
+            const dataStr = line.replace('data:', '').trim();
+            if (!dataStr) {
+              currentEventType = '';
+              continue;
+            }
+            try {
+              const rawData = JSON.parse(dataStr);
+              const eventType = currentEventType || rawData.type || '';
+
+              if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE event:', eventType);
+
+              this.handleSceneSSEEvent(
+                eventType, rawData, unwrapEventData, applyScenePayload,
+                progressMessageId, scenes, findings, trackEvents,
+              );
+
+              // Terminal events
+              if (eventType === 'end' || eventType === 'error') {
+                reader.releaseLock();
+                clearTimeout(timeoutId);
+                if (eventType === 'error') {
+                  const errData = unwrapEventData(rawData);
+                  console.error('[AIPanel] Scene SSE error event:', errData);
+                  throw new Error(errData.error || rawData.error || 'Scene reconstruction failed');
+                }
+                // 'end' event - render final result
+                if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE: end event received');
+                this.renderSceneReconstructionResult(progressMessageId, scenes, trackEvents, narrative, findings);
+                this.autoPinTracksForScenes(scenes);
+                return;
+              }
+            } catch (e) {
+              // Re-throw scene errors; only swallow JSON parse failures
+              if (e instanceof Error && e.message.includes('Scene reconstruction')) throw e;
+              console.warn('[AIPanel] Failed to parse scene SSE data:', e);
+            }
+            currentEventType = '';
           }
-          this.updateMessage(progressMessageId, {
-            content: `🎬 **场景还原中...**\n\n已检测到 ${scenes.length} 个场景...`,
-          });
-          m.redraw();
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse scene_detected event:', e);
         }
-      });
+      }
 
-      eventSource.addEventListener('finding', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Scene finding:', data);
-          if (data.finding) {
-            findings.push(data.finding);
-          }
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse finding event:', e);
+      // Stream ended without explicit 'end' event - render what we have
+      this.renderSceneReconstructionResult(progressMessageId, scenes, trackEvents, narrative, findings);
+      this.autoPinTracksForScenes(scenes);
+    } catch (e: any) {
+      if (abortController.signal.aborted && !e.message?.includes('Scene reconstruction')) {
+        throw new Error('Scene reconstruction timeout');
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * Dispatch a single scene SSE event to the appropriate handler.
+   * Extracted to keep connectToSceneSSE readable.
+   */
+  private handleSceneSSEEvent(
+    eventType: string,
+    rawData: any,
+    unwrapEventData: (raw: any) => any,
+    applyScenePayload: (payload: any) => void,
+    progressMessageId: string,
+    scenes: any[],
+    findings: any[],
+    trackEvents: any[],
+  ): void {
+    const data = unwrapEventData(rawData);
+
+    switch (eventType) {
+      case 'connected':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE: connected event received');
+        break;
+
+      case 'progress': {
+        const phase = data.phase || rawData.phase;
+        if (!phase) break;
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene progress:', phase, data);
+        this.updateMessage(progressMessageId, {
+          content: `🎬 **场景还原中...**\n\n${phase}...`,
+        });
+        m.redraw();
+        break;
+      }
+
+      case 'phase_start':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene phase start:', data);
+        this.updateMessage(progressMessageId, {
+          content: `🎬 **场景还原中...**\n\n${data.phase || '正在分析'}...`,
+        });
+        m.redraw();
+        break;
+
+      case 'scene_detected':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene detected:', data);
+        if (data.scene) {
+          scenes.push(data.scene);
         }
-      });
+        this.updateMessage(progressMessageId, {
+          content: `🎬 **场景还原中...**\n\n已检测到 ${scenes.length} 个场景...`,
+        });
+        m.redraw();
+        break;
 
-      eventSource.addEventListener('track_events', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Track events:', data);
-          if (Array.isArray(data.events)) {
-            trackEvents = data.events;
-          } else if (Array.isArray(data.trackEvents)) {
-            trackEvents = data.trackEvents;
-          }
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse track_events:', e);
+      case 'finding':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene finding:', data);
+        if (data.finding) {
+          findings.push(data.finding);
         }
-      });
+        break;
 
-      eventSource.addEventListener('track_data', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Track data:', data);
-          if (Array.isArray(data.scenes)) scenes = data.scenes;
-          if (Array.isArray(data.tracks)) trackEvents = data.tracks;
-          if (Array.isArray(data.trackEvents)) trackEvents = data.trackEvents;
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse track_data event:', e);
+      case 'track_events':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Track events:', data);
+        if (Array.isArray(data.events)) {
+          trackEvents.length = 0;
+          trackEvents.push(...data.events);
+        } else if (Array.isArray(data.trackEvents)) {
+          trackEvents.length = 0;
+          trackEvents.push(...data.trackEvents);
         }
-      });
+        break;
 
-      eventSource.addEventListener('result', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Scene result:', data);
-          applyScenePayload(data);
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse result event:', e);
+      case 'track_data':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Track data:', data);
+        if (Array.isArray(data.scenes)) {
+          scenes.length = 0;
+          scenes.push(...data.scenes);
         }
-      });
-
-      eventSource.addEventListener('analysis_completed', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Analysis completed:', data);
-          applyScenePayload(data);
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse analysis_completed event:', e);
+        if (Array.isArray(data.tracks)) {
+          trackEvents.length = 0;
+          trackEvents.push(...data.tracks);
         }
-      });
-
-      eventSource.addEventListener('scene_reconstruction_completed', (event) => {
-        try {
-          const raw = JSON.parse(event.data);
-          const data = unwrapEventData(raw);
-          console.log('[AIPanel] Scene reconstruction completed:', data);
-          applyScenePayload(data);
-        } catch (e) {
-          console.warn('[AIPanel] Failed to parse scene_reconstruction_completed event:', e);
+        if (Array.isArray(data.trackEvents)) {
+          trackEvents.length = 0;
+          trackEvents.push(...data.trackEvents);
         }
-      });
+        break;
 
-      eventSource.addEventListener('end', () => {
-        console.log('[AIPanel] Scene SSE: end event received');
-        eventSource.close();
+      case 'result':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene result:', data);
+        applyScenePayload(data);
+        break;
 
-        // Render the final result
-        this.renderSceneReconstructionResult(progressMessageId, scenes, trackEvents, narrative, findings);
+      case 'analysis_completed':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Analysis completed:', data);
+        applyScenePayload(data);
+        break;
 
-        // Auto-pin tracks based on detected scenes
-        this.autoPinTracksForScenes(scenes);
+      case 'scene_reconstruction_completed':
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene reconstruction completed:', data);
+        applyScenePayload(data);
+        break;
 
-        resolve();
-      });
-
-      eventSource.addEventListener('error', (event) => {
-        try {
-          const data = JSON.parse((event as any).data || '{}');
-          console.error('[AIPanel] Scene SSE error event:', data);
-          eventSource.close();
-          reject(new Error(data.error || 'Scene reconstruction failed'));
-        } catch (e) {
-          // Not a data event, might be connection error
-          eventSource.close();
-          reject(new Error('Scene reconstruction connection failed'));
-        }
-      });
-
-      // Timeout after 5 minutes
-      setTimeout(() => {
-        if (eventSource.readyState !== EventSource.CLOSED) {
-          console.warn('[AIPanel] Scene SSE timeout');
-          eventSource.close();
-          reject(new Error('Scene reconstruction timeout'));
-        }
-      }, 5 * 60 * 1000);
-    });
+      default:
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE unknown event:', eventType);
+        break;
+    }
   }
 
   /**
@@ -3520,7 +3556,7 @@ Output MUST follow this exact markdown structure:
       .filter(s => s.appPackage)
       .map(s => ({ processName: s.appPackage, frameCount: 1 }));
 
-    console.log('[AIPanel] Auto-pinning tracks for scenes:', sceneTypes, 'with', allInstructions.length, 'instructions');
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Auto-pinning tracks for scenes:', sceneTypes, 'with', allInstructions.length, 'instructions');
 
     // Use existing pinTracksFromInstructions method
     await this.pinTracksFromInstructions(allInstructions, activeProcesses);
@@ -3577,12 +3613,12 @@ Output MUST follow this exact markdown structure:
    */
   private async detectScenesQuick() {
     if (!this.state.backendTraceId) {
-      console.log('[AIPanel] No backend trace ID, skipping quick scene detection');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] No backend trace ID, skipping quick scene detection');
       return;
     }
 
     if (this.state.scenesLoading) {
-      console.log('[AIPanel] Scene detection already in progress');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene detection already in progress');
       return;
     }
 
@@ -3590,7 +3626,7 @@ Output MUST follow this exact markdown structure:
     this.state.scenesError = null;
     m.redraw();
 
-    console.log('[AIPanel] Starting quick scene detection for trace:', this.state.backendTraceId);
+    if (DEBUG_AI_PANEL) console.log('[AIPanel] Starting quick scene detection for trace:', this.state.backendTraceId);
 
     try {
       const response = await this.fetchBackend(buildAssistantApiV1Url(this.state.settings.backendUrl, '/scene-detect-quick'), {
@@ -3612,7 +3648,7 @@ Output MUST follow this exact markdown structure:
       }
 
       this.state.detectedScenes = data.scenes || [];
-      console.log('[AIPanel] Quick scene detection complete:', this.state.detectedScenes.length, 'scenes');
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Quick scene detection complete:', this.state.detectedScenes.length, 'scenes');
 
     } catch (error: any) {
       console.warn('[AIPanel] Quick scene detection failed:', error.message);
@@ -3739,9 +3775,9 @@ Output MUST follow this exact markdown structure:
     // Debug: Log available track names and active processes
     if (flatTracks) {
       const trackNames = flatTracks.slice(0, 50).map(t => t.name);
-      console.log('[AIPanel] Available track names (first 50):', trackNames);
-      console.log('[AIPanel] Active rendering processes:', Array.from(activeProcessNames));
-      console.log('[AIPanel] Active surface hints:', Array.from(activityHints));
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Available track names (first 50):', trackNames);
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Active rendering processes:', Array.from(activeProcessNames));
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Active surface hints:', Array.from(activityHints));
     }
 
     // Try using the PinTracksByRegex command first (Perfetto built-in) - but only for non-smart patterns
@@ -3751,7 +3787,7 @@ Output MUST follow this exact markdown structure:
       try {
         // v3.1: Skip instructions marked with skipPin (e.g., RenderThread with no active processes)
         if (inst.skipPin) {
-          console.log(`[AIPanel] Skipped by skipPin flag: ${inst.pattern} - ${inst.reason || 'no reason'}`);
+          if (DEBUG_AI_PANEL) console.log(`[AIPanel] Skipped by skipPin flag: ${inst.pattern} - ${inst.reason || 'no reason'}`);
           pinnedCount.skipped++;
           continue;
         }
@@ -3909,7 +3945,7 @@ Output MUST follow this exact markdown structure:
     }
 
     if (pinnedCount.count > 0 || pinnedCount.skipped > 0) {
-      console.log(`[AIPanel] Pinned ${pinnedCount.count} tracks for teaching (skipped ${pinnedCount.skipped} inactive)`);
+      if (DEBUG_AI_PANEL) console.log(`[AIPanel] Pinned ${pinnedCount.count} tracks for teaching (skipped ${pinnedCount.skipped} inactive)`);
     }
   }
 
@@ -4086,7 +4122,7 @@ Output MUST follow this exact markdown structure:
       const startNs = timestampNs - windowNs / BigInt(2);
       const endNs = timestampNs + windowNs / BigInt(2);
 
-      console.log(`[AIPanel] Jumping to timestamp: ${timestampNs}ns`);
+      if (DEBUG_AI_PANEL) console.log(`[AIPanel] Jumping to timestamp: ${timestampNs}ns`);
 
       this.trace.scrollTo({
         time: {
@@ -4380,7 +4416,7 @@ Output MUST follow this exact markdown structure:
     // 更新书签列表
     if (bookmarks.length > 0) {
       this.state.bookmarks = bookmarks;
-      console.log(`Extracted ${bookmarks.length} bookmarks from query result`);
+      if (DEBUG_AI_PANEL) console.log(`Extracted ${bookmarks.length} bookmarks from query result`);
     }
   }
 
