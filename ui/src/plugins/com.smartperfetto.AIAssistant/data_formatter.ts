@@ -66,6 +66,34 @@ markdownRenderer.renderer.rules.table_open = (tokens, idx, options, env, self) =
   return defaultTableOpenRenderer(tokens, idx, options, env, self);
 };
 
+const defaultFenceRenderer = markdownRenderer.renderer.rules.fence ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+markdownRenderer.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const info = String(token.info || '').trim().split(/\s+/)[0].toLowerCase();
+  if (info !== 'mermaid') {
+    return defaultFenceRenderer(tokens, idx, options, env, self);
+  }
+
+  const mermaidCode = String(token.content || '').trim();
+  if (!mermaidCode) {
+    return '<div class="ai-mermaid-error">Mermaid 源码为空</div>';
+  }
+  const b64 = encodeBase64Unicode(mermaidCode);
+  return [
+    '<div class="ai-mermaid-block">',
+    `<div class="ai-mermaid-diagram" data-mermaid-b64="${b64}"></div>`,
+    '<details class="ai-mermaid-details">',
+    '<summary>查看 Mermaid 源码</summary>',
+    '<div class="ai-mermaid-actions">',
+    `<button class="ai-mermaid-copy" data-mermaid-b64="${b64}" type="button">复制代码</button>`,
+    '</div>',
+    `<pre class="ai-mermaid-source" data-mermaid-b64="${b64}"></pre>`,
+    '</details>',
+    '</div>',
+  ].join('');
+};
+
 function normalizeMarkdownSpacing(content: string): string {
   return String(content || '')
     .replace(/\r\n/g, '\n')

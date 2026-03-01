@@ -29,6 +29,11 @@ import {Trace} from '../../public/trace';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
 import {AppImpl} from '../../core/app_impl';
 import {getBackendUploader} from '../../core/backend_uploader';
+import {
+  getBackendUploadState,
+  subscribeBackendUploadState,
+  type BackendUploadSnapshot,
+} from '../../core/backend_upload_state';
 import {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
 // Note: generated types are used by SSE event handlers module
@@ -52,7 +57,6 @@ import {
 // Agent-Driven Architecture v2.0 - Intervention Panel
 import {InterventionPanel, DEFAULT_INTERVENTION_STATE} from './intervention_panel';
 import {
-  encodeBase64Unicode,
   decodeBase64Unicode,
   formatMessage,
 } from './data_formatter';
@@ -63,6 +67,10 @@ import {
   handleSSEEvent as handleSSEEventExternal,
   SSEHandlerContext,
 } from './sse_event_handlers';
+import {
+  subscribeClearChat,
+  subscribeOpenSettings,
+} from './assistant_command_bus';
 // Scene reconstruction module available for future integration
 // import {SceneReconstructionHandler, SceneHandlerContext} from './scene_reconstruction';
 
@@ -70,13 +78,6 @@ export interface AIPanelAttrs {
   engine: Engine;
   trace: Trace;
 }
-
-type AppBackendUploadState = {
-  backendTraceId?: string;
-  backendUploadPromise?: Promise<void>;
-  backendUploadState?: 'idle' | 'uploading' | 'ready' | 'failed';
-  backendUploadError?: string;
-};
 
 // Re-export types for backward compatibility with external consumers
 export {Message, SqlQueryResult, AISettings, AISession, PinnedResult} from './types';
@@ -131,18 +132,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     streamingAnswer: createStreamingAnswerState(),
   };
 
-  private onClearChat?: () => void;
-  private onOpenSettings?: () => void;
-  private onBackendUploadComplete?: (e: Event) => void;
-  private onBackendUploadFailed?: (e: Event) => void;
+  private unsubscribeClearChat?: () => void;
+  private unsubscribeOpenSettings?: () => void;
+  private unsubscribeBackendUpload?: () => void;
+  private lastBackendUploadState: BackendUploadSnapshot = getBackendUploadState();
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
-
-  private getAppBackendUploadState(): AppBackendUploadState {
-    return AppImpl.instance as unknown as AppBackendUploadState;
-  }
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
@@ -217,12 +214,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private handleTraceChange(): void {
     const newFingerprint = this.getTraceFingerprint();
     const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
-    const appBackendState = this.getAppBackendUploadState();
+    const backendUploadState = getBackendUploadState();
 
-    // Auto-RPC: Try to get backendTraceId from AppImpl (set by background upload in load_trace.ts)
-    const appBackendTraceId = appBackendState.backendTraceId;
-    const appBackendUploadState = appBackendState.backendUploadState;
-    const appBackendUploadError = appBackendState.backendUploadError;
+    // Auto-RPC: Try to get backendTraceId from shared backend upload state.
+    const appBackendTraceId = backendUploadState.traceId;
+    const appBackendUploadState = backendUploadState.state;
+    const appBackendUploadError = backendUploadState.error;
 
     console.log('[AIPanel] Trace fingerprint check:', {
       new: newFingerprint,
@@ -235,7 +232,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       engineInRpcMode,
     });
 
-    // If we have a backendTraceId from AppImpl (upload already completed), use it
+    // If upload already completed, reuse the backend trace id.
     if (appBackendTraceId && !this.state.backendTraceId) {
       console.log('[AIPanel] Using backendTraceId from auto-upload:', appBackendTraceId);
       this.state.backendTraceId = appBackendTraceId;
@@ -530,62 +527,61 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 上传完成/失败后更新状态
    */
   private listenForBackendUpload(): void {
-    // Clean up any previous listeners
-    if (this.onBackendUploadComplete) {
-      window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
-    }
-    if (this.onBackendUploadFailed) {
-      window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
+    if (this.unsubscribeBackendUpload) {
+      this.unsubscribeBackendUpload();
+      this.unsubscribeBackendUpload = undefined;
     }
 
-    this.onBackendUploadComplete = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.traceId) {
-        this.state.backendTraceId = detail.traceId;
-        console.log('[AIPanel] Backend upload complete, traceId:', detail.traceId);
+    const handleSnapshot = (snapshot: BackendUploadSnapshot): void => {
+      const previous = this.lastBackendUploadState;
+      this.lastBackendUploadState = snapshot;
 
-        // Update with connected message
+      if (snapshot.state === 'ready' && snapshot.traceId) {
+        const isNewReadyState =
+          previous.state !== 'ready' || previous.traceId !== snapshot.traceId;
+        if (!isNewReadyState) return;
+
+        this.state.backendTraceId = snapshot.traceId;
+        console.log('[AIPanel] Backend upload complete, traceId:', snapshot.traceId);
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
           content: `✅ **AI 后端已连接**\n\nAI 分析后端已就绪，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
           timestamp: Date.now(),
         });
-
         this.saveCurrentSession();
         this.detectScenesQuick();
         m.redraw();
+
+        if (this.unsubscribeBackendUpload) {
+          this.unsubscribeBackendUpload();
+          this.unsubscribeBackendUpload = undefined;
+        }
+        return;
       }
 
-      // One-shot: remove listeners after first terminal event
-      if (this.onBackendUploadComplete) {
-        window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
-        this.onBackendUploadComplete = undefined;
-      }
-      if (this.onBackendUploadFailed) {
-        window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
-        this.onBackendUploadFailed = undefined;
+      if (snapshot.state === 'failed') {
+        const isNewFailedState =
+          previous.state !== 'failed' || previous.error !== snapshot.error;
+        if (!isNewFailedState) return;
+
+        console.warn('[AIPanel] Backend upload failed:', snapshot.error ?? 'unknown error');
+        this.addBackendUnavailableMessage(snapshot.error);
+        if (this.unsubscribeBackendUpload) {
+          this.unsubscribeBackendUpload();
+          this.unsubscribeBackendUpload = undefined;
+        }
       }
     };
 
-    this.onBackendUploadFailed = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      const errorText = detail?.error ? String(detail.error) : undefined;
-      console.warn('[AIPanel] Backend upload failed:', errorText ?? 'unknown error');
-      this.addBackendUnavailableMessage(errorText);
+    const current = getBackendUploadState();
+    this.lastBackendUploadState = current;
+    if (current.state === 'ready' || current.state === 'failed') {
+      handleSnapshot(current);
+      return;
+    }
 
-      if (this.onBackendUploadComplete) {
-        window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
-        this.onBackendUploadComplete = undefined;
-      }
-      if (this.onBackendUploadFailed) {
-        window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
-        this.onBackendUploadFailed = undefined;
-      }
-    };
-
-    window.addEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
-    window.addEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
+    this.unsubscribeBackendUpload = subscribeBackendUploadState(handleSnapshot);
   }
 
   /**
@@ -616,11 +612,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   oncreate(_vnode: m.VnodeDOM<AIPanelAttrs>) {
-    // Listen for custom events (requires DOM)
-    this.onClearChat = () => this.clearChat();
-    this.onOpenSettings = () => this.openSettings();
-    window.addEventListener('ai-assistant:clear-chat', this.onClearChat);
-    window.addEventListener('ai-assistant:open-settings', this.onOpenSettings);
+    // Subscribe to assistant command bus.
+    this.unsubscribeClearChat = subscribeClearChat(() => {
+      void this.clearChat();
+    });
+    this.unsubscribeOpenSettings = subscribeOpenSettings(() => {
+      this.openSettings();
+    });
 
     // Focus input (requires DOM)
     setTimeout(() => {
@@ -633,19 +631,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   onremove() {
     this.cancelSSEConnection();
     this.resetInterventionState();
-    if (this.onClearChat) {
-      window.removeEventListener('ai-assistant:clear-chat', this.onClearChat);
+    if (this.unsubscribeClearChat) {
+      this.unsubscribeClearChat();
+      this.unsubscribeClearChat = undefined;
     }
-    if (this.onOpenSettings) {
-      window.removeEventListener('ai-assistant:open-settings', this.onOpenSettings);
+    if (this.unsubscribeOpenSettings) {
+      this.unsubscribeOpenSettings();
+      this.unsubscribeOpenSettings = undefined;
     }
-    if (this.onBackendUploadComplete) {
-      window.removeEventListener('perfetto:backend-upload-complete', this.onBackendUploadComplete);
-      this.onBackendUploadComplete = undefined;
-    }
-    if (this.onBackendUploadFailed) {
-      window.removeEventListener('perfetto:backend-upload-failed', this.onBackendUploadFailed);
-      this.onBackendUploadFailed = undefined;
+    if (this.unsubscribeBackendUpload) {
+      this.unsubscribeBackendUpload();
+      this.unsubscribeBackendUpload = undefined;
     }
   }
 
@@ -656,8 +652,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // With non-blocking upload, WASM engine is used for UI while backend runs separately
     const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
     const hasBackendTrace = !!this.state.backendTraceId;
-    const appBackendState = this.getAppBackendUploadState();
-    const hasUploadInProgress = appBackendState.backendUploadState === 'uploading';
+    const backendUploadState = getBackendUploadState();
+    const hasUploadInProgress = backendUploadState.state === 'uploading';
     const isInRpcMode = engineInRpcMode || hasBackendTrace || hasUploadInProgress;
 
     // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
@@ -875,7 +871,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     if (target.classList.contains('ai-clickable-timestamp')) {
                       const tsNs = target.getAttribute('data-ts');
                       if (tsNs) {
-                        this.jumpToTimestamp(BigInt(tsNs));
+                        const timestampNs = BigInt(tsNs);
+                        const navigation = this.jumpToTimestamp(timestampNs);
+                        if (!navigation.ok) {
+                          this.addMessage({
+                            id: this.generateId(),
+                            role: 'assistant',
+                            content: `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+                            timestamp: Date.now(),
+                          });
+                        }
                       }
                     }
                   },
@@ -1927,8 +1932,8 @@ Click ⚙️ to change settings.`;
       return;
     }
 
-    const timestamp = parseInt(ts, 10);
-    if (isNaN(timestamp)) {
+    const normalized = ts.trim().replace(/ns$/i, '').trim();
+    if (!/^\d+$/.test(normalized)) {
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
@@ -1938,15 +1943,24 @@ Click ⚙️ to change settings.`;
       return;
     }
 
-    // Navigate to timestamp
+    const timestampNs = BigInt(normalized);
+    const navigation = this.jumpToTimestamp(timestampNs);
+    if (!navigation.ok) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `Navigated to timestamp ${timestamp}.`,
+      content: `Navigated to timestamp ${timestampNs.toString()}ns.`,
       timestamp: Date.now(),
     });
-
-    // TODO: Implement actual navigation when API is available
   }
 
   private async handleAnalyzeCommand() {
@@ -2908,19 +2922,10 @@ Output MUST follow this exact markdown structure:
       if (teaching.mermaidBlocks && teaching.mermaidBlocks.length > 0) {
         content += `#### 时序图\n\n`;
         const mermaidCode = teaching.mermaidBlocks[0];
-        const b64 = encodeBase64Unicode(mermaidCode);
-
-        // Diagram placeholder - rendered on the client by mermaid.js
-        content += `<div class="ai-mermaid-block">`;
-        content += `<div class="ai-mermaid-diagram" data-mermaid-b64="${b64}"></div>`;
-        content += `<details class="ai-mermaid-details">`;
-        content += `<summary>📝 查看 Mermaid 源码</summary>`;
-        content += `<div class="ai-mermaid-actions">`;
-        content += `<button class="ai-mermaid-copy" data-mermaid-b64="${b64}" type="button">复制代码</button>`;
-        content += `</div>`;
-        content += `<pre class="ai-mermaid-source" data-mermaid-b64="${b64}"></pre>`;
-        content += `</details>`;
-        content += `</div>\n\n`;
+        // Use fenced mermaid block so formatter can safely convert to renderable placeholder.
+        content += '```mermaid\n';
+        content += `${mermaidCode}\n`;
+        content += '```\n\n';
       }
 
       // Trace requirements warning
@@ -4010,10 +4015,19 @@ Output MUST follow this exact markdown structure:
   /**
    * Jump to a specific timestamp in the Perfetto timeline
    */
-  private jumpToTimestamp(timestampNs: bigint): void {
+  private jumpToTimestamp(timestampNs: bigint): {ok: true} | {ok: false; error: string} {
     if (!this.trace) {
       console.error('[AIPanel] No trace available for navigation');
-      return;
+      return {ok: false, error: 'trace context is not available'};
+    }
+
+    const traceStart = this.trace.traceInfo.start as unknown as bigint;
+    const traceEnd = this.trace.traceInfo.end as unknown as bigint;
+    if (timestampNs < traceStart || timestampNs > traceEnd) {
+      return {
+        ok: false,
+        error: `timestamp is outside trace range [${traceStart.toString()}ns, ${traceEnd.toString()}ns]`,
+      };
     }
 
     try {
@@ -4030,8 +4044,11 @@ Output MUST follow this exact markdown structure:
           end: Time.fromRaw(endNs),
         },
       });
+      return {ok: true};
     } catch (error) {
       console.error('[AIPanel] Failed to jump to timestamp:', error);
+      const errorText = error instanceof Error ? error.message : String(error);
+      return {ok: false, error: errorText};
     }
   }
 
@@ -4039,26 +4056,13 @@ Output MUST follow this exact markdown structure:
     this.cancelSSEConnection();
     this.resetInterventionState();
 
-    // First, cleanup backend resources if a trace was uploaded
-    if (this.state.backendTraceId) {
-      try {
-        const response = await this.fetchBackend(
-          `${this.state.settings.backendUrl}/api/traces/${this.state.backendTraceId}`,
-          { method: 'DELETE' }
-        );
-        if (response.ok) {
-          console.log(`[AIPanel] Backend trace ${this.state.backendTraceId} deleted`);
-        }
-      } catch (error) {
-        console.error('[AIPanel] Failed to cleanup backend trace:', error);
-      }
-    }
+    // Do not delete backend trace resources when clearing chat.
+    // Clear-chat resets conversation state only and preserves trace continuity.
 
     // Clear frontend state
     this.state.messages = [];
     this.state.commandHistory = [];
     this.state.historyIndex = -1;
-    this.state.backendTraceId = null;  // Clear backend trace ID
     this.state.pinnedResults = [];  // Clear pinned results
     this.state.agentSessionId = null;  // Clear Agent session for multi-turn dialogue
     this.clearAgentObservability();

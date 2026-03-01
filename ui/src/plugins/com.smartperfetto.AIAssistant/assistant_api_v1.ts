@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-export const ASSISTANT_API_V1_BASE = '/api/assistant/v1';
+export const ASSISTANT_API_V1_BASE = '/api/agent/v1';
 
 function trimTrailingSlash(value: string): string {
   return String(value || '').replace(/\/+$/, '');

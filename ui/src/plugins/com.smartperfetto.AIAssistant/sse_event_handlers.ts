@@ -2423,7 +2423,7 @@ export function handleErrorEvent(
   failStreamingAnswer(ctx);
 
   const payload = eventPayload(data);
-  const error = readStringField(payload, 'error');
+  const error = readStringField(payload, 'error') || readStringField(payload, 'message');
 
   if (error) {
     failStreamingFlow(ctx, error);

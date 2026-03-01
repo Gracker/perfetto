@@ -97,7 +97,7 @@ export class BackendProxyService extends AIService {
   }
 
   async chat(messages: AIMessage[]): Promise<string> {
-    const url = `${this.backendUrl}/chat/completions`;
+    const url = `${this.backendUrl}/api/agent/v1/llm/completions`;
     console.log('[BackendProxyService] Sending request to:', url);
     console.log('[BackendProxyService] Messages:', messages);
 
@@ -131,7 +131,7 @@ export class BackendProxyService extends AIService {
   }
 
   async testConnection(): Promise<boolean> {
-    const url = `${this.backendUrl}/chat/completions`;
+    const url = `${this.backendUrl}/api/agent/v1/llm/completions`;
     console.log('[BackendProxyService] Testing connection to:', url);
 
     try {

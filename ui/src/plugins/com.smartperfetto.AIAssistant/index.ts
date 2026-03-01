@@ -16,6 +16,10 @@ import m from 'mithril';
 import {PerfettoPlugin} from '../../public/plugin';
 import {Trace} from '../../public/trace';
 import {AIPanel} from './ai_panel';
+import {
+  emitClearChatCommand,
+  emitOpenSettingsCommand,
+} from './assistant_command_bus';
 
 export default class implements PerfettoPlugin {
   static readonly id = 'com.smartperfetto.AIAssistant';
@@ -52,8 +56,7 @@ export default class implements PerfettoPlugin {
       id: 'com.smartperfetto.AIAssistant.ClearChat',
       name: 'Clear AI Chat',
       callback: () => {
-        // Trigger clear chat event
-        window.dispatchEvent(new CustomEvent('ai-assistant:clear-chat'));
+        emitClearChatCommand();
       },
     });
 
@@ -61,8 +64,7 @@ export default class implements PerfettoPlugin {
       id: 'com.smartperfetto.AIAssistant.Settings',
       name: 'AI Assistant Settings',
       callback: () => {
-        // Trigger settings event
-        window.dispatchEvent(new CustomEvent('ai-assistant:open-settings'));
+        emitOpenSettingsCommand();
       },
     });
   }

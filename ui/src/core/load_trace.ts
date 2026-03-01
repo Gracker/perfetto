@@ -51,6 +51,7 @@ import {base64Decode} from '../base/string_utils';
 import {parseUrlCommands} from './command_manager';
 import {HighPrecisionTimeSpan} from '../base/high_precision_time_span';
 import {getBackendUploader} from './backend_uploader';
+import {setBackendUploadState} from './backend_upload_state';
 import {sha1} from '../base/hash';
 
 const ENABLE_CHROME_RELIABLE_RANGE_ZOOM_FLAG = featureFlags.register({
@@ -140,36 +141,26 @@ async function createEngine(
   engineId: string,
   traceSource: TraceSource,
 ): Promise<EngineBase> {
-  const appWithBackendState = app as unknown as {
-    backendTraceId?: string;
-    backendUploadPromise?: Promise<void>;
-    backendUploadState?: 'idle' | 'uploading' | 'ready' | 'failed';
-    backendUploadError?: string;
-  };
-
   // === Background upload to AI backend (non-blocking) ===
   // Upload runs in the background while WASM engine is created immediately.
-  // When upload completes, a CustomEvent notifies plugins (e.g. AI panel).
+  // Upload status is published through backend_upload_state.
   // This creates two independent trace_processor instances:
   // - WASM in-browser for UI queries (immediate)
   // - trace_processor_shell for AI analysis (deferred)
   if (traceSource.type !== 'HTTP_RPC') {
-    appWithBackendState.backendUploadState = 'uploading';
-    appWithBackendState.backendUploadError = undefined;
+    setBackendUploadState({
+      state: 'uploading',
+    });
 
     const uploader = getBackendUploader();
     const notifyUploadFailed = (error: string): void => {
-      appWithBackendState.backendUploadState = 'failed';
-      appWithBackendState.backendUploadError = error;
-      window.dispatchEvent(
-        new CustomEvent('perfetto:backend-upload-failed', {
-          detail: {error},
-        }),
-      );
+      setBackendUploadState({
+        state: 'failed',
+        error,
+      });
     };
 
-    let uploadPromise: Promise<void> | undefined;
-    uploadPromise = (async () => {
+    void (async () => {
       try {
         const backendAvailable = await uploader.checkAvailable();
         if (!backendAvailable) {
@@ -184,16 +175,10 @@ async function createEngine(
           console.log(
             `[AutoRPC] Background upload complete, traceId=${result.traceId}, port=${result.port}`,
           );
-          appWithBackendState.backendTraceId = result.traceId ?? '';
-          appWithBackendState.backendUploadState = 'ready';
-          appWithBackendState.backendUploadError = undefined;
-
-          // Notify plugins that backend is ready
-          window.dispatchEvent(
-            new CustomEvent('perfetto:backend-upload-complete', {
-              detail: {traceId: result.traceId, port: result.port},
-            }),
-          );
+          setBackendUploadState({
+            state: 'ready',
+            traceId: result.traceId ?? '',
+          });
         } else {
           const error = result.error ?? 'Background upload failed';
           console.warn('[AutoRPC] Background upload failed:', error);
@@ -202,22 +187,12 @@ async function createEngine(
       } catch (error) {
         console.warn('[AutoRPC] Background upload error:', error);
         notifyUploadFailed(String(error));
-      } finally {
-        // Clear upload promise regardless of outcome.
-        if (
-          uploadPromise !== undefined &&
-          appWithBackendState.backendUploadPromise === uploadPromise
-        ) {
-          appWithBackendState.backendUploadPromise = undefined;
-        }
       }
     })();
-
-    // Store promise so plugins can optionally await it
-    appWithBackendState.backendUploadPromise = uploadPromise;
   } else {
-    appWithBackendState.backendUploadState = 'idle';
-    appWithBackendState.backendUploadError = undefined;
+    setBackendUploadState({
+      state: 'idle',
+    });
   }
 
   // === Create engine immediately (no blocking on upload) ===
