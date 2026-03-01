@@ -140,10 +140,31 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private lastMessageCount = 0;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
+  // Paragraph-level progressive reveal: tracks how many children have been animated per message
+  private revealedBlockCounts = new Map<string, number>();
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
     await mermaidRenderer.renderMermaidInElement(container);
+  }
+
+  /**
+   * Apply paragraph-level progressive reveal animation to message content.
+   * Only animates block-level children that haven't been revealed yet,
+   * enabling incremental streaming: already-revealed blocks appear instantly
+   * while new blocks fade in with a staggered delay.
+   */
+  private applyBlockReveal(dom: HTMLElement, msgId: string): void {
+    const children = Array.from(dom.children) as HTMLElement[];
+    const alreadyRevealed = this.revealedBlockCounts.get(msgId) ?? 0;
+
+    for (let i = alreadyRevealed; i < children.length; i++) {
+      const child = children[i];
+      child.classList.add('ai-reveal-block');
+      child.style.animationDelay = `${(i - alreadyRevealed) * 60}ms`;
+    }
+
+    this.revealedBlockCounts.set(msgId, children.length);
   }
 
   private async copyTextToClipboard(text: string): Promise<boolean> {
@@ -888,6 +909,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     const dom = vnode.dom as HTMLElement;
                     dom.innerHTML = formatMessage(msg.content);
                     void this.renderMermaidInElement(dom);
+                    if (msg.role === 'assistant' && !isProgressMessage) {
+                      this.applyBlockReveal(dom, msg.id);
+                    }
                   },
                   onupdate: (vnode: m.VnodeDOM) => {
                     const newHtml = formatMessage(msg.content);
@@ -896,6 +920,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     if (dom.innerHTML !== newHtml) {
                       dom.innerHTML = newHtml;
                       void this.renderMermaidInElement(dom);
+                      if (msg.role === 'assistant' && !isProgressMessage) {
+                        this.applyBlockReveal(dom, msg.id);
+                      }
                     }
                   },
                 }),
@@ -1187,12 +1214,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   onkeydown: (e: KeyboardEvent) => this.handleKeyDown(e),
                   disabled: this.state.isLoading || !this.state.aiService,
                 }),
-                m('button.ai-send-btn', {
-                  class: this.state.isLoading || !this.state.aiService ? 'disabled' : '',
-                  onclick: () => this.sendMessage(),
-                  disabled: this.state.isLoading || !this.state.aiService,
-                  title: 'Send (Enter)',
-                }, m('i.pf-icon', this.state.isLoading ? 'more_horiz' : 'send')),
+                this.state.isLoading
+                  ? m('button.ai-send-btn.ai-stop-btn', {
+                      onclick: () => this.cancelAnalysis(),
+                      title: 'Stop analysis',
+                    }, m('i.pf-icon', 'stop_circle'))
+                  : m('button.ai-send-btn', {
+                      class: !this.state.aiService ? 'disabled' : '',
+                      onclick: () => this.sendMessage(),
+                      disabled: !this.state.aiService,
+                      title: 'Send (Enter)',
+                    }, m('i.pf-icon', 'send')),
               ]),
               m('div.ai-input-hint', 'Press Enter to send, Shift+Enter for new line'),
               !this.state.aiService
@@ -2595,6 +2627,24 @@ Output MUST follow this exact markdown structure:
       this.sseAbortController = null;
     }
     this.state.sseConnectionState = 'disconnected';
+  }
+
+  /**
+   * User-initiated analysis cancellation. Aborts the SSE stream,
+   * resets loading state, and adds a cancellation notice to chat.
+   */
+  private cancelAnalysis(): void {
+    this.cancelSSEConnection();
+    this.state.isLoading = false;
+    this.resetStreamingFlow();
+    this.resetStreamingAnswer();
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: '分析已取消。',
+      timestamp: Date.now(),
+    });
+    m.redraw();
   }
 
   private resetInterventionState(): void {
@@ -4065,6 +4115,7 @@ Output MUST follow this exact markdown structure:
     this.state.historyIndex = -1;
     this.state.pinnedResults = [];  // Clear pinned results
     this.state.agentSessionId = null;  // Clear Agent session for multi-turn dialogue
+    this.revealedBlockCounts.clear();
     this.clearAgentObservability();
     this.resetStreamingFlow();
     this.resetStreamingAnswer();

@@ -46,7 +46,7 @@ describe('AIPanel /goto navigation', () => {
 
     expect(result).toEqual({ok: true});
     expect(scrollTo).toHaveBeenCalledTimes(1);
-    const arg = scrollTo.mock.calls[0][0];
+    const arg = scrollTo.mock.calls[0][0] as any;
     expect(arg.time.start).toBe(0n);
     expect(arg.time.end).toBe(5000001n);
   });

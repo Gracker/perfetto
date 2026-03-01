@@ -94,6 +94,29 @@ markdownRenderer.renderer.rules.fence = (tokens, idx, options, env, self) => {
   ].join('');
 };
 
+/**
+ * Escape HTML special characters to prevent XSS when inserting text into HTML.
+ */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Defense-in-depth HTML sanitizer. Strips dangerous tags and event handler
+ * attributes from rendered HTML. Primary protection comes from markdown-it's
+ * html:false setting; this catches any bypasses or future regressions.
+ */
+export function sanitizeHtml(html: string): string {
+  return html
+    .replace(/<\/?(?:script|iframe|object|embed|form|meta|link|base|applet|frame|frameset)\b[^>]*>/gi, '')
+    .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi, '')
+    .replace(/((?:href|src|action)\s*=\s*["'])javascript:/gi, '$1about:blank');
+}
+
 function normalizeMarkdownSpacing(content: string): string {
   return String(content || '')
     .replace(/\r\n/g, '\n')
@@ -334,7 +357,7 @@ export function formatMessage(content: string): string {
   const normalized = normalizeMarkdownSpacing(content);
   const withTimestampLinks = encodeTimestampMarkers(normalized);
   const rendered = markdownRenderer.render(withTimestampLinks).trim();
-  return decodeTimestampLinks(rendered);
+  return sanitizeHtml(decodeTimestampLinks(rendered));
 }
 
 /**

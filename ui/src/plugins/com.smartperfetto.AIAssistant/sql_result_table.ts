@@ -23,6 +23,7 @@ import {
 import {
   getColumnClasses,
 } from './renderers/formatters';
+import {escapeHtml} from './data_formatter';
 
 /**
  * User interaction data for focus tracking (Agent-Driven Architecture v2.0).
@@ -1404,7 +1405,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private formatMarkdown(content: string): string {
     if (!content) return '';
 
-    return content
+    return escapeHtml(content)
       // 粗体
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       // 斜体

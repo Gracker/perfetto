@@ -477,6 +477,24 @@
   }
 }
 
+// Paragraph-level progressive reveal for assistant message blocks.
+// Each block-level child fades in with a staggered delay set via JS.
+@keyframes revealBlock {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ai-message-content > .ai-reveal-block {
+  opacity: 0;
+  animation: revealBlock 0.3s ease-out forwards;
+}
+
 // Avatar - compact for height efficiency
 .ai-avatar {
   width: 24px;
@@ -895,6 +913,16 @@
 
     .pf-icon {
       animation: spin 1s linear infinite;
+    }
+  }
+
+  &.ai-stop-btn {
+    background: var(--chat-error, #ef4444);
+
+    &:hover {
+      background: #dc2626;
+      transform: scale(1.05);
+      box-shadow: var(--chat-shadow-sm);
     }
   }
 }
