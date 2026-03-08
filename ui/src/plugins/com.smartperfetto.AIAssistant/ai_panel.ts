@@ -87,13 +87,22 @@ export {Message, SqlQueryResult, AISettings, AISession, PinnedResult} from './ty
 // All styles are now in styles.scss using CSS classes
 // Removed inline STYLES, THEME, ANIMATIONS objects for better maintainability
 
+/** Detect system dark mode preference. Updates reactively when user toggles OS theme. */
+function detectDarkMode(): boolean {
+  return typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-color-scheme: dark)').matches === true;
+}
+
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
+  private isDarkMode = detectDarkMode();
+  private darkModeListener?: () => void;
   private state: AIPanelState = {
     messages: [],
     input: '',
     isLoading: false,
+    loadingPhase: '',
     showSettings: false,
     aiService: null,
     settings: {...DEFAULT_SETTINGS},
@@ -140,6 +149,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private lastBackendUploadState: BackendUploadSnapshot = getBackendUploadState();
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
+  private scrollThrottleTimer: ReturnType<typeof setTimeout> | null = null;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
   // Paragraph-level progressive reveal: tracks how many children have been animated per message
@@ -643,6 +653,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.openSettings();
     });
 
+    // Listen for OS dark mode changes
+    const mql = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (mql) {
+      this.darkModeListener = () => {
+        this.isDarkMode = mql.matches;
+        m.redraw();
+      };
+      mql.addEventListener('change', this.darkModeListener);
+    }
+
     // Focus input (requires DOM)
     setTimeout(() => {
       const textarea = document.getElementById('ai-input') as HTMLTextAreaElement;
@@ -661,6 +681,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.unsubscribeOpenSettings) {
       this.unsubscribeOpenSettings();
       this.unsubscribeOpenSettings = undefined;
+    }
+    // Clean up dark mode listener
+    if (this.darkModeListener) {
+      window.matchMedia?.('(prefers-color-scheme: dark)')
+        ?.removeEventListener('change', this.darkModeListener);
+      this.darkModeListener = undefined;
     }
     if (this.unsubscribeBackendUpload) {
       this.unsubscribeBackendUpload();
@@ -685,6 +711,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     return m(
       'div.ai-panel',
+      { 'data-theme': this.isDarkMode ? 'dark' : 'light' },
       [
         // Settings Modal
         this.state.showSettings
@@ -705,6 +732,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               class: isConnected ? 'connected' : 'disconnected',
             }),
             m('span.ai-status-text', providerLabel),
+            // SSE streaming status (visible during analysis)
+            this.state.sseConnectionState !== 'disconnected'
+              ? m('span.ai-status-dot', {
+                  class: `sse-${this.state.sseConnectionState}`,
+                  title: {
+                    connecting: 'Connecting to analysis stream...',
+                    connected: 'Streaming analysis results',
+                    reconnecting: `Reconnecting (${this.state.sseRetryCount}/${this.state.sseMaxRetries})...`,
+                  }[this.state.sseConnectionState] || '',
+                })
+              : null,
+            this.state.sseConnectionState !== 'disconnected'
+              ? m('span.ai-status-text', {
+                  connecting: 'Connecting...',
+                  connected: 'Streaming',
+                  reconnecting: `Retry ${this.state.sseRetryCount}/${this.state.sseMaxRetries}`,
+                }[this.state.sseConnectionState] || '')
+              : null,
             // Backend trace status
             isInRpcMode
               ? m('span.ai-status-dot.backend', {
@@ -763,6 +808,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   isLoading: this.state.scenesLoading,
                   onSceneClick: (scene, index) => {
                     if (DEBUG_AI_PANEL) console.log(`[AIPanel] Jumped to scene ${index}: ${scene.type}`);
+                    this.analyzeScene(scene);
                   },
                   onRefresh: () => this.detectScenesQuick(),
                 })
@@ -779,9 +825,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 })
               : null,
 
-            // Backend Unavailable Dialog - Show when trace is loaded but not in RPC mode
-            // In the new auto-RPC architecture, this means the backend was unavailable during trace load
-            !isInRpcMode
+            // Backend Unavailable Dialog - full overlay only when no existing messages
+            // When messages exist, an inline banner is shown inside the messages area instead
+            (!isInRpcMode && this.state.messages.length === 0)
               ? m('div.ai-rpc-dialog', [
                   this.state.isRetryingBackend
                     ? m('div.ai-rpc-dialog-icon.uploading', m('i.pf-icon', 'cloud_upload'))
@@ -792,7 +838,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   m('p.ai-rpc-dialog-desc', [
                     'Trace 已加载到 WASM 引擎，但无法连接到 AI 后端。',
                     m('br'),
-                    'AI 分析��能需要后端服务支持。',
+                    'AI 分析功能需要后端服务支持。',
                   ]),
                   this.state.retryError
                     ? m('p.ai-rpc-dialog-desc', {style: 'color: var(--chat-error);'}, [
@@ -821,22 +867,69 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 ])
               : null,
 
-            // Messages with auto-scroll - only show when connected to backend
-            isInRpcMode ? m('div.ai-messages', {
+            // Messages with auto-scroll - show when connected OR when messages exist
+            (isInRpcMode || this.state.messages.length > 0) ? m('div.ai-messages', {
+          role: 'log',
+          'aria-live': 'polite',
           oncreate: (vnode) => {
             this.messagesContainer = vnode.dom as HTMLElement;
-            this.scrollToBottom();
+            this.scrollToBottom(true);
           },
           onupdate: () => {
             if (this.state.messages.length !== this.lastMessageCount) {
               this.lastMessageCount = this.state.messages.length;
               this.scrollToBottom();
+            } else if (this.state.isLoading) {
+              // During streaming, content updates within existing messages
+              // (answer_token appending) don't change message count.
+              // Throttle to avoid forced reflow on every m.redraw().
+              this.throttledScrollToBottom();
             }
           },
         },
           (() => {
             let reportLinkSequence = 0;
-            return this.state.messages.map((msg) => {
+            const hasConversationTimeline = this.state.messages.some(
+              (msg) => msg.flowTag === 'streaming_flow'
+            );
+            const filteredMessages = this.state.messages
+              .filter((msg) => {
+                // Hide progress_note bubbles when conversation timeline is active
+                // (same info is already shown in the timeline)
+                if (hasConversationTimeline && msg.flowTag === 'progress_note') return false;
+                return true;
+              });
+            // Assign each message a round index based on round_separator boundaries.
+            // Within each round, streaming_flow sorts before answer_stream, but
+            // this reordering never crosses round boundaries.
+            const roundIndexMap = new Map<string, number>();
+            let currentRound = 0;
+            for (const msg of filteredMessages) {
+              if (msg.flowTag === 'round_separator') currentRound++;
+              roundIndexMap.set(msg.id, currentRound);
+            }
+            const sortedMessages = [...filteredMessages]
+              .sort((a, b) => {
+                const roundA = roundIndexMap.get(a.id) ?? 0;
+                const roundB = roundIndexMap.get(b.id) ?? 0;
+                if (roundA !== roundB) return roundA - roundB;
+                const order = (msg: {flowTag?: string}) => {
+                  if (msg.flowTag === 'streaming_flow') return 1;
+                  if (msg.flowTag === 'answer_stream') return 2;
+                  return 0;
+                };
+                return order(a) - order(b);
+              });
+            return sortedMessages.map((msg) => {
+              // Round separator — visual divider between conversation rounds
+              if (msg.flowTag === 'round_separator') {
+                return m('div.ai-round-separator', {key: msg.id}, [
+                  m('div.ai-round-separator-line'),
+                  m('span.ai-round-separator-label', msg.content),
+                  m('div.ai-round-separator-line'),
+                ]);
+              }
+
               const reportLinkLabel = msg.reportUrl
                 ? `查看详细分析报告 #${++reportLinkSequence} (${new Date(msg.timestamp).toLocaleTimeString('zh-CN', {hour12: false})})`
                 : '';
@@ -853,6 +946,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               const contentClass = isProgressMessage ? 'ai-message-content-progress' : '';
 
               return m('div.ai-message', {
+              key: msg.id,
               class: messageClass,
             }, [
               // Avatar
@@ -1161,6 +1255,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   ]),
                 ]) : null,
               ]),
+
+              // Feedback buttons — show on non-progress assistant messages
+              (msg.role === 'assistant' && !isProgressMessage && msg.content.length > 50)
+                ? m('div.ai-feedback-bar', [
+                    m('button.ai-feedback-btn', {
+                      class: (this.state as any)[`feedback_${msg.id}`] === 'positive' ? 'active' : '',
+                      title: '有用',
+                      onclick: () => {
+                        (this.state as any)[`feedback_${msg.id}`] = 'positive';
+                        this.submitFeedback(msg.id, 'positive');
+                      },
+                    }, m('i.pf-icon', 'thumb_up')),
+                    m('button.ai-feedback-btn', {
+                      class: (this.state as any)[`feedback_${msg.id}`] === 'negative' ? 'active' : '',
+                      title: '不准确',
+                      onclick: () => {
+                        (this.state as any)[`feedback_${msg.id}`] = 'negative';
+                        this.submitFeedback(msg.id, 'negative');
+                      },
+                    }, m('i.pf-icon', 'thumb_down')),
+                  ])
+                : null,
             ]);
             });
           })(),
@@ -1185,7 +1301,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               })
             : null,
 
-          // Loading Indicator
+          // Loading Indicator with phase context
           this.state.isLoading
             ? m('div.ai-message.ai-message-assistant', [
                 m('div.ai-avatar.ai-avatar-assistant', [
@@ -1196,25 +1312,47 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m('span.ai-typing-dot'),
                     m('span.ai-typing-dot'),
                     m('span.ai-typing-dot'),
+                    this.state.loadingPhase
+                      ? m('span.ai-typing-phase', this.state.loadingPhase)
+                      : null,
                   ]),
                 ]),
               ])
             : null,
+
+          // Inline disconnection banner — shown when backend drops mid-conversation
+          (!isInRpcMode && this.state.messages.length > 0)
+            ? m('div.ai-disconnect-banner', [
+                m('i.pf-icon', 'cloud_off'),
+                m('span', 'AI 后端连接已断开'),
+                this.state.isRetryingBackend
+                  ? m('span.ai-disconnect-retrying', '重试中...')
+                  : m('button.ai-disconnect-retry-btn', {
+                      onclick: () => this.retryBackendConnection(),
+                    }, '重试连接'),
+              ])
+            : null,
         ) : null,
 
-        // Input Area - only show when connected to backend
-            isInRpcMode ? m('div.ai-input-area', [
+        // Input Area - always show (disabled when disconnected)
+            (isInRpcMode || this.state.messages.length > 0) ? m('div.ai-input-area', [
+              // Conversation context indicator
+              this.state.messages.length > 0 && this.state.agentSessionId
+                ? m('div.ai-context-indicator',
+                  `第 ${this.state.messages.filter(msg => msg.role === 'user').length} 轮对话 | 会话 ${this.state.agentSessionId.substring(0, 8)}...`)
+                : null,
               m('div.ai-input-wrapper', [
                 m('textarea#ai-input.ai-input', {
-                  class: this.state.isLoading || !this.state.aiService ? 'disabled' : '',
-                  placeholder: 'Ask anything about your trace...',
+                  class: this.state.isLoading || !this.state.aiService || !isInRpcMode ? 'disabled' : '',
+                  'aria-label': '\u8F93\u5165\u5206\u6790\u95EE\u9898',
+                  placeholder: !isInRpcMode ? 'AI 后端未连接...' : 'Ask anything about your trace...',
                   value: this.state.input,
                   oninput: (e: Event) => {
                     this.state.input = (e.target as HTMLTextAreaElement).value;
                     this.state.historyIndex = -1;
                   },
                   onkeydown: (e: KeyboardEvent) => this.handleKeyDown(e),
-                  disabled: this.state.isLoading || !this.state.aiService,
+                  disabled: this.state.isLoading || !this.state.aiService || !isInRpcMode,
                 }),
                 this.state.isLoading
                   ? m('button.ai-send-btn.ai-stop-btn', {
@@ -1222,10 +1360,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       title: 'Stop analysis',
                     }, m('i.pf-icon', 'stop_circle'))
                   : m('button.ai-send-btn', {
-                      class: !this.state.aiService ? 'disabled' : '',
+                      class: !this.state.aiService || !isInRpcMode ? 'disabled' : '',
                       onclick: () => this.sendMessage(),
-                      disabled: !this.state.aiService,
+                      disabled: !this.state.aiService || !isInRpcMode,
                       title: 'Send (Enter)',
+                      'aria-label': '\u53D1\u9001',
                     }, m('i.pf-icon', 'send')),
               ]),
               m('div.ai-input-hint', 'Press Enter to send, Shift+Enter for new line'),
@@ -1245,6 +1384,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ]),  // End of ai-content-wrapper
       ]
     );
+  }
+
+  private submitFeedback(_messageId: string, rating: 'positive' | 'negative'): void {
+    if (!this.state.agentSessionId || !this.state.settings.backendUrl) return;
+    const url = `${this.state.settings.backendUrl}/api/agent/v1/${this.state.agentSessionId}/feedback`;
+    const turnIndex = this.state.messages.filter(msg => msg.role === 'user').length;
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating, turnIndex }),
+    }).catch(() => { /* non-blocking */ });
+    m.redraw();
   }
 
   private async copyToClipboard(text: string): Promise<void> {
@@ -1690,6 +1841,21 @@ Click ⚙️ to change settings.`;
     this.state.displayedSkillProgress.clear();
     this.state.collectedErrors = [];
 
+    // Add round separator when this is a follow-up round (prior assistant messages exist)
+    const hasPriorResults = this.state.messages.some(
+      (msg) => msg.role === 'assistant' && msg.flowTag !== 'round_separator'
+    );
+    if (hasPriorResults) {
+      const roundNumber = (this.state.agentRunSequence || 0) + 1;
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: `Round #${roundNumber}`,
+        timestamp: Date.now(),
+        flowTag: 'round_separator',
+      });
+    }
+
     // Add user message
     this.addMessage({
       id: this.generateId(),
@@ -1729,12 +1895,33 @@ Click ⚙️ to change settings.`;
     this.sendMessage();
   }
 
+  /**
+   * Analyze a detected scene - triggered by clicking a scene chip in the navigation bar.
+   * Builds a context-rich query from the scene metadata and sends it for analysis.
+   */
+  private analyzeScene(scene: import('./scene_navigation_bar').DetectedScene) {
+    if (this.state.isLoading) return;
+    const typeNames: Record<string, string> = {
+      cold_start: '冷启动', warm_start: '温启动', hot_start: '热启动',
+      scroll: '滑动', inertial_scroll: '惯性滑动', scroll_start: '滑动',
+      app_switch: '应用切换', navigation: '页面跳转',
+      tap: '点击响应', long_press: '长按响应',
+      screen_on: '亮屏', screen_unlock: '解锁',
+    };
+    const typeName = typeNames[scene.type] || scene.type;
+    const appHint = scene.appPackage ? ` (${scene.appPackage})` : '';
+    const durHint = scene.durationMs > 0 ? `，耗时 ${scene.durationMs.toFixed(0)}ms` : '';
+    const query = `分析${typeName}性能${appHint}${durHint}`;
+    this.state.input = query;
+    this.sendMessage();
+  }
+
   private addMessage(msg: Message) {
     this.state.messages.push(msg);
     this.saveHistory();
     // 同时保存到 Session
     this.saveCurrentSession();
-    this.scrollToBottom();
+    this.scrollToBottom(true);
   }
 
   /**
@@ -1762,7 +1949,7 @@ Click ⚙️ to change settings.`;
         return false;
       },
       setLoading: (loading: boolean) => {
-        this.state.isLoading = loading;
+        this.setLoadingState(loading);
       },
       displayedSkillProgress: this.state.displayedSkillProgress,
       collectedErrors: this.state.collectedErrors,
@@ -1796,9 +1983,14 @@ Click ⚙️ to change settings.`;
     const ctx = this.createSSEHandlerContext();
     const result = handleSSEEventExternal(eventType, data, ctx);
 
+    // Update loading phase from handler result
+    if (result.loadingPhase !== undefined) {
+      this.state.loadingPhase = result.loadingPhase;
+    }
+
     // Handle terminal events
     if (result.stopLoading) {
-      this.state.isLoading = false;
+      this.setLoadingState(false);
     }
 
     // Note: completionHandled is updated via setCompletionHandled() directly on this.state
@@ -1909,7 +2101,7 @@ Click ⚙️ to change settings.`;
     // Store the query for pinning
     this.state.lastQuery = query;
 
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -1951,7 +2143,7 @@ Click ⚙️ to change settings.`;
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
@@ -2043,7 +2235,7 @@ Click ⚙️ to change settings.`;
   }
 
   private async analyzeSelectedSlice(_trackUri: string, eventId: number) {
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -2079,7 +2271,7 @@ Click ⚙️ to change settings.`;
           content: '**Error:** Could not find slice details. The slice may have been removed or the track may not be a slice track.',
           timestamp: Date.now(),
         });
-        this.state.isLoading = false;
+        this.setLoadingState(false);
         m.redraw();
         return;
       }
@@ -2167,12 +2359,12 @@ Output MUST follow this exact markdown structure:
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
   private async analyzeAreaSelection(selection: import('../../public/selection').AreaSelection) {
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -2207,7 +2399,7 @@ Output MUST follow this exact markdown structure:
           content: '**No slices found** in the selected time range.',
           timestamp: Date.now(),
         });
-        this.state.isLoading = false;
+        this.setLoadingState(false);
         m.redraw();
         return;
       }
@@ -2243,12 +2435,12 @@ Output MUST follow this exact markdown structure:
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
   private async handleAnrCommand() {
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -2311,12 +2503,12 @@ Output MUST follow this exact markdown structure:
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
   private async handleJankCommand() {
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -2380,7 +2572,7 @@ Output MUST follow this exact markdown structure:
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
@@ -2492,7 +2684,7 @@ Output MUST follow this exact markdown structure:
       return;
     }
 
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     this.state.completionHandled = false;  // Reset completion flag for new analysis
     this.state.displayedSkillProgress.clear();  // Clear progress tracking for new analysis
     this.state.collectedErrors = [];  // Clear error collection for new analysis
@@ -2602,7 +2794,7 @@ Output MUST follow this exact markdown structure:
       }
     } finally {
       // Always reset loading state, even on early returns via thrown errors
-      this.state.isLoading = false;
+      this.setLoadingState(false);
       m.redraw();
     }
   }
@@ -2637,7 +2829,7 @@ Output MUST follow this exact markdown structure:
    */
   private cancelAnalysis(): void {
     this.cancelSSEConnection();
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     this.resetStreamingFlow();
     this.resetStreamingAnswer();
     this.addMessage({
@@ -2760,7 +2952,10 @@ Output MUST follow this exact markdown structure:
                     this.handleSSEEvent(eventType, data);
 
                     // Check for terminal events (no need to reconnect after these)
-                    if (eventType === 'analysis_completed' || eventType === 'error') {
+                    // 'conclusion' from agentv3 is near-terminal (answer done) but
+                    // 'analysis_completed' follows with reportUrl after HTML report
+                    // generation. Only close on analysis_completed/error/end.
+                    if (eventType === 'analysis_completed' || eventType === 'error' || eventType === 'end') {
                       this.cancelSSEConnection();
                       m.redraw();
                       return;
@@ -2789,7 +2984,7 @@ Output MUST follow this exact markdown structure:
           // Max retries exceeded - give up
           console.error('[AIPanel] SSE max retries exceeded, giving up');
           this.state.sseConnectionState = 'disconnected';
-          this.state.isLoading = false;
+          this.setLoadingState(false);
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
@@ -2856,7 +3051,7 @@ Output MUST follow this exact markdown structure:
       return;
     }
 
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     if (DEBUG_AI_PANEL) console.log('[AIPanel] Teaching pipeline request with traceId:', this.state.backendTraceId);
@@ -3011,7 +3206,7 @@ Output MUST follow this exact markdown structure:
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
@@ -3156,7 +3351,7 @@ Output MUST follow this exact markdown structure:
       return;
     }
 
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     // Add initial progress message
@@ -3213,7 +3408,7 @@ Output MUST follow this exact markdown structure:
       });
     }
 
-    this.state.isLoading = false;
+    this.setLoadingState(false);
     m.redraw();
   }
 
@@ -4183,7 +4378,7 @@ Output MUST follow this exact markdown structure:
    * Export SQL result to CSV or JSON
    */
   private async exportResult(result: SqlQueryResult, format: 'csv' | 'json'): Promise<void> {
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -4236,7 +4431,7 @@ Output MUST follow this exact markdown structure:
         timestamp: Date.now(),
       });
     } finally {
-      this.state.isLoading = false;
+      this.setLoadingState(false);
       m.redraw();
     }
   }
@@ -4263,7 +4458,7 @@ Output MUST follow this exact markdown structure:
       return;
     }
 
-    this.state.isLoading = true;
+    this.setLoadingState(true);
     m.redraw();
 
     try {
@@ -4309,7 +4504,7 @@ Output MUST follow this exact markdown structure:
         timestamp: Date.now(),
       });
     } finally {
-      this.state.isLoading = false;
+      this.setLoadingState(false);
       m.redraw();
     }
   }
@@ -4420,9 +4615,37 @@ Output MUST follow this exact markdown structure:
     }
   }
 
-  private scrollToBottom(): void {
-    if (this.messagesContainer) {
-      this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+  /**
+   * Centralized loading state setter. Clears loadingPhase on both start and stop
+   * to prevent stale phase text from previous analyses.
+   */
+  private setLoadingState(loading: boolean): void {
+    this.state.isLoading = loading;
+    this.state.loadingPhase = '';
+  }
+
+  /**
+   * Auto-scroll to bottom only if the user is already near the bottom.
+   * This prevents stealing scroll position during long analyses when
+   * the user has scrolled up to review intermediate results.
+   * @param force If true, always scroll (e.g., on user-initiated message send).
+   */
+  private scrollToBottom(force = false): void {
+    if (!this.messagesContainer) return;
+    const el = this.messagesContainer;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // Only auto-scroll if within 150px of bottom or forced
+    if (force || distanceFromBottom < 150) {
+      el.scrollTop = el.scrollHeight;
     }
+  }
+
+  /** Throttled variant for streaming updates — avoids forced reflow on every redraw. */
+  private throttledScrollToBottom(): void {
+    if (this.scrollThrottleTimer) return;
+    this.scrollThrottleTimer = setTimeout(() => {
+      this.scrollThrottleTimer = null;
+      this.scrollToBottom();
+    }, 100);
   }
 }

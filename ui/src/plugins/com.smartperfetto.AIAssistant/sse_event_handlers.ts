@@ -391,6 +391,8 @@ export interface SSEHandlerResult {
   isTerminal?: boolean;
   /** Whether to stop loading indicator */
   stopLoading?: boolean;
+  /** Current analysis phase text from progress events */
+  loadingPhase?: string;
 }
 
 const STREAM_FLOW_LIMITS = {
@@ -398,7 +400,7 @@ const STREAM_FLOW_LIMITS = {
   thoughts: 6,
   tools: 8,
   outputs: 8,
-  conversation: 20,
+  conversation: 60,
 } as const;
 
 const ANSWER_STREAM_RENDER_INTERVAL_MS = 16;
@@ -523,12 +525,37 @@ function buildStreamingFlowContent(flow: StreamingFlowState, section: StreamingF
     }
   }
 
+  // Render sub-agent cards in the tool section
+  if (section === 'tool' && flow.subAgents.length > 0) {
+    lines.push('');
+    lines.push(buildSubAgentCardsHtml(flow.subAgents));
+  }
+
   if (section === 'phase' || section === 'conversation') {
     lines.push('');
     lines.push(flowStatusHint(flow));
   }
 
   return lines.join('\n');
+}
+
+/** Build HTML for sub-agent status cards. */
+function buildSubAgentCardsHtml(agents: StreamingFlowState['subAgents']): string {
+  const cards = agents.map((a) => {
+    const statusIcon = a.status === 'running' ? '⏳' : a.status === 'completed' ? '✅' : '❌';
+    const statusClass = `sub-agent-${a.status}`;
+    const dur = a.completedAt
+      ? `${Math.round((a.completedAt - a.startedAt) / 1000)}s`
+      : `${Math.round((Date.now() - a.startedAt) / 1000)}s...`;
+    const tools = a.toolUses !== undefined ? ` · ${a.toolUses} 次调用` : '';
+    return `<div class="ai-sub-agent-card ${statusClass}">`
+      + `<span class="ai-sub-agent-icon">${statusIcon}</span>`
+      + `<span class="ai-sub-agent-name">${a.agentName}</span>`
+      + `<span class="ai-sub-agent-desc">${a.description}</span>`
+      + `<span class="ai-sub-agent-meta">${dur}${tools}</span>`
+      + `</div>`;
+  });
+  return `<div class="ai-sub-agent-cards">${cards.join('')}</div>`;
 }
 
 function resolveStreamingFlowMessageId(
@@ -631,6 +658,37 @@ function pushStreamingOutput(ctx: SSEHandlerContext, line: string): void {
   }
 }
 
+/**
+ * Push a conversation timeline step directly (for sub-agent events in timeline mode).
+ */
+function pushConversationStep(
+  ctx: SSEHandlerContext,
+  phase: ConversationStepTimelineItem['phase'],
+  role: ConversationStepTimelineItem['role'],
+  text: string
+): void {
+  const flow = ctx.streamingFlow;
+  const ordinal = flow.conversationLastOrdinal + 1;
+  flow.conversationPendingSteps[ordinal] = { ordinal, phase, role, text, timestamp: Date.now() };
+  const changed = flushConversationTimeline(ctx);
+  if (!changed) {
+    refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
+  }
+}
+
+/**
+ * Refresh the sub-agent cards in the streaming flow tool section.
+ * Renders running/completed sub-agent cards as markdown for display.
+ */
+function refreshSubAgentCards(ctx: SSEHandlerContext): void {
+  // Sub-agent cards are rendered as part of the tool section flow.
+  // No separate message needed — the tool section already has the text lines.
+  // This function triggers a re-render of the tool section to pick up updated card state.
+  if (ctx.streamingFlow.tools.length > 0) {
+    refreshStreamingFlowMessage(ctx, 'tool');
+  }
+}
+
 function getConversationPhaseLabel(phase: ConversationStepTimelineItem['phase']): string {
   switch (phase) {
     case 'progress':
@@ -653,13 +711,17 @@ function getConversationRoleLabel(role: ConversationStepTimelineItem['role']): s
 function renderConversationStepLine(step: ConversationStepTimelineItem): string {
   const phaseLabel = getConversationPhaseLabel(step.phase);
   const roleLabel = getConversationRoleLabel(step.role);
-  return `#${step.ordinal} [${phaseLabel}/${roleLabel}] ${step.text}`;
+  const timeStr = step.timestamp
+    ? new Date(step.timestamp).toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'})
+    : '';
+  const timePrefix = timeStr ? `\`${timeStr}\` ` : '';
+  return `${timePrefix}#${step.ordinal} [${phaseLabel}/${roleLabel}] ${step.text}`;
 }
 
 function getConversationPhaseMinGapMs(phase: ConversationStepTimelineItem['phase']): number {
   switch (phase) {
     case 'thinking':
-      return 220;
+      return 80;
     case 'tool':
       return 160;
     case 'result':
@@ -689,6 +751,15 @@ function flushConversationTimeline(
       const minGapMs = getConversationPhaseMinGapMs(step.phase);
       const now = Date.now();
       if (lastRenderedAt > 0 && now - lastRenderedAt < minGapMs) {
+        // Schedule a deferred retry so throttled steps are not lost
+        if (!flow.conversationFlushTimer) {
+          const retryMs = minGapMs - (now - lastRenderedAt) + 10;
+          flow.conversationFlushTimer = window.setTimeout(() => {
+            flow.conversationFlushTimer = undefined;
+            const retryChanged = flushConversationTimeline(ctx);
+            if (retryChanged) refreshStreamingFlowMessage(ctx, 'conversation');
+          }, retryMs);
+        }
         break;
       }
     }
@@ -714,6 +785,10 @@ function flushConversationTimeline(
 function completeStreamingFlow(ctx: SSEHandlerContext): void {
   if (ctx.streamingFlow.status === 'running' || ctx.streamingFlow.status === 'idle') {
     ctx.streamingFlow.status = 'completed';
+    if (ctx.streamingFlow.conversationFlushTimer) {
+      clearTimeout(ctx.streamingFlow.conversationFlushTimer);
+      ctx.streamingFlow.conversationFlushTimer = undefined;
+    }
     if (ctx.streamingFlow.conversationEnabled) {
       flushConversationTimeline(ctx, {force: true});
     }
@@ -735,6 +810,10 @@ function completeStreamingFlow(ctx: SSEHandlerContext): void {
 function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
   ctx.streamingFlow.status = 'failed';
   ctx.streamingFlow.error = normalizeFlowLine(error || 'unknown_error');
+  if (ctx.streamingFlow.conversationFlushTimer) {
+    clearTimeout(ctx.streamingFlow.conversationFlushTimer);
+    ctx.streamingFlow.conversationFlushTimer = undefined;
+  }
   if (ctx.streamingFlow.conversationEnabled) {
     flushConversationTimeline(ctx, {force: true});
   }
@@ -850,16 +929,17 @@ export function handleProgressEvent(
       timestamp: Date.now(),
       flowTag: 'progress_note',
     });
-    return {};
+    return { loadingPhase: phaseMessage || '分析计划已确认' };
   }
 
   if (phaseMessage) {
     pushStreamingPhase(ctx, phaseMessage);
-    return {};
+    return { loadingPhase: phaseMessage };
   }
 
   if (phase) {
     pushStreamingPhase(ctx, `阶段: ${phase}`);
+    return { loadingPhase: phase };
   }
   return {};
 }
@@ -1934,9 +2014,33 @@ export function handleAnalysisCompletedEvent(
 
   mergeConversationTimelineFromAnalysisCompleted(rawPayload, ctx);
 
-  // Guard against duplicate handling
+  // Guard against duplicate conclusion handling — but still extract reportUrl
+  // (agentv3 sends 'conclusion' first, then 'analysis_completed' carries reportUrl)
   if (ctx.completionHandled) {
-    console.log('[SSEHandlers] Completion already handled, skipping');
+    console.log('[SSEHandlers] Completion already handled, extracting reportUrl only');
+    const reportUrl = payload?.reportUrl;
+    if (reportUrl) {
+      // Attach reportUrl to the existing answer/conclusion message
+      const answerMsgId = ctx.streamingAnswer.messageId;
+      if (answerMsgId) {
+        ctx.updateMessage(answerMsgId, {
+          reportUrl: `${ctx.backendUrl}${reportUrl}`,
+        }, {persist: true});
+      } else {
+        // No streamed answer — find the last assistant message (conclusion added by 'conclusion' event)
+        const messages = ctx.getMessages();
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'assistant' && !messages[i].reportUrl) {
+            ctx.updateMessage(messages[i].id, {
+              reportUrl: `${ctx.backendUrl}${reportUrl}`,
+            }, {persist: true});
+            break;
+          }
+        }
+      }
+    } else if (payload?.reportError) {
+      console.warn('[SSEHandlers] HTML report generation failed:', payload.reportError);
+    }
     return { isTerminal: true, stopLoading: true };
   }
 
@@ -2014,6 +2118,25 @@ export function handleAnalysisCompletedEvent(
         });
       }
     }
+  }
+
+  // When conclusion is empty (e.g. timeout) but answer was streamed,
+  // still attach the reportUrl to the streamed answer message.
+  if (!answerContent) {
+    const reportUrl = payload?.reportUrl;
+    const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
+    if (reportUrl && streamedAnswerMessageId) {
+      const streamedMsg = ctx.getMessages().find(
+        (m) => m.id === streamedAnswerMessageId && String(m.content || '').trim().length > 0
+      );
+      if (streamedMsg) {
+        completeStreamingAnswer(ctx);
+        ctx.updateMessage(streamedAnswerMessageId, {
+          reportUrl: `${ctx.backendUrl}${reportUrl}`,
+        }, {persist: true});
+      }
+    }
+    completeStreamingFlow(ctx);
   }
 
   // Show error summary if there were any non-fatal errors
@@ -2306,17 +2429,56 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
 
     case 'chart':
       if (payload.chart) {
-        const chartConfig = payload.chart;
-        let chartContent = `### 📉 ${title}\n\n`;
-        chartContent += `**图表类型:** ${chartConfig.type}\n\n`;
-        chartContent += `*[图表渲染暂未实现，数据已记录]*\n`;
-        console.log('[SSEHandlers] Chart data received:', chartConfig);
-        ctx.addMessage({
-          id: ctx.generateId(),
-          role: 'assistant',
-          content: chartContent,
-          timestamp: Date.now(),
-        });
+        const chartConfig = asRecord(payload.chart);
+        const chartColumns = Array.isArray(chartConfig.columns) ? chartConfig.columns : [];
+        const chartRows = Array.isArray(chartConfig.rows) ? chartConfig.rows : [];
+        const chartData = Array.isArray(chartConfig.data) ? chartConfig.data : [];
+
+        if (chartColumns.length > 0 && chartRows.length > 0) {
+          // Render chart data as a markdown table
+          const header = chartColumns.map(String).join(' | ');
+          const separator = chartColumns.map(() => '---').join(' | ');
+          const rowLines = chartRows.slice(0, 10).map((r: unknown) =>
+            Array.isArray(r) ? r.map(String).join(' | ') : String(r)
+          ).join(' |\n| ');
+          const chartContent = `### \uD83D\uDCC9 ${title}\n\n| ${header} |\n| ${separator} |\n| ${rowLines} |`;
+          ctx.addMessage({
+            id: ctx.generateId(),
+            role: 'assistant',
+            content: chartContent,
+            timestamp: Date.now(),
+          });
+        } else if (chartData.length > 0) {
+          // Try to render from data array (objects with label/value)
+          const firstItem = asRecord(chartData[0]);
+          const dataKeys = Object.keys(firstItem);
+          if (dataKeys.length > 0) {
+            const header = dataKeys.join(' | ');
+            const separator = dataKeys.map(() => '---').join(' | ');
+            const rowLines = chartData.slice(0, 10).map((item: unknown) => {
+              const rec = asRecord(item);
+              return dataKeys.map(k => String(rec[k] ?? '')).join(' | ');
+            }).join(' |\n| ');
+            const chartContent = `### \uD83D\uDCC9 ${title}\n\n| ${header} |\n| ${separator} |\n| ${rowLines} |`;
+            ctx.addMessage({
+              id: ctx.generateId(),
+              role: 'assistant',
+              content: chartContent,
+              timestamp: Date.now(),
+            });
+          }
+        } else {
+          let chartContent = `### \uD83D\uDCC9 ${title}\n\n`;
+          chartContent += `**\u56FE\u8868\u7C7B\u578B:** ${readStringField(chartConfig, 'type', 'unknown')}\n\n`;
+          chartContent += `*[\u56FE\u8868\u6E32\u67D3\u6682\u672A\u5B9E\u73B0\uFF0C\u6570\u636E\u5DF2\u8BB0\u5F55]*\n`;
+          console.log('[SSEHandlers] Chart data received but no renderable data:', chartConfig);
+          ctx.addMessage({
+            id: ctx.generateId(),
+            role: 'assistant',
+            content: chartContent,
+            timestamp: Date.now(),
+          });
+        }
       }
       break;
 
@@ -2719,8 +2881,10 @@ export function handleThoughtEvent(
   const eventRecord = asRecord(data);
   const payload = eventPayload(data);
   const content = normalizeFlowLine(
+    readStringField(payload, 'thought') ||
     readStringField(payload, 'content') ||
     readStringField(payload, 'message') ||
+    readStringField(eventRecord, 'thought') ||
     readStringField(eventRecord, 'content') ||
     readStringField(eventRecord, 'message')
   );
@@ -2921,11 +3085,14 @@ export function handleConversationStepEvent(
   }
 
   if (!flow.conversationPendingSteps[ordinal]) {
+    const eventTimestamp = readNumberField(asRecord(data), 'timestamp', 0)
+      || readNumberField(payload, 'timestamp', 0);
     flow.conversationPendingSteps[ordinal] = {
       ordinal,
       phase: toConversationPhase(normalizeFlowLine(readStringField(payload, 'phase', 'progress')).toLowerCase()),
       role: toConversationRole(normalizeFlowLine(readStringField(payload, 'role', 'agent')).toLowerCase()),
       text,
+      timestamp: eventTimestamp > 0 ? eventTimestamp : Date.now(),
     };
   }
 
@@ -2949,11 +3116,13 @@ function mergeConversationTimelineFromAnalysisCompleted(
     const step = asRecord(entry);
     const stepEvent = {
       id: readStringField(step, 'eventId') || undefined,
+      timestamp: readNumberField(step, 'timestamp', 0) || undefined,
       data: {
         eventId: readStringField(step, 'eventId'),
         ordinal: readNumberField(step, 'ordinal', -1),
         phase: readStringField(step, 'phase', 'progress'),
         role: readStringField(step, 'role', 'agent'),
+        timestamp: readNumberField(step, 'timestamp', 0) || undefined,
         content: {
           text: readStringField(step, 'text'),
         },
@@ -3125,11 +3294,101 @@ export function handleSSEEvent(
     case 'strategy_decision':
       return handleStrategyDecisionEvent(eventData, ctx);
 
-    case 'conclusion':
-      // Skip - let analysis_completed handle final message
-      pushStreamingOutput(ctx, '结论文本已生成，等待落地输出');
-      console.log('[SSEHandlers] CONCLUSION event received - waiting for analysis_completed');
+    case 'architecture_detected': {
+      const archPayload = eventPayload(eventData);
+      const arch = asRecord(archPayload.architecture);
+      if (Object.keys(arch).length > 0) {
+        const archType = readStringField(arch, 'type', 'unknown');
+        const flutter = asRecord(arch.flutter);
+        const compose = readBooleanField(arch, 'compose', false);
+        const webview = asRecord(arch.webview);
+        const archDesc = archType
+          + (Object.keys(flutter).length > 0 ? ` (Flutter ${readStringField(flutter, 'engine', '')})` : '')
+          + (compose ? ' (Compose)' : '')
+          + (Object.keys(webview).length > 0 ? ` (WebView ${readStringField(webview, 'engine', '')})` : '');
+        const confidence = readNumberField(arch, 'confidence', 0);
+        pushStreamingPhase(ctx, `检测到渲染架构: ${archDesc} (置信度: ${Math.round(confidence * 100)}%)`);
+      }
       return {};
+    }
+
+    case 'conclusion': {
+      // agentv3 sends 'conclusion' when the SDK result arrives (answer done).
+      // 'analysis_completed' follows later with reportUrl after HTML report generation.
+      // So conclusion is near-terminal: stop loading but keep connection open.
+      const conclusionPayload = eventPayload(eventData);
+      const conclusionText = readStringField(conclusionPayload, 'conclusion');
+      console.log('[SSEHandlers] CONCLUSION event received');
+
+      // Complete streaming state so UI doesn't stay loading
+      if (ctx.streamingFlow.status === 'running') {
+        completeStreamingFlow(ctx);
+      }
+      if (ctx.streamingAnswer.status === 'streaming') {
+        completeStreamingAnswer(ctx);
+      }
+
+      // If the conclusion text was NOT already streamed via answer_token events,
+      // add it as a proper conversation message bubble so the user can see it.
+      const alreadyStreamed = ctx.streamingAnswer.content.length > 0;
+      if (conclusionText && !alreadyStreamed) {
+        ctx.addMessage({
+          id: ctx.generateId(),
+          role: 'assistant',
+          content: conclusionText,
+          timestamp: Date.now(),
+        });
+      }
+
+      ctx.setCompletionHandled(true);
+      // Not terminal — analysis_completed with reportUrl still follows
+      return { stopLoading: true };
+    }
+
+    case 'sub_agent_started': {
+      const subPayload = eventPayload(eventData);
+      const agentName = readStringField(subPayload, 'agentName') || 'sub-agent';
+      const desc = readStringField(subPayload, 'description') || agentName;
+      const msg = readStringField(subPayload, 'message') || `委托子代理 [${agentName}]: ${desc}`;
+      // Track sub-agent card state
+      ctx.streamingFlow.subAgents.push({
+        agentName,
+        description: desc,
+        status: 'running',
+        startedAt: Date.now(),
+      });
+      pushStreamingTool(ctx, msg);
+      // Also push to conversation timeline if enabled
+      if (isConversationTimelineEnabled(ctx)) {
+        pushConversationStep(ctx, 'tool', 'system', `🤖 委托 ${agentName}: ${desc}`);
+      }
+      refreshSubAgentCards(ctx);
+      return {};
+    }
+
+    case 'sub_agent_completed': {
+      const subPayload = eventPayload(eventData);
+      const agentName = readStringField(subPayload, 'agentName') || 'sub-agent';
+      const msg = readStringField(subPayload, 'message') || `子代理 [${agentName}] 完成证据收集`;
+      // Update sub-agent card state
+      const card = ctx.streamingFlow.subAgents.find(
+        (a) => a.agentName === agentName && a.status === 'running'
+      );
+      if (card) {
+        card.status = 'completed';
+        card.completedAt = Date.now();
+        const usage = subPayload.usage ?? subPayload;
+        const toolUses = readNumberField(usage as Record<string, unknown>, 'tool_uses', -1);
+        if (toolUses >= 0) card.toolUses = toolUses;
+      }
+      pushStreamingTool(ctx, msg);
+      if (isConversationTimelineEnabled(ctx)) {
+        const dur = card ? `${Math.round((Date.now() - card.startedAt) / 1000)}s` : '';
+        pushConversationStep(ctx, 'result', 'system', `✅ ${agentName} 完成${dur ? ` (${dur})` : ''}`);
+      }
+      refreshSubAgentCards(ctx);
+      return {};
+    }
 
     // Agent-Driven Architecture v2.0 - Intervention Events
     case 'intervention_required':

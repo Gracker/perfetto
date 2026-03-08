@@ -107,14 +107,19 @@ export class MermaidRenderer {
       return;
     }
 
+    // Detect dark mode to select appropriate Mermaid theme
+    const isDarkMode = typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-color-scheme: dark)').matches === true;
+    const theme = isDarkMode ? 'dark' : 'default';
+
     // Keep this safe for untrusted markdown: strict sanitization and no autostart.
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: 'strict',
-      theme: 'default',
+      theme,
     });
     this.mermaidInitialized = true;
-    console.log('[MermaidRenderer] Mermaid initialized with strict security');
+    console.log(`[MermaidRenderer] Mermaid initialized (theme: ${theme}, strict security)`);
   }
 
   /**
@@ -192,10 +197,22 @@ export class MermaidRenderer {
 
   /**
    * Reset the renderer state (for testing or re-initialization).
+   * Call this when the color scheme changes to re-initialize with the new theme.
    */
   reset(): void {
     this.mermaidInitialized = false;
     this.mermaidLoadPromise = null;
+  }
+
+  /**
+   * Re-initialize Mermaid with the current theme (call on dark mode toggle).
+   * Does not reload the script, only re-runs mermaid.initialize().
+   */
+  async reinitializeTheme(): Promise<void> {
+    const mermaid = this.getMermaid();
+    if (!mermaid) return;
+    this.mermaidInitialized = false;
+    await this.ensureMermaidInitialized();
   }
 }
 

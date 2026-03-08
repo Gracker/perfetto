@@ -155,12 +155,54 @@ export class SessionManager {
 
   /**
    * Save all Sessions storage to localStorage.
+   * Includes size protection to avoid exceeding browser storage limits.
    */
   saveSessionsStorage(storage: SessionsStorage): void {
     try {
-      localStorage.setItem(SESSIONS_KEY, JSON.stringify(storage));
-    } catch {
-      // Ignore errors
+      const serialized = JSON.stringify(storage);
+      const sizeBytes = new Blob([serialized]).size;
+      const MAX_STORAGE_BYTES = 4 * 1024 * 1024; // 4MB safety limit
+
+      if (sizeBytes > MAX_STORAGE_BYTES) {
+        console.warn(
+          `[SessionManager] Storage size ${(sizeBytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_STORAGE_BYTES / 1024 / 1024}MB limit, trimming old sessions`
+        );
+        // Collect all sessions across traces with their fingerprints
+        const allSessions: Array<{fingerprint: string; index: number; lastActiveAt: number}> = [];
+        for (const fingerprint in storage.byTrace) {
+          storage.byTrace[fingerprint].forEach((session, index) => {
+            allSessions.push({fingerprint, index, lastActiveAt: session.lastActiveAt});
+          });
+        }
+        // Sort oldest first
+        allSessions.sort((a, b) => a.lastActiveAt - b.lastActiveAt);
+
+        // Remove oldest sessions one at a time until under limit
+        for (const entry of allSessions) {
+          const sessions = storage.byTrace[entry.fingerprint];
+          if (!sessions) continue;
+          const sessionIdx = sessions.findIndex(
+            s => s.lastActiveAt === entry.lastActiveAt
+          );
+          if (sessionIdx !== -1) {
+            sessions.splice(sessionIdx, 1);
+            if (sessions.length === 0) {
+              delete storage.byTrace[entry.fingerprint];
+            }
+          }
+          const trimmedSerialized = JSON.stringify(storage);
+          if (new Blob([trimmedSerialized]).size <= MAX_STORAGE_BYTES) {
+            localStorage.setItem(SESSIONS_KEY, trimmedSerialized);
+            return;
+          }
+        }
+        // If still too large after trimming all, save what we have
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify(storage));
+      } else {
+        localStorage.setItem(SESSIONS_KEY, serialized);
+      }
+    } catch (e) {
+      console.warn('[SessionManager] Failed to save sessions storage:', e);
     }
   }
 

@@ -159,6 +159,27 @@
     background: var(--chat-success);
     margin-left: 4px;
   }
+
+  // SSE streaming connection states
+  &.sse-connecting {
+    background: var(--chat-warning, #f59e0b);
+    animation: sse-pulse 1.5s ease-in-out infinite;
+  }
+
+  &.sse-connected {
+    background: var(--chat-success);
+    animation: sse-pulse 2s ease-in-out infinite;
+  }
+
+  &.sse-reconnecting {
+    background: var(--chat-error);
+    animation: sse-pulse 0.8s ease-in-out infinite;
+  }
+}
+
+@keyframes sse-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 .ai-status-text {
@@ -792,6 +813,7 @@
 .ai-typing-dots,
 .ai-typing-indicator {
   display: flex;
+  align-items: center;
   gap: 3px;
   padding: 2px 0;
 }
@@ -817,6 +839,27 @@
     transform: scale(1);
     opacity: 1;
   }
+}
+
+.ai-typing-phase {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-secondary, #6b7280);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(100% - 40px);  // Adapt to bubble width minus dots
+  align-self: center;
+  opacity: 0.85;
+}
+
+// Context indicator (below messages, above input)
+.ai-context-indicator {
+  font-size: 11px;
+  color: var(--text-secondary, #6b7280);
+  padding: 2px 8px;
+  margin-bottom: 4px;
+  opacity: 0.8;
 }
 
 // ----------------------------------------------------------------------------
@@ -959,6 +1002,153 @@
   }
 }
 
+// Inline disconnect banner — shown inside messages area when backend drops mid-conversation
+.ai-disconnect-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--chat-error, #ef4444);
+
+  .pf-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+
+  span {
+    flex: 1;
+  }
+
+  .ai-disconnect-retrying {
+    font-size: 11px;
+    opacity: 0.7;
+  }
+}
+
+.ai-disconnect-retry-btn {
+  padding: 3px 10px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--chat-error, #ef4444);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover {
+    background: rgba(239, 68, 68, 0.1);
+  }
+}
+
+// Feedback buttons — thumbs up/down on assistant messages
+.ai-feedback-bar {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+
+  .ai-message:hover & {
+    opacity: 1;
+  }
+}
+
+.ai-feedback-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--chat-text-muted, #9ca3af);
+  cursor: pointer;
+  padding: 0;
+
+  .pf-icon {
+    font-size: 14px;
+  }
+
+  &:hover {
+    background: var(--chat-bg-secondary, #f3f4f6);
+    color: var(--chat-text, #374151);
+  }
+
+  &.active {
+    color: var(--chat-primary, #3b82f6);
+    opacity: 1;
+  }
+}
+
+// Sub-agent status cards — visual indicators of parallel evidence collection
+.ai-sub-agent-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-sub-agent-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  border: 1px solid var(--chat-border, #e5e7eb);
+  background: var(--chat-bg-secondary, #f9fafb);
+  min-width: 180px;
+  flex: 1;
+
+  &.sub-agent-running {
+    border-color: rgba(59, 130, 246, 0.3);
+    background: rgba(59, 130, 246, 0.05);
+  }
+
+  &.sub-agent-completed {
+    border-color: rgba(34, 197, 94, 0.3);
+    background: rgba(34, 197, 94, 0.05);
+  }
+
+  &.sub-agent-failed,
+  &.sub-agent-stopped {
+    border-color: rgba(239, 68, 68, 0.2);
+    background: rgba(239, 68, 68, 0.05);
+  }
+}
+
+.ai-sub-agent-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.ai-sub-agent-name {
+  font-weight: 600;
+  color: var(--chat-text, #1f2937);
+  white-space: nowrap;
+}
+
+.ai-sub-agent-desc {
+  color: var(--chat-text-muted, #6b7280);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-sub-agent-meta {
+  color: var(--chat-text-muted, #6b7280);
+  font-size: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 // ----------------------------------------------------------------------------
 // SQL Result Card
 // ----------------------------------------------------------------------------
@@ -1068,7 +1258,7 @@
 // Table Wrapper - compact
 .sql-result-table-wrapper {
   overflow-x: auto;
-  max-height: 240px;
+  max-height: 400px;
   overflow-y: auto;
 
   &::-webkit-scrollbar {
@@ -2339,6 +2529,36 @@
 }
 
 // 历史对话分隔线
+// Round separator between conversation turns
+.ai-round-separator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 20px 8px;
+  gap: 12px;
+  user-select: none;
+}
+
+.ai-round-separator-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--chat-border) 20%,
+    var(--chat-border) 80%,
+    transparent
+  );
+}
+
+.ai-round-separator-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--chat-text-secondary);
+  white-space: nowrap;
+  letter-spacing: 0.5px;
+}
+
 .ai-session-sidebar-divider {
   display: flex;
   align-items: center;

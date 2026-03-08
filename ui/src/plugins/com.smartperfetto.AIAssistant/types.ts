@@ -30,7 +30,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
-  flowTag?: 'streaming_flow' | 'answer_stream' | 'progress_note';
+  flowTag?: 'streaming_flow' | 'answer_stream' | 'progress_note' | 'round_separator';
   sqlResult?: SqlQueryResult;
   query?: string;
   reportUrl?: string;  // HTML report link
@@ -58,6 +58,17 @@ export interface ConversationStepTimelineItem {
   phase: 'progress' | 'thinking' | 'tool' | 'result' | 'error';
   role: 'agent' | 'system';
   text: string;
+  timestamp?: number;
+}
+
+/** Tracked sub-agent state for UI cards. */
+export interface SubAgentCard {
+  agentName: string;
+  description: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  startedAt: number;
+  completedAt?: number;
+  toolUses?: number;
 }
 
 export interface StreamingFlowState {
@@ -81,6 +92,10 @@ export interface StreamingFlowState {
   startedAt: number | null;
   lastUpdatedAt: number | null;
   error: string | null;
+  /** Active/completed sub-agent cards for visual tracking. */
+  subAgents: SubAgentCard[];
+  /** Deferred retry timer for throttled conversation timeline steps. */
+  conversationFlushTimer?: number;
 }
 
 export function createStreamingFlowState(): StreamingFlowState {
@@ -105,6 +120,8 @@ export function createStreamingFlowState(): StreamingFlowState {
     startedAt: null,
     lastUpdatedAt: null,
     error: null,
+    subAgents: [],
+    conversationFlushTimer: undefined,
   };
 }
 
@@ -193,6 +210,7 @@ export interface AIPanelState {
   messages: Message[];
   input: string;
   isLoading: boolean;
+  loadingPhase: string;  // Current analysis phase text (from SSE progress events)
   showSettings: boolean;
   aiService: any | null;  // AIService type from ai_service.ts
   settings: AISettings;

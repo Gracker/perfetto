@@ -8,7 +8,7 @@
  *
  * @module dataContract.types
  * @version 2.0.0 - DataEnvelope refactoring
- * @generated 2026-03-01T15:50:42.869Z
+ * @generated 2026-03-07T12:36:22.651Z
  */
 
 // =============================================================================
@@ -121,7 +121,8 @@ export type DisplayLayer =
   | 'overview'
   | 'list'
   | 'session'
-  | 'deep';
+  | 'deep'
+  | 'diagnosis';
 
 /**
  * Display Levels - Controls HOW MUCH detail to show
@@ -131,7 +132,8 @@ export type DisplayLevel =
   | 'debug'
   | 'detail'
   | 'summary'
-  | 'key';
+  | 'key'
+  | 'hidden';
 
 /**
  * Display Formats - HOW to render the data

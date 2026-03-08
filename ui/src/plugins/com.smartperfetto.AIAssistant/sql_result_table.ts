@@ -144,6 +144,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private expandedRows = new Set<number>();
   // Trace 起始时间（纳秒），用于计算相对时间显示
   private traceStartNs: number = 0;
+  // Column sorting state
+  private sortColumnIdx: number | null = null;
+  private sortDirection: 'asc' | 'desc' = 'asc';
 
   view(vnode: m.Vnode<SqlResultTableAttrs>) {
     const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary, metadata, columnDefinitions, onInteraction} = vnode.attrs;
@@ -177,9 +180,30 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ? columns.map((_, idx) => getColumnClasses(effectiveColumnDefs[idx]))
       : this.classifyColumns(columns);
 
+    // Apply column sorting if active
+    let sortedRows = rows;
+    if (this.sortColumnIdx !== null && this.sortColumnIdx < columns.length) {
+      const colIdx = this.sortColumnIdx;
+      const dir = this.sortDirection;
+      sortedRows = [...rows].sort((a, b) => {
+        const valA = a[colIdx];
+        const valB = b[colIdx];
+        // Numeric comparison if both are numbers
+        const numA = Number(valA);
+        const numB = Number(valB);
+        if (!isNaN(numA) && !isNaN(numB)) {
+          return dir === 'asc' ? numA - numB : numB - numA;
+        }
+        // String comparison
+        const strA = String(valA ?? '');
+        const strB = String(valB ?? '');
+        return dir === 'asc' ? strA.localeCompare(strB) : strB.localeCompare(strA);
+      });
+    }
+
     // Limit displayed rows: collapsed shows 10, expanded shows up to 50
     const displayLimit = this.expanded ? EXPANDED_ROW_LIMIT : COLLAPSED_ROW_LIMIT;
-    const displayRows = rows.slice(0, displayLimit);
+    const displayRows = sortedRows.slice(0, displayLimit);
     const hasMore = rows.length > COLLAPSED_ROW_LIMIT;
 
     // Calculate statistics (only when needed)
@@ -266,17 +290,42 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
       // Table - Perfetto style, full width
       m('.sql-result-table-wrapper',
-        m('table.sql-result-table', [
+        m('table.sql-result-table', { role: 'grid' }, [
           m('thead',
             m('tr', [
               // 可展开按钮列表头（如果有可展开数据 - check for at least one non-null item）
               expandableData && expandableData.some(Boolean) ? m('th.col-expand', '') : null,
               ...columns.map((col, idx) =>
                 m('th', {
+                  role: 'columnheader',
+                  'aria-sort': this.sortColumnIdx === idx
+                    ? (this.sortDirection === 'asc' ? 'ascending' : 'descending')
+                    : 'none',
                   class: columnClasses[idx] || '',
                   title: col,
-                  onclick: () => this.copyColumn(rows, columns, idx),
-                }, col)
+                  style: { cursor: 'pointer', userSelect: 'none' },
+                  onclick: (e: MouseEvent) => {
+                    if (e.shiftKey) {
+                      // Shift+click copies column (original behavior)
+                      this.copyColumn(rows, columns, idx);
+                    } else {
+                      // Click sorts
+                      if (this.sortColumnIdx === idx) {
+                        this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+                      } else {
+                        this.sortColumnIdx = idx;
+                        this.sortDirection = 'asc';
+                      }
+                      m.redraw();
+                    }
+                  },
+                }, [
+                  col,
+                  this.sortColumnIdx === idx
+                    ? m('span.sort-indicator', { style: { marginLeft: '4px', fontSize: '10px' } },
+                        this.sortDirection === 'asc' ? '\u25B2' : '\u25BC')
+                    : null,
+                ])
               ),
               // Navigation arrow column header
               trace ? m('th.col-action', '') : null,

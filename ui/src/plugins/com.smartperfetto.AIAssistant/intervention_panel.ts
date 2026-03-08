@@ -127,7 +127,7 @@ function getActionButtonStyle(action: InterventionAction, recommended: boolean):
     case 'abort':
       return {
         ...baseStyle,
-        background: '#fef2f2',
+        background: 'var(--surface-warning, #fef2f2)',
         color: '#dc2626',
         border: '1px solid #fecaca',
       };
@@ -141,16 +141,16 @@ function getActionButtonStyle(action: InterventionAction, recommended: boolean):
     case 'focus':
       return {
         ...baseStyle,
-        background: '#eef2ff',
+        background: 'var(--surface-accent, #eef2ff)',
         color: '#4f46e5',
         border: '1px solid #c7d2fe',
       };
     default:
       return {
         ...baseStyle,
-        background: '#f9fafb',
-        color: '#374151',
-        border: '1px solid #e5e7eb',
+        background: 'var(--surface, #f9fafb)',
+        color: 'var(--text-color, #374151)',
+        border: '1px solid var(--border-color, #e5e7eb)',
       };
   }
 }
@@ -284,9 +284,9 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
       }
     };
 
-    // Panel styles
+    // Panel styles - using CSS custom properties for dark mode support
     const panelStyle: Record<string, string> = {
-      background: 'white',
+      background: 'var(--background, white)',
       borderRadius: '12px',
       boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
       padding: '20px',
@@ -300,23 +300,23 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
       gap: '12px',
       marginBottom: '16px',
       paddingBottom: '12px',
-      borderBottom: '1px solid #e5e7eb',
+      borderBottom: '1px solid var(--border-color, #e5e7eb)',
     };
 
     const titleStyle: Record<string, string> = {
       fontSize: '18px',
       fontWeight: '600',
-      color: '#1f2937',
+      color: 'var(--text-color, #1f2937)',
       margin: '0',
     };
 
     const contextStyle: Record<string, string> = {
-      background: '#f9fafb',
+      background: 'var(--surface, #f9fafb)',
       borderRadius: '8px',
       padding: '12px',
       marginBottom: '16px',
       fontSize: '13px',
-      color: '#6b7280',
+      color: 'var(--text-secondary, #6b7280)',
     };
 
     const optionsContainerStyle: Record<string, string> = {
@@ -331,7 +331,7 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
       justifyContent: 'flex-end',
       gap: '12px',
       paddingTop: '12px',
-      borderTop: '1px solid #e5e7eb',
+      borderTop: '1px solid var(--border-color, #e5e7eb)',
     };
 
     return m('div.intervention-panel', { style: panelStyle }, [
@@ -406,9 +406,11 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
             minHeight: '80px',
             padding: '12px',
             borderRadius: '8px',
-            border: '1px solid #d1d5db',
+            border: '1px solid var(--border-color, #d1d5db)',
             fontSize: '14px',
             resize: 'vertical',
+            background: 'var(--background, white)',
+            color: 'var(--text-color, inherit)',
           },
           placeholder: '请输入您的具体需求...',
           value: state.customInput,
@@ -425,9 +427,9 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
           style: {
             padding: '10px 20px',
             borderRadius: '6px',
-            border: '1px solid #d1d5db',
-            background: 'white',
-            color: '#6b7280',
+            border: '1px solid var(--border-color, #d1d5db)',
+            background: 'var(--background, white)',
+            color: 'var(--text-secondary, #6b7280)',
             cursor: 'pointer',
             fontSize: '14px',
           },
@@ -439,7 +441,7 @@ export const InterventionPanel: m.Component<InterventionPanelAttrs> = {
             padding: '10px 20px',
             borderRadius: '6px',
             border: 'none',
-            background: state.selectedOptionId ? '#3b82f6' : '#9ca3af',
+            background: state.selectedOptionId ? '#3b82f6' : 'var(--text-secondary, #9ca3af)',
             color: 'white',
             cursor: state.selectedOptionId ? 'pointer' : 'not-allowed',
             fontSize: '14px',

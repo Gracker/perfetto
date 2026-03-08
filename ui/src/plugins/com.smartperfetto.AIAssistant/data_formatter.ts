@@ -112,9 +112,9 @@ export function escapeHtml(text: string): string {
  */
 export function sanitizeHtml(html: string): string {
   return html
-    .replace(/<\/?(?:script|iframe|object|embed|form|meta|link|base|applet|frame|frameset)\b[^>]*>/gi, '')
+    .replace(/<\/?(?:script|iframe|object|embed|form|meta|link|base|applet|frame|frameset|style|noscript|plaintext|xmp)\b[^>]*>/gi, '')
     .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi, '')
-    .replace(/((?:href|src|action)\s*=\s*["'])javascript:/gi, '$1about:blank');
+    .replace(/((?:href|src|action|formaction|xlink:href)\s*=\s*["'])(?:javascript|data|vbscript):/gi, '$1about:blank');
 }
 
 function normalizeMarkdownSpacing(content: string): string {
