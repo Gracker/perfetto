@@ -152,6 +152,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
   private scrollThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+  // Debounced session save (P1-8): coalesce rapid addMessage() calls
+  private saveSessionTimer: ReturnType<typeof setTimeout> | null = null;
+  private beforeUnloadHandler: (() => void) | null = null;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
   // Paragraph-level progressive reveal: tracks how many children have been animated per message
@@ -296,8 +299,31 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // 尝试迁移旧格式数据
     this.migrateOldHistoryToSession();
 
-    // 总是创建新 Session（不自动恢复历史）
-    // 用户可以通过侧边栏点击历史 Session 来恢复
+    // Auto-restore a recent session (<30 min old with messages) for this trace,
+    // otherwise create a new session.
+    const recentSessions = sessionManager.getSessionsForTrace(newFingerprint);
+    const THIRTY_MINUTES = 30 * 60 * 1000;
+    const now = Date.now();
+    const restorable = recentSessions
+      .filter(s => s.messages.length > 0 && (now - (s.lastActiveAt || s.createdAt)) < THIRTY_MINUTES)
+      .sort((a, b) => (b.lastActiveAt || b.createdAt) - (a.lastActiveAt || a.createdAt));
+
+    if (restorable.length > 0) {
+      if (DEBUG_AI_PANEL) console.log('[AIPanel] Auto-restoring recent session:', restorable[0].sessionId);
+      // Preserve backendTraceId from upload state — loadSession may clear it
+      const savedBackendTraceId = this.state.backendTraceId;
+      this.loadSession(restorable[0].sessionId);
+      if (savedBackendTraceId && !this.state.backendTraceId) {
+        this.state.backendTraceId = savedBackendTraceId;
+        this.saveCurrentSession();
+      }
+      if (this.state.backendTraceId) {
+        this.detectScenesQuick();
+      }
+      m.redraw();
+      return;
+    }
+
     if (DEBUG_AI_PANEL) console.log('[AIPanel] Creating new session for trace');
     this.createNewSession();
 
@@ -665,6 +691,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       mql.addEventListener('change', this.darkModeListener);
     }
 
+    // Flush pending session save on page unload
+    this.beforeUnloadHandler = () => this.flushSessionSave();
+    window.addEventListener('beforeunload', this.beforeUnloadHandler);
+
     // Focus input (requires DOM)
     setTimeout(() => {
       const textarea = document.getElementById('ai-input') as HTMLTextAreaElement;
@@ -693,6 +723,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.unsubscribeBackendUpload) {
       this.unsubscribeBackendUpload();
       this.unsubscribeBackendUpload = undefined;
+    }
+    // Flush pending session save and remove beforeunload listener
+    this.flushSessionSave();
+    if (this.beforeUnloadHandler) {
+      window.removeEventListener('beforeunload', this.beforeUnloadHandler);
+      this.beforeUnloadHandler = null;
     }
   }
 
@@ -1622,6 +1658,31 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   /**
+   * Schedule a debounced session save (500ms trailing).
+   * Coalesces rapid addMessage() calls during streaming.
+   */
+  private debouncedSaveSession(): void {
+    if (this.saveSessionTimer) {
+      clearTimeout(this.saveSessionTimer);
+    }
+    this.saveSessionTimer = setTimeout(() => {
+      this.saveSessionTimer = null;
+      this.saveCurrentSession();
+    }, 500);
+  }
+
+  /**
+   * Immediately flush any pending debounced session save.
+   */
+  private flushSessionSave(): void {
+    if (this.saveSessionTimer) {
+      clearTimeout(this.saveSessionTimer);
+      this.saveSessionTimer = null;
+      this.saveCurrentSession();
+    }
+  }
+
+  /**
    * 加载指定 Session
    */
   loadSession(sessionId: string): boolean {
@@ -1859,7 +1920,7 @@ Click ⚙️ to change settings.`;
       (msg) => msg.role === 'assistant' && msg.flowTag !== 'round_separator'
     );
     if (hasPriorResults) {
-      const roundNumber = (this.state.agentRunSequence || 0) + 1;
+      const roundNumber = this.state.messages.filter(m => m.role === 'user').length + 1;
       this.addMessage({
         id: this.generateId(),
         role: 'system',
@@ -1981,8 +2042,8 @@ Click ⚙️ to change settings.`;
   private addMessage(msg: Message) {
     this.state.messages.push(msg);
     this.saveHistory();
-    // 同时保存到 Session
-    this.saveCurrentSession();
+    // Debounced session save — coalesces rapid streaming messages
+    this.debouncedSaveSession();
     this.scrollToBottom(true);
   }
 
@@ -3158,6 +3219,7 @@ Output MUST follow this exact markdown structure:
                     // 'analysis_completed' follows with reportUrl after HTML report
                     // generation. Only close on analysis_completed/error/end.
                     if (eventType === 'analysis_completed' || eventType === 'error' || eventType === 'end') {
+                      this.flushSessionSave();
                       this.cancelSSEConnection();
                       m.redraw();
                       return;
@@ -3233,8 +3295,55 @@ Output MUST follow this exact markdown structure:
           if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE retry wait aborted');
           return;
         }
+
+        // Check if analysis already completed while disconnected
+        if (await this.checkSessionStatus(sessionId, signal)) {
+          return;
+        }
       }
     }
+  }
+
+  /**
+   * Check backend session status after SSE reconnect.
+   * If analysis already completed/failed during disconnect, finalize the UI.
+   * Returns true if the session is terminal (no need to reconnect).
+   */
+  private async checkSessionStatus(sessionId: string, signal: AbortSignal): Promise<boolean> {
+    try {
+      const statusUrl = buildAssistantApiV1Url(
+        this.state.settings.backendUrl,
+        `/${sessionId}/status`,
+      );
+      const res = await this.fetchBackend(statusUrl, {signal});
+      if (!res.ok) return false;
+      const body = await res.json();
+      const status = body.status || body.state;
+      if (status === 'completed' || status === 'failed') {
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Session already', status, '— stopping SSE reconnect');
+        this.state.sseConnectionState = 'disconnected';
+        this.setLoadingState(false);
+        // Remove reconnecting indicator if present
+        const lastMsg = this.state.messages[this.state.messages.length - 1];
+        if (lastMsg?.role === 'assistant' && lastMsg.content.startsWith('\u{1F504}')) {
+          this.state.messages.pop();
+        }
+        if (status === 'failed') {
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `**Analysis failed** while reconnecting. Please try again.`,
+            timestamp: Date.now(),
+          });
+        }
+        this.flushSessionSave();
+        m.redraw();
+        return true;
+      }
+    } catch {
+      // Status check failed — continue with reconnect attempt
+    }
+    return false;
   }
 
 
@@ -4539,6 +4648,10 @@ Output MUST follow this exact markdown structure:
     this.cancelSSEConnection();
     this.resetInterventionState();
 
+    // Persist current conversation before wiping
+    this.flushSessionSave();
+    this.saveCurrentSession();
+
     // Do not delete backend trace resources when clearing chat.
     // Clear-chat resets conversation state only and preserves trace continuity.
 
@@ -4554,13 +4667,17 @@ Output MUST follow this exact markdown structure:
     this.resetStreamingAnswer();
     this.saveHistory();
 
-    // Show welcome message
-    this.addMessage({
-      id: this.generateId(),
-      role: 'assistant',
-      content: this.getWelcomeMessage(),
-      timestamp: Date.now(),
-    });
+    // Show appropriate welcome message based on mode
+    if (this.state.backendTraceId || this.engine?.mode === 'HTTP_RPC') {
+      this.addRpcModeWelcomeMessage();
+    } else {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: this.getWelcomeMessage(),
+        timestamp: Date.now(),
+      });
+    }
     m.redraw();
   }
 
