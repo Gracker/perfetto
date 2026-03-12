@@ -353,6 +353,42 @@ export const PRESET_QUESTIONS: PresetQuestion[] = [
 ];
 
 // =============================================================================
+// User Selection Context — passed to backend /analyze for scoped analysis
+// =============================================================================
+
+/**
+ * Describes the user's current Perfetto UI selection (area or single slice).
+ * Serialized and sent to the backend so that Claude can scope its analysis
+ * to the user-selected time range or slice.
+ */
+export interface SelectionContext {
+  kind: 'area' | 'track_event';
+  // ── Area selection (M key) ──
+  startNs?: number;
+  endNs?: number;
+  durationNs?: number;
+  /** Resolved track metadata for the selected area */
+  tracks?: SelectionTrackInfo[];
+  trackCount?: number;
+  // ── Single slice selection ──
+  trackUri?: string;
+  eventId?: number;
+  ts?: number;
+  dur?: number;
+}
+
+/** Human-readable metadata for a track in an area selection. */
+export interface SelectionTrackInfo {
+  uri: string;
+  threadName?: string;
+  processName?: string;
+  tid?: number;
+  pid?: number;
+  cpu?: number;
+  kind?: string;
+}
+
+// =============================================================================
 // Agent-Driven Architecture v2.0 - Intervention Types
 // =============================================================================
 

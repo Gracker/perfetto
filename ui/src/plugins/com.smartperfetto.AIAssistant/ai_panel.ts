@@ -53,6 +53,8 @@ import {
   DEFAULT_SETTINGS,
   PENDING_BACKEND_TRACE_KEY,
   PRESET_QUESTIONS,
+  SelectionContext,
+  SelectionTrackInfo,
 } from './types';
 // Agent-Driven Architecture v2.0 - Intervention Panel
 import {InterventionPanel, DEFAULT_INTERVENTION_STATE} from './intervention_panel';
@@ -761,8 +763,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               : null,
             // Preset question buttons - only show when connected to backend
             isInRpcMode && !this.state.isLoading
-              ? m('div.ai-preset-questions',
-                  PRESET_QUESTIONS.map(preset =>
+              ? m('div.ai-preset-questions', [
+                  ...PRESET_QUESTIONS.map(preset =>
                     m(`button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}`, {
                       onclick: () => this.sendPresetQuestion(preset.question),
                       title: preset.isTeaching ? '检测当前 Trace 的渲染管线类型，自动 Pin 关键泳道' : preset.question,
@@ -771,8 +773,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       m('i.pf-icon', preset.icon),
                       preset.label,
                     ])
-                  )
-                )
+                  ),
+                  // "Analyze Selection" button — only visible when user has an active selection
+                  this.hasActiveSelection()
+                    ? m('button.ai-preset-btn.ai-selection-btn', {
+                        onclick: () => this.analyzeCurrentSelection(),
+                        title: this.getSelectionButtonTitle(),
+                        disabled: this.state.isLoading,
+                      }, [
+                        m('i.pf-icon', 'my_location'),
+                        '选区分析',
+                      ])
+                    : null,
+                ])
               : null,
           ]),
           m('div.ai-header-right', [
@@ -1895,6 +1908,55 @@ Click ⚙️ to change settings.`;
     this.sendMessage();
   }
 
+  /** Check if the user has an active Perfetto selection (area or slice). */
+  private hasActiveSelection(): boolean {
+    if (!this.trace) return false;
+    const kind = this.trace.selection.selection.kind;
+    return kind === 'area' || kind === 'track_event';
+  }
+
+  /** Build a descriptive tooltip for the selection analysis button. */
+  private getSelectionButtonTitle(): string {
+    if (!this.trace) return '分析当前选区';
+    const sel = this.trace.selection.selection;
+    if (sel.kind === 'area') {
+      const timeSpan = this.trace.selection.getTimeSpanOfSelection();
+      if (timeSpan) {
+        const durMs = (Number(timeSpan.duration) / 1e6).toFixed(1);
+        return `分析选中区间 (${durMs}ms, ${sel.trackUris.length} tracks)`;
+      }
+      return `分析选中区间 (${sel.trackUris.length} tracks)`;
+    }
+    if (sel.kind === 'track_event') {
+      return '分析选中的 Slice';
+    }
+    return '分析当前选区';
+  }
+
+  /**
+   * One-click analysis of the current Perfetto selection.
+   * Builds a smart query and sends it through the normal agent flow.
+   * The selectionContext is auto-injected by handleChatMessage().
+   */
+  private analyzeCurrentSelection() {
+    if (this.state.isLoading || !this.trace) return;
+    const sel = this.trace.selection.selection;
+
+    let query: string;
+    if (sel.kind === 'area') {
+      const timeSpan = this.trace.selection.getTimeSpanOfSelection();
+      const durMs = timeSpan ? (Number(timeSpan.duration) / 1e6).toFixed(1) : '?';
+      query = `分析用户选中区间的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
+    } else if (sel.kind === 'track_event') {
+      query = '分析用户选中的这个 Slice：它是什么、子调用链耗时分解、与历史同类 Slice 对比是否异常、根因分析';
+    } else {
+      return;
+    }
+
+    this.state.input = query;
+    this.sendMessage();
+  }
+
   /**
    * Analyze a detected scene - triggered by clicking a scene chip in the navigation bar.
    * Builds a context-rich query from the scene metadata and sends it for analysis.
@@ -2439,6 +2501,139 @@ Output MUST follow this exact markdown structure:
     m.redraw();
   }
 
+  /**
+   * Capture the current Perfetto UI selection and resolve track metadata.
+   * Returns null if nothing is selected.
+   * Called on every handleChatMessage() so the backend always gets the latest selection.
+   */
+  private async captureSelectionContext(): Promise<SelectionContext | null> {
+    if (!this.trace) return null;
+    const sel = this.trace.selection.selection;
+
+    if (sel.kind === 'area') {
+      const timeSpan = this.trace.selection.getTimeSpanOfSelection();
+      const startNs = Number(sel.start);
+      const endNs = Number(sel.end);
+      const durationNs = timeSpan ? Number(timeSpan.duration) : endNs - startNs;
+
+      // Resolve track metadata (thread/process names) from track tags
+      const tracks = await this.resolveTrackInfos(sel.tracks);
+
+      return {
+        kind: 'area',
+        startNs,
+        endNs,
+        durationNs,
+        tracks,
+        trackCount: sel.trackUris.length,
+      };
+    }
+
+    if (sel.kind === 'track_event') {
+      return {
+        kind: 'track_event',
+        trackUri: sel.trackUri,
+        eventId: sel.eventId,
+        ts: Number(sel.ts),
+        dur: sel.dur !== undefined ? Number(sel.dur) : undefined,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Batch-resolve track tags (utid/upid/cpu) into human-readable names via SQL.
+   */
+  private async resolveTrackInfos(
+    tracks: ReadonlyArray<import('../../public/track').Track>,
+  ): Promise<SelectionTrackInfo[]> {
+    const result: SelectionTrackInfo[] = [];
+    const utids = new Set<number>();
+    const upids = new Set<number>();
+
+    // Collect utid/upid/cpu from track tags
+    for (const t of tracks) {
+      const info: SelectionTrackInfo = { uri: t.uri };
+      if (t.tags?.cpu !== undefined) info.cpu = t.tags.cpu as number;
+      if (t.tags?.type) info.kind = t.tags.type as string;
+      if (t.tags?.utid !== undefined) utids.add(t.tags.utid as number);
+      if (t.tags?.upid !== undefined) upids.add(t.tags.upid as number);
+      result.push(info);
+    }
+
+    if (!this.engine || (utids.size === 0 && upids.size === 0)) return result;
+
+    // Batch query thread names
+    const threadMap = new Map<number, { name: string; tid: number; upid?: number }>();
+    if (utids.size > 0) {
+      try {
+        const q = `SELECT utid, name, tid, upid FROM thread WHERE utid IN (${[...utids].join(',')})`;
+        const res = await this.engine.query(q);
+        const it = res.iter({});
+        while (it.valid()) {
+          threadMap.set(
+            Number(it.get('utid')),
+            { name: String(it.get('name') ?? ''), tid: Number(it.get('tid')), upid: it.get('upid') != null ? Number(it.get('upid')) : undefined },
+          );
+          // Also collect upids from thread rows for process name resolution
+          if (it.get('upid') != null) upids.add(Number(it.get('upid')));
+          it.next();
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    // Batch query process names
+    const processMap = new Map<number, { name: string; pid: number }>();
+    if (upids.size > 0) {
+      try {
+        const q = `SELECT upid, name, pid FROM process WHERE upid IN (${[...upids].join(',')})`;
+        const res = await this.engine.query(q);
+        const it = res.iter({});
+        while (it.valid()) {
+          processMap.set(
+            Number(it.get('upid')),
+            { name: String(it.get('name') ?? ''), pid: Number(it.get('pid')) },
+          );
+          it.next();
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    // Merge resolved names back into result
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      const info = result[i];
+      const utid = t.tags?.utid as number | undefined;
+      const upid = t.tags?.upid as number | undefined;
+
+      if (utid !== undefined) {
+        const th = threadMap.get(utid);
+        if (th) {
+          info.threadName = th.name;
+          info.tid = th.tid;
+          // Resolve process via thread's upid
+          if (th.upid !== undefined) {
+            const proc = processMap.get(th.upid);
+            if (proc) {
+              info.processName = proc.name;
+              info.pid = proc.pid;
+            }
+          }
+        }
+      }
+      if (upid !== undefined && !info.processName) {
+        const proc = processMap.get(upid);
+        if (proc) {
+          info.processName = proc.name;
+          info.pid = proc.pid;
+        }
+      }
+    }
+
+    return result;
+  }
+
   private async handleAnrCommand() {
     this.setLoadingState(true);
     m.redraw();
@@ -2711,6 +2906,13 @@ Output MUST follow this exact markdown structure:
           maxFailureRounds: 2,
         },
       };
+
+      // Capture current Perfetto selection (area / slice) and include in request
+      const selectionContext = await this.captureSelectionContext();
+      if (selectionContext) {
+        requestBody.selectionContext = selectionContext;
+        if (DEBUG_AI_PANEL) console.log('[AIPanel] Injecting selectionContext:', selectionContext);
+      }
 
       // Include agentSessionId if available for multi-turn dialogue
       if (this.state.agentSessionId) {
