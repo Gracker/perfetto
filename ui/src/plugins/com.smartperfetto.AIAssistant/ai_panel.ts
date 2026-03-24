@@ -69,7 +69,7 @@ import {
   handleSSEEvent as handleSSEEventExternal,
   SSEHandlerContext,
 } from './sse_event_handlers';
-import {createOverlayTrack} from './track_overlay';
+import {createOverlayTrack, STEP_TO_OVERLAY} from './track_overlay';
 import {
   subscribeClearChat,
   subscribeOpenSettings,
@@ -320,7 +320,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.saveCurrentSession();
       }
       if (this.state.backendTraceId) {
-        this.detectScenesQuick();
+        // Scene navigation bar now populates only after explicit /scene command.
+        // detectScenesQuick() quality is too low for navigation (0ms entries, inaccurate types).
       } else if (appBackendUploadState === 'uploading') {
         // Background upload still in progress — listen for completion
         // Without this, restored sessions get stuck in disconnected state
@@ -342,9 +343,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // 3. Manual RPC mode (trace_processor_shell -D)
     // 4. No backend at all
     if (this.state.backendTraceId) {
-      // Backend already available — show welcome and fire scene detection
+      // Backend already available — show welcome (scene detection deferred to /scene command)
       this.addRpcModeWelcomeMessage();
-      this.detectScenesQuick();
     } else if (appBackendUploadState === 'uploading') {
       // Background upload in progress — show connecting state, listen for completion
       this.addBackendConnectingMessage();
@@ -412,9 +412,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           });
 
           this.saveCurrentSession();
-
-          // Trigger quick scene detection for navigation bar
-          this.detectScenesQuick();
 
           m.redraw();
           return;
@@ -620,7 +617,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           timestamp: Date.now(),
         });
         this.saveCurrentSession();
-        this.detectScenesQuick();
         m.redraw();
 
         if (this.unsubscribeBackendUpload) {
@@ -3892,7 +3888,7 @@ Output MUST follow this exact markdown structure:
               const rawData = JSON.parse(dataStr);
               const eventType = currentEventType || rawData.type || '';
 
-              if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE event:', eventType);
+              console.log('[AIPanel] Scene SSE event:', eventType, 'terminal?', eventType === 'end' || eventType === 'error');
 
               this.handleSceneSSEEvent(
                 eventType, rawData, unwrapEventData, applyScenePayload,
@@ -3912,6 +3908,9 @@ Output MUST follow this exact markdown structure:
                 if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene SSE: end event received');
                 this.renderSceneReconstructionResult(progressMessageId, scenes, trackEvents, narrative, findings);
                 this.autoPinTracksForScenes(scenes);
+                // Update scene navigation bar with reconstruction results
+                this.state.detectedScenes = scenes;
+                m.redraw();
                 return;
               }
             } catch (e) {
@@ -3927,6 +3926,9 @@ Output MUST follow this exact markdown structure:
       // Stream ended without explicit 'end' event - render what we have
       this.renderSceneReconstructionResult(progressMessageId, scenes, trackEvents, narrative, findings);
       this.autoPinTracksForScenes(scenes);
+      // Update scene navigation bar with reconstruction results
+      this.state.detectedScenes = scenes;
+      m.redraw();
     } catch (e: any) {
       if (abortController.signal.aborted && !e.message?.includes('Scene reconstruction')) {
         throw new Error('Scene reconstruction timeout');
@@ -4021,6 +4023,23 @@ Output MUST follow this exact markdown structure:
           trackEvents.push(...data.trackEvents);
         }
         break;
+
+      // DataEnvelope events — route to track overlay for state timeline lanes
+      case 'data': {
+        const envelopes = Array.isArray(rawData.envelope)
+          ? rawData.envelope
+          : (rawData.envelope ? [rawData.envelope] : []);
+        for (const envelope of envelopes) {
+          if (!envelope?.meta?.stepId || !envelope?.data?.columns || !envelope?.data?.rows) continue;
+          const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
+          if (overlayId && this.trace) {
+            if (DEBUG_AI_PANEL) console.log('[AIPanel] Creating overlay track:', overlayId);
+            createOverlayTrack(this.trace, overlayId, envelope.data.columns, envelope.data.rows)
+              .catch((err: Error) => console.warn('[AIPanel] Overlay track creation failed:', err));
+          }
+        }
+        break;
+      }
 
       case 'result':
         if (DEBUG_AI_PANEL) console.log('[AIPanel] Scene result:', data);

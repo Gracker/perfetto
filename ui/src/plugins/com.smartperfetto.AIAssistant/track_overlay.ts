@@ -38,7 +38,14 @@ import {addDebugSliceTrack} from '../../components/tracks/debug_tracks';
 // ---------------------------------------------------------------------------
 
 /** Registered overlay type identifiers. */
-type OverlayId = 'jank' | 'scene_timeline' | 'pipeline_slices';
+type OverlayId =
+  | 'jank'
+  | 'scene_timeline'
+  | 'pipeline_slices'
+  | 'state_device'
+  | 'state_input'
+  | 'state_app'
+  | 'state_system';
 
 /** Declarative configuration for a track overlay type. */
 interface OverlayConfig {
@@ -156,6 +163,44 @@ const OVERLAY_CONFIGS = new Map<OverlayId, OverlayConfig>([
 ]);
 
 // ---------------------------------------------------------------------------
+// State lane overlay factory — shared config for continuous state timeline
+// ---------------------------------------------------------------------------
+
+function makeStateLaneOverlay(
+  id: OverlayId,
+  title: string,
+  extraRawCols: string[] = [],
+): [OverlayId, OverlayConfig] {
+  return [
+    id,
+    {
+      id,
+      trackTitle: title,
+      columns: {ts: 'start_ts', dur: 'dur_ns', name: 'state_label'},
+      colorColumn: 'state',
+      rawColumns: [
+        'state',
+        'dur_ms',
+        'state_label',
+        'source_status',
+        ...extraRawCols,
+      ],
+      maxRows: 1000,
+    },
+  ];
+}
+
+// Register state lane overlays
+OVERLAY_CONFIGS.set(...makeStateLaneOverlay('state_device', 'Device State'));
+OVERLAY_CONFIGS.set(
+  ...makeStateLaneOverlay('state_input', 'User Input', ['app_package']),
+);
+OVERLAY_CONFIGS.set(...makeStateLaneOverlay('state_app', 'App State'));
+OVERLAY_CONFIGS.set(
+  ...makeStateLaneOverlay('state_system', 'System State', ['confidence']),
+);
+
+// ---------------------------------------------------------------------------
 // stepId → overlayId routing table
 // ---------------------------------------------------------------------------
 
@@ -168,6 +213,11 @@ export const STEP_TO_OVERLAY = new Map<string, OverlayId>([
   ['batch_frame_root_cause', 'jank'],
   ['clean_timeline', 'scene_timeline'],
   ['pipeline_key_slices_overlay', 'pipeline_slices'],
+  // State timeline lanes (continuous state coverage)
+  ['device_state_lane', 'state_device'],
+  ['input_state_lane', 'state_input'],
+  ['app_state_lane', 'state_app'],
+  ['system_state_lane', 'state_system'],
 ]);
 
 // ---------------------------------------------------------------------------

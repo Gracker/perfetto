@@ -28,6 +28,7 @@
 import m from 'mithril';
 import {Message, AISettings} from './types';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
 
 /**
  * Scene data structure returned from backend analysis.
@@ -82,6 +83,8 @@ export interface SceneHandlerContext {
     instructions: PinInstruction[],
     activeProcesses: Array<{processName: string; frameCount: number}>
   ) => Promise<void>;
+  /** Update the scene navigation bar with detected scenes from scene reconstruction */
+  onScenesDetected?: (scenes: SceneData[]) => void;
 }
 
 // =============================================================================
@@ -487,6 +490,32 @@ export class SceneReconstructionHandler {
         }
       });
 
+      // Handle DataEnvelope events (e.g., state_timeline lanes → track overlays)
+      eventSource.addEventListener('data', (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          // StreamProjector wraps DataEnvelopes in { envelope: ... }
+          const envelopes = Array.isArray(raw.envelope)
+            ? raw.envelope
+            : (raw.envelope ? [raw.envelope] : []);
+          for (const envelope of envelopes) {
+            if (!envelope?.meta?.stepId || !envelope?.data?.columns || !envelope?.data?.rows) continue;
+            const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
+            if (overlayId && this.ctx.trace) {
+              console.log('[SceneReconstruction] Creating overlay track:', overlayId, 'from step:', envelope.meta.stepId);
+              createOverlayTrack(
+                this.ctx.trace,
+                overlayId,
+                envelope.data.columns,
+                envelope.data.rows,
+              );
+            }
+          }
+        } catch (e) {
+          console.warn('[SceneReconstruction] Failed to parse data event:', e);
+        }
+      });
+
       eventSource.addEventListener('result', (event) => {
         try {
           const raw = JSON.parse(event.data);
@@ -529,6 +558,11 @@ export class SceneReconstructionHandler {
 
         // Auto-pin tracks based on detected scenes
         this.autoPinTracksForScenes(scenes);
+
+        // Update scene navigation bar in parent panel
+        if (this.ctx.onScenesDetected) {
+          this.ctx.onScenesDetected(scenes);
+        }
 
         resolve();
       });
