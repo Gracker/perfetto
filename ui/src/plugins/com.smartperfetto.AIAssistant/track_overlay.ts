@@ -215,8 +215,11 @@ export const STEP_TO_OVERLAY = new Map<string, OverlayId>([
   ['pipeline_key_slices_overlay', 'pipeline_slices'],
   // State timeline lanes (continuous state coverage)
   ['device_state_lane', 'state_device'],
-  ['input_state_lane', 'state_input'],
+  ['device_state_lane_fallback', 'state_device'],
+  ['input_state_lane_frames', 'state_input'],
+  ['input_state_lane_fallback', 'state_input'],
   ['app_state_lane', 'state_app'],
+  ['app_state_lane_fallback', 'state_app'],
   ['system_state_lane', 'state_system'],
 ]);
 
@@ -225,6 +228,100 @@ export const STEP_TO_OVERLAY = new Map<string, OverlayId>([
 // ---------------------------------------------------------------------------
 
 const activeTrackNodes = new Map<OverlayId, string[]>();
+
+// ---------------------------------------------------------------------------
+// sessionStorage persistence — survives build.js --watch hot-reload
+// ---------------------------------------------------------------------------
+
+const OVERLAY_STORAGE_KEY = 'smartperfetto_overlay_data_v1';
+
+interface PersistedOverlayStore {
+  traceUuid: string;
+  overlays: Record<string, {columns: string[]; rows: unknown[][]}>;
+}
+
+/**
+ * Persist overlay data to sessionStorage after successful track creation.
+ * Keyed by traceUuid so stale data from a different trace is not restored.
+ */
+function persistOverlayData(
+  traceUuid: string,
+  overlayId: string,
+  columns: string[],
+  rows: unknown[][],
+): void {
+  try {
+    const raw = sessionStorage.getItem(OVERLAY_STORAGE_KEY);
+    const store: PersistedOverlayStore = raw
+      ? JSON.parse(raw)
+      : {traceUuid, overlays: {}};
+
+    // If traceUuid changed (new trace loaded), clear old data
+    if (store.traceUuid !== traceUuid) {
+      store.traceUuid = traceUuid;
+      store.overlays = {};
+    }
+
+    store.overlays[overlayId] = {columns, rows};
+    sessionStorage.setItem(OVERLAY_STORAGE_KEY, JSON.stringify(store));
+  } catch (e) {
+    // sessionStorage full or unavailable — non-fatal
+    console.warn('[TrackOverlay] Failed to persist overlay data:', e);
+  }
+}
+
+/**
+ * Restore persisted overlay tracks after a hot-reload.
+ * Only restores if the stored traceUuid matches the current trace.
+ * Call from plugin onTraceLoad() after the workspace is ready.
+ */
+export async function restoreOverlayTracks(trace: Trace): Promise<void> {
+  try {
+    const raw = sessionStorage.getItem(OVERLAY_STORAGE_KEY);
+    if (!raw) return;
+
+    const store: PersistedOverlayStore = JSON.parse(raw);
+    if (
+      !store.overlays ||
+      Object.keys(store.overlays).length === 0 ||
+      store.traceUuid !== trace.traceInfo.uuid
+    ) {
+      return;
+    }
+
+    let restored = 0;
+    for (const [overlayId, data] of Object.entries(store.overlays)) {
+      // Skip if already created in this session
+      if (activeTrackNodes.has(overlayId as OverlayId)) continue;
+      try {
+        await createOverlayTrack(trace, overlayId, data.columns, data.rows);
+        restored++;
+      } catch (e) {
+        // Stale/corrupt data — remove from storage to prevent repeated crashes
+        console.warn(`[TrackOverlay] Failed to restore ${overlayId}, removing from cache:`, e);
+        delete store.overlays[overlayId];
+        sessionStorage.setItem(OVERLAY_STORAGE_KEY, JSON.stringify(store));
+      }
+    }
+
+    if (restored > 0) {
+      console.log(
+        `[TrackOverlay] Restored ${restored} overlay(s) from sessionStorage`,
+      );
+    }
+  } catch (e) {
+    console.warn('[TrackOverlay] Failed to restore overlays:', e);
+  }
+}
+
+/** Clear persisted overlay data (e.g., when starting a new analysis). */
+export function clearPersistedOverlays(): void {
+  try {
+    sessionStorage.removeItem(OVERLAY_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
+}
 
 // ---------------------------------------------------------------------------
 // SQL utilities
@@ -316,9 +413,14 @@ export async function createOverlayTrack(
     return;
   }
 
-  // Safety: cap rows
+  // Safety: cap rows and filter out negative durations (Perfetto requires dur >= 0)
   const maxRows = config.maxRows ?? DEFAULT_MAX_ROWS;
-  const limitedRows = rows.slice(0, maxRows);
+  const limitedRows = rows
+    .filter((row) => {
+      const dur = Number(row[durIdx]);
+      return !isNaN(dur) && dur >= 0;
+    })
+    .slice(0, maxRows);
 
   // Filter rawColumns to those present in the data
   const rawCols = config.rawColumns.filter((c) => idx(c) >= 0);
@@ -357,12 +459,13 @@ export async function createOverlayTrack(
     return `(${vals.join(', ')})`;
   });
 
+  const durCol = config.columns.dur;
   const sqlSource = `
     WITH source(${cteColumns.join(', ')}) AS (
       VALUES
         ${valueTuples.join(',\n        ')}
     )
-    SELECT * FROM source
+    SELECT * FROM source WHERE ${durCol} >= 0
   `;
 
   // Snapshot pinned track node IDs before creation
@@ -384,6 +487,9 @@ export async function createOverlayTrack(
     .filter((n) => !beforeIds.has(n.id))
     .map((n) => n.id);
   activeTrackNodes.set(config.id, newNodeIds);
+
+  // Persist to sessionStorage for hot-reload survival (use capped rows, not raw input)
+  persistOverlayData(trace.traceInfo.uuid, overlayId, columns, limitedRows);
 
   console.log(
     `[TrackOverlay:${overlayId}] Created ${newNodeIds.length} track(s) ` +

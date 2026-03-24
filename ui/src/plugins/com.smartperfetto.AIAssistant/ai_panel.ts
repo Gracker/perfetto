@@ -4103,7 +4103,7 @@ Output MUST follow this exact markdown structure:
       // Make start timestamp clickable for navigation
       const startTsNs = scene.startTs;
       content += `| ${index + 1} | ${displayName} | `;
-      content += `<span class="clickable-ts" data-ts="${startTsNs}">${this.formatSceneTimestamp(startTsNs)}</span> | `;
+      content += `@ts[${startTsNs}|${this.formatSceneTimestamp(startTsNs)}] | `;
       content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${responseStatus} |\n`;
     });
 

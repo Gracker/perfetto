@@ -498,17 +498,25 @@ export class SceneReconstructionHandler {
           const envelopes = Array.isArray(raw.envelope)
             ? raw.envelope
             : (raw.envelope ? [raw.envelope] : []);
+          console.log('[SceneReconstruction] data event: envelopes=%d, hasTrace=%s', envelopes.length, !!this.ctx.trace);
           for (const envelope of envelopes) {
-            if (!envelope?.meta?.stepId || !envelope?.data?.columns || !envelope?.data?.rows) continue;
+            if (!envelope?.meta?.stepId || !envelope?.data?.columns || !envelope?.data?.rows) {
+              console.log('[SceneReconstruction] Skipping envelope: stepId=%s, cols=%d, rows=%d',
+                envelope?.meta?.stepId, envelope?.data?.columns?.length, envelope?.data?.rows?.length);
+              continue;
+            }
             const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
+            console.log('[SceneReconstruction] stepId=%s → overlayId=%s, rows=%d',
+              envelope.meta.stepId, overlayId ?? 'NONE', envelope.data.rows.length);
             if (overlayId && this.ctx.trace) {
-              console.log('[SceneReconstruction] Creating overlay track:', overlayId, 'from step:', envelope.meta.stepId);
               createOverlayTrack(
                 this.ctx.trace,
                 overlayId,
                 envelope.data.columns,
                 envelope.data.rows,
-              );
+              ).catch((err: Error) => {
+                console.error('[SceneReconstruction] Overlay creation FAILED:', overlayId, envelope.meta.stepId, err);
+              });
             }
           }
         } catch (e) {
@@ -638,7 +646,7 @@ export class SceneReconstructionHandler {
       // Make start timestamp clickable for navigation
       const startTsNs = scene.startTs;
       content += `| ${index + 1} | ${displayName} | `;
-      content += `<span class="clickable-ts" data-ts="${startTsNs}">${formatSceneTimestamp(startTsNs)}</span> | `;
+      content += `@ts[${startTsNs}|${formatSceneTimestamp(startTsNs)}] | `;
       content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${responseStatus} |\n`;
     });
 

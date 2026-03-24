@@ -20,6 +20,7 @@ import {
   emitClearChatCommand,
   emitOpenSettingsCommand,
 } from './assistant_command_bus';
+import {restoreOverlayTracks} from './track_overlay';
 
 export default class implements PerfettoPlugin {
   static readonly id = 'com.smartperfetto.AIAssistant';
@@ -66,6 +67,14 @@ export default class implements PerfettoPlugin {
       callback: () => {
         emitOpenSettingsCommand();
       },
+    });
+
+    // Restore persisted overlay tracks after hot-reload (build.js --watch).
+    // Deferred to onTraceReady to ensure workspace is fully initialized.
+    ctx.onTraceReady.addListener(() => {
+      restoreOverlayTracks(ctx).catch((e) => {
+        console.warn('[AIAssistant] Failed to restore overlay tracks:', e);
+      });
     });
   }
 }
