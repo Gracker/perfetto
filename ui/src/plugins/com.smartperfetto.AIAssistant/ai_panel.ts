@@ -1426,6 +1426,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               ])
             : null,
 
+          // Backend connecting indicator — animated progress during background upload
+          (hasUploadInProgress && !hasBackendTrace && !this.state.isLoading)
+            ? m('div.ai-connecting-indicator', [
+                m('i.pf-icon', 'cloud_upload'),
+                m('span', '正在连接 AI 后端...'),
+                m('div.ai-upload-progress'),
+              ])
+            : null,
+
           // Inline disconnection banner — shown when backend drops mid-conversation
           (!isInRpcMode && this.state.messages.length > 0)
             ? m('div.ai-disconnect-banner', [
@@ -2908,7 +2917,7 @@ Output MUST follow this exact markdown structure:
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: '⚠️ **Trace not uploaded to backend.**\n\nClick the 📤 button to upload this trace to the backend first. The `/slow` command requires backend analysis.',
+        content: '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。`/slow` 命令需要后端支持。',
         timestamp: Date.now(),
       });
       return;
@@ -2922,7 +2931,7 @@ Output MUST follow this exact markdown structure:
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: '⚠️ **Trace not uploaded to backend.**\n\nClick the 📤 button to upload this trace to the backend first. The `/memory` command requires backend analysis.',
+        content: '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。`/memory` 命令需要后端支持。',
         timestamp: Date.now(),
       });
       return;
@@ -3012,7 +3021,7 @@ Output MUST follow this exact markdown structure:
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: '⚠️ **Trace not uploaded to backend.**\n\nClick the 📤 button to upload this trace to the backend first. The backend will execute SQL queries and provide detailed analysis.',
+        content: '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。后端将执行 SQL 查询并提供详细分析。',
         timestamp: Date.now(),
       });
       return;
@@ -3078,7 +3087,7 @@ Output MUST follow this exact markdown structure:
           this.addMessage({
             id: this.generateId(),
             role: 'system',
-            content: '⚠️ **Trace not found in backend.**\n\nPlease upload the trace again using the 📤 button.',
+            content: '⚠️ **后端未找到该 Trace**\n\nTrace 可能已过期。请点击右上角"重试连接"按钮重新上传。',
             timestamp: Date.now(),
           });
           this.state.backendTraceId = null;

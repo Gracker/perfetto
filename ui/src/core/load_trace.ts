@@ -51,7 +51,7 @@ import {base64Decode} from '../base/string_utils';
 import {parseUrlCommands} from './command_manager';
 import {HighPrecisionTimeSpan} from '../base/high_precision_time_span';
 import {getBackendUploader} from './backend_uploader';
-import {setBackendUploadState} from './backend_upload_state';
+import {getBackendUploadState, setBackendUploadState} from './backend_upload_state';
 import {sha1} from '../base/hash';
 
 const ENABLE_CHROME_RELIABLE_RANGE_ZOOM_FLAG = featureFlags.register({
@@ -148,47 +148,54 @@ async function createEngine(
   // - WASM in-browser for UI queries (immediate)
   // - trace_processor_shell for AI analysis (deferred)
   if (traceSource.type !== 'HTTP_RPC') {
-    setBackendUploadState({
-      state: 'uploading',
-    });
-
-    const uploader = getBackendUploader();
-    const notifyUploadFailed = (error: string): void => {
+    // Guard: skip if an upload is already in progress to prevent duplicate uploads
+    // (Perfetto lifecycle can call createEngine multiple times for the same trace)
+    const currentUploadState = getBackendUploadState();
+    if (currentUploadState.state === 'uploading') {
+      console.log('[AutoRPC] Upload already in progress, skipping duplicate');
+    } else {
       setBackendUploadState({
-        state: 'failed',
-        error,
+        state: 'uploading',
       });
-    };
 
-    void (async () => {
-      try {
-        const backendAvailable = await uploader.checkAvailable();
-        if (!backendAvailable) {
-          notifyUploadFailed('AI backend unavailable');
-          return;
+      const uploader = getBackendUploader();
+      const notifyUploadFailed = (error: string): void => {
+        setBackendUploadState({
+          state: 'failed',
+          error,
+        });
+      };
+
+      void (async () => {
+        try {
+          const backendAvailable = await uploader.checkAvailable();
+          if (!backendAvailable) {
+            notifyUploadFailed('AI backend unavailable');
+            return;
+          }
+
+          console.log('[AutoRPC] Starting background upload...');
+          const result = await uploader.upload(traceSource);
+
+          if (result.success && result.port) {
+            console.log(
+              `[AutoRPC] Background upload complete, traceId=${result.traceId}, port=${result.port}`,
+            );
+            setBackendUploadState({
+              state: 'ready',
+              traceId: result.traceId ?? '',
+            });
+          } else {
+            const error = result.error ?? 'Background upload failed';
+            console.warn('[AutoRPC] Background upload failed:', error);
+            notifyUploadFailed(error);
+          }
+        } catch (error) {
+          console.warn('[AutoRPC] Background upload error:', error);
+          notifyUploadFailed(String(error));
         }
-
-        console.log('[AutoRPC] Starting background upload...');
-        const result = await uploader.upload(traceSource);
-
-        if (result.success && result.port) {
-          console.log(
-            `[AutoRPC] Background upload complete, traceId=${result.traceId}, port=${result.port}`,
-          );
-          setBackendUploadState({
-            state: 'ready',
-            traceId: result.traceId ?? '',
-          });
-        } else {
-          const error = result.error ?? 'Background upload failed';
-          console.warn('[AutoRPC] Background upload failed:', error);
-          notifyUploadFailed(error);
-        }
-      } catch (error) {
-        console.warn('[AutoRPC] Background upload error:', error);
-        notifyUploadFailed(String(error));
-      }
-    })();
+      })();
+    }
   } else {
     setBackendUploadState({
       state: 'idle',
