@@ -40,6 +40,7 @@ import {
 } from '../../core/backend_upload_state';
 import {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
+import {download} from '../../base/download_utils';
 // Note: generated types are used by SSE event handlers module
 // import {FullAnalysis, ExpandableSections, isFrameDetailData} from './generated';
 
@@ -1285,7 +1286,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   },
                 }),
 
-                // HTML Report Link (问题1修复)
+                // HTML Report Link
                 msg.reportUrl ? m('div.ai-report-link', [
                   m('i.pf-icon', 'description'),
                   m('a', {
@@ -1293,6 +1294,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     target: '_blank',
                     rel: 'noopener noreferrer',
                   }, reportLinkLabel),
+                  m('button.ai-report-save-btn', {
+                    type: 'button',
+                    title: '选择路径并保存网页报告',
+                    onclick: (e: MouseEvent) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void this.saveReport(msg.reportUrl!);
+                    },
+                  }, '保存 HTML'),
                 ]) : null,
 
                 // SQL Result
@@ -5084,6 +5094,50 @@ Output MUST follow this exact markdown structure:
   }
 
   // NOTE: uploadTraceToBackend() method removed - auto-upload now happens in load_trace.ts
+
+  /**
+   * Save a generated detailed analysis report through the browser/system file
+   * picker. Falls back to a normal browser download when the File System Access
+   * API is unavailable.
+   */
+  private async saveReport(reportUrl: string): Promise<void> {
+    try {
+      const reportLocation = new URL(reportUrl, window.location.href);
+      const exportUrl = `${reportLocation.origin}${reportLocation.pathname.replace(/\/$/, '')}/export`;
+      const response = await this.fetchBackend(exportUrl);
+      if (!response.ok) {
+        throw new Error(`保存报告失败: HTTP ${response.status}`);
+      }
+
+      const contentDisposition = response.headers.get('Content-Disposition') || '';
+      const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+      const fallbackReportId = reportLocation.pathname.split('/').filter(Boolean).pop() || 'report';
+      const filename = filenameMatch
+        ? filenameMatch[1]
+        : `smartperfetto-${fallbackReportId}.html`;
+      const blob = await response.blob();
+
+      await download({
+        content: blob,
+        fileName: filename,
+        mimeType: 'text/html',
+        filePicker: {
+          types: [{
+            description: 'HTML 网页报告',
+            accept: {'text/html': ['.html', '.htm']},
+          }],
+        },
+      });
+    } catch (e: any) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `**保存报告失败:** ${e?.message || e}`,
+        timestamp: Date.now(),
+      });
+      m.redraw();
+    }
+  }
 
   /**
    * Export SQL result to CSV or JSON

@@ -2573,6 +2573,27 @@ tr.detail-row {
       text-decoration: underline;
     }
   }
+
+  .ai-report-save-btn {
+    margin-left: auto;
+    border: 1px solid var(--chat-primary);
+    background: transparent;
+    color: var(--chat-primary);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+
+    & + .ai-report-save-btn {
+      margin-left: 2px;
+    }
+
+    &:hover {
+      background: var(--chat-primary);
+      color: white;
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------
