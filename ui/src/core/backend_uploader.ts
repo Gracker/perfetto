@@ -9,6 +9,7 @@ import {fetchWithTimeout} from '../base/http_utils';
 
 const BACKEND_CHECK_TIMEOUT_MS = 1000; // Fast timeout for health check
 const BACKEND_UPLOAD_TIMEOUT_MS = 60000; // 60s timeout for upload
+const BACKEND_URL_UPLOAD_TIMEOUT_MS = 300000; // URL fetches can be slow on first load
 
 export interface BackendUploadResult {
   success: boolean;
@@ -57,9 +58,9 @@ export class BackendUploader {
         return new Blob([source.buffer], {type: 'application/octet-stream'});
 
       case 'URL':
-        // For URL traces, we could fetch and convert, but for now skip
-        // as the backend can fetch URLs directly
-        console.log('[BackendUploader] URL traces not supported for auto-upload');
+        // URL traces are uploaded through /upload-url so the backend can fetch
+        // them without browser CORS restrictions.
+        console.log('[BackendUploader] URL traces are uploaded by backend fetch');
         return null;
 
       case 'HTTP_RPC':
@@ -112,6 +113,10 @@ export class BackendUploader {
    * Upload trace to backend and return the RPC port
    */
   async upload(source: TraceSource): Promise<BackendUploadResult> {
+    if (source.type === 'URL') {
+      return this.uploadUrl(source.url, this.getFilename(source));
+    }
+
     const blob = await this.getTraceBlob(source);
     if (!blob) {
       return {
@@ -176,6 +181,64 @@ export class BackendUploader {
       return {
         success: false,
         error: `Upload error: ${errorMsg}`,
+      };
+    }
+  }
+
+  private async uploadUrl(url: string, filename: string): Promise<BackendUploadResult> {
+    console.log(`[BackendUploader] Asking backend to fetch URL trace: ${url}`);
+
+    try {
+      const resp = await fetchWithTimeout(
+        `${this.backendUrl}/api/traces/upload-url`,
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url, filename}),
+        },
+        BACKEND_URL_UPLOAD_TIMEOUT_MS,
+      );
+
+      if (resp.status !== 200) {
+        const errorText = await resp.text();
+        console.error('[BackendUploader] URL upload failed:', resp.status, errorText);
+        return {
+          success: false,
+          error: `URL upload failed: ${resp.status} ${resp.statusText}`,
+        };
+      }
+
+      const data = await resp.json();
+
+      if (!data.success || !data.trace) {
+        return {
+          success: false,
+          error: data.error ?? 'Unknown URL upload error',
+        };
+      }
+
+      const {id: traceId, port} = data.trace;
+
+      if (!port) {
+        return {
+          success: false,
+          error: 'Backend did not return a port for HTTP RPC',
+        };
+      }
+
+      console.log(`[BackendUploader] URL upload successful! traceId=${traceId}, port=${port}`);
+
+      return {
+        success: true,
+        traceId,
+        port,
+      };
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error('[BackendUploader] URL upload error:', errorMsg);
+      return {
+        success: false,
+        error: `URL upload error: ${errorMsg}`,
       };
     }
   }
