@@ -19,6 +19,7 @@
 import m from 'mithril';
 import {BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
+import {ProviderQuickSwitcher} from './provider_switcher';
 import {SqlResultTable, UserInteraction} from './sql_result_table';
 import {ChartVisualizer} from './chart_visualizer';
 import {NavigationBookmarkBar, NavigationBookmark} from './navigation_bookmark_bar';
@@ -1620,7 +1621,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 : null,
               this.renderSliceCard(),
               this.renderAreaCard(),
-              this.renderAnalysisModeChips(),
+              m('div', {style: {display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'space-between'}}, [
+                this.renderAnalysisModeChips(),
+                m(ProviderQuickSwitcher, {
+                  backendUrl: this.state.settings.backendUrl,
+                  apiKey: this.state.settings.backendApiKey || undefined,
+                  compact: true,
+                }),
+              ]),
               m('div.ai-input-wrapper', [
                 m('textarea#ai-input.ai-input', {
                   class: this.state.isLoading || !this.state.aiService || !isInRpcMode ? 'disabled' : '',

@@ -8,7 +8,6 @@ import {
   ProviderConfig,
   ProviderTemplate,
   ProviderPanelAttrs,
-  ProviderQuickSwitcherAttrs,
   FormState,
   TYPE_ICONS,
   CATEGORY_LABELS,
@@ -19,7 +18,7 @@ import {
 } from './provider_types';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 
-export {ProviderPanelAttrs, ProviderQuickSwitcherAttrs};
+export {ProviderPanelAttrs};
 
 export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private providers: ProviderConfig[] = [];
@@ -649,126 +648,3 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 }
 
-export class ProviderQuickSwitcher implements m.ClassComponent<ProviderQuickSwitcherAttrs> {
-  private providers: ProviderConfig[] = [];
-  private open = false;
-  private loading = false;
-  private backendUrl = '';
-  private apiKey?: string;
-
-  oninit(vnode: m.Vnode<ProviderQuickSwitcherAttrs>) {
-    this.backendUrl = vnode.attrs.backendUrl;
-    this.apiKey = vnode.attrs.apiKey;
-    this.loadProviders();
-  }
-
-  onupdate(vnode: m.Vnode<ProviderQuickSwitcherAttrs>) {
-    if (vnode.attrs.backendUrl !== this.backendUrl || vnode.attrs.apiKey !== this.apiKey) {
-      this.backendUrl = vnode.attrs.backendUrl;
-      this.apiKey = vnode.attrs.apiKey;
-      this.loadProviders();
-    }
-  }
-
-  private async loadProviders() {
-    this.loading = true;
-    try {
-      const res = await fetch(apiUrl(this.backendUrl, ''), {
-        headers: buildHeaders(this.apiKey),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        this.providers = data.providers || [];
-      }
-    } catch {
-      // Silent fail for switcher
-    } finally {
-      this.loading = false;
-      m.redraw();
-    }
-  }
-
-  private async activate(id: string) {
-    try {
-      const res = await fetch(apiUrl(this.backendUrl, `/${id}/activate`), {
-        method: 'POST',
-        headers: buildHeaders(this.apiKey),
-      });
-      if (res.ok) {
-        await this.loadProviders();
-      }
-    } catch {
-      // Silent fail
-    }
-    this.open = false;
-    m.redraw();
-  }
-
-  view(_vnode: m.Vnode<ProviderQuickSwitcherAttrs>): m.Children {
-    const t = getTokens();
-    const s = getStyles(t);
-    const active = this.providers.find((p) => p.isActive);
-
-    if (this.loading && this.providers.length === 0) {
-      return m('div', {style: s.switcherContainer}, [
-        m('span', {style: {fontSize: '12px', color: t.textSecondary}}, '⏳'),
-      ]);
-    }
-
-    if (this.providers.length === 0) {
-      return null;
-    }
-
-    return m('div', {style: s.switcherContainer}, [
-      m('button', {
-        style: s.switcherBtn,
-        onclick: (e: Event) => {
-          e.stopPropagation();
-          this.open = !this.open;
-        },
-      }, [
-        m('span', TYPE_ICONS[active?.type || 'custom']),
-        m('span', {style: {maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis'}},
-          active?.name || 'No provider'),
-        m('span', {style: {fontSize: '10px', opacity: 0.6}}, this.open ? '▲' : '▼'),
-      ]),
-
-      this.open ? this.renderDropdown() : null,
-    ]);
-  }
-
-  private renderDropdown(): m.Children {
-    const t = getTokens();
-    const s = getStyles(t);
-    return m('div', {
-      style: s.switcherDropdown,
-      onclick: (e: Event) => e.stopPropagation(),
-    }, [
-      ...this.providers.map((p) =>
-        m('div', {
-          style: {
-            ...s.switcherItem,
-            ...(p.isActive ? s.switcherItemActive : {}),
-          },
-          key: p.id,
-          onclick: () => {
-            if (!p.isActive) this.activate(p.id);
-            else this.open = false;
-          },
-        }, [
-          m('span', {style: {fontSize: '16px'}}, TYPE_ICONS[p.type]),
-          m('div', {style: {flex: 1, minWidth: 0}}, [
-            m('div', {style: {fontSize: '13px', fontWeight: 500}}, p.name),
-            m('div', {style: {fontSize: '11px', color: t.textSecondary, fontFamily: 'monospace'}},
-              p.models.primary),
-          ]),
-          p.isActive ? m('div', {style: s.activeDot}) : null,
-        ]),
-      ),
-    ]);
-  }
-
-  onremove() {
-    this.open = false;
-  }
-}
