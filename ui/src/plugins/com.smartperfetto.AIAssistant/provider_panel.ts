@@ -17,358 +17,9 @@ import {
   apiUrl,
   createEmptyForm,
 } from './provider_types';
+import {getTokens, STYLES as getStyles} from './provider_styles';
 
 export {ProviderPanelAttrs, ProviderQuickSwitcherAttrs};
-
-const COLORS = {
-  primary: 'var(--chat-primary, #3d5688)',
-  primaryHover: 'var(--chat-primary-hover, #2e4470)',
-  primaryLight:
-    'color-mix(in srgb, var(--chat-primary, #3d5688) 12%, transparent)',
-  success: 'var(--chat-success, #10b981)',
-  successLight:
-    'color-mix(in srgb, var(--chat-success, #10b981) 12%, transparent)',
-  warning: 'var(--chat-warning, #f59e0b)',
-  warningLight:
-    'color-mix(in srgb, var(--chat-warning, #f59e0b) 12%, transparent)',
-  error: 'var(--chat-error, #ef4444)',
-  errorLight:
-    'color-mix(in srgb, var(--chat-error, #ef4444) 12%, transparent)',
-};
-
-const STYLES = {
-  container: {
-    padding: '20px',
-    height: '100%',
-    overflowY: 'auto' as const,
-    backgroundColor: 'var(--chat-bg)',
-    color: 'var(--chat-text)',
-  },
-  header: {
-    display: 'flex' as const,
-    justifyContent: 'space-between' as const,
-    alignItems: 'center' as const,
-    marginBottom: '20px',
-  },
-  title: {
-    margin: 0,
-    fontSize: '18px',
-    fontWeight: 600,
-    color: 'var(--chat-text)',
-  },
-  subtitle: {
-    margin: '4px 0 0 0',
-    fontSize: '13px',
-    color: 'var(--chat-text-secondary)',
-  },
-  addBtn: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    gap: '6px',
-    padding: '10px 18px',
-    border: 'none',
-    borderRadius: '8px',
-    fontSize: '14px',
-    fontWeight: 500,
-    cursor: 'pointer',
-    backgroundColor: 'var(--chat-primary, #3d5688)',
-    color: 'white',
-    transition: 'all 0.15s ease',
-  },
-  grid: {
-    display: 'grid' as const,
-    gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-    gap: '14px',
-  },
-  card: {
-    padding: '16px',
-    borderRadius: '10px',
-    border: '1px solid var(--chat-border)',
-    backgroundColor: 'var(--chat-bg-secondary)',
-    transition: 'all 0.2s ease',
-    position: 'relative' as const,
-    cursor: 'default',
-  },
-  cardActive: {
-    border: `2px solid var(--chat-success, #10b981)`,
-    boxShadow: '0 0 12px color-mix(in srgb, var(--chat-success, #10b981) 20%, transparent)',
-  },
-  cardHeader: {
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    gap: '10px',
-    marginBottom: '10px',
-  },
-  cardIcon: {
-    fontSize: '24px',
-    width: '36px',
-    height: '36px',
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    borderRadius: '8px',
-    backgroundColor: 'var(--chat-bg)',
-    flexShrink: 0,
-  },
-  cardName: {
-    fontSize: '15px',
-    fontWeight: 600,
-    color: 'var(--chat-text)',
-    margin: 0,
-    overflow: 'hidden' as const,
-    textOverflow: 'ellipsis' as const,
-    whiteSpace: 'nowrap' as const,
-  },
-  cardBadge: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    gap: '4px',
-    padding: '2px 8px',
-    borderRadius: '12px',
-    fontSize: '11px',
-    fontWeight: 500,
-  },
-  activeBadge: {
-    backgroundColor: COLORS.successLight,
-    color: COLORS.success,
-  },
-  categoryBadge: {
-    backgroundColor: COLORS.primaryLight,
-    color: COLORS.primary,
-  },
-  cardModels: {
-    marginTop: '8px',
-    fontSize: '12px',
-    color: 'var(--chat-text-secondary)',
-    fontFamily: 'monospace',
-    lineHeight: '1.6',
-  },
-  cardActions: {
-    display: 'flex' as const,
-    gap: '6px',
-    marginTop: '12px',
-    borderTop: '1px solid var(--chat-border)',
-    paddingTop: '12px',
-  },
-  actionBtn: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    padding: '6px 10px',
-    border: '1px solid var(--chat-border)',
-    borderRadius: '6px',
-    fontSize: '12px',
-    cursor: 'pointer',
-    backgroundColor: 'transparent',
-    color: 'var(--chat-text-secondary)',
-    transition: 'all 0.15s ease',
-    gap: '4px',
-  },
-  actionBtnDanger: {
-    borderColor: 'color-mix(in srgb, var(--chat-error, #ef4444) 40%, transparent)',
-    color: COLORS.error,
-  },
-  emptyState: {
-    textAlign: 'center' as const,
-    padding: '60px 20px',
-    color: 'var(--chat-text-secondary)',
-  },
-  emptyIcon: {
-    fontSize: '48px',
-    marginBottom: '16px',
-    opacity: 0.6,
-  },
-  loadingState: {
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    padding: '60px 20px',
-    color: 'var(--chat-text-secondary)',
-    fontSize: '14px',
-    gap: '8px',
-  },
-  errorBanner: {
-    display: 'flex' as const,
-    gap: '10px',
-    padding: '12px 14px',
-    borderRadius: '8px',
-    fontSize: '13px',
-    marginBottom: '16px',
-    backgroundColor: COLORS.errorLight,
-    border: `1px solid color-mix(in srgb, var(--chat-error, #ef4444) 25%, transparent)`,
-    color: COLORS.error,
-  },
-  successBanner: {
-    display: 'flex' as const,
-    gap: '10px',
-    padding: '12px 14px',
-    borderRadius: '8px',
-    fontSize: '13px',
-    marginBottom: '16px',
-    backgroundColor: COLORS.successLight,
-    border: `1px solid color-mix(in srgb, var(--chat-success, #10b981) 25%, transparent)`,
-    color: COLORS.success,
-  },
-  form: {
-    padding: '20px',
-  },
-  formSection: {
-    marginBottom: '24px',
-  },
-  formSectionTitle: {
-    margin: '0 0 14px 0',
-    fontSize: '13px',
-    fontWeight: 600,
-    color: 'var(--chat-text-secondary)',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.8px',
-  },
-  formField: {
-    marginBottom: '16px',
-  },
-  formLabel: {
-    display: 'block' as const,
-    marginBottom: '6px',
-    fontSize: '13px',
-    fontWeight: 500,
-    color: 'var(--chat-text)',
-  },
-  formInput: {
-    width: '100%',
-    padding: '10px 12px',
-    border: '1px solid var(--chat-border)',
-    borderRadius: '8px',
-    backgroundColor: 'var(--chat-bg-secondary)',
-    color: 'var(--chat-text)',
-    fontSize: '14px',
-    boxSizing: 'border-box' as const,
-    transition: 'all 0.15s ease',
-    fontFamily: 'inherit',
-  },
-  formSelect: {
-    width: '100%',
-    padding: '10px 12px',
-    border: '1px solid var(--chat-border)',
-    borderRadius: '8px',
-    backgroundColor: 'var(--chat-bg-secondary)',
-    color: 'var(--chat-text)',
-    fontSize: '14px',
-    boxSizing: 'border-box' as const,
-    cursor: 'pointer',
-  },
-  formHint: {
-    fontSize: '12px',
-    color: 'var(--chat-text-secondary)',
-    marginTop: '4px',
-  },
-  formActions: {
-    display: 'flex' as const,
-    gap: '10px',
-    justifyContent: 'flex-end' as const,
-    marginTop: '24px',
-    paddingTop: '16px',
-    borderTop: '1px solid var(--chat-border)',
-  },
-  btn: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    gap: '6px',
-    padding: '10px 20px',
-    border: 'none',
-    borderRadius: '8px',
-    fontSize: '14px',
-    fontWeight: 500,
-    cursor: 'pointer',
-    transition: 'all 0.15s ease',
-  },
-  btnPrimary: {
-    backgroundColor: COLORS.primary,
-    color: 'white',
-  },
-  btnSecondary: {
-    backgroundColor: 'transparent',
-    color: 'var(--chat-text-secondary)',
-    border: '1px solid var(--chat-border)',
-  },
-  btnSuccess: {
-    backgroundColor: COLORS.success,
-    color: 'white',
-  },
-  btnDisabled: {
-    opacity: 0.6,
-    cursor: 'not-allowed',
-  },
-  tuningToggle: {
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    gap: '8px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    fontWeight: 500,
-    color: 'var(--chat-text-secondary)',
-    padding: '8px 0',
-    userSelect: 'none' as const,
-  },
-  testResult: {
-    marginTop: '12px',
-    padding: '10px 14px',
-    borderRadius: '8px',
-    fontSize: '13px',
-  },
-  switcherContainer: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    gap: '8px',
-    position: 'relative' as const,
-  },
-  switcherBtn: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    gap: '6px',
-    padding: '6px 12px',
-    border: '1px solid var(--chat-border)',
-    borderRadius: '8px',
-    fontSize: '13px',
-    cursor: 'pointer',
-    backgroundColor: 'var(--chat-bg-secondary)',
-    color: 'var(--chat-text)',
-    transition: 'all 0.15s ease',
-    whiteSpace: 'nowrap' as const,
-  },
-  switcherDropdown: {
-    position: 'absolute' as const,
-    top: '100%',
-    left: 0,
-    marginTop: '4px',
-    minWidth: '220px',
-    backgroundColor: 'var(--chat-bg)',
-    border: '1px solid var(--chat-border)',
-    borderRadius: '10px',
-    boxShadow: '0 8px 24px rgba(0, 0, 0, 0.3)',
-    zIndex: 1000,
-    overflow: 'hidden' as const,
-  },
-  switcherItem: {
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    gap: '10px',
-    padding: '10px 14px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    transition: 'background 0.1s ease',
-    color: 'var(--chat-text)',
-  },
-  switcherItemActive: {
-    backgroundColor: COLORS.primaryLight,
-  },
-  activeDot: {
-    width: '8px',
-    height: '8px',
-    borderRadius: '50%',
-    backgroundColor: COLORS.success,
-    flexShrink: 0,
-  },
-};
 
 export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private providers: ProviderConfig[] = [];
@@ -606,29 +257,31 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 
   private renderList(): m.Children {
-    return m('div', {style: STYLES.container}, [
-      this.error ? m('div', {style: STYLES.errorBanner}, [
+    const t = getTokens();
+    const s = getStyles(t);
+    return m('div', {style: s.container}, [
+      this.error ? m('div', {style: s.errorBanner}, [
         m('span', '⚠️'),
         m('span', this.error),
       ]) : null,
-      this.success ? m('div', {style: STYLES.successBanner}, [
+      this.success ? m('div', {style: s.successBanner}, [
         m('span', '✅'),
         m('span', this.success),
       ]) : null,
 
-      m('div', {style: STYLES.header}, [
+      m('div', {style: s.header}, [
         m('div', [
-          m('h3', {style: STYLES.title}, 'Provider Management'),
-          m('p', {style: STYLES.subtitle}, 'Configure and switch between AI providers'),
+          m('h3', {style: s.title}, 'Provider Management'),
+          m('p', {style: s.subtitle}, 'Configure and switch between AI providers'),
         ]),
         m('button', {
-          style: STYLES.addBtn,
+          style: s.addBtn,
           onclick: () => this.startAdd(),
         }, '+ Add Provider'),
       ]),
 
       this.loading
-        ? m('div', {style: STYLES.loadingState}, [
+        ? m('div', {style: s.loadingState}, [
             m('span', '⏳'),
             'Loading providers...',
           ])
@@ -641,49 +294,55 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 
   private renderEmpty(): m.Children {
-    return m('div', {style: STYLES.emptyState}, [
-      m('div', {style: STYLES.emptyIcon}, '\u{1F50C}'),
-      m('h4', {style: {margin: '0 0 8px', color: 'var(--chat-text)'}}, 'No providers configured'),
+    const t = getTokens();
+    const s = getStyles(t);
+    return m('div', {style: s.emptyState}, [
+      m('div', {style: s.emptyIcon}, '\u{1F50C}'),
+      m('h4', {style: {margin: '0 0 8px', color: t.text}}, 'No providers configured'),
       m('p', {style: {margin: 0, fontSize: '14px'}}, 'Add a provider to start using AI analysis'),
       m('button', {
-        style: {...STYLES.btn, ...STYLES.btnPrimary, marginTop: '16px'},
+        style: {...s.btn, ...s.btnPrimary, marginTop: '16px'},
         onclick: () => this.startAdd(),
       }, '+ Add Your First Provider'),
     ]);
   }
 
   private renderGrid(): m.Children {
-    return m('div', {style: STYLES.grid},
+    const t = getTokens();
+    const s = getStyles(t);
+    return m('div', {style: s.grid},
       this.providers.map((p) => this.renderCard(p)),
     );
   }
 
   private renderCard(provider: ProviderConfig): m.Children {
+    const t = getTokens();
+    const s = getStyles(t);
     const isActive = provider.isActive;
     const cardStyle = {
-      ...STYLES.card,
-      ...(isActive ? STYLES.cardActive : {}),
+      ...s.card,
+      ...(isActive ? s.cardActive : {}),
     };
 
     return m('div', {style: cardStyle, key: provider.id}, [
-      m('div', {style: STYLES.cardHeader}, [
-        m('div', {style: STYLES.cardIcon}, TYPE_ICONS[provider.type] || '\u{1F527}'),
+      m('div', {style: s.cardHeader}, [
+        m('div', {style: s.cardIcon}, TYPE_ICONS[provider.type] || '\u{1F527}'),
         m('div', {style: {flex: 1, minWidth: 0}}, [
-          m('div', {style: STYLES.cardName}, provider.name),
+          m('div', {style: s.cardName}, provider.name),
           m('div', {style: {display: 'flex', gap: '6px', marginTop: '4px', flexWrap: 'wrap' as const}}, [
             isActive
-              ? m('span', {style: {...STYLES.cardBadge, ...STYLES.activeBadge}}, [
-                  m('span', {style: {width: '6px', height: '6px', borderRadius: '50%', backgroundColor: COLORS.success, display: 'inline-block'}}),
+              ? m('span', {style: {...s.cardBadge, ...s.activeBadge}}, [
+                  m('span', {style: {width: '6px', height: '6px', borderRadius: '50%', backgroundColor: t.accent, display: 'inline-block'}}),
                   'Active',
                 ])
               : null,
-            m('span', {style: {...STYLES.cardBadge, ...STYLES.categoryBadge}},
+            m('span', {style: {...s.cardBadge, ...s.categoryBadge}},
               CATEGORY_LABELS[provider.category] || provider.category),
           ]),
         ]),
       ]),
 
-      m('div', {style: STYLES.cardModels}, [
+      m('div', {style: s.cardModels}, [
         m('div', `Primary: ${provider.models.primary}`),
         m('div', `Light: ${provider.models.light}`),
         provider.models.subAgent
@@ -691,27 +350,27 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
           : null,
       ]),
 
-      m('div', {style: STYLES.cardActions}, [
+      m('div', {style: s.cardActions}, [
         !isActive
           ? m('button', {
-              style: STYLES.actionBtn,
+              style: s.actionBtn,
               onclick: () => this.activateProvider(provider.id),
               title: 'Activate',
             }, '⭐ Activate')
           : null,
         m('button', {
-          style: STYLES.actionBtn,
+          style: s.actionBtn,
           onclick: () => this.testConnection(provider.id),
           disabled: this.testingId === provider.id,
           title: 'Test Connection',
         }, this.testingId === provider.id ? '⏳' : '\u{1F50C} Test'),
         m('button', {
-          style: STYLES.actionBtn,
+          style: s.actionBtn,
           onclick: () => this.startEdit(provider),
           title: 'Edit',
         }, '✏️ Edit'),
         m('button', {
-          style: {...STYLES.actionBtn, ...STYLES.actionBtnDanger},
+          style: {...s.actionBtn, ...s.actionBtnDanger},
           onclick: () => this.deleteProvider(provider.id),
           disabled: this.deleting === provider.id || isActive,
           title: isActive ? 'Cannot delete active provider' : 'Delete',
@@ -723,11 +382,13 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private renderTestResult(): m.Children {
     if (!this.testResult) return null;
 
+    const t = getTokens();
+    const s = getStyles(t);
     const style = {
-      ...STYLES.testResult,
+      ...s.testResult,
       ...(this.testResult.success
-        ? {backgroundColor: COLORS.successLight, color: COLORS.success, border: `1px solid ${COLORS.success}`}
-        : {backgroundColor: COLORS.errorLight, color: COLORS.error, border: `1px solid ${COLORS.error}`}),
+        ? {backgroundColor: `${t.success}15`, color: t.success, border: `1px solid ${t.success}`}
+        : {backgroundColor: `${t.error}15`, color: t.error, border: `1px solid ${t.error}`}),
       marginTop: '16px',
     };
 
@@ -739,49 +400,51 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 
   private renderForm(): m.Children {
-    const template = this.templates.find((t) => t.type === this.form.type);
+    const t = getTokens();
+    const s = getStyles(t);
+    const template = this.templates.find((tmpl) => tmpl.type === this.form.type);
     // requiredFields from API are "connection.apiKey" format — strip prefix
     const requiredFields = (template?.requiredFields || ['connection.apiKey'])
       .map((f) => f.replace(/^connection\./, ''));
     const isEdit = this.view_mode === 'edit';
 
-    return m('div', {style: STYLES.container}, [
-      this.error ? m('div', {style: STYLES.errorBanner}, [
+    return m('div', {style: s.container}, [
+      this.error ? m('div', {style: s.errorBanner}, [
         m('span', '⚠️'),
         m('span', this.error),
       ]) : null,
 
-      m('div', {style: STYLES.header}, [
+      m('div', {style: s.header}, [
         m('div', [
-          m('h3', {style: STYLES.title}, isEdit ? 'Edit Provider' : 'Add Provider'),
-          m('p', {style: STYLES.subtitle}, isEdit ? 'Modify provider configuration' : 'Configure a new AI provider'),
+          m('h3', {style: s.title}, isEdit ? 'Edit Provider' : 'Add Provider'),
+          m('p', {style: s.subtitle}, isEdit ? 'Modify provider configuration' : 'Configure a new AI provider'),
         ]),
       ]),
 
-      m('div', {style: STYLES.form}, [
+      m('div', {style: s.form}, [
         // Type selector
-        m('div', {style: STYLES.formSection}, [
-          m('h4', {style: STYLES.formSectionTitle}, 'Provider Type'),
-          m('div', {style: STYLES.formField}, [
+        m('div', {style: s.formSection}, [
+          m('h4', {style: s.formSectionTitle}, 'Provider Type'),
+          m('div', {style: s.formField}, [
             m('select', {
-              style: STYLES.formSelect,
+              style: s.formSelect,
               value: this.form.type,
               onchange: (e: Event) => this.onTypeChange((e.target as HTMLSelectElement).value as ProviderType),
               disabled: isEdit,
             },
-              this.templates.map((t) =>
-                m('option', {value: t.type}, `${TYPE_ICONS[t.type]} ${t.displayName}`),
+              this.templates.map((tmpl) =>
+                m('option', {value: tmpl.type}, `${TYPE_ICONS[tmpl.type]} ${tmpl.displayName}`),
               ),
             ),
           ]),
         ]),
 
         // Name
-        m('div', {style: STYLES.formSection}, [
-          m('h4', {style: STYLES.formSectionTitle}, 'Name'),
-          m('div', {style: STYLES.formField}, [
+        m('div', {style: s.formSection}, [
+          m('h4', {style: s.formSectionTitle}, 'Name'),
+          m('div', {style: s.formField}, [
             m('input[type=text]', {
-              style: STYLES.formInput,
+              style: s.formInput,
               value: this.form.name,
               oninput: (e: Event) => {
                 this.form.name = (e.target as HTMLInputElement).value;
@@ -792,18 +455,18 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         ]),
 
         // Connection
-        m('div', {style: STYLES.formSection}, [
-          m('h4', {style: STYLES.formSectionTitle}, 'Connection'),
+        m('div', {style: s.formSection}, [
+          m('h4', {style: s.formSectionTitle}, 'Connection'),
           ...requiredFields.map((field) => {
             const meta = CONNECTION_FIELD_LABELS[field] || {
               label: field,
               type: 'text',
               placeholder: '',
             };
-            return m('div', {style: STYLES.formField}, [
-              m('label', {style: STYLES.formLabel}, meta.label),
+            return m('div', {style: s.formField}, [
+              m('label', {style: s.formLabel}, meta.label),
               m(`input[type=${meta.type}]`, {
-                style: STYLES.formInput,
+                style: s.formInput,
                 value: (this.form.connection as Record<string, string>)[field] || '',
                 oninput: (e: Event) => {
                   (this.form.connection as Record<string, string>)[field] =
@@ -816,13 +479,13 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         ]),
 
         // Models
-        m('div', {style: STYLES.formSection}, [
-          m('h4', {style: STYLES.formSectionTitle}, 'Models'),
-          m('div', {style: STYLES.formField}, [
-            m('label', {style: STYLES.formLabel}, 'Primary Model'),
+        m('div', {style: s.formSection}, [
+          m('h4', {style: s.formSectionTitle}, 'Models'),
+          m('div', {style: s.formField}, [
+            m('label', {style: s.formLabel}, 'Primary Model'),
             template?.availableModels && template.availableModels.length > 0
               ? m('select', {
-                  style: STYLES.formSelect,
+                  style: s.formSelect,
                   value: this.form.models.primary,
                   onchange: (e: Event) => {
                     this.form.models.primary = (e.target as HTMLSelectElement).value;
@@ -834,7 +497,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   ),
                 ])
               : m('input[type=text]', {
-                  style: STYLES.formInput,
+                  style: s.formInput,
                   value: this.form.models.primary,
                   oninput: (e: Event) => {
                     this.form.models.primary = (e.target as HTMLInputElement).value;
@@ -842,14 +505,14 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   placeholder: template?.defaultModels.primary || 'Model ID',
                 }),
             template?.defaultModels.primary
-              ? m('div', {style: STYLES.formHint}, `Default: ${template.defaultModels.primary}`)
+              ? m('div', {style: s.formHint}, `Default: ${template.defaultModels.primary}`)
               : null,
           ]),
-          m('div', {style: STYLES.formField}, [
-            m('label', {style: STYLES.formLabel}, 'Light Model'),
+          m('div', {style: s.formField}, [
+            m('label', {style: s.formLabel}, 'Light Model'),
             template?.availableModels && template.availableModels.length > 0
               ? m('select', {
-                  style: STYLES.formSelect,
+                  style: s.formSelect,
                   value: this.form.models.light,
                   onchange: (e: Event) => {
                     this.form.models.light = (e.target as HTMLSelectElement).value;
@@ -861,7 +524,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   ),
                 ])
               : m('input[type=text]', {
-                  style: STYLES.formInput,
+                  style: s.formInput,
                   value: this.form.models.light,
                   oninput: (e: Event) => {
                     this.form.models.light = (e.target as HTMLInputElement).value;
@@ -869,13 +532,13 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   placeholder: template?.defaultModels.light || 'Model ID',
                 }),
             template?.defaultModels.light
-              ? m('div', {style: STYLES.formHint}, `Default: ${template.defaultModels.light}`)
+              ? m('div', {style: s.formHint}, `Default: ${template.defaultModels.light}`)
               : null,
           ]),
-          m('div', {style: STYLES.formField}, [
-            m('label', {style: STYLES.formLabel}, 'Sub-agent Model (optional)'),
+          m('div', {style: s.formField}, [
+            m('label', {style: s.formLabel}, 'Sub-agent Model (optional)'),
             m('input[type=text]', {
-              style: STYLES.formInput,
+              style: s.formInput,
               value: this.form.models.subAgent || '',
               oninput: (e: Event) => {
                 this.form.models.subAgent = (e.target as HTMLInputElement).value || undefined;
@@ -886,9 +549,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         ]),
 
         // Tuning (collapsible)
-        m('div', {style: STYLES.formSection}, [
+        m('div', {style: s.formSection}, [
           m('div', {
-            style: STYLES.tuningToggle,
+            style: s.tuningToggle,
             onclick: () => {
               this.form.showTuning = !this.form.showTuning;
             },
@@ -900,16 +563,16 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         ]),
 
         // Actions
-        m('div', {style: STYLES.formActions}, [
+        m('div', {style: s.formActions}, [
           m('button', {
-            style: {...STYLES.btn, ...STYLES.btnSecondary},
+            style: {...s.btn, ...s.btnSecondary},
             onclick: () => this.cancelForm(),
           }, 'Cancel'),
           m('button', {
             style: {
-              ...STYLES.btn,
-              ...STYLES.btnPrimary,
-              ...(!this.form.name ? STYLES.btnDisabled : {}),
+              ...s.btn,
+              ...s.btnPrimary,
+              ...(!this.form.name ? s.btnDisabled : {}),
             },
             onclick: () => this.saveProvider(),
             disabled: !this.form.name,
@@ -920,13 +583,15 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 
   private renderTuningFields(): m.Children {
+    const t = getTokens();
+    const s = getStyles(t);
     const tuning = this.form.tuning;
 
     const numField = (label: string, key: keyof ProviderTuning, placeholder: string) =>
-      m('div', {style: STYLES.formField}, [
-        m('label', {style: STYLES.formLabel}, label),
+      m('div', {style: s.formField}, [
+        m('label', {style: s.formLabel}, label),
         m('input[type=number]', {
-          style: STYLES.formInput,
+          style: s.formInput,
           value: tuning[key] ?? '',
           oninput: (e: Event) => {
             const val = (e.target as HTMLInputElement).value;
@@ -941,22 +606,22 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       ]);
 
     const boolField = (label: string, key: 'enableSubAgents' | 'enableVerification') =>
-      m('div', {style: {...STYLES.formField, display: 'flex', alignItems: 'center', gap: '8px'}}, [
+      m('div', {style: {...s.formField, display: 'flex', alignItems: 'center', gap: '8px'}}, [
         m('input[type=checkbox]', {
           checked: tuning[key] ?? true,
           onchange: (e: Event) => {
             tuning[key] = (e.target as HTMLInputElement).checked;
           },
         }),
-        m('label', {style: {...STYLES.formLabel, margin: 0}}, label),
+        m('label', {style: {...s.formLabel, margin: 0}}, label),
       ]);
 
-    return m('div', {style: {paddingLeft: '12px', borderLeft: '2px solid var(--chat-border)'}}, [
+    return m('div', {style: {paddingLeft: '12px', borderLeft: `2px solid ${t.border}`}}, [
       numField('Max Turns', 'maxTurns', '30'),
-      m('div', {style: STYLES.formField}, [
-        m('label', {style: STYLES.formLabel}, 'Effort Level'),
+      m('div', {style: s.formField}, [
+        m('label', {style: s.formLabel}, 'Effort Level'),
         m('select', {
-          style: STYLES.formSelect,
+          style: s.formSelect,
           value: tuning.effort || '',
           onchange: (e: Event) => {
             const val = (e.target as HTMLSelectElement).value;
@@ -1040,11 +705,13 @@ export class ProviderQuickSwitcher implements m.ClassComponent<ProviderQuickSwit
   }
 
   view(_vnode: m.Vnode<ProviderQuickSwitcherAttrs>): m.Children {
+    const t = getTokens();
+    const s = getStyles(t);
     const active = this.providers.find((p) => p.isActive);
 
     if (this.loading && this.providers.length === 0) {
-      return m('div', {style: STYLES.switcherContainer}, [
-        m('span', {style: {fontSize: '12px', color: 'var(--chat-text-secondary)'}}, '⏳'),
+      return m('div', {style: s.switcherContainer}, [
+        m('span', {style: {fontSize: '12px', color: t.textSecondary}}, '⏳'),
       ]);
     }
 
@@ -1052,9 +719,9 @@ export class ProviderQuickSwitcher implements m.ClassComponent<ProviderQuickSwit
       return null;
     }
 
-    return m('div', {style: STYLES.switcherContainer}, [
+    return m('div', {style: s.switcherContainer}, [
       m('button', {
-        style: STYLES.switcherBtn,
+        style: s.switcherBtn,
         onclick: (e: Event) => {
           e.stopPropagation();
           this.open = !this.open;
@@ -1071,15 +738,17 @@ export class ProviderQuickSwitcher implements m.ClassComponent<ProviderQuickSwit
   }
 
   private renderDropdown(): m.Children {
+    const t = getTokens();
+    const s = getStyles(t);
     return m('div', {
-      style: STYLES.switcherDropdown,
+      style: s.switcherDropdown,
       onclick: (e: Event) => e.stopPropagation(),
     }, [
       ...this.providers.map((p) =>
         m('div', {
           style: {
-            ...STYLES.switcherItem,
-            ...(p.isActive ? STYLES.switcherItemActive : {}),
+            ...s.switcherItem,
+            ...(p.isActive ? s.switcherItemActive : {}),
           },
           key: p.id,
           onclick: () => {
@@ -1090,10 +759,10 @@ export class ProviderQuickSwitcher implements m.ClassComponent<ProviderQuickSwit
           m('span', {style: {fontSize: '16px'}}, TYPE_ICONS[p.type]),
           m('div', {style: {flex: 1, minWidth: 0}}, [
             m('div', {style: {fontSize: '13px', fontWeight: 500}}, p.name),
-            m('div', {style: {fontSize: '11px', color: 'var(--chat-text-secondary)', fontFamily: 'monospace'}},
+            m('div', {style: {fontSize: '11px', color: t.textSecondary, fontFamily: 'monospace'}},
               p.models.primary),
           ]),
-          p.isActive ? m('div', {style: STYLES.activeDot}) : null,
+          p.isActive ? m('div', {style: s.activeDot}) : null,
         ]),
       ),
     ]);
