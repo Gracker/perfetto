@@ -579,12 +579,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       }
 
       // 使用 AppImpl 重新打开 Trace（会使用新的 RPC 端口）
-      AppImpl.instance.openTraceFromBuffer({
-        buffer: (traceSource as any).buffer,
-        title: this.trace.traceInfo.traceTitle,
-        fileName: (traceSource as any).fileName,
-        url: (traceSource as any).url,
-      });
+      if (traceSource.type === 'FILE') {
+        AppImpl.instance.openTraceFromFile(traceSource.file);
+      } else if (traceSource.type === 'URL') {
+        AppImpl.instance.openTraceFromUrl(traceSource.url);
+      } else if (traceSource.type === 'ARRAY_BUFFER') {
+        AppImpl.instance.openTraceFromBuffer({
+          buffer: traceSource.buffer,
+          title: this.trace.traceInfo.traceTitle,
+          fileName: traceSource.fileName,
+          url: traceSource.url,
+        });
+      } else {
+        throw new Error(`Cannot reopen trace source type ${traceSource.type} in RPC mode`);
+      }
 
       // 重置重试状态
       this.state.isRetryingBackend = false;
