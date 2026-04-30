@@ -278,7 +278,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         ]);
       }),
 
-      m('div', {style: {...s.formActions, marginTop: '16px'}}, [
+      m('div', {key: 'actions', style: {...s.formActions, marginTop: '16px'}}, [
         m('button', {
           style: {
             ...s.btn,
