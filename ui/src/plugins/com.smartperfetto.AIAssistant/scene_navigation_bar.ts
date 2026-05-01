@@ -124,7 +124,6 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
     const {scenes, trace, isLoading, onSceneClick, onRefresh} = vnode.attrs;
 
     return m('div.scene-nav-bar', [
-      // Header with label and controls
       m('div.scene-nav-header', [
         m('span.scene-nav-label', [
           m('i.pf-icon', 'movie'),
@@ -136,40 +135,38 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
               ' 检测中...',
             ])
           : m('span.scene-nav-count', `${scenes.length} 个场景`),
-        onRefresh
-          ? m('button.scene-nav-refresh', {
-              onclick: onRefresh,
-              disabled: isLoading,
-              title: '刷新场景检测',
-            }, m('i.pf-icon', 'refresh'))
-          : null,
       ]),
 
-      // Scene chips
-      scenes.length > 0
-        ? m('div.scene-nav-chips', [
-            // Previous button
-            m('button.scene-nav-arrow', {
-              onclick: () => this.jumpToPrevious(scenes, trace, onSceneClick),
-              disabled: this.currentIndex <= 0,
-              title: '上一个场景',
-            }, m('i.pf-icon', 'chevron_left')),
+      m(
+        'div.scene-nav-content',
+        scenes.length > 0
+          ? m('div.scene-nav-chips', [
+              m('button.scene-nav-arrow', {
+                onclick: () => this.jumpToPrevious(scenes, trace, onSceneClick),
+                disabled: this.currentIndex <= 0,
+                title: '上一个场景',
+              }, m('i.pf-icon', 'chevron_left')),
+              m('div.scene-nav-chips-scroll',
+                scenes.map((scene, index) => this.renderSceneChip(scene, index, scenes, trace, onSceneClick))
+              ),
+              m('button.scene-nav-arrow', {
+                onclick: () => this.jumpToNext(scenes, trace, onSceneClick),
+                disabled: this.currentIndex >= scenes.length - 1,
+                title: '下一个场景',
+              }, m('i.pf-icon', 'chevron_right')),
+            ])
+          : isLoading
+            ? m('div.scene-nav-empty', '正在检测操作场景...')
+            : m('div.scene-nav-empty', '未检测到场景'),
+      ),
 
-            // Scene chips container
-            m('div.scene-nav-chips-scroll',
-              scenes.map((scene, index) => this.renderSceneChip(scene, index, scenes, trace, onSceneClick))
-            ),
-
-            // Next button
-            m('button.scene-nav-arrow', {
-              onclick: () => this.jumpToNext(scenes, trace, onSceneClick),
-              disabled: this.currentIndex >= scenes.length - 1,
-              title: '下一个场景',
-            }, m('i.pf-icon', 'chevron_right')),
-          ])
-        : !isLoading
-          ? m('div.scene-nav-empty', '未检测到操作场景')
-          : null,
+      onRefresh
+        ? m('button.scene-nav-refresh', {
+            onclick: onRefresh,
+            disabled: isLoading,
+            title: '刷新场景检测',
+          }, m('i.pf-icon', 'refresh'))
+        : null,
     ]);
   }
 
