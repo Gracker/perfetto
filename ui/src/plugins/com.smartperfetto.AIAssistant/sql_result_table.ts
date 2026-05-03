@@ -99,6 +99,14 @@ export interface SqlResultTableAttrs {
   columnDefinitions?: ColumnDefinition[];
 }
 
+type ExpandableRowData = NonNullable<SqlResultTableAttrs['expandableData']>[number];
+
+interface DisplayRow {
+  row: any[];
+  originalIndex: number;
+  expandableData?: ExpandableRowData;
+}
+
 // 时间戳列信息
 interface TimestampColumn {
   columnIndex: number;
@@ -184,26 +192,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ? columns.map((_, idx) => getColumnClasses(effectiveColumnDefs[idx]))
       : this.classifyColumns(columns);
 
-    // Apply column sorting if active
-    let sortedRows = rows;
-    if (this.sortColumnIdx !== null && this.sortColumnIdx < columns.length) {
-      const colIdx = this.sortColumnIdx;
-      const dir = this.sortDirection;
-      sortedRows = [...rows].sort((a, b) => {
-        const valA = a[colIdx];
-        const valB = b[colIdx];
-        // Numeric comparison if both are numbers
-        const numA = Number(valA);
-        const numB = Number(valB);
-        if (!isNaN(numA) && !isNaN(numB)) {
-          return dir === 'asc' ? numA - numB : numB - numA;
-        }
-        // String comparison
-        const strA = String(valA ?? '');
-        const strB = String(valB ?? '');
-        return dir === 'asc' ? strA.localeCompare(strB) : strB.localeCompare(strA);
-      });
-    }
+    const sortedRows = this.buildSortedRowsWithExpandableData(rows, columns, expandableData);
 
     // Limit displayed rows: collapsed shows 10, expanded shows up to 50
     const displayLimit = this.expanded ? EXPANDED_ROW_LIMIT : COLLAPSED_ROW_LIMIT;
@@ -339,15 +328,15 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
           // CRITICAL: Each row ALWAYS produces exactly 2 tr elements for structural stability
           // This prevents Mithril's virtual DOM reconciliation errors during concurrent redraws
           m('tbody',
-            displayRows.map((row, rowIndex) => {
-              const hasExpandableData = expandableData && expandableData[rowIndex];
-              const isExpanded = hasExpandableData && this.expandedRows.has(rowIndex);
+            displayRows.map(({row, originalIndex, expandableData: rowExpandableData}) => {
+              const hasExpandableData = Boolean(rowExpandableData);
+              const isExpanded = hasExpandableData && this.expandedRows.has(originalIndex);
               const hasAnyExpandable = expandableData && expandableData.some(Boolean);
               const totalColSpan = columns.length + (trace ? 2 : 1) + (hasAnyExpandable ? 1 : 0);
 
               // 主行 - 始终渲染
               const mainRow = m('tr.main-row', {
-                key: `main-${rowIndex}`,
+                key: `main-${originalIndex}`,
                 class: trace ? 'clickable' : '',
               }, [
                 // 可展开按钮列（如果整体有可展开数据）
@@ -355,9 +344,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                   onclick: (e: MouseEvent) => {
                     e.stopPropagation();
                     if (isExpanded) {
-                      this.expandedRows.delete(rowIndex);
+                      this.expandedRows.delete(originalIndex);
                     } else {
-                      this.expandedRows.add(rowIndex);
+                      this.expandedRows.add(originalIndex);
                     }
                     m.redraw();
                   },
@@ -385,12 +374,12 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
               // 详情行 - 始终渲染完整内容，仅用 CSS 控制显示
               // 关键：内容始终存在，不根据 isExpanded 条件渲染，避免 DOM 变化
               const detailRow = m('tr.detail-row', {
-                key: `detail-${rowIndex}`,
+                key: `detail-${originalIndex}`,
                 style: { display: isExpanded ? 'table-row' : 'none' },
               }, m('td', {
                 colSpan: totalColSpan,
               }, hasExpandableData
-                ? m('div.expanded-content', this.renderExpandableContent(expandableData![rowIndex]))
+                ? m('div.expanded-content', this.renderExpandableContent(rowExpandableData!))
                 : null  // 没有数据的行内容为空，但 tr 和 td 始终存在
               ));
 
@@ -425,6 +414,39 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   /**
    * Classify columns for proper styling (number, duration, name, etc.)
    */
+  private buildSortedRowsWithExpandableData(
+    rows: any[][],
+    columns: string[],
+    expandableData?: SqlResultTableAttrs['expandableData'],
+  ): DisplayRow[] {
+    const displayRows = rows.map((row, originalIndex) => ({
+      row,
+      originalIndex,
+      expandableData: expandableData?.[originalIndex],
+    }));
+
+    if (this.sortColumnIdx === null || this.sortColumnIdx >= columns.length) {
+      return displayRows;
+    }
+
+    const colIdx = this.sortColumnIdx;
+    const dir = this.sortDirection;
+    return [...displayRows].sort((a, b) => {
+      const valA = a.row[colIdx];
+      const valB = b.row[colIdx];
+      // Numeric comparison if both are numbers
+      const numA = Number(valA);
+      const numB = Number(valB);
+      if (!isNaN(numA) && !isNaN(numB)) {
+        return dir === 'asc' ? numA - numB : numB - numA;
+      }
+      // String comparison
+      const strA = String(valA ?? '');
+      const strB = String(valB ?? '');
+      return dir === 'asc' ? strA.localeCompare(strB) : strB.localeCompare(strA);
+    });
+  }
+
   private classifyColumns(columns: string[]): string[] {
     return columns.map((col) => {
       const lowerCol = col.toLowerCase();
