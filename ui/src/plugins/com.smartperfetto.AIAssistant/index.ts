@@ -33,6 +33,7 @@ import {AI_NOTE_COLORS, resetActiveNoteIds} from './ai_timeline_notes';
 import {locateFloatingWindow, setupFloatingWindow} from './ai_floating_window';
 import {getFloatingState, toggleSidebarCollapsed, updateFloatingState} from './ai_floating_state';
 import {resetTransientState, switchFloatingMode} from './ai_transient_state';
+import {setupCriticalPathExtension} from './critical_path_extension';
 
 function toggleSidebarPanel(): void {
   if (!isTimelineRouteActive()) return;
@@ -124,6 +125,8 @@ export default class implements PerfettoPlugin {
     // null (mode=tab). Only one AIPanel instance exists at any time.
     const surfaceHandle = setupFloatingWindow(ctx);
     ctx.trash.defer(() => surfaceHandle.dispose());
+    const criticalPathHandle = setupCriticalPathExtension(ctx);
+    ctx.trash.defer(() => criticalPathHandle.dispose());
 
     // ── F1: Area Selection Analysis Tab ──
     // When user selects a time range, show quick stats + AI analyze button
