@@ -2250,9 +2250,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   /** Render the analysis mode selector inside the input bar.
-   *  Disables 'fast' when a strong context (comparison mode) is active: the lightweight
-   *  MCP registration skips comparison tools and buildQuickSystemPrompt does not consume
-   *  selectionContext, so fast under these contexts would silently drop critical state. */
+   *  Disables 'fast' when comparison mode is active because the lightweight
+   *  MCP registration skips comparison tools. Selection context is supported
+   *  by the quick prompt and should remain fast by default. */
   private renderAnalysisModeSelector(): m.Vnode {
     const current = this.state.analysisMode;
     const fastDisabled = !!this.state.referenceTraceId;
@@ -3072,7 +3072,7 @@ Click ⚙️ to configure backend connection.`;
    * Builds a smart query and sends it through the normal agent flow.
    * The selectionContext is auto-injected by handleChatMessage().
    */
-  private analyzeCurrentSelection() {
+  private async analyzeCurrentSelection() {
     if (this.state.isLoading || !this.trace) return;
     const sel = this.trace.selection.selection;
 
@@ -3085,12 +3085,14 @@ Click ⚙️ to configure backend connection.`;
       query = `分析用户选中区间的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
     } else if (sel.kind === 'track_event') {
       query =
-        '分析用户选中的这个 Slice：它是什么、子调用链耗时分解、与历史同类 Slice 对比是否异常、根因分析';
+        '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常';
     } else {
       return;
     }
 
     this.state.input = query;
+    const datasets = await this.querySelectionData();
+    this.state.pendingTraceContext = datasets.length > 0 ? datasets : null;
     this.sendMessage();
   }
 
@@ -3880,7 +3882,109 @@ Output MUST follow this exact markdown structure:
         },
       );
 
-      // 2) Ancestor chain (up to 10 levels)
+      // 2) If the selected slice is an Android FrameTimeline row, resolve the
+      // paired expected/actual/SF-present timing up front. This keeps the
+      // default selected-frame analysis on the quick path.
+      await runQuery(
+        `selected FrameTimeline frame for slice ${id}`,
+        `
+        WITH selected AS (
+          SELECT 'actual' AS selected_kind, id, name, upid, display_frame_token,
+                 surface_frame_token, layer_name
+          FROM actual_frame_timeline_slice
+          WHERE id = ${id}
+          UNION ALL
+          SELECT 'expected' AS selected_kind, id, name, upid, display_frame_token,
+                 surface_frame_token, layer_name
+          FROM expected_frame_timeline_slice
+          WHERE id = ${id}
+        ),
+        frame_key AS (
+          SELECT * FROM selected LIMIT 1
+        ),
+        expected_match AS (
+          SELECT e.*
+          FROM expected_frame_timeline_slice e
+          JOIN frame_key k ON e.upid = k.upid AND e.name = k.name
+          ORDER BY e.id
+          LIMIT 1
+        ),
+        actual_match AS (
+          SELECT a.*
+          FROM actual_frame_timeline_slice a
+          JOIN frame_key k ON
+            (a.id = k.id AND k.selected_kind = 'actual')
+            OR (a.upid = k.upid AND a.name = k.name)
+            OR (
+              k.display_frame_token IS NOT NULL
+              AND a.display_frame_token = k.display_frame_token
+              AND a.upid = k.upid
+            )
+          ORDER BY CASE WHEN a.id = k.id THEN 0 ELSE 1 END, a.dur DESC
+          LIMIT 1
+        ),
+        sf_match AS (
+          SELECT sf.*
+          FROM actual_frame_timeline_slice sf
+          JOIN actual_match a ON
+            a.display_frame_token IS NOT NULL
+            AND sf.display_frame_token = a.display_frame_token
+          WHERE sf.surface_frame_token IS NULL
+          ORDER BY sf.ts + sf.dur DESC
+          LIMIT 1
+        )
+        SELECT
+          k.selected_kind,
+          k.id AS selected_id,
+          COALESCE(a.name, e.name, k.name) AS frame_id,
+          COALESCE(a.layer_name, e.layer_name, k.layer_name) AS layer_name,
+          p.name AS process_name,
+          e.ts AS expected_start_ns,
+          e.ts + e.dur AS expected_end_ns,
+          CAST(e.dur / 1e6 AS REAL) AS expected_ms,
+          a.ts AS actual_start_ns,
+          a.ts + a.dur AS actual_end_ns,
+          CAST(a.dur / 1e6 AS REAL) AS actual_ms,
+          sf.ts AS sf_start_ns,
+          sf.ts + sf.dur AS sf_present_ns,
+          CAST(sf.dur / 1e6 AS REAL) AS sf_ms,
+          a.present_type,
+          a.on_time_finish,
+          a.jank_type,
+          a.jank_severity_type,
+          a.prediction_type,
+          a.gpu_composition
+        FROM frame_key k
+        LEFT JOIN expected_match e ON 1 = 1
+        LEFT JOIN actual_match a ON 1 = 1
+        LEFT JOIN sf_match sf ON 1 = 1
+        LEFT JOIN process p ON p.upid = COALESCE(a.upid, e.upid, k.upid)
+      `,
+        {
+          selected_kind: STR_NULL,
+          selected_id: NUM_NULL,
+          frame_id: STR_NULL,
+          layer_name: STR_NULL,
+          process_name: STR_NULL,
+          expected_start_ns: NUM_NULL,
+          expected_end_ns: NUM_NULL,
+          expected_ms: NUM_NULL,
+          actual_start_ns: NUM_NULL,
+          actual_end_ns: NUM_NULL,
+          actual_ms: NUM_NULL,
+          sf_start_ns: NUM_NULL,
+          sf_present_ns: NUM_NULL,
+          sf_ms: NUM_NULL,
+          present_type: STR_NULL,
+          on_time_finish: NUM_NULL,
+          jank_type: STR_NULL,
+          jank_severity_type: STR_NULL,
+          prediction_type: STR_NULL,
+          gpu_composition: NUM_NULL,
+        },
+      );
+
+      // 3) Ancestor chain (up to 10 levels)
       await runQuery(
         `caller chain of slice ${id}`,
         `
@@ -3896,7 +4000,7 @@ Output MUST follow this exact markdown structure:
         {id: NUM_NULL, name: STR_NULL, dur_ms: NUM_NULL, depth: NUM_NULL},
       );
 
-      // 3) Direct children (call tree)
+      // 4) Direct children (call tree)
       await runQuery(
         `children of slice ${id}`,
         `
@@ -3913,7 +4017,7 @@ Output MUST follow this exact markdown structure:
         },
       );
 
-      // 4) Thread state distribution
+      // 5) Thread state distribution
       if (durNs > 0) {
         await runQuery(
           `thread state during slice ${id}`,
@@ -4071,7 +4175,7 @@ Output MUST follow this exact markdown structure:
           {
             onclick: () =>
               onAction(
-                `分析这个 Slice：${info.name}（${dur}），找出性能问题和根因`,
+                `快速分析当前选中的 Slice：${info.name}（${dur}），先给出它是什么、关键时间和是否异常`,
               ),
             disabled: this.state.isLoading,
           },
