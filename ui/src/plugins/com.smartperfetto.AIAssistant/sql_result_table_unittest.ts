@@ -21,6 +21,43 @@ import {describe, it, expect, jest} from '@jest/globals';
 import {SqlResultTable, UserInteraction} from './sql_result_table';
 
 describe('SqlResultTable unit handling', () => {
+  it('keeps expandable row data aligned after sorting', () => {
+    const table = new SqlResultTable() as any;
+    table.sortColumnIdx = 1;
+    table.sortDirection = 'asc';
+
+    const rows = [
+      ['slow', 30],
+      ['fast', 10],
+      ['middle', 20],
+    ];
+    const expandableData = rows.map(([name]) => ({
+      item: {name},
+      result: {
+        success: true,
+        sections: {detail: `${name}-detail`},
+      },
+    }));
+
+    const sorted = table.buildSortedRowsWithExpandableData(
+      rows,
+      ['name', 'duration_ms'],
+      expandableData,
+    );
+
+    expect(sorted.map((entry: any) => entry.row[0])).toEqual([
+      'fast',
+      'middle',
+      'slow',
+    ]);
+    expect(sorted.map((entry: any) => entry.expandableData.item.name)).toEqual([
+      'fast',
+      'middle',
+      'slow',
+    ]);
+    expect(sorted.map((entry: any) => entry.originalIndex)).toEqual([1, 2, 0]);
+  });
+
   it('formats duration values in milliseconds only', () => {
     const table = new SqlResultTable() as any;
 
