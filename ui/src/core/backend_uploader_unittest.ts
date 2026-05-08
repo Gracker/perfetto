@@ -77,6 +77,7 @@ describe('BackendUploader request context', () => {
         leaseQueueLength: 2,
         statusUrl: expect.stringContaining('/api/tp/lease-a/status?'),
         websocketUrl: expect.stringContaining('/api/tp/lease-a/websocket?'),
+        heartbeatUrl: expect.stringContaining('/api/tp/lease-a/heartbeat?'),
       },
     });
     expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
@@ -127,6 +128,7 @@ describe('BackendUploader request context', () => {
         displayName: 'backend isolated lease lease-on',
         statusUrl: expect.stringContaining('https://backend.example/base/api/tp/lease-only/status?'),
         websocketUrl: expect.stringContaining('wss://backend.example/base/api/tp/lease-only/websocket?'),
+        heartbeatUrl: expect.stringContaining('https://backend.example/base/api/tp/lease-only/heartbeat?'),
       },
     });
   });

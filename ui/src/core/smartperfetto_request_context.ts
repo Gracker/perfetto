@@ -240,6 +240,7 @@ export function buildSmartPerfettoTraceProcessorProxyTarget(
     leaseQueueLength: leaseStatus.leaseQueueLength,
     statusUrl: `${httpBase}/status${suffix}`,
     websocketUrl: `${websocketBase}/api/tp/${encodedLeaseId}/websocket${suffix}`,
+    heartbeatUrl: `${httpBase}/heartbeat${suffix}`,
     displayName: `backend ${leaseStatus.leaseMode ?? 'unknown'} lease ${leaseId.slice(0, 8)}`,
     headers: buildSmartPerfettoContextHeaders(),
     credentials: 'include' as const,

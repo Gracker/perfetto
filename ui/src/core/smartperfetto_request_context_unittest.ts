@@ -5,6 +5,7 @@ import {beforeEach, describe, expect, it} from '@jest/globals';
 import {
   buildSmartPerfettoStorageKey,
   buildSmartPerfettoContextHeaders,
+  buildSmartPerfettoTraceProcessorProxyTarget,
   buildSmartPerfettoWorkspaceApiUrl,
   getSmartPerfettoRequestContext,
   getSmartPerfettoStorageNamespace,
@@ -104,5 +105,27 @@ describe('SmartPerfetto frontend request context', () => {
     expect(buildSmartPerfettoWorkspaceApiUrl('http://backend', 'traces')).toBe(
       'http://backend/api/workspaces/workspace-a/traces',
     );
+  });
+
+  it('builds trace processor lease proxy status, websocket, and heartbeat URLs', () => {
+    sessionStorage.setItem('smartperfetto-window-id', 'window-a');
+    setSmartPerfettoWorkspaceId('workspace-a');
+
+    const target = buildSmartPerfettoTraceProcessorProxyTarget(
+      'https://backend.example/base/',
+      'lease-a',
+      {leaseMode: 'shared'},
+    );
+
+    expect(target.statusUrl).toContain(
+      'https://backend.example/base/api/tp/lease-a/status?',
+    );
+    expect(target.websocketUrl).toContain(
+      'wss://backend.example/base/api/tp/lease-a/websocket?',
+    );
+    expect(target.heartbeatUrl).toContain(
+      'https://backend.example/base/api/tp/lease-a/heartbeat?',
+    );
+    expect(target.headers).toMatchObject({'X-Window-Id': 'window-a'});
   });
 });

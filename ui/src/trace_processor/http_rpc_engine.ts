@@ -19,6 +19,9 @@ import {assertExists} from '../base/assert';
 import {EngineBase} from '../trace_processor/engine';
 
 const RPC_CONNECT_TIMEOUT_MS = 2000;
+const SMARTPERFETTO_LEASE_HEARTBEAT_INTERVAL_MS = 30_000;
+
+type SmartPerfettoLeaseVisibility = 'visible' | 'hidden' | 'offline';
 
 export interface HttpRpcState {
   connected: boolean;
@@ -36,6 +39,7 @@ export interface HttpRpcTarget {
   leaseQueueLength?: number;
   statusUrl: string;
   websocketUrl: string;
+  heartbeatUrl?: string;
   displayName?: string;
   headers?: HeadersInit;
   credentials?: RequestCredentials;
@@ -66,6 +70,10 @@ export class HttpRpcEngine extends EngineBase {
   // Can be changed by frontend/index.ts when passing ?rpc_port=1234 .
   static rpcPort = '9001';
   private static rpcTarget?: HttpRpcTarget;
+  private static leaseHeartbeatTarget?: HttpRpcTarget;
+  private static leaseHeartbeatTimer?: ReturnType<typeof setInterval>;
+  private static leaseHeartbeatInFlight = false;
+  private static leaseHeartbeatListenersInstalled = false;
 
   constructor(id: string) {
     super();
@@ -172,16 +180,20 @@ export class HttpRpcEngine extends EngineBase {
   }
 
   static useDirectPort(port = HttpRpcEngine.rpcPort): void {
+    HttpRpcEngine.stopLeaseHeartbeat();
     HttpRpcEngine.rpcPort = String(port);
     HttpRpcEngine.rpcTarget = undefined;
   }
 
   static setRpcTarget(target: HttpRpcTarget): void {
+    HttpRpcEngine.stopLeaseHeartbeat();
     HttpRpcEngine.rpcTarget = target;
     if (target.mode === 'direct-port' && target.port) {
       HttpRpcEngine.rpcPort = String(target.port);
       HttpRpcEngine.rpcTarget = undefined;
+      return;
     }
+    HttpRpcEngine.startLeaseHeartbeat(target);
   }
 
   static getCurrentTarget(): HttpRpcTarget {
@@ -190,6 +202,97 @@ export class HttpRpcEngine extends EngineBase {
 
   static get hostAndPort() {
     return HttpRpcEngine.getCurrentTarget().displayName ?? 'unknown HTTP RPC target';
+  }
+
+  private static startLeaseHeartbeat(target: HttpRpcTarget): void {
+    if (target.mode !== 'backend-lease-proxy' || target.heartbeatUrl === undefined) {
+      return;
+    }
+    HttpRpcEngine.leaseHeartbeatTarget = target;
+    HttpRpcEngine.ensureLeaseHeartbeatListeners();
+    void HttpRpcEngine.sendLeaseHeartbeat();
+    HttpRpcEngine.leaseHeartbeatTimer = setInterval(() => {
+      void HttpRpcEngine.sendLeaseHeartbeat();
+    }, SMARTPERFETTO_LEASE_HEARTBEAT_INTERVAL_MS);
+  }
+
+  private static stopLeaseHeartbeat(): void {
+    if (HttpRpcEngine.leaseHeartbeatTimer !== undefined) {
+      clearInterval(HttpRpcEngine.leaseHeartbeatTimer);
+      HttpRpcEngine.leaseHeartbeatTimer = undefined;
+    }
+    HttpRpcEngine.leaseHeartbeatTarget = undefined;
+    HttpRpcEngine.leaseHeartbeatInFlight = false;
+  }
+
+  private static ensureLeaseHeartbeatListeners(): void {
+    if (HttpRpcEngine.leaseHeartbeatListenersInstalled) return;
+    HttpRpcEngine.leaseHeartbeatListenersInstalled = true;
+    if (typeof document !== 'undefined') {
+      document.addEventListener(
+        'visibilitychange',
+        HttpRpcEngine.onLeaseHeartbeatSignal,
+      );
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', HttpRpcEngine.onLeaseHeartbeatSignal);
+      window.addEventListener('offline', HttpRpcEngine.onLeaseHeartbeatSignal);
+      window.addEventListener('pageshow', HttpRpcEngine.onLeaseHeartbeatSignal);
+      window.addEventListener('focus', HttpRpcEngine.onLeaseHeartbeatSignal);
+    }
+  }
+
+  private static onLeaseHeartbeatSignal = () => {
+    void HttpRpcEngine.sendLeaseHeartbeat();
+  };
+
+  private static leaseVisibility(): SmartPerfettoLeaseVisibility {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return 'offline';
+    }
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return 'hidden';
+    }
+    return 'visible';
+  }
+
+  private static async sendLeaseHeartbeat(): Promise<void> {
+    const target = HttpRpcEngine.leaseHeartbeatTarget;
+    if (
+      target?.mode !== 'backend-lease-proxy' ||
+      target.heartbeatUrl === undefined ||
+      HttpRpcEngine.leaseHeartbeatInFlight
+    ) {
+      return;
+    }
+
+    HttpRpcEngine.leaseHeartbeatInFlight = true;
+    try {
+      const headers = new Headers(target.headers);
+      headers.set('Content-Type', 'application/json');
+      const response = await fetchWithTimeout(
+        target.heartbeatUrl,
+        {
+          method: 'post',
+          cache: 'no-cache',
+          headers,
+          credentials: target.credentials,
+          body: JSON.stringify({visibility: HttpRpcEngine.leaseVisibility()}),
+        },
+        RPC_CONNECT_TIMEOUT_MS,
+      );
+      if (!response.ok) {
+        console.warn(
+          `SmartPerfetto lease heartbeat failed: ${response.status} ${response.statusText}`,
+        );
+      }
+    } catch (err) {
+      if (HttpRpcEngine.leaseVisibility() !== 'offline') {
+        console.warn('SmartPerfetto lease heartbeat failed:', err);
+      }
+    } finally {
+      HttpRpcEngine.leaseHeartbeatInFlight = false;
+    }
   }
 
   [Symbol.dispose]() {
