@@ -81,6 +81,10 @@ import {decodeBase64Unicode, formatMessage} from './data_formatter';
 import {sessionManager} from './session_manager';
 import {mermaidRenderer} from './mermaid_renderer';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import {
+  buildAgentSseStreamInit,
+  buildAgentSseStreamUrl,
+} from './agent_sse_transport';
 import {clearComparisonState} from './comparison_state_manager';
 import {
   handleSSEEvent as handleSSEEventExternal,
@@ -5162,9 +5166,9 @@ Output MUST follow this exact markdown structure:
     sessionId: string,
     resumeFromLastEventId: boolean = false,
   ): Promise<void> {
-    const baseApiUrl = buildAssistantApiV1Url(
+    const apiUrl = buildAgentSseStreamUrl(
       this.state.settings.backendUrl,
-      `/${sessionId}/stream`,
+      sessionId,
     );
 
     // Cancel any existing connection
@@ -5192,13 +5196,10 @@ Output MUST follow this exact markdown structure:
           return;
         }
 
-        // F3: Append lastEventId query param on reconnect for event replay
-        const apiUrl =
-          this.state.sseLastEventId !== null
-            ? `${baseApiUrl}${baseApiUrl.includes('?') ? '&' : '?'}lastEventId=${this.state.sseLastEventId}`
-            : baseApiUrl;
-
-        const response = await this.fetchBackend(apiUrl, {signal});
+        const response = await this.fetchBackend(
+          apiUrl,
+          buildAgentSseStreamInit(signal, this.state.sseLastEventId),
+        );
         if (!response.ok) {
           if (response.status === 404 && !attemptedSessionRecovery) {
             attemptedSessionRecovery = true;
@@ -6967,8 +6968,8 @@ Output MUST follow this exact markdown structure:
       this.state.streamingAnswer = a.streamingAnswer;
       // Mark loading + resume SSE. The resumeFromLastEventId flag tells
       // listenToAgentSSE to preserve sseLastEventId so the initial fetch
-      // appends ?lastEventId=N. The backend replays any events that
-      // arrived during the unmount-remount gap.
+      // sends Last-Event-ID. The backend replays any events that arrived
+      // during the unmount-remount gap.
       this.setLoadingState(true);
       void this.listenToAgentSSE(
         a.agentSessionId,

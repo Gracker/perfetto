@@ -16,10 +16,10 @@
  *   3. **Active SSE analysis** — an in-flight streaming analysis would be
  *      cancelled by onremove's cancelSSEConnection() and lost
  *
- * For SSE takeover we leverage the backend's existing lastEventId replay:
- * cancelling the fetch + reconnecting with ?lastEventId=N makes the backend
+ * For SSE takeover we leverage the backend's existing Last-Event-ID replay:
+ * cancelling the fetch + reconnecting with the saved cursor makes the backend
  * replay all events from that point forward. So we don't need to lift the
- * EventSource itself — we just need to carry the last seen event ID across
+ * fetch stream itself — we just need to carry the last seen event ID across
  * the mount boundary.
  *
  * Save/restore flow:
