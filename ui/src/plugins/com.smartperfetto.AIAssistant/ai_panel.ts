@@ -38,6 +38,7 @@ import {Trace} from '../../public/trace';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
 import {AppImpl} from '../../core/app_impl';
 import {getBackendUploader} from '../../core/backend_uploader';
+import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {
   getBackendUploadState,
   subscribeBackendUploadState,
@@ -2400,7 +2401,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const turnIndex = this.state.messages.filter(
       (msg) => msg.role === 'user',
     ).length;
-    fetch(url, {
+    this.fetchBackend(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({rating, turnIndex}),
@@ -2429,26 +2430,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.settings = sessionManager.loadSettings();
   }
 
-  private normalizeHeaders(headers?: HeadersInit): Record<string, string> {
-    if (!headers) return {};
-    if (headers instanceof Headers) {
-      return Object.fromEntries(headers.entries());
-    }
-    if (Array.isArray(headers)) {
-      return Object.fromEntries(headers);
-    }
-    return {...headers};
-  }
-
   private buildBackendHeaders(headers?: HeadersInit): Record<string, string> {
-    const normalized = this.normalizeHeaders(headers);
+    const normalized = buildSmartPerfettoContextHeaders(headers);
     const apiKey = (this.state.settings.backendApiKey || '').trim();
     if (!apiKey) return normalized;
+    const authorization = Object.entries(normalized).find(
+      ([key]) => key.toLowerCase() === 'authorization',
+    )?.[1];
+    const apiKeyHeader = Object.entries(normalized).find(
+      ([key]) => key.toLowerCase() === 'x-api-key',
+    )?.[1];
 
     return {
       ...normalized,
-      'x-api-key': apiKey,
-      'Authorization': normalized.Authorization || `Bearer ${apiKey}`,
+      'x-api-key': apiKeyHeader || apiKey,
+      'Authorization': authorization || `Bearer ${apiKey}`,
     };
   }
 
@@ -2898,9 +2894,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         headers['x-api-key'] = trimmedKey;
         headers['Authorization'] = `Bearer ${trimmedKey}`;
       }
-      const response = await fetch(`${backendUrl.replace(/\/+$/, '')}/health`, {
-        headers,
-      });
+      const response = await fetch(
+        `${backendUrl.replace(/\/+$/, '')}/health`,
+        {headers: buildSmartPerfettoContextHeaders(headers)},
+      );
       if (!response.ok) return {connected: false};
       const data = await response.json();
       return {

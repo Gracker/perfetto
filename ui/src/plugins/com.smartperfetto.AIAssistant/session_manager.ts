@@ -40,6 +40,9 @@ import {
   PENDING_BACKEND_TRACE_KEY,
 } from './types';
 import {NavigationBookmark} from './navigation_bookmark_bar';
+import {getSmartPerfettoWindowId} from '../../core/smartperfetto_request_context';
+
+export {getSmartPerfettoWindowId};
 
 /**
  * Generates a unique ID for messages and sessions.
@@ -48,29 +51,11 @@ export function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
-const WINDOW_ID_KEY = 'smartperfetto-window-id';
-
 interface SessionsStorageEnvelope extends SessionsStorage {
   _meta?: {
     mtimeMs: number;
     revision: number;
   };
-}
-
-function createWindowId(): string {
-  return `win-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-}
-
-export function getSmartPerfettoWindowId(): string {
-  try {
-    const existing = sessionStorage.getItem(WINDOW_ID_KEY);
-    if (existing) return existing;
-    const next = createWindowId();
-    sessionStorage.setItem(WINDOW_ID_KEY, next);
-    return next;
-  } catch {
-    return createWindowId();
-  }
 }
 
 export function getPendingBackendTraceStorageKey(
