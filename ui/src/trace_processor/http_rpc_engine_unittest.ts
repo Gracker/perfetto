@@ -25,6 +25,14 @@ function okResponse(): Response {
   } as Response;
 }
 
+function errorResponse(status: number, statusText: string): Response {
+  return {
+    ok: false,
+    status,
+    statusText,
+  } as Response;
+}
+
 async function flushAsyncWork(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -162,5 +170,81 @@ describe('HttpRpcEngine target selection', () => {
     await flushAsyncWork();
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requests a page reload when a visible stale lease cannot be recovered', async () => {
+    const recoveryEvents: unknown[] = [];
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const listener = (event: Event) => {
+      recoveryEvents.push((event as CustomEvent).detail);
+      event.preventDefault();
+    };
+    window.addEventListener('smartperfetto-lease-recovery-required', listener);
+    fetchMock.mockResolvedValue(errorResponse(409, 'Conflict'));
+
+    try {
+      HttpRpcEngine.setRpcTarget({
+        mode: 'backend-lease-proxy',
+        leaseId: 'lease-a',
+        statusUrl: 'http://backend/api/tp/lease-a/status',
+        websocketUrl: 'ws://backend/api/tp/lease-a/websocket',
+        heartbeatUrl: 'http://backend/api/tp/lease-a/heartbeat',
+      });
+      await flushAsyncWork();
+
+      expect(recoveryEvents).toEqual([{
+        leaseId: 'lease-a',
+        status: 409,
+        statusText: 'Conflict',
+      }]);
+
+      window.dispatchEvent(new Event('focus'));
+      await flushAsyncWork();
+      expect(recoveryEvents).toHaveLength(1);
+    } finally {
+      window.removeEventListener('smartperfetto-lease-recovery-required', listener);
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not reload hidden or offline pages for stale lease heartbeat failures', async () => {
+    const recoveryEvents: unknown[] = [];
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const listener = (event: Event) => {
+      recoveryEvents.push((event as CustomEvent).detail);
+      event.preventDefault();
+    };
+    window.addEventListener('smartperfetto-lease-recovery-required', listener);
+    fetchMock.mockResolvedValue(errorResponse(409, 'Conflict'));
+
+    try {
+      setDocumentVisibility('hidden');
+      HttpRpcEngine.setRpcTarget({
+        mode: 'backend-lease-proxy',
+        leaseId: 'lease-a',
+        statusUrl: 'http://backend/api/tp/lease-a/status',
+        websocketUrl: 'ws://backend/api/tp/lease-a/websocket',
+        heartbeatUrl: 'http://backend/api/tp/lease-a/heartbeat',
+      });
+      await flushAsyncWork();
+      expect(recoveryEvents).toHaveLength(0);
+
+      fetchMock.mockClear();
+      HttpRpcEngine.useDirectPort('9001');
+      setDocumentVisibility('visible');
+      setNavigatorOnline(false);
+      HttpRpcEngine.setRpcTarget({
+        mode: 'backend-lease-proxy',
+        leaseId: 'lease-b',
+        statusUrl: 'http://backend/api/tp/lease-b/status',
+        websocketUrl: 'ws://backend/api/tp/lease-b/websocket',
+        heartbeatUrl: 'http://backend/api/tp/lease-b/heartbeat',
+      });
+      await flushAsyncWork();
+      expect(recoveryEvents).toHaveLength(0);
+    } finally {
+      window.removeEventListener('smartperfetto-lease-recovery-required', listener);
+      warnSpy.mockRestore();
+    }
   });
 });

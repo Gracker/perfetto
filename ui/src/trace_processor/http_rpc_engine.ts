@@ -20,6 +20,8 @@ import {EngineBase} from '../trace_processor/engine';
 
 const RPC_CONNECT_TIMEOUT_MS = 2000;
 const SMARTPERFETTO_LEASE_HEARTBEAT_INTERVAL_MS = 30_000;
+const SMARTPERFETTO_LEASE_RECOVERY_EVENT =
+  'smartperfetto-lease-recovery-required';
 
 type SmartPerfettoLeaseVisibility = 'visible' | 'hidden' | 'offline';
 
@@ -74,6 +76,7 @@ export class HttpRpcEngine extends EngineBase {
   private static leaseHeartbeatTimer?: ReturnType<typeof setInterval>;
   private static leaseHeartbeatInFlight = false;
   private static leaseHeartbeatListenersInstalled = false;
+  private static leaseRecoveryReloadScheduled = false;
 
   constructor(id: string) {
     super();
@@ -209,6 +212,7 @@ export class HttpRpcEngine extends EngineBase {
       return;
     }
     HttpRpcEngine.leaseHeartbeatTarget = target;
+    HttpRpcEngine.leaseRecoveryReloadScheduled = false;
     HttpRpcEngine.ensureLeaseHeartbeatListeners();
     void HttpRpcEngine.sendLeaseHeartbeat();
     HttpRpcEngine.leaseHeartbeatTimer = setInterval(() => {
@@ -223,6 +227,7 @@ export class HttpRpcEngine extends EngineBase {
     }
     HttpRpcEngine.leaseHeartbeatTarget = undefined;
     HttpRpcEngine.leaseHeartbeatInFlight = false;
+    HttpRpcEngine.leaseRecoveryReloadScheduled = false;
   }
 
   private static ensureLeaseHeartbeatListeners(): void {
@@ -285,6 +290,7 @@ export class HttpRpcEngine extends EngineBase {
         console.warn(
           `SmartPerfetto lease heartbeat failed: ${response.status} ${response.statusText}`,
         );
+        HttpRpcEngine.maybeReloadForStaleLease(response);
       }
     } catch (err) {
       if (HttpRpcEngine.leaseVisibility() !== 'offline') {
@@ -293,6 +299,29 @@ export class HttpRpcEngine extends EngineBase {
     } finally {
       HttpRpcEngine.leaseHeartbeatInFlight = false;
     }
+  }
+
+  private static maybeReloadForStaleLease(response: Response): void {
+    if (
+      HttpRpcEngine.leaseRecoveryReloadScheduled ||
+      HttpRpcEngine.leaseVisibility() !== 'visible' ||
+      ![404, 409, 410].includes(response.status) ||
+      typeof window === 'undefined'
+    ) {
+      return;
+    }
+
+    HttpRpcEngine.leaseRecoveryReloadScheduled = true;
+    const event = new CustomEvent(SMARTPERFETTO_LEASE_RECOVERY_EVENT, {
+      cancelable: true,
+      detail: {
+        leaseId: HttpRpcEngine.leaseHeartbeatTarget?.leaseId,
+        status: response.status,
+        statusText: response.statusText,
+      },
+    });
+    if (!window.dispatchEvent(event)) return;
+    window.location.reload();
   }
 
   [Symbol.dispose]() {
