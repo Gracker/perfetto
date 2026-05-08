@@ -31,6 +31,29 @@ export interface ProviderFormAttrs {
 
 type AccordionSection = 'name' | 'connection' | 'models' | 'tuning';
 
+const DUAL_SURFACE_PROVIDER_TYPES: ProviderType[] = [
+  'deepseek',
+  'glm',
+  'qwen',
+  'qwen_coding',
+  'kimi_code',
+  'kimi',
+  'doubao',
+  'minimax',
+  'xiaomi',
+  'tencent_token_plan',
+  'tencent_coding_plan',
+  'hunyuan',
+  'qianfan',
+  'stepfun',
+  'siliconflow',
+  'huawei',
+];
+
+function isDualSurfaceProviderType(type: ProviderType): boolean {
+  return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
+}
+
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private form: FormState = createEmptyForm();
   private expandedSection: AccordionSection = 'name';
@@ -123,9 +146,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       conn.openaiBaseUrl ??= conn.baseUrl;
       conn.agentRuntime ??= 'openai-agents-sdk';
       conn.openaiProtocol ??= type === 'openai' ? 'responses' : 'chat_completions';
-    } else if (type === 'deepseek') {
-      conn.claudeBaseUrl ??= conn.baseUrl || 'https://api.deepseek.com/anthropic';
-      conn.openaiBaseUrl ??= 'https://api.deepseek.com/v1';
+    } else if (isDualSurfaceProviderType(type)) {
+      conn.claudeBaseUrl ??= conn.baseUrl;
       conn.openaiProtocol ??= 'chat_completions';
       conn.agentRuntime ??= 'claude-agent-sdk';
     } else if (type === 'custom') {
@@ -163,7 +185,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         if (this.form.type === 'anthropic') {
           return !!(conn.claudeApiKey || conn.claudeAuthToken || conn.apiKey);
         }
-        if (this.form.type === 'deepseek') {
+        if (isDualSurfaceProviderType(this.form.type)) {
           return !!(conn.apiKey || conn.claudeApiKey || conn.claudeAuthToken || conn.openaiApiKey);
         }
         if (this.form.type === 'openai') {

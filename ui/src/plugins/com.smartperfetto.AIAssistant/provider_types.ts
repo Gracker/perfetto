@@ -5,6 +5,21 @@ export type ProviderType =
   | 'bedrock'
   | 'vertex'
   | 'deepseek'
+  | 'glm'
+  | 'qwen'
+  | 'qwen_coding'
+  | 'kimi_code'
+  | 'kimi'
+  | 'doubao'
+  | 'minimax'
+  | 'xiaomi'
+  | 'tencent_token_plan'
+  | 'tencent_coding_plan'
+  | 'hunyuan'
+  | 'qianfan'
+  | 'stepfun'
+  | 'siliconflow'
+  | 'huawei'
   | 'openai'
   | 'ollama'
   | 'custom';
@@ -94,10 +109,48 @@ export const TYPE_ICONS: Record<ProviderType, string> = {
   bedrock: '☁️',
   vertex: '\u{1F537}',
   deepseek: '\u{1F40B}',
+  glm: '智',
+  qwen: '通',
+  qwen_coding: '码',
+  kimi_code: 'K',
+  kimi: '月',
+  doubao: '豆',
+  minimax: 'M',
+  xiaomi: '米',
+  tencent_token_plan: '腾',
+  tencent_coding_plan: '编',
+  hunyuan: '混',
+  qianfan: '千',
+  stepfun: '阶',
+  siliconflow: '硅',
+  huawei: '华',
   openai: '⚡',
   ollama: '\u{1F999}',
   custom: '\u{1F527}',
 };
+
+const DUAL_SURFACE_PROVIDER_TYPES: ProviderType[] = [
+  'deepseek',
+  'glm',
+  'qwen',
+  'qwen_coding',
+  'kimi_code',
+  'kimi',
+  'doubao',
+  'minimax',
+  'xiaomi',
+  'tencent_token_plan',
+  'tencent_coding_plan',
+  'hunyuan',
+  'qianfan',
+  'stepfun',
+  'siliconflow',
+  'huawei',
+];
+
+function isDualSurfaceProviderType(type: ProviderType): boolean {
+  return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
+}
 
 export const CATEGORY_LABELS: Record<ProviderCategory, string> = {
   official: 'Official',
@@ -180,7 +233,7 @@ export function providerHasClaudeSurface(provider: ProviderConfig): boolean {
     provider.type === 'anthropic' ||
     provider.type === 'bedrock' ||
     provider.type === 'vertex' ||
-    provider.type === 'deepseek'
+    isDualSurfaceProviderType(provider.type)
   ) {
     return true;
   }
@@ -194,7 +247,7 @@ export function providerHasClaudeSurface(provider: ProviderConfig): boolean {
 
 export function providerHasOpenAISurface(provider: ProviderConfig): boolean {
   const conn = provider.connection;
-  if (provider.type === 'openai' || provider.type === 'ollama' || provider.type === 'deepseek') {
+  if (provider.type === 'openai' || provider.type === 'ollama' || isDualSurfaceProviderType(provider.type)) {
     return true;
   }
   return !!(
