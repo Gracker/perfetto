@@ -14,8 +14,17 @@ import {
 import type {HttpRpcTarget} from '../trace_processor/http_rpc_engine';
 
 const BACKEND_CHECK_TIMEOUT_MS = 1000; // Fast timeout for health check
-const BACKEND_UPLOAD_TIMEOUT_MS = 60000; // 60s timeout for upload
+const BACKEND_UPLOAD_MIN_TIMEOUT_MS = 60000;
+const BACKEND_UPLOAD_THROUGHPUT_MB_PER_S = 50;
 const BACKEND_URL_UPLOAD_TIMEOUT_MS = 300000; // URL fetches can be slow on first load
+
+function computeUploadTimeoutMs(byteSize: number): number {
+  if (!Number.isFinite(byteSize) || byteSize <= 0) {
+    return BACKEND_UPLOAD_MIN_TIMEOUT_MS;
+  }
+  const bytesPerMs = BACKEND_UPLOAD_THROUGHPUT_MB_PER_S * 1024;
+  return Math.max(BACKEND_UPLOAD_MIN_TIMEOUT_MS, Math.ceil(byteSize / bytesPerMs));
+}
 
 export interface BackendUploadResult {
   success: boolean;
@@ -154,7 +163,7 @@ export class BackendUploader {
           headers: buildSmartPerfettoContextHeaders(),
           body: formData,
         },
-        BACKEND_UPLOAD_TIMEOUT_MS,
+        computeUploadTimeoutMs(blob.size),
       );
 
       if (resp.status !== 200) {
