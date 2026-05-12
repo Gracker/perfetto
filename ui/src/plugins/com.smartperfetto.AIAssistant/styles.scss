@@ -4301,6 +4301,10 @@ tr.detail-row {
   &.current {
     color: var(--chat-primary);
   }
+
+  &.active-window {
+    color: var(--chat-warning);
+  }
 }
 
 .ai-result-picker-item-actions {

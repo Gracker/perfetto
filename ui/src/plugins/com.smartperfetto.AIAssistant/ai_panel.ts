@@ -77,6 +77,7 @@ import {
   AreaCardInfo,
   TraceDataset,
   AnalysisResultPickerItem,
+  AnalysisResultWindowState,
 } from './types';
 // Agent-Driven Architecture v2.0 - Intervention Panel
 import {
@@ -286,7 +287,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     size?: number;
   }> = [];
   private availableAnalysisResults: AnalysisResultPickerItem[] = [];
+  private activeResultWindowStates: AnalysisResultWindowState[] = [];
   private resultVisibilityUpdatingIds = new Set<string>();
+  private windowHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   // Debounced session save (P1-8): coalesce rapid addMessage() calls
   private saveSessionTimer: ReturnType<typeof setTimeout> | null = null;
   private beforeUnloadHandler: (() => void) | null = null;
@@ -837,6 +840,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         });
         this.saveCurrentSession();
         m.redraw();
+        void this.postWindowHeartbeat();
 
         if (this.unsubscribeBackendUpload) {
           this.unsubscribeBackendUpload();
@@ -892,6 +896,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.selectedResultBaselineId = null;
     this.state.selectedResultCandidateIds = new Set();
     this.availableAnalysisResults = [];
+    this.activeResultWindowStates = [];
     this.resultVisibilityUpdatingIds.clear();
     this.clearAgentObservability();
     this.resetInterventionState();
@@ -961,6 +966,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       ) as HTMLTextAreaElement;
       if (textarea) textarea.focus();
     }, 100);
+    this.startWindowHeartbeat();
     // Animation keyframes are now defined in styles.scss
   }
 
@@ -991,6 +997,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.scrollThrottleTimer) {
       clearTimeout(this.scrollThrottleTimer);
       this.scrollThrottleTimer = null;
+    }
+    if (this.windowHeartbeatTimer) {
+      clearInterval(this.windowHeartbeatTimer);
+      this.windowHeartbeatTimer = null;
     }
     if (this.unsubscribeClearChat) {
       this.unsubscribeClearChat();
@@ -3424,6 +3434,7 @@ Click ⚙️ to configure backend connection.`;
     if (this.state.showResultPicker) {
       void this.fetchAnalysisResults();
     }
+    void this.postWindowHeartbeat();
   }
 
   private applyAnalysisCompletedSnapshotFallback(data?: any): void {
@@ -3448,6 +3459,7 @@ Click ⚙️ to configure backend connection.`;
       visibility: 'private',
       createdAt: Date.now(),
     };
+    void this.postWindowHeartbeat();
   }
 
   private formatLatestSnapshotLabel(): string {
@@ -7543,6 +7555,105 @@ Output MUST follow this exact markdown structure:
     }
   }
 
+  private startWindowHeartbeat(): void {
+    if (this.windowHeartbeatTimer) return;
+    void this.postWindowHeartbeat();
+    this.windowHeartbeatTimer = setInterval(() => {
+      void this.postWindowHeartbeat();
+    }, 30_000);
+  }
+
+  private async postWindowHeartbeat(): Promise<void> {
+    const backendUrl = this.state.settings.backendUrl;
+    if (!backendUrl) return;
+
+    const context = getSmartPerfettoRequestContext();
+    const latest = this.state.latestAnalysisSnapshot;
+    const traceTitle = this.trace?.traceInfo?.traceTitle;
+    const traceId =
+      this.state.backendTraceId || this.state.currentTraceFingerprint || undefined;
+
+    try {
+      const url = buildSmartPerfettoWorkspaceApiUrl(
+        backendUrl,
+        'windows',
+        `/${encodeURIComponent(context.windowId)}/heartbeat`,
+      );
+      const response = await this.fetchBackend(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          traceId,
+          backendTraceId: this.state.backendTraceId || undefined,
+          activeSessionId:
+            this.state.agentSessionId || this.state.currentSessionId || undefined,
+          latestSnapshotId: latest?.snapshotId,
+          traceTitle: traceTitle || undefined,
+          sceneType: latest?.sceneType,
+          updatedAt: Date.now(),
+        }),
+      });
+      if (!response.ok) return;
+
+      const data = await response.json();
+      this.activeResultWindowStates = Array.isArray(data.activeWindows)
+        ? data.activeWindows
+            .filter((item: any) => item && typeof item.windowId === 'string')
+            .map((item: any) => ({
+              windowId: item.windowId,
+              userId: typeof item.userId === 'string' ? item.userId : undefined,
+              traceId: typeof item.traceId === 'string' ? item.traceId : undefined,
+              backendTraceId:
+                typeof item.backendTraceId === 'string'
+                  ? item.backendTraceId
+                  : undefined,
+              activeSessionId:
+                typeof item.activeSessionId === 'string'
+                  ? item.activeSessionId
+                  : undefined,
+              latestSnapshotId:
+                typeof item.latestSnapshotId === 'string'
+                  ? item.latestSnapshotId
+                  : undefined,
+              traceTitle:
+                typeof item.traceTitle === 'string' ? item.traceTitle : undefined,
+              sceneType:
+                typeof item.sceneType === 'string' ? item.sceneType : undefined,
+              updatedAt:
+                typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+              expiresAt:
+                typeof item.expiresAt === 'number' ? item.expiresAt : Date.now(),
+            }))
+        : [];
+      if (this.state.showResultPicker) {
+        m.redraw();
+      }
+    } catch (error) {
+      if (DEBUG_AI_PANEL) {
+        console.warn('[AIPanel] Failed to post window heartbeat:', error);
+      }
+    }
+  }
+
+  private getSortedAnalysisResults(): AnalysisResultPickerItem[] {
+    const latestId = this.state.latestAnalysisSnapshot?.snapshotId;
+    const activeRank = new Map<string, number>();
+    this.activeResultWindowStates.forEach((state, index) => {
+      if (state.latestSnapshotId && !activeRank.has(state.latestSnapshotId)) {
+        activeRank.set(state.latestSnapshotId, index);
+      }
+    });
+
+    return [...this.availableAnalysisResults].sort((left, right) => {
+      const leftRank =
+        left.id === latestId ? -2 : activeRank.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank =
+        right.id === latestId ? -2 : activeRank.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return right.createdAt - left.createdAt;
+    });
+  }
+
   /** Fetch persisted analysis-result snapshots for the result picker. */
   private async fetchAnalysisResults(): Promise<void> {
     this.state.resultPickerLoading = true;
@@ -7816,7 +7927,7 @@ Output MUST follow this exact markdown structure:
                 ])
               : m('div.ai-result-picker-list', [
                   this.availableAnalysisResults.length > 0
-                    ? this.availableAnalysisResults.map((item) =>
+                    ? this.getSortedAnalysisResults().map((item) =>
                         this.renderResultPickerItem(item),
                       )
                     : m(
@@ -7865,6 +7976,9 @@ Output MUST follow this exact markdown structure:
     const isCandidate = this.state.selectedResultCandidateIds.has(item.id);
     const isCurrent =
       item.id === this.state.latestAnalysisSnapshot?.snapshotId;
+    const activeWindow = this.activeResultWindowStates.find(
+      (state) => state.latestSnapshotId === item.id,
+    );
     const isVisibilityUpdating = this.resultVisibilityUpdatingIds.has(item.id);
     const metricCount = item.metrics?.length ?? 0;
     const evidenceCount = item.evidenceRefs?.length ?? 0;
@@ -7888,6 +8002,9 @@ Output MUST follow this exact markdown structure:
             isCurrent
               ? m('span.ai-result-picker-pill.current', 'Current')
               : null,
+            activeWindow
+              ? m('span.ai-result-picker-pill.active-window', 'Open')
+              : null,
             m(
               `span.ai-result-picker-pill.${item.status === 'ready' ? 'ready' : item.status === 'failed' ? 'failed' : 'partial'}`,
               this.formatAnalysisResultStatus(item.status),
@@ -7901,6 +8018,7 @@ Output MUST follow this exact markdown structure:
             'div.ai-result-picker-item-meta',
             [
               item.sceneType,
+              activeWindow?.traceTitle,
               item.traceLabel || item.traceId,
               this.formatAnalysisResultTime(item.createdAt),
               item.createdBy || '',

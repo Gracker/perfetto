@@ -321,6 +321,19 @@ export interface AnalysisResultPickerItem {
   evidenceRefs?: unknown[];
 }
 
+export interface AnalysisResultWindowState {
+  windowId: string;
+  userId?: string;
+  traceId?: string;
+  backendTraceId?: string;
+  activeSessionId?: string;
+  latestSnapshotId?: string;
+  traceTitle?: string;
+  sceneType?: string;
+  updatedAt: number;
+  expiresAt: number;
+}
+
 /**
  * AI panel internal state.
  */
