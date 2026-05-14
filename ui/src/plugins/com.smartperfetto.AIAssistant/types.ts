@@ -63,6 +63,237 @@ export interface Message {
     status?: 'good' | 'warning' | 'critical';
     delta?: string; // e.g., "+5%" or "-10ms"
   };
+  teachingPipeline?: TeachingPipelineResult;
+  teachingPinExecution?: TeachingPinExecutionResult;
+}
+
+export interface TeachingPipelineResult {
+  success: boolean;
+  schemaVersion?: string;
+  detection: TeachingDetection;
+  observedFlow?: TeachingObservedFlow;
+  teaching?: TeachingContent | null;
+  teachingContent?: TeachingContent | null;
+  pinPlan?: TeachingPinPlan;
+  overlayPlan?: TeachingOverlayPlan;
+  warnings?: TeachingWarning[];
+  pinInstructions?: TeachingPinInstruction[];
+  activeRenderingProcesses?: TeachingActiveRenderingProcess[];
+}
+
+export interface TeachingDetection {
+  detected?: boolean;
+  primaryPipelineId?: string;
+  primaryConfidence?: number;
+  primary_pipeline?: {
+    id: string;
+    confidence: number;
+  };
+  candidates?: Array<{id: string; confidence: number}>;
+  features?: Array<{
+    id?: string;
+    name?: string;
+    feature?: string;
+    detected?: boolean;
+    confidence?: number;
+    value?: string | number;
+  }>;
+  subvariants?: {
+    buffer_mode?: string;
+    flutter_engine?: string;
+    webview_mode?: string;
+    game_engine?: string;
+  };
+  traceRequirementsMissing?: string[];
+  trace_requirements_missing?: string[];
+}
+
+export interface TeachingContent {
+  title: string;
+  summary: string;
+  mermaidBlocks?: string[];
+  threadRoles?: Array<{
+    thread: string;
+    responsibility: string;
+    traceTag?: string;
+  }>;
+  keySlices?: string[];
+  docPath?: string;
+}
+
+export interface TeachingObservedFlow {
+  schemaVersion: string;
+  context?: {
+    traceId?: string;
+    packageName?: string;
+    processName?: string;
+    fallbackUsed?: string;
+    timeRange?: {
+      startTs: number;
+      endTs: number;
+      source: string;
+    };
+    sourcePriority?: string[];
+  };
+  lanes: TeachingObservedLane[];
+  events: TeachingObservedEvent[];
+  dependencies?: Array<{
+    fromLaneId: string;
+    toLaneId: string;
+    relation: string;
+    confidence?: number;
+    evidenceSource?: string;
+    fromEventId?: string;
+    toEventId?: string;
+    fromTaskId?: string;
+    toTaskId?: string;
+    detail?: string;
+  }>;
+  criticalTasks?: TeachingObservedCriticalTask[];
+  completeness?: {
+    level: 'high' | 'medium' | 'low';
+    missingSignals?: string[];
+    warnings?: string[];
+  };
+}
+
+export interface TeachingObservedLane {
+  id: string;
+  role: string;
+  title: string;
+  processName?: string;
+  threadName?: string;
+  layerName?: string;
+  trackHint?: {
+    matchBy: string;
+    pattern: string;
+    processName?: string;
+    threadName?: string;
+    layerName?: string;
+    mainThreadOnly?: boolean;
+  };
+  pipelineIds?: string[];
+  confidence?: number;
+  evidenceSource?: string;
+}
+
+export interface TeachingObservedEvent {
+  id: string;
+  stage: string;
+  name: string;
+  ts: number;
+  dur: number;
+  durMs?: number;
+  processName?: string;
+  threadName?: string;
+  trackId?: number;
+  utid?: number;
+  upid?: number;
+  laneId?: string;
+  evidenceSource?: string;
+  confidence?: number;
+  threadStateId?: number;
+  criticalTaskId?: string;
+}
+
+export interface TeachingObservedWakeupRef {
+  threadStateId?: number;
+  utid?: number;
+  processName?: string;
+  threadName?: string;
+  state?: string;
+  irqContext?: boolean;
+  kind?: string;
+}
+
+export interface TeachingObservedCriticalTask {
+  id: string;
+  kind: string;
+  rootEventId: string;
+  rootLaneId?: string;
+  laneId?: string;
+  name: string;
+  ts: number;
+  dur: number;
+  durMs?: number;
+  processName?: string;
+  threadName?: string;
+  utid?: number;
+  threadStateId?: number;
+  state?: string;
+  tableName?: string;
+  stackDepth?: number;
+  waker?: TeachingObservedWakeupRef;
+  evidenceSource?: string;
+  confidence?: number;
+}
+
+export interface TeachingWarning {
+  code?: string;
+  severity?: 'info' | 'warning' | 'error';
+  message: string;
+  source?: string;
+}
+
+export interface TeachingPinPlan {
+  status: 'planned' | 'empty' | 'partial' | 'failed';
+  instructions?: TeachingPinInstruction[];
+  expectedLaneIds?: string[];
+  expectedTrackHints?: TeachingTrackHint[];
+  summary?: string;
+  warnings?: string[];
+}
+
+export interface TeachingTrackHint {
+  matchBy: string;
+  pattern: string;
+  processName?: string;
+  threadName?: string;
+  layerName?: string;
+  mainThreadOnly?: boolean;
+}
+
+export interface TeachingOverlayPlan {
+  status: 'ready' | 'empty' | 'partial' | 'failed';
+  skillId?: string;
+  eventIds?: string[];
+  keySliceNames?: string[];
+  timeRange?: {
+    startTs: number;
+    endTs: number;
+    source: string;
+  };
+  summary?: string;
+  warnings?: string[];
+}
+
+export interface TeachingPinInstruction {
+  pattern: string;
+  matchBy: string;
+  priority: number;
+  reason: string;
+  expand?: boolean;
+  mainThreadOnly?: boolean;
+  smartPin?: boolean;
+  skipPin?: boolean;
+  activeProcessNames?: string[];
+}
+
+export interface TeachingActiveRenderingProcess {
+  upid?: number;
+  processName: string;
+  frameCount: number;
+  renderThreadTid?: number;
+}
+
+export interface TeachingPinExecutionResult {
+  count: number;
+  skipped: number;
+  failed: number;
+  attempted: number;
+  missingPatterns: string[];
+  pinnedTrackNames: string[];
+  reason?: string;
 }
 
 /**

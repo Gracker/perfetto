@@ -82,13 +82,28 @@ import {
   AnalysisResultComparisonDelta,
   AnalysisResultComparisonMatrixRow,
   AnalysisResultComparisonRun,
+  TeachingActiveRenderingProcess,
+  TeachingContent,
+  TeachingObservedCriticalTask,
+  TeachingObservedEvent,
+  TeachingObservedFlow,
+  TeachingObservedLane,
+  TeachingPinExecutionResult,
+  TeachingPinInstruction,
+  TeachingPipelineResult,
+  TeachingTrackHint,
+  TeachingWarning,
 } from './types';
 // Agent-Driven Architecture v2.0 - Intervention Panel
 import {
   InterventionPanel,
   DEFAULT_INTERVENTION_STATE,
 } from './intervention_panel';
-import {decodeBase64Unicode, formatMessage} from './data_formatter';
+import {
+  decodeBase64Unicode,
+  encodeBase64Unicode,
+  formatMessage,
+} from './data_formatter';
 import {sessionManager} from './session_manager';
 import {mermaidRenderer} from './mermaid_renderer';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
@@ -171,6 +186,54 @@ function metricStatusStyle(status: string | undefined): {
     (status ? METRIC_STATUS_STYLES[status] : undefined) ??
     METRIC_STATUS_STYLES.info
   );
+}
+
+function formatTeachingConfidence(confidence: number | undefined): string {
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence)) return '-';
+  return `${Math.round(confidence * 100)}%`;
+}
+
+function formatTeachingNs(value: number | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  return value.toLocaleString('en-US');
+}
+
+function formatTeachingMs(value: number | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  if (value >= 1000) return `${(value / 1000).toFixed(2)}s`;
+  if (value >= 1) return `${value.toFixed(2)}ms`;
+  return `${(value * 1000).toFixed(0)}µs`;
+}
+
+function teachingPrimaryPipelineId(result: TeachingPipelineResult): string {
+  return (
+    result.detection?.primary_pipeline?.id ||
+    result.detection?.primaryPipelineId ||
+    'UNKNOWN_PIPELINE'
+  );
+}
+
+function teachingPrimaryConfidence(result: TeachingPipelineResult): number | undefined {
+  return (
+    result.detection?.primary_pipeline?.confidence ??
+    result.detection?.primaryConfidence
+  );
+}
+
+function teachingContent(result: TeachingPipelineResult): TeachingContent | null {
+  return result.teaching || result.teachingContent || null;
+}
+
+function teachingFeatureName(feature: {
+  id?: string;
+  name?: string;
+  feature?: string;
+}): string {
+  return feature.id || feature.name || feature.feature || 'unknown';
+}
+
+function escapeTeachingRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export interface AIPanelAttrs {
@@ -396,6 +459,453 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (/^VSYNC-appsf$/i.test(trackName)) return true;
     if (/^AChoreographer/i.test(trackName)) return true;
     return false;
+  }
+
+  private renderTeachingPipelineView(
+    result: TeachingPipelineResult,
+    pinExecution?: TeachingPinExecutionResult,
+  ): m.Children {
+    const content = teachingContent(result);
+    const observedFlow = result.observedFlow;
+    const warnings = result.warnings || [];
+    const pipelineId = teachingPrimaryPipelineId(result);
+
+    return m(
+      'div.sp-teaching-result',
+      {
+        onclick: (e: MouseEvent) => {
+          const target = e.target as HTMLElement;
+          const copyBtn = target.closest?.(
+            '.ai-mermaid-copy',
+          ) as HTMLElement | null;
+          const b64 = copyBtn?.getAttribute('data-mermaid-b64');
+          if (!b64) return;
+          try {
+            void this.copyTextToClipboard(decodeBase64Unicode(b64));
+          } catch (err) {
+            console.warn('[AIPanel] Failed to copy mermaid code:', err);
+          }
+        },
+        oncreate: (vnode: m.VnodeDOM) => {
+          void this.renderMermaidInElement(vnode.dom as HTMLElement);
+        },
+        onupdate: (vnode: m.VnodeDOM) => {
+          void this.renderMermaidInElement(vnode.dom as HTMLElement);
+        },
+      },
+      [
+        m('div.sp-teaching-header', [
+          m('div', [
+            m('div.sp-teaching-eyebrow', '出图教学'),
+            m('h3', content?.title || pipelineId),
+          ]),
+          m('div.sp-teaching-actions', [
+            m(
+              'button.sp-teaching-copy',
+              {
+                title: '复制诊断摘要',
+                onclick: () => {
+                  void this.copyTextToClipboard(
+                    this.buildTeachingPipelineMarkdown(result, pinExecution),
+                  );
+                },
+              },
+              [m('i.pf-icon', 'content_copy'), m('span', '复制摘要')],
+            ),
+          ]),
+        ]),
+        this.renderTeachingPipelineSummary(result),
+        warnings.length > 0 ? this.renderTeachingWarnings(warnings) : null,
+        observedFlow ? this.renderTeachingObservedFlow(observedFlow) : null,
+        this.renderTeachingExecutionState(result, pinExecution),
+        content ? this.renderTeachingKnowledge(content) : null,
+      ],
+    );
+  }
+
+  private renderTeachingPipelineSummary(result: TeachingPipelineResult): m.Children {
+    const detection = result.detection;
+    const subvariants = detection.subvariants || {};
+    const chips: Array<{label: string; value: string | undefined}> = [
+      {label: 'Pipeline', value: teachingPrimaryPipelineId(result)},
+      {
+        label: 'Confidence',
+        value: formatTeachingConfidence(teachingPrimaryConfidence(result)),
+      },
+      {label: 'Buffer', value: subvariants.buffer_mode},
+      {label: 'Flutter', value: subvariants.flutter_engine},
+      {label: 'WebView', value: subvariants.webview_mode},
+      {label: 'Game', value: subvariants.game_engine},
+    ];
+    const visibleChips = chips.filter(
+      (chip) => chip.value && chip.value !== 'UNKNOWN' && chip.value !== 'N/A',
+    );
+
+    return m('div.sp-teaching-summary', [
+      m(
+        'div.sp-teaching-chip-row',
+        visibleChips.map((chip) =>
+          m('span.sp-teaching-chip', [
+            m('span.sp-teaching-chip-label', chip.label),
+            m('span.sp-teaching-chip-value', chip.value),
+          ]),
+        ),
+      ),
+      detection.candidates && detection.candidates.length > 1
+        ? m('div.sp-teaching-inline-list', [
+            m('span', '候选类型'),
+            ...detection.candidates.slice(0, 5).map((candidate) =>
+              m(
+                'code',
+                `${candidate.id} ${formatTeachingConfidence(candidate.confidence)}`,
+              ),
+            ),
+          ])
+        : null,
+      detection.features && detection.features.length > 0
+        ? m('div.sp-teaching-inline-list', [
+            m('span', '伴随特性'),
+            ...detection.features
+              .slice(0, 8)
+              .map((feature) => m('code', teachingFeatureName(feature))),
+          ])
+        : null,
+    ]);
+  }
+
+  private renderTeachingWarnings(warnings: TeachingWarning[]): m.Children {
+    return m('div.sp-teaching-warning-list', [
+      m('div.sp-teaching-section-title', 'Warnings'),
+      ...warnings.slice(0, 8).map((warning) =>
+        m('div.sp-teaching-warning', [
+          m('span.sp-teaching-warning-severity', warning.severity || 'info'),
+          m('span', warning.message || warning.code || 'warning'),
+        ]),
+      ),
+      warnings.length > 8
+        ? m('div.sp-teaching-more', `还有 ${warnings.length - 8} 条提示未展开`)
+        : null,
+    ]);
+  }
+
+  private renderTeachingObservedFlow(flow: TeachingObservedFlow): m.Children {
+    return m('div.sp-teaching-observed', [
+      m('div.sp-teaching-section-title', '当前 Trace 实际链路'),
+      this.renderTeachingContext(flow),
+      this.renderTeachingLanes(flow.lanes || []),
+      this.renderTeachingDependencies(flow),
+      this.renderTeachingCriticalTasks(flow.criticalTasks || []),
+      this.renderTeachingEvents(flow.events || []),
+      flow.completeness?.missingSignals?.length
+        ? m('div.sp-teaching-missing', [
+            m('div.sp-teaching-subtitle', '采集/观测缺口'),
+            m(
+              'ul',
+              flow.completeness.missingSignals.map((signal) => m('li', signal)),
+            ),
+          ])
+        : null,
+    ]);
+  }
+
+  private renderTeachingContext(flow: TeachingObservedFlow): m.Children {
+    const range = flow.context?.timeRange;
+    return m('div.sp-teaching-context', [
+      range
+        ? m('span', [
+            m('b', '时间窗 '),
+            `${formatTeachingNs(range.startTs)} - ${formatTeachingNs(range.endTs)} ns (${range.source})`,
+          ])
+        : null,
+      flow.context?.packageName
+        ? m('span', [m('b', 'Package '), flow.context.packageName])
+        : null,
+      flow.context?.processName
+        ? m('span', [m('b', 'Process '), flow.context.processName])
+        : null,
+      flow.context?.fallbackUsed
+        ? m('span', [m('b', 'Fallback '), flow.context.fallbackUsed])
+        : null,
+      flow.completeness?.level
+        ? m('span', [m('b', 'Completeness '), flow.completeness.level])
+        : null,
+    ]);
+  }
+
+  private renderTeachingLanes(lanes: TeachingObservedLane[]): m.Children {
+    if (lanes.length === 0) {
+      return m('div.sp-teaching-empty', '当前上下文没有观测到可展示泳道。');
+    }
+    return m(
+      'div.sp-teaching-lanes',
+      lanes.slice(0, 12).map((lane) =>
+        m('div.sp-teaching-lane', [
+          m('div.sp-teaching-lane-role', lane.role),
+          m('div.sp-teaching-lane-title', lane.title || lane.id),
+          m(
+            'div.sp-teaching-lane-meta',
+            lane.threadName || lane.processName || lane.layerName || '-',
+          ),
+          m('div.sp-teaching-lane-foot', [
+            m('span', formatTeachingConfidence(lane.confidence)),
+            m('span', lane.evidenceSource || '-'),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  private renderTeachingDependencies(flow: TeachingObservedFlow): m.Children {
+    const dependencies = flow.dependencies || [];
+    if (dependencies.length === 0) return null;
+    const lanesById = new Map((flow.lanes || []).map((lane) => [lane.id, lane]));
+    return m('div.sp-teaching-dependencies', [
+      m('div.sp-teaching-subtitle', `调度/链路依赖 (${dependencies.length})`),
+      m('table.sp-teaching-table', [
+        m('thead', [
+          m('tr', [
+            m('th', 'From'),
+            m('th', 'Relation'),
+            m('th', 'To'),
+            m('th', 'Evidence'),
+          ]),
+        ]),
+        m(
+          'tbody',
+          dependencies.slice(0, 16).map((dependency) => {
+            const from = lanesById.get(dependency.fromLaneId);
+            const to = lanesById.get(dependency.toLaneId);
+            return m('tr', [
+              m('td', from?.title || dependency.fromLaneId),
+              m('td', dependency.relation),
+              m('td', to?.title || dependency.toLaneId),
+              m('td', dependency.evidenceSource || dependency.detail || '-'),
+            ]);
+          }),
+        ),
+      ]),
+      dependencies.length > 16
+        ? m('div.sp-teaching-more', `还有 ${dependencies.length - 16} 条依赖未展开`)
+        : null,
+    ]);
+  }
+
+  private renderTeachingCriticalTasks(
+    criticalTasks: TeachingObservedCriticalTask[],
+  ): m.Children {
+    if (criticalTasks.length === 0) return null;
+    return m('div.sp-teaching-critical-tasks', [
+      m('div.sp-teaching-subtitle', `Critical task / Wakeup (${criticalTasks.length})`),
+      m('table.sp-teaching-table', [
+        m('thead', [
+          m('tr', [
+            m('th', 'Kind'),
+            m('th', 'Task'),
+            m('th', 'Waker'),
+            m('th', 'ts'),
+            m('th', 'dur'),
+          ]),
+        ]),
+        m(
+          'tbody',
+          criticalTasks.slice(0, 16).map((task) => {
+            const owner =
+              [task.threadName, task.processName].filter(Boolean).join(' / ') ||
+              task.name ||
+              '-';
+            const waker =
+              task.waker
+                ? [task.waker.threadName, task.waker.processName]
+                    .filter(Boolean)
+                    .join(' / ') || task.waker.kind || '-'
+                : '-';
+            return m('tr', [
+              m('td', task.kind),
+              m('td', [
+                m('div', owner),
+                task.state ? m('code', task.state) : null,
+                task.evidenceSource ? m('div.sp-teaching-muted', task.evidenceSource) : null,
+              ]),
+              m('td', waker),
+              m('td', formatTeachingNs(task.ts)),
+              m('td', formatTeachingMs(task.durMs)),
+            ]);
+          }),
+        ),
+      ]),
+      criticalTasks.length > 16
+        ? m('div.sp-teaching-more', `还有 ${criticalTasks.length - 16} 个 task 未展开`)
+        : null,
+    ]);
+  }
+
+  private renderTeachingEvents(events: TeachingObservedEvent[]): m.Children {
+    if (events.length === 0) {
+      return m('div.sp-teaching-empty', '当前上下文没有观测到关键出图事件。');
+    }
+    return m('div.sp-teaching-events', [
+      m('div.sp-teaching-subtitle', `实际事件 (${events.length})`),
+      m('table.sp-teaching-table', [
+        m('thead', [
+          m('tr', [
+            m('th', 'Stage'),
+            m('th', 'Slice'),
+            m('th', 'Thread / Process'),
+            m('th', 'ts'),
+            m('th', 'dur'),
+          ]),
+        ]),
+        m(
+          'tbody',
+          events.slice(0, 16).map((event) => {
+            const owner =
+              [event.threadName, event.processName].filter(Boolean).join(' / ') ||
+              '-';
+            return m('tr', [
+              m('td', event.stage),
+              m('td', event.name),
+              m('td', owner),
+              m('td', [
+                m(
+                  'button.sp-teaching-ts',
+                  {
+                    title: '跳转到该事件',
+                    onclick: () => {
+                      const navigation = this.jumpToTimestamp(BigInt(event.ts));
+                      if (!navigation.ok) {
+                        this.addMessage({
+                          id: this.generateId(),
+                          role: 'assistant',
+                          content: `Failed to navigate to timestamp ${event.ts}ns: ${navigation.error}`,
+                          timestamp: Date.now(),
+                        });
+                      }
+                    },
+                  },
+                  formatTeachingNs(event.ts),
+                ),
+              ]),
+              m('td', formatTeachingMs(event.durMs)),
+            ]);
+          }),
+        ),
+      ]),
+      events.length > 16
+        ? m('div.sp-teaching-more', `还有 ${events.length - 16} 个事件未展开`)
+        : null,
+    ]);
+  }
+
+  private renderTeachingExecutionState(
+    result: TeachingPipelineResult,
+    pinExecution?: TeachingPinExecutionResult,
+  ): m.Children {
+    return m('div.sp-teaching-execution', [
+      result.pinPlan
+        ? m('div.sp-teaching-plan-state', [
+            m('span.sp-teaching-state-label', 'Pin plan'),
+            m('span.sp-teaching-state-value', result.pinPlan.status),
+            result.pinPlan.summary ? m('span', result.pinPlan.summary) : null,
+          ])
+        : null,
+      result.overlayPlan
+        ? m('div.sp-teaching-plan-state', [
+            m('span.sp-teaching-state-label', 'Overlay plan'),
+            m('span.sp-teaching-state-value', result.overlayPlan.status),
+            result.overlayPlan.summary
+              ? m('span', result.overlayPlan.summary)
+              : null,
+          ])
+        : null,
+      pinExecution
+        ? [
+            m('div.sp-teaching-plan-state', [
+              m('span.sp-teaching-state-label', 'Pin result'),
+              m(
+                'span.sp-teaching-state-value',
+                `${pinExecution.count} pinned`,
+              ),
+              m(
+                'span',
+                `${pinExecution.skipped} skipped / ${pinExecution.failed} failed`,
+              ),
+            ]),
+            pinExecution.pinnedTrackNames?.length > 0
+              ? m('div.sp-teaching-inline-list', [
+                  m('span', '已 pin'),
+                  ...pinExecution.pinnedTrackNames
+                    .slice(0, 8)
+                    .map((trackName) => m('code', trackName)),
+                ])
+              : null,
+            pinExecution.missingPatterns?.length > 0
+              ? m('div.sp-teaching-inline-list', [
+                  m('span', '未命中'),
+                  ...pinExecution.missingPatterns
+                    .slice(0, 8)
+                    .map((pattern) => m('code', pattern)),
+                ])
+              : null,
+          ]
+        : null,
+    ]);
+  }
+
+  private renderTeachingKnowledge(content: TeachingContent): m.Children {
+    const mermaid = content.mermaidBlocks?.[0];
+    return m('div.sp-teaching-knowledge', [
+      m('div.sp-teaching-section-title', '知识点'),
+      content.summary ? m('p', content.summary) : null,
+      content.threadRoles?.length
+        ? m('div', [
+            m('div.sp-teaching-subtitle', '关键线程角色'),
+            m('table.sp-teaching-table', [
+              m('thead', [
+                m('tr', [m('th', '线程'), m('th', '职责'), m('th', 'Trace 标签')]),
+              ]),
+              m(
+                'tbody',
+                content.threadRoles.map((role) =>
+                  m('tr', [
+                    m('td', role.thread),
+                    m('td', role.responsibility),
+                    m('td', role.traceTag || '-'),
+                  ]),
+                ),
+              ),
+            ]),
+          ])
+        : null,
+      content.keySlices?.length
+        ? m('div.sp-teaching-inline-list', [
+            m('span', '关键 Slice'),
+            ...content.keySlices.map((sliceName) => m('code', sliceName)),
+          ])
+        : null,
+      mermaid
+        ? m('div.ai-mermaid-block', [
+            m('div.ai-mermaid-diagram', {
+              'data-mermaid-b64': encodeBase64Unicode(mermaid),
+            }),
+            m('details.ai-mermaid-details', [
+              m('summary', '查看 Mermaid 源码'),
+              m('div.ai-mermaid-actions', [
+                m(
+                  'button.ai-mermaid-copy',
+                  {
+                    type: 'button',
+                    'data-mermaid-b64': encodeBase64Unicode(mermaid),
+                  },
+                  '复制代码',
+                ),
+              ]),
+              m('pre.ai-mermaid-source', {
+                'data-mermaid-b64': encodeBase64Unicode(mermaid),
+              }),
+            ]),
+          ])
+        : null,
+    ]);
   }
 
   // oninit is called before view(), so AI service is initialized before first render
@@ -1609,79 +2119,93 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   class: bubbleClass,
                                 },
                                 [
-                                  // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
-                                  // reconciliation for m.trust() content. This avoids removeChild errors
-                                  // that occur when multiple SSE events trigger rapid redraws.
-                                  m('div.ai-message-content', {
-                                    class: contentClass,
-                                    onclick: (e: MouseEvent) => {
-                                      const selection = window.getSelection();
-                                      if (selection && !selection.isCollapsed) {
-                                        // Don't trigger click actions while user is selecting text to copy.
-                                        return;
-                                      }
-                                      const target = e.target as HTMLElement;
-                                      const copyBtn = target.closest?.(
-                                        '.ai-mermaid-copy',
-                                      ) as HTMLElement | null;
-                                      if (copyBtn) {
-                                        const b64 =
-                                          copyBtn.getAttribute(
-                                            'data-mermaid-b64',
+                                  msg.teachingPipeline
+                                    ? this.renderTeachingPipelineView(
+                                        msg.teachingPipeline,
+                                        msg.teachingPinExecution,
+                                      )
+                                    : // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
+                                      // reconciliation for m.trust() content. This avoids removeChild errors
+                                      // that occur when multiple SSE events trigger rapid redraws.
+                                      m('div.ai-message-content', {
+                                        class: contentClass,
+                                        onclick: (e: MouseEvent) => {
+                                          const selection =
+                                            window.getSelection();
+                                          if (
+                                            selection &&
+                                            !selection.isCollapsed
+                                          ) {
+                                            // Don't trigger click actions while user is selecting text to copy.
+                                            return;
+                                          }
+                                          const target =
+                                            e.target as HTMLElement;
+                                          const copyBtn = target.closest?.(
+                                            '.ai-mermaid-copy',
+                                          ) as HTMLElement | null;
+                                          if (copyBtn) {
+                                            const b64 =
+                                              copyBtn.getAttribute(
+                                                'data-mermaid-b64',
+                                              );
+                                            if (b64) {
+                                              try {
+                                                const code =
+                                                  decodeBase64Unicode(b64);
+                                                void this.copyTextToClipboard(
+                                                  code,
+                                                );
+                                              } catch (err) {
+                                                console.warn(
+                                                  '[AIPanel] Failed to copy mermaid code:',
+                                                  err,
+                                                );
+                                              }
+                                            }
+                                            return;
+                                          }
+                                          if (
+                                            target.classList.contains(
+                                              'ai-clickable-timestamp',
+                                            )
+                                          ) {
+                                            const tsNs =
+                                              target.getAttribute('data-ts');
+                                            if (tsNs) {
+                                              const timestampNs = BigInt(tsNs);
+                                              const navigation =
+                                                this.jumpToTimestamp(
+                                                  timestampNs,
+                                                );
+                                              if (!navigation.ok) {
+                                                this.addMessage({
+                                                  id: this.generateId(),
+                                                  role: 'assistant',
+                                                  content: `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+                                                  timestamp: Date.now(),
+                                                });
+                                              }
+                                            }
+                                          }
+                                        },
+                                        oncreate: (vnode: m.VnodeDOM) => {
+                                          const dom = vnode.dom as HTMLElement;
+                                          this.renderMessageContent(
+                                            dom,
+                                            msg,
+                                            isProgressMessage,
                                           );
-                                        if (b64) {
-                                          try {
-                                            const code =
-                                              decodeBase64Unicode(b64);
-                                            void this.copyTextToClipboard(code);
-                                          } catch (err) {
-                                            console.warn(
-                                              '[AIPanel] Failed to copy mermaid code:',
-                                              err,
-                                            );
-                                          }
-                                        }
-                                        return;
-                                      }
-                                      if (
-                                        target.classList.contains(
-                                          'ai-clickable-timestamp',
-                                        )
-                                      ) {
-                                        const tsNs =
-                                          target.getAttribute('data-ts');
-                                        if (tsNs) {
-                                          const timestampNs = BigInt(tsNs);
-                                          const navigation =
-                                            this.jumpToTimestamp(timestampNs);
-                                          if (!navigation.ok) {
-                                            this.addMessage({
-                                              id: this.generateId(),
-                                              role: 'assistant',
-                                              content: `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
-                                              timestamp: Date.now(),
-                                            });
-                                          }
-                                        }
-                                      }
-                                    },
-                                    oncreate: (vnode: m.VnodeDOM) => {
-                                      const dom = vnode.dom as HTMLElement;
-                                      this.renderMessageContent(
-                                        dom,
-                                        msg,
-                                        isProgressMessage,
-                                      );
-                                    },
-                                    onupdate: (vnode: m.VnodeDOM) => {
-                                      const dom = vnode.dom as HTMLElement;
-                                      this.renderMessageContent(
-                                        dom,
-                                        msg,
-                                        isProgressMessage,
-                                      );
-                                    },
-                                  }),
+                                        },
+                                        onupdate: (vnode: m.VnodeDOM) => {
+                                          const dom = vnode.dom as HTMLElement;
+                                          this.renderMessageContent(
+                                            dom,
+                                            msg,
+                                            isProgressMessage,
+                                          );
+                                        },
+                                      }),
 
                                   // HTML Report Link (问题1修复)
                                   msg.reportUrl
@@ -5701,6 +6225,294 @@ Output MUST follow this exact markdown structure:
     return false;
   }
 
+  private buildTeachingPipelineRequestContext(): {
+    packageName?: string;
+    visibleWindow?: {startTs: number; endTs: number};
+    selectionContext?: Record<string, unknown>;
+  } {
+    const visibleSpan = this.trace?.timeline?.visibleWindow?.toTimeSpan?.();
+    const visibleWindow = visibleSpan
+      ? {
+          startTs: Number(visibleSpan.start),
+          endTs: Number(visibleSpan.end),
+        }
+      : undefined;
+    const selection = this.trace?.selection?.selection;
+    const sliceInfo = this.state.sliceCardInfo;
+    const areaInfo = this.state.areaCardInfo;
+    const selectionContext =
+      selection?.kind === 'track_event'
+        ? {
+            kind: 'track_event',
+            eventId: selection.eventId,
+            ts: sliceInfo?.ts ?? Number(selection.ts),
+            dur:
+              sliceInfo?.dur ??
+              (selection.dur !== undefined ? Number(selection.dur) : undefined),
+            name: sliceInfo?.name,
+            threadName: sliceInfo?.threadName,
+            processName: sliceInfo?.processName,
+          }
+        : selection?.kind === 'area'
+          ? {
+              kind: 'area',
+              startTs: areaInfo?.startNs ?? Number(selection.start),
+              endTs: areaInfo?.endNs ?? Number(selection.end),
+              durationMs: areaInfo?.durationMs,
+            }
+          : undefined;
+
+    return {
+      packageName: sliceInfo?.processName || undefined,
+      visibleWindow,
+      selectionContext,
+    };
+  }
+
+  private buildTeachingPipelineMarkdown(
+    result: TeachingPipelineResult,
+    pinExecution?: TeachingPinExecutionResult,
+  ): string {
+    const content = teachingContent(result);
+    const observedFlow = result.observedFlow;
+    const detection = result.detection;
+    const pipelineType = teachingPrimaryPipelineId(result);
+    const confidence = formatTeachingConfidence(teachingPrimaryConfidence(result));
+    const lines: string[] = [
+      '## 🎓 渲染管线教学',
+      '',
+      '### 检测结果',
+      `- **管线类型**: \`${pipelineType}\` (置信度: ${confidence})`,
+    ];
+
+    const subvariants = detection.subvariants || {};
+    for (const [label, value] of [
+      ['Buffer 模式', subvariants.buffer_mode],
+      ['Flutter 引擎', subvariants.flutter_engine],
+      ['WebView 模式', subvariants.webview_mode],
+      ['游戏引擎', subvariants.game_engine],
+    ]) {
+      if (value && value !== 'UNKNOWN' && value !== 'N/A') {
+        lines.push(`- **${label}**: ${value}`);
+      }
+    }
+
+    if (detection.candidates && detection.candidates.length > 1) {
+      lines.push(
+        `- **候选类型**: ${detection.candidates
+          .slice(0, 5)
+          .map(
+            (candidate) =>
+              `${candidate.id} (${formatTeachingConfidence(candidate.confidence)})`,
+          )
+          .join(', ')}`,
+      );
+    }
+    if (detection.features && detection.features.length > 0) {
+      lines.push(
+        `- **伴随特性**: ${detection.features
+          .map((feature) => teachingFeatureName(feature))
+          .join(', ')}`,
+      );
+    }
+
+    lines.push('', '### 当前 Trace 实际链路');
+    if (observedFlow?.context?.timeRange) {
+      const {startTs, endTs, source} = observedFlow.context.timeRange;
+      lines.push(
+        `- **时间范围**: ${formatTeachingNs(startTs)} ~ ${formatTeachingNs(endTs)} ns (${source})`,
+      );
+    }
+    if (observedFlow?.context?.fallbackUsed) {
+      lines.push(`- **上下文 fallback**: ${observedFlow.context.fallbackUsed}`);
+    }
+    lines.push(`- **观测泳道**: ${observedFlow?.lanes?.length || 0}`);
+    lines.push(`- **实际事件**: ${observedFlow?.events?.length || 0}`);
+    lines.push(`- **调度依赖**: ${observedFlow?.dependencies?.length || 0}`);
+    lines.push(`- **Critical task / Wakeup**: ${observedFlow?.criticalTasks?.length || 0}`);
+    if (observedFlow?.lanes?.length) {
+      lines.push('', '| Lane | 角色 | Trace 标识 | 置信度 | 证据 |');
+      lines.push('|------|------|------------|--------|------|');
+      for (const lane of observedFlow.lanes.slice(0, 12)) {
+        const marker = lane.threadName || lane.processName || lane.layerName || '-';
+        lines.push(
+          `| ${lane.title || lane.id} | ${lane.role} | ${marker} | ${formatTeachingConfidence(lane.confidence)} | ${lane.evidenceSource || '-'} |`,
+        );
+      }
+    }
+    if (observedFlow?.dependencies?.length) {
+      const lanesById = new Map((observedFlow.lanes || []).map((lane) => [lane.id, lane]));
+      lines.push('', '| From | Relation | To | Evidence |');
+      lines.push('|------|----------|----|----------|');
+      for (const dependency of observedFlow.dependencies.slice(0, 16)) {
+        const from = lanesById.get(dependency.fromLaneId);
+        const to = lanesById.get(dependency.toLaneId);
+        lines.push(
+          `| ${from?.title || dependency.fromLaneId} | ${dependency.relation} | ${to?.title || dependency.toLaneId} | ${dependency.evidenceSource || dependency.detail || '-'} |`,
+        );
+      }
+    }
+    if (observedFlow?.criticalTasks?.length) {
+      lines.push('', '| Kind | Task | Waker | ts(ns) | dur | Evidence |');
+      lines.push('|------|------|-------|--------|-----|----------|');
+      for (const task of observedFlow.criticalTasks.slice(0, 16)) {
+        const owner =
+          [task.threadName, task.processName].filter(Boolean).join(' / ') ||
+          task.name ||
+          '-';
+        const waker = task.waker
+          ? [task.waker.threadName, task.waker.processName].filter(Boolean).join(' / ') ||
+            task.waker.kind ||
+            '-'
+          : '-';
+        lines.push(
+          `| ${task.kind} | ${owner} | ${waker} | ${formatTeachingNs(task.ts)} | ${formatTeachingMs(task.durMs)} | ${task.evidenceSource || '-'} |`,
+        );
+      }
+    }
+    if (observedFlow?.events?.length) {
+      lines.push('', '| Stage | Slice | Thread / Process | ts(ns) | dur |');
+      lines.push('|-------|-------|------------------|--------|-----|');
+      for (const event of observedFlow.events.slice(0, 16)) {
+        const owner = [event.threadName, event.processName]
+          .filter(Boolean)
+          .join(' / ') || '-';
+        lines.push(
+          `| ${event.stage} | ${event.name} | ${owner} | ${formatTeachingNs(event.ts)} | ${formatTeachingMs(event.durMs)} |`,
+        );
+      }
+    }
+    if (observedFlow?.completeness?.missingSignals?.length) {
+      lines.push('', '### 采集/观测缺口');
+      for (const missing of observedFlow.completeness.missingSignals) {
+        lines.push(`- ${missing}`);
+      }
+    }
+
+    if (content) {
+      lines.push('', '---', '', `### ${content.title}`, '', content.summary || '');
+      if (content.threadRoles?.length) {
+        lines.push('', '#### 关键线程角色', '', '| 线程 | 职责 | Trace 标签 |');
+        lines.push('|------|------|------------|');
+        for (const role of content.threadRoles) {
+          lines.push(
+            `| ${role.thread} | ${role.responsibility} | ${role.traceTag || '-'} |`,
+          );
+        }
+      }
+      if (content.keySlices?.length) {
+        lines.push('', '#### 关键 Slice', `\`${content.keySlices.join('`, `')}\``);
+      }
+      if (content.mermaidBlocks?.length) {
+        lines.push('', '#### 时序图', '', '```mermaid');
+        lines.push(content.mermaidBlocks[0]);
+        lines.push('```');
+      }
+    }
+
+    const traceWarnings =
+      detection.trace_requirements_missing ||
+      detection.traceRequirementsMissing ||
+      [];
+    if (traceWarnings.length > 0) {
+      lines.push('', '### 采集建议');
+      for (const hint of traceWarnings) lines.push(`- ${hint}`);
+    }
+    if (result.warnings?.length) {
+      lines.push('', '### 教学结果提示');
+      for (const warning of result.warnings.slice(0, 20)) {
+        lines.push(
+          `- [${warning.severity || 'info'}] ${warning.message || warning.code || 'warning'}`,
+        );
+      }
+    }
+    if (pinExecution) {
+      lines.push('', '### Pin 执行结果');
+      lines.push(`- 已 pin: ${pinExecution.count}`);
+      lines.push(`- 未命中/跳过: ${pinExecution.skipped}`);
+      lines.push(`- 失败: ${pinExecution.failed}`);
+      if (pinExecution.missingPatterns?.length > 0) {
+        lines.push(`- 未命中的 pattern: ${pinExecution.missingPatterns.join(', ')}`);
+      }
+      if (pinExecution.pinnedTrackNames?.length > 0) {
+        lines.push(`- 已 pin 的 track: ${pinExecution.pinnedTrackNames.join(', ')}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  private buildTeachingPinInstructions(
+    result: TeachingPipelineResult,
+  ): TeachingPinInstruction[] {
+    const merged: TeachingPinInstruction[] = [];
+    const seen = new Set<string>();
+    const addInstruction = (instruction: TeachingPinInstruction | null) => {
+      if (!instruction) return;
+      const key = [
+        instruction.matchBy,
+        instruction.pattern,
+        instruction.mainThreadOnly ? 'main' : '',
+        instruction.activeProcessNames?.join(',') || '',
+      ].join('|');
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(instruction);
+    };
+
+    for (const instruction of result.pinInstructions || []) {
+      addInstruction(instruction);
+    }
+    for (const [index, hint] of (
+      result.pinPlan?.expectedTrackHints || []
+    ).entries()) {
+      addInstruction(this.pinInstructionFromTrackHint(hint, index));
+    }
+
+    return merged.sort((a, b) => a.priority - b.priority);
+  }
+
+  private pinInstructionFromTrackHint(
+    hint: TeachingTrackHint,
+    index: number,
+  ): TeachingPinInstruction | null {
+    const rawPattern =
+      hint.pattern || hint.threadName || hint.processName || hint.layerName;
+    if (!rawPattern) return null;
+
+    const label = hint.threadName || hint.processName || hint.layerName || rawPattern;
+    const instruction: TeachingPinInstruction = {
+      pattern: rawPattern,
+      matchBy: 'name',
+      priority: 1000 + index,
+      reason: `Observed lane: ${label}`,
+    };
+
+    if (hint.matchBy === 'uri') {
+      instruction.matchBy = 'uri';
+    } else if (hint.matchBy === 'process') {
+      instruction.matchBy = 'path';
+      instruction.pattern = escapeTeachingRegex(hint.processName || rawPattern);
+    } else if (hint.matchBy === 'layer') {
+      instruction.matchBy = 'path';
+      instruction.pattern = escapeTeachingRegex(hint.layerName || rawPattern);
+    } else if (hint.matchBy === 'thread') {
+      instruction.matchBy = 'name';
+      instruction.pattern = `^${escapeTeachingRegex(hint.threadName || rawPattern)}$`;
+    } else if (hint.matchBy === 'slice' || hint.matchBy === 'name') {
+      instruction.matchBy = 'name';
+    }
+
+    if (hint.mainThreadOnly !== undefined) {
+      instruction.mainThreadOnly = hint.mainThreadOnly;
+    }
+    if (hint.processName) {
+      instruction.smartPin = true;
+      instruction.activeProcessNames = [hint.processName];
+    }
+    return instruction;
+  }
+
   /**
    * Handle /teaching-pipeline command
    * Detects the rendering pipeline type and shows educational content
@@ -5726,6 +6538,7 @@ Output MUST follow this exact markdown structure:
       );
 
     try {
+      const requestContext = this.buildTeachingPipelineRequestContext();
       const response = await this.fetchBackend(
         buildAssistantApiV1Url(
           this.state.settings.backendUrl,
@@ -5736,6 +6549,7 @@ Output MUST follow this exact markdown structure:
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             traceId: this.state.backendTraceId,
+            ...requestContext,
           }),
         },
       );
@@ -5757,151 +6571,31 @@ Output MUST follow this exact markdown structure:
         }
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as TeachingPipelineResult & {
+        error?: string;
+      };
       if (!data.success) {
         throw new Error(data.error || 'Pipeline detection failed');
       }
 
-      // Build teaching content message
-      const detection = data.detection;
-      const teaching = data.teaching;
-      const pinInstructions = data.pinInstructions || [];
-      // v3 Smart Pin: Get active rendering processes for intelligent pinning
+      const pinInstructions = this.buildTeachingPinInstructions(data);
       const activeRenderingProcesses = data.activeRenderingProcesses || [];
-
-      // Format pipeline type with confidence
-      const pipelineType = detection.primary_pipeline.id;
-      const confidence = (detection.primary_pipeline.confidence * 100).toFixed(
-        0,
-      );
-
-      // Build message content
-      let content = `## 🎓 渲染管线教学\n\n`;
-      content += `### 检测结果\n`;
-      content += `- **管线类型**: \`${pipelineType}\` (置信度: ${confidence}%)\n`;
-
-      // Show subvariants if relevant
-      const subvariants = detection.subvariants;
-      if (
-        subvariants.buffer_mode !== 'UNKNOWN' &&
-        subvariants.buffer_mode !== 'N/A'
-      ) {
-        content += `- **Buffer 模式**: ${subvariants.buffer_mode}\n`;
-      }
-      if (
-        subvariants.flutter_engine !== 'UNKNOWN' &&
-        subvariants.flutter_engine !== 'N/A'
-      ) {
-        content += `- **Flutter 引擎**: ${subvariants.flutter_engine}\n`;
-      }
-      if (
-        subvariants.webview_mode !== 'UNKNOWN' &&
-        subvariants.webview_mode !== 'N/A'
-      ) {
-        content += `- **WebView 模式**: ${subvariants.webview_mode}\n`;
-      }
-      if (
-        subvariants.game_engine !== 'UNKNOWN' &&
-        subvariants.game_engine !== 'N/A'
-      ) {
-        content += `- **游戏引擎**: ${subvariants.game_engine}\n`;
-      }
-
-      // Show candidates if there are alternatives
-      if (detection.candidates && detection.candidates.length > 1) {
-        content += `\n**候选类型**: `;
-        content += detection.candidates
-          .slice(0, 3)
-          .map(
-            (c: {id: string; confidence: number}) =>
-              `${c.id} (${(c.confidence * 100).toFixed(0)}%)`,
-          )
-          .join(', ');
-        content += `\n`;
-      }
-
-      // Show features if detected
-      if (detection.features && detection.features.length > 0) {
-        content += `\n**伴随特性**: `;
-        content += detection.features
-          .map((f: {id: string; confidence: number}) => `${f.id}`)
-          .join(', ');
-        content += `\n`;
-      }
-
-      // v3: Show active rendering processes
-      if (activeRenderingProcesses.length > 0) {
-        content += `\n**活跃渲染进程**: `;
-        content += activeRenderingProcesses
-          .slice(0, 5) // Show top 5
-          .map(
-            (p: {processName: string; frameCount: number}) =>
-              `${p.processName} (${p.frameCount} 帧)`,
-          )
-          .join(', ');
-        if (activeRenderingProcesses.length > 5) {
-          content += ` 等 ${activeRenderingProcesses.length} 个进程`;
-        }
-        content += `\n`;
-      }
-
-      // Teaching content
-      content += `\n---\n\n### ${teaching.title}\n\n`;
-      content += `${teaching.summary}\n\n`;
-
-      // Thread roles table
-      if (teaching.threadRoles && teaching.threadRoles.length > 0) {
-        content += `#### 关键线程角色\n\n`;
-        content += `| 线程 | 职责 | Trace 标签 |\n`;
-        content += `|------|------|------------|\n`;
-        for (const role of teaching.threadRoles) {
-          content += `| ${role.thread} | ${role.responsibility} | ${role.traceTag || '-'} |\n`;
-        }
-        content += `\n`;
-      }
-
-      // Key slices
-      if (teaching.keySlices && teaching.keySlices.length > 0) {
-        content += `#### 关键 Slice\n`;
-        content += `\`${teaching.keySlices.join('`, `')}\`\n\n`;
-      }
-
-      // Mermaid diagrams - render locally in the UI (offline, no external services).
-      if (teaching.mermaidBlocks && teaching.mermaidBlocks.length > 0) {
-        content += `#### 时序图\n\n`;
-        const mermaidCode = teaching.mermaidBlocks[0];
-        // Use fenced mermaid block so formatter can safely convert to renderable placeholder.
-        content += '```mermaid\n';
-        content += `${mermaidCode}\n`;
-        content += '```\n\n';
-      }
-
-      // Trace requirements warning
-      if (
-        detection.trace_requirements_missing &&
-        detection.trace_requirements_missing.length > 0
-      ) {
-        content += `\n⚠️ **采集建议**:\n`;
-        for (const hint of detection.trace_requirements_missing) {
-          content += `- ${hint}\n`;
-        }
-      }
-
-      // Add message
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content,
-        timestamp: Date.now(),
-      });
-
-      // Auto-pin relevant tracks with v3 smart pinning
+      let pinExecution: TeachingPinExecutionResult | undefined;
       if (pinInstructions.length > 0 && this.trace) {
-        await this.pinTracksFromInstructions(
+        pinExecution = await this.pinTracksFromInstructions(
           pinInstructions,
           activeRenderingProcesses,
         );
       }
+
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: this.buildTeachingPipelineMarkdown(data, pinExecution),
+        timestamp: Date.now(),
+        teachingPipeline: data,
+        teachingPinExecution: pinExecution,
+      });
     } catch (error: any) {
       console.error('[AIPanel] Teaching pipeline error:', error);
       this.addMessage({
@@ -5939,8 +6633,9 @@ Output MUST follow this exact markdown structure:
         generateId: () => this.generateId(),
         setLoadingState: (loading) => this.setLoadingState(loading),
         fetchBackend: (url, opts) => this.fetchBackend(url, opts),
-        pinTracksFromInstructions: (insts, procs) =>
-          this.pinTracksFromInstructions(insts, procs),
+        pinTracksFromInstructions: async (insts, procs) => {
+          await this.pinTracksFromInstructions(insts, procs);
+        },
         setDetectedScenes: (scenes) => {
           this.state.detectedScenes = scenes;
         },
@@ -6473,31 +7168,34 @@ Output MUST follow this exact markdown structure:
    * v4 Enhancement: Uses mainThreadOnly to only pin main thread tracks (checks track.chips)
    */
   private async pinTracksFromInstructions(
-    instructions: Array<{
-      pattern: string;
-      matchBy: string;
-      priority: number;
-      reason: string;
-      expand?: boolean; // Whether to expand the track after pinning
-      mainThreadOnly?: boolean; // Only pin main thread (track.chips includes 'main thread')
-      smartPin?: boolean;
-      skipPin?: boolean; // v3.1: Skip RenderThread when no active rendering processes
-      activeProcessNames?: string[];
-    }>,
-    activeRenderingProcesses: Array<{
-      processName: string;
-      frameCount: number;
-    }> = [],
-  ) {
-    if (!this.trace) return;
+    instructions: TeachingPinInstruction[],
+    activeRenderingProcesses: TeachingActiveRenderingProcess[] = [],
+  ): Promise<TeachingPinExecutionResult> {
+    const pinnedCount: TeachingPinExecutionResult = {
+      count: 0,
+      skipped: 0,
+      failed: 0,
+      attempted: instructions.length,
+      missingPatterns: [],
+      pinnedTrackNames: [],
+    };
+
+    if (!this.trace) {
+      return {
+        ...pinnedCount,
+        reason: 'trace context is not available',
+      };
+    }
 
     const workspace = this.trace.currentWorkspace;
     if (!workspace) {
       console.warn('[AIPanel] No workspace available for track pinning');
-      return;
+      return {
+        ...pinnedCount,
+        reason: 'workspace is not available',
+      };
     }
 
-    const pinnedCount = {count: 0, skipped: 0};
     const sortedInstructions = [...instructions].sort(
       (a, b) => a.priority - b.priority,
     );
@@ -6605,12 +7303,9 @@ Output MUST follow this exact markdown structure:
         );
     }
 
-    // Try using the PinTracksByRegex command first (Perfetto built-in) - but only for non-smart patterns
-    const pinByRegexAvailable = this.trace.commands?.hasCommand?.(
-      'dev.perfetto.PinTracksByRegex',
-    );
-
     for (const inst of sortedInstructions) {
+      const pinnedBeforeInstruction = pinnedCount.count;
+      const skippedBeforeInstruction = pinnedCount.skipped;
       try {
         // v3.1: Skip instructions marked with skipPin (e.g., RenderThread with no active processes)
         if (inst.skipPin) {
@@ -6633,27 +7328,8 @@ Output MUST follow this exact markdown structure:
         );
         let pinnedForInstruction = 0;
 
-        // Use built-in pin-by-regex only when we don't need extra filtering.
-        // Smart pinning and mainThreadOnly require manual iteration.
-        const canUsePinByRegex =
-          pinByRegexAvailable &&
-          !shouldSmartFilterByProcess &&
-          !inst.mainThreadOnly &&
-          !inst.expand &&
-          !shouldAttemptDisambiguation &&
-          (inst.matchBy === 'name' || inst.matchBy === 'path');
-
-        if (canUsePinByRegex) {
-          this.trace.commands.runCommand(
-            'dev.perfetto.PinTracksByRegex',
-            inst.pattern,
-            inst.matchBy,
-          );
-          pinnedCount.count++;
-          continue;
-        }
-
-        // Manual iteration (supports smart process filtering and mainThreadOnly).
+        // Manual iteration keeps the execution result factual: we only count
+        // tracks we can observe and pin in the current workspace.
         if (flatTracks) {
           const candidates: any[] = [];
           const hasActiveContext =
@@ -6664,7 +7340,11 @@ Output MUST follow this exact markdown structure:
 
           for (const trackNode of flatTracks) {
             const matchValue =
-              inst.matchBy === 'uri' ? trackNode.uri : trackNode.name;
+              inst.matchBy === 'uri'
+                ? trackNode.uri
+                : inst.matchBy === 'path'
+                  ? this.trackFullPathToString(trackNode as any)
+                  : trackNode.name;
             if (!matchValue || !regex.test(matchValue)) continue;
             if (this.shouldIgnoreAutoPinTrackName(trackNode.name || '')) {
               pinnedCount.skipped++;
@@ -6744,15 +7424,29 @@ Output MUST follow this exact markdown structure:
                 pinnedByProcAndKind.add(dedupKey);
               }
 
-              if (!trackNode.isPinned) {
+              if (trackNode.isPinned) {
+                pinnedCount.skipped++;
+                pinnedForInstruction++;
+              } else {
                 trackNode.pin();
                 if (inst.expand) trackNode.expand();
+                pinnedCount.pinnedTrackNames.push(
+                  this.trackFullPathToString(trackNode as any) ||
+                    trackNode.name ||
+                    uri,
+                );
                 pinnedCount.count++;
                 pinnedForInstruction++;
-                // If we don't have per-proc filtering, pin at most 2 (slice + state).
-                if (smartProcessNames.length === 0 && pinnedForInstruction >= 2)
-                  break;
               }
+              // If we don't have per-proc filtering, pin at most 2 (slice + state).
+              if (smartProcessNames.length === 0 && pinnedForInstruction >= 2)
+                break;
+            }
+            if (
+              pinnedCount.count === pinnedBeforeInstruction &&
+              pinnedCount.skipped === skippedBeforeInstruction
+            ) {
+              pinnedCount.missingPatterns.push(inst.pattern);
             }
             continue;
           }
@@ -6800,9 +7494,19 @@ Output MUST follow this exact markdown structure:
             }
 
             for (const trackNode of nodesToPin) {
-              if (trackNode.isPinned) continue;
+              if (trackNode.isPinned) {
+                pinnedCount.skipped++;
+                pinnedForInstruction++;
+                continue;
+              }
               trackNode.pin();
               if (inst.expand) trackNode.expand();
+              pinnedCount.pinnedTrackNames.push(
+                this.trackFullPathToString(trackNode as any) ||
+                  trackNode.name ||
+                  trackNode.uri ||
+                  inst.pattern,
+              );
               pinnedCount.count++;
               pinnedForInstruction++;
               if (
@@ -6813,11 +7517,20 @@ Output MUST follow this exact markdown structure:
             }
           }
         }
+
+        if (
+          pinnedCount.count === pinnedBeforeInstruction &&
+          pinnedCount.skipped === skippedBeforeInstruction
+        ) {
+          pinnedCount.missingPatterns.push(inst.pattern);
+        }
       } catch (e) {
         console.warn(
           `[AIPanel] Failed to pin tracks with pattern ${inst.pattern}:`,
           e,
         );
+        pinnedCount.failed++;
+        pinnedCount.missingPatterns.push(inst.pattern);
       }
     }
 
@@ -6827,6 +7540,10 @@ Output MUST follow this exact markdown structure:
           `[AIPanel] Pinned ${pinnedCount.count} tracks for teaching (skipped ${pinnedCount.skipped} inactive)`,
         );
     }
+
+    pinnedCount.missingPatterns = Array.from(new Set(pinnedCount.missingPatterns));
+    pinnedCount.pinnedTrackNames = Array.from(new Set(pinnedCount.pinnedTrackNames));
+    return pinnedCount;
   }
 
   private getHelpMessage(): string {

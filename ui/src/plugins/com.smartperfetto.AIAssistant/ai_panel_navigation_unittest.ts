@@ -163,3 +163,226 @@ describe('AIPanel /goto navigation', () => {
     expect(message.content).toBe('Invalid timestamp: abc');
   });
 });
+
+describe('AIPanel teaching pipeline compatibility view', () => {
+  it('passes visible window and selected slice context to backend request', () => {
+    const panel = new AIPanel() as any;
+    panel.trace = {
+      timeline: {
+        visibleWindow: {
+          toTimeSpan: () => ({start: 100n, end: 500n}),
+        },
+      },
+      selection: {
+        selection: {
+          kind: 'track_event',
+          eventId: 42,
+          ts: 120n,
+          dur: 16n,
+        },
+      },
+    };
+    panel.state.sliceCardInfo = {
+      ts: 123,
+      dur: 17,
+      name: 'Choreographer#doFrame',
+      threadName: 'main',
+      processName: 'com.example.app',
+    };
+
+    expect(panel.buildTeachingPipelineRequestContext()).toEqual({
+      packageName: 'com.example.app',
+      visibleWindow: {startTs: 100, endTs: 500},
+      selectionContext: {
+        kind: 'track_event',
+        eventId: 42,
+        ts: 123,
+        dur: 17,
+        name: 'Choreographer#doFrame',
+        threadName: 'main',
+        processName: 'com.example.app',
+      },
+    });
+  });
+
+  it('keeps structured teaching results copyable as markdown evidence', () => {
+    const panel = new AIPanel() as any;
+    const markdown = panel.buildTeachingPipelineMarkdown(
+      {
+        success: true,
+        detection: {
+          primaryPipelineId: 'android_hwui',
+          primaryConfidence: 0.91,
+          candidates: [{id: 'android_hwui', confidence: 0.91}],
+          features: [{name: 'webview', confidence: 0.74}],
+        },
+        observedFlow: {
+          schemaVersion: 'v2',
+          context: {
+            packageName: 'com.example.app',
+            timeRange: {startTs: 100, endTs: 900, source: 'selection'},
+          },
+          lanes: [
+            {
+              id: 'main',
+              role: 'app',
+              title: 'App main',
+              threadName: 'main',
+              confidence: 0.95,
+              evidenceSource: 'slice',
+            },
+          ],
+          events: [
+            {
+              id: 'evt-1',
+              stage: 'app',
+              name: 'Choreographer#doFrame',
+              ts: 120,
+              dur: 16000000,
+              durMs: 16,
+              threadName: 'main',
+              processName: 'com.example.app',
+            },
+          ],
+          dependencies: [
+            {
+              fromLaneId: 'main',
+              toLaneId: 'render',
+              relation: 'wakes_to',
+              evidenceSource: 'thread_state_waker_id',
+            },
+          ],
+          criticalTasks: [
+            {
+              id: 'task-1',
+              kind: 'direct_wakeup',
+              rootEventId: 'evt-1',
+              rootLaneId: 'main',
+              name: 'direct waker: Binder',
+              ts: 110,
+              dur: 1000000,
+              durMs: 1,
+              threadName: 'main',
+              processName: 'com.example.app',
+              waker: {
+                threadName: 'Binder:123',
+                processName: 'system_server',
+                kind: 'thread',
+              },
+              evidenceSource: 'thread_state_waker_id',
+            },
+          ],
+          completeness: {
+            level: 'medium',
+            missingSignals: ['present fence not available'],
+          },
+        },
+        teaching: {
+          title: 'HWUI 教学',
+          summary: '基于已观测 slice 解释。',
+          keySlices: ['Choreographer#doFrame'],
+        },
+      },
+      {
+        count: 1,
+        skipped: 0,
+        failed: 1,
+        attempted: 2,
+        missingPatterns: ['^RenderThread$'],
+        pinnedTrackNames: ['com.example.app > main'],
+      },
+    );
+
+    expect(markdown).toContain('当前 Trace 实际链路');
+    expect(markdown).toContain('App main');
+    expect(markdown).toContain('Choreographer#doFrame');
+    expect(markdown).toContain('wakes_to');
+    expect(markdown).toContain('Binder:123 / system_server');
+    expect(markdown).toContain('present fence not available');
+    expect(markdown).toContain('未命中的 pattern: ^RenderThread$');
+    expect(markdown).toContain('已 pin 的 track: com.example.app > main');
+  });
+
+  it('returns explicit pin execution failure when trace context is absent', async () => {
+    const panel = new AIPanel() as any;
+
+    await expect(
+      panel.pinTracksFromInstructions([
+        {
+          pattern: '^main$',
+          matchBy: 'name',
+          priority: 1,
+          reason: 'test',
+        },
+      ]),
+    ).resolves.toEqual({
+      count: 0,
+      skipped: 0,
+      failed: 0,
+      attempted: 1,
+      missingPatterns: [],
+      pinnedTrackNames: [],
+      reason: 'trace context is not available',
+    });
+  });
+
+  it('merges observed lane track hints into executable teaching pin instructions', () => {
+    const panel = new AIPanel() as any;
+
+    const instructions = panel.buildTeachingPinInstructions({
+      success: true,
+      detection: {
+        primaryPipelineId: 'android_hwui',
+        primaryConfidence: 0.9,
+      },
+      pinInstructions: [
+        {
+          pattern: '^RenderThread$',
+          matchBy: 'name',
+          priority: 1,
+          reason: 'static render thread',
+        },
+      ],
+      pinPlan: {
+        status: 'planned',
+        expectedTrackHints: [
+          {
+            matchBy: 'thread',
+            pattern: 'main',
+            processName: 'com.example.app',
+            threadName: 'main',
+            mainThreadOnly: true,
+          },
+          {
+            matchBy: 'process',
+            pattern: 'surfaceflinger',
+            processName: 'surfaceflinger',
+          },
+        ],
+      },
+    });
+
+    expect(instructions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          pattern: '^RenderThread$',
+          matchBy: 'name',
+          priority: 1,
+        }),
+        expect.objectContaining({
+          pattern: '^main$',
+          matchBy: 'name',
+          mainThreadOnly: true,
+          smartPin: true,
+          activeProcessNames: ['com.example.app'],
+        }),
+        expect.objectContaining({
+          pattern: 'surfaceflinger',
+          matchBy: 'path',
+          smartPin: true,
+          activeProcessNames: ['surfaceflinger'],
+        }),
+      ]),
+    );
+  });
+});
