@@ -76,6 +76,7 @@ import {
   SliceCardInfo,
   AreaCardInfo,
   TraceDataset,
+  LatestAnalysisSnapshot,
   AnalysisResultPickerItem,
   AnalysisResultWindowState,
   AnalysisResultComparisonCell,
@@ -107,6 +108,12 @@ import {
 import {sessionManager} from './session_manager';
 import {mermaidRenderer} from './mermaid_renderer';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import {
+  formatAnalysisResultRef,
+  isAnalysisResultComparisonRequest,
+  resolveAnalysisResultComparisonRequest,
+} from './analysis_result_references';
+import {latestSnapshotFromAnalysisCompletedEvent} from './analysis_result_snapshot_state';
 import {
   buildAgentSseStreamInit,
   buildAgentSseStreamUrl,
@@ -1585,7 +1592,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 this.state.showTracePicker = false;
                 this.state.showSessionSidebar = false;
                 this.state.showStorySidebar = false;
-                this.fetchAnalysisResults();
+                void (async () => {
+                  await this.postWindowHeartbeat();
+                  await this.fetchAnalysisResults();
+                })();
                 m.redraw();
               },
             })
@@ -3336,6 +3346,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         agentRunId: this.state.agentRunId || undefined,
         agentRequestId: this.state.agentRequestId || undefined,
         agentRunSequence: this.state.agentRunSequence || undefined,
+        latestAnalysisSnapshot: this.state.latestAnalysisSnapshot || undefined,
       },
     );
   }
@@ -3386,6 +3397,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.agentRunSequence = Number.isFinite(session.agentRunSequence)
       ? Math.max(0, Math.floor(session.agentRunSequence as number))
       : 0;
+    this.state.latestAnalysisSnapshot = session.latestAnalysisSnapshot || null;
 
     // Only restore backendTraceId if we're currently in RPC mode
     // If not in RPC mode, the old backendTraceId is stale and invalid
@@ -3719,6 +3731,9 @@ Click ⚙️ to configure backend connection.`;
     if (input.startsWith('/')) {
       await this.handleCommand(input);
     } else {
+      if (await this.tryStartNaturalLanguageResultComparison(input)) {
+        return;
+      }
       if (DEBUG_AI_PANEL)
         console.log('[AIPanel] Calling handleChatMessage with:', input);
       await this.handleChatMessage(input);
@@ -3741,6 +3756,84 @@ Click ⚙️ to configure backend connection.`;
     if (this.state.isLoading) return;
     this.state.input = question;
     this.sendMessage();
+  }
+
+  private async tryStartNaturalLanguageResultComparison(
+    message: string,
+  ): Promise<boolean> {
+    if (this.state.referenceTraceId) return false;
+    if (!isAnalysisResultComparisonRequest(message)) return false;
+
+    await this.postWindowHeartbeat();
+    await this.fetchAnalysisResults({silent: true});
+
+    if (this.state.resultPickerError) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: `加载分析结果失败，无法创建结果对比: ${this.state.resultPickerError}`,
+        timestamp: Date.now(),
+      });
+      return true;
+    }
+
+    const context = getSmartPerfettoRequestContext();
+    const currentSnapshotId = this.resolveCurrentAnalysisResultSnapshotId();
+    const resolved = resolveAnalysisResultComparisonRequest({
+      query: message,
+      results: this.availableAnalysisResults,
+      currentSnapshotId,
+      activeWindowStates: this.activeResultWindowStates,
+      currentWindowId: context.windowId,
+    });
+    if (resolved.kind === 'not_comparison') {
+      return false;
+    }
+
+    if (resolved.kind === 'resolved') {
+      const baseline = this.availableAnalysisResults.find(
+        (item) => item.id === resolved.resolution.baselineId,
+      );
+      const candidates = this.availableAnalysisResults.filter((item) =>
+        resolved.resolution.candidateIds.includes(item.id),
+      );
+      if (baseline && candidates.length > 0) {
+        await this.createAnalysisResultComparison({
+          baseline,
+          candidates,
+          query: message,
+          closePicker: true,
+        });
+        return true;
+      }
+    }
+
+    const selection =
+      resolved.kind === 'needs_selection'
+        ? resolved.selection
+        : {
+            baselineId: currentSnapshotId,
+            candidateIds: [] as string[],
+            reason: 'no_candidate' as const,
+          };
+    this.state.selectedResultBaselineId =
+      selection.baselineId ?? currentSnapshotId ?? null;
+    this.state.selectedResultCandidateIds = new Set(selection.candidateIds);
+    this.state.showResultPicker = true;
+    this.state.resultComparisonError = null;
+    this.syncResultPickerSelection();
+    this.addMessage({
+      id: this.generateId(),
+      role: 'system',
+      content: [
+        '这条请求需要选择要对比的分析结果。',
+        '我已经打开“分析结果对比”面板，并优先选中当前窗口结果。',
+        '每份结果标题旁都有 Result ID（如 AR-1234abcd），之后可以直接说“对比 AR-1234abcd”。',
+      ].join('\n'),
+      timestamp: Date.now(),
+    });
+    m.redraw();
+    return true;
   }
 
   /** Check if the user has an active Perfetto selection (area or slice). */
@@ -3971,45 +4064,49 @@ Click ⚙️ to configure backend connection.`;
   }
 
   private applyAnalysisCompletedSnapshotFallback(data?: any): void {
-    if (this.state.latestAnalysisSnapshot) return;
-    const payload = data && typeof data === 'object' ? data.data : null;
-    if (!payload || typeof payload !== 'object') return;
-    const snapshotId =
-      typeof payload.resultSnapshotId === 'string'
-        ? payload.resultSnapshotId
-        : '';
-    if (!snapshotId) return;
-
-    this.state.latestAnalysisSnapshot = {
-      snapshotId,
-      status: 'partial',
-      sceneType: 'general',
-      metricCount: 0,
-      evidenceRefCount: 0,
+    const snapshot = latestSnapshotFromAnalysisCompletedEvent({
+      eventData: data,
+      current: this.state.latestAnalysisSnapshot,
       traceId: this.state.backendTraceId || undefined,
       sessionId: this.state.agentSessionId || undefined,
       runId: this.state.agentRunId || undefined,
-      visibility: 'private',
-      createdAt: Date.now(),
-    };
+    });
+    if (!snapshot) return;
+    this.state.latestAnalysisSnapshot = snapshot;
     void this.postWindowHeartbeat();
   }
 
   private formatLatestSnapshotLabel(): string {
     const snapshot = this.state.latestAnalysisSnapshot;
     if (!snapshot) return '';
-    return `${snapshot.status === 'ready' ? 'Ready' : 'Partial'} result`;
+    const status = snapshot.status === 'ready' ? 'Ready' : 'Partial';
+    return `${status} result ${this.formatKnownAnalysisResultRef(snapshot.snapshotId)}`;
   }
 
   private formatLatestSnapshotTitle(): string {
     const snapshot = this.state.latestAnalysisSnapshot;
     if (!snapshot) return '';
+    const ref = this.formatKnownAnalysisResultRef(snapshot.snapshotId);
     return [
+      `Result ID: ${ref}`,
       `Snapshot: ${snapshot.snapshotId}`,
       `Scene: ${snapshot.sceneType}`,
       `Metrics: ${snapshot.metricCount}`,
       `Visibility: ${snapshot.visibility || 'private'}`,
+      `Chat usage: 对比 ${ref}`,
     ].join('\n');
+  }
+
+  private knownAnalysisResultIds(): string[] {
+    const ids = [
+      ...this.availableAnalysisResults.map((item) => item.id),
+      this.state.latestAnalysisSnapshot?.snapshotId,
+    ].filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return [...new Set(ids)];
+  }
+
+  private formatKnownAnalysisResultRef(snapshotId: string | undefined): string {
+    return formatAnalysisResultRef(snapshotId, this.knownAnalysisResultIds());
   }
 
   private async handleCommand(input: string) {
@@ -8381,11 +8478,17 @@ Output MUST follow this exact markdown structure:
   }
 
   /** Fetch persisted analysis-result snapshots for the result picker. */
-  private async fetchAnalysisResults(): Promise<void> {
-    this.state.resultPickerLoading = true;
+  private async fetchAnalysisResults(
+    options: {silent?: boolean} = {},
+  ): Promise<void> {
+    if (!options.silent) {
+      this.state.resultPickerLoading = true;
+    }
     this.state.resultPickerError = null;
     this.state.resultComparisonError = null;
-    m.redraw();
+    if (!options.silent) {
+      m.redraw();
+    }
 
     try {
       const url = new URL(
@@ -8395,7 +8498,7 @@ Output MUST follow this exact markdown structure:
         ),
         window.location.href,
       );
-      url.searchParams.set('limit', '100');
+      url.searchParams.set('limit', '500');
 
       const response = await this.fetchBackend(url.toString());
       if (!response.ok) {
@@ -8410,6 +8513,7 @@ Output MUST follow this exact markdown structure:
         .filter((item: AnalysisResultPickerItem | null): item is AnalysisResultPickerItem =>
           item !== null,
         );
+      this.reconcileLatestAnalysisSnapshotFromResults();
       this.syncResultPickerSelection();
     } catch (error) {
       console.warn('[AIPanel] Failed to fetch analysis results:', error);
@@ -8417,9 +8521,60 @@ Output MUST follow this exact markdown structure:
       this.state.resultPickerError =
         error instanceof Error ? error.message : 'Failed to load analysis results';
     } finally {
-      this.state.resultPickerLoading = false;
+      if (!options.silent) {
+        this.state.resultPickerLoading = false;
+      }
       m.redraw();
     }
+  }
+
+  private latestSnapshotFromPickerItem(
+    item: AnalysisResultPickerItem,
+  ): LatestAnalysisSnapshot {
+    return {
+      snapshotId: item.id,
+      status: item.status,
+      sceneType: item.sceneType,
+      metricCount: item.metrics?.length ?? 0,
+      evidenceRefCount: item.evidenceRefs?.length ?? 0,
+      traceId: item.traceId,
+      sessionId: item.sessionId,
+      runId: item.runId,
+      reportId: item.reportId,
+      visibility: item.visibility,
+      createdAt: item.createdAt,
+    };
+  }
+
+  private resolveCurrentAnalysisResultSnapshotId(): string | undefined {
+    const latestId = this.state.latestAnalysisSnapshot?.snapshotId;
+    if (
+      latestId &&
+      this.availableAnalysisResults.some((item) => item.id === latestId)
+    ) {
+      return latestId;
+    }
+
+    const sessionId = this.state.agentSessionId || this.state.currentSessionId;
+    const traceId = this.state.backendTraceId;
+    const candidates = this.availableAnalysisResults
+      .filter((item) =>
+        (sessionId && item.sessionId === sessionId) ||
+        (traceId && item.traceId === traceId),
+      )
+      .sort((left, right) => right.createdAt - left.createdAt);
+    return candidates[0]?.id;
+  }
+
+  private reconcileLatestAnalysisSnapshotFromResults(): void {
+    const snapshotId = this.resolveCurrentAnalysisResultSnapshotId();
+    if (!snapshotId) return;
+    const item = this.availableAnalysisResults.find(
+      (result) => result.id === snapshotId,
+    );
+    if (!item) return;
+    if (this.state.latestAnalysisSnapshot?.snapshotId === item.id) return;
+    this.state.latestAnalysisSnapshot = this.latestSnapshotFromPickerItem(item);
   }
 
   private normalizeAnalysisResultItem(
@@ -8634,6 +8789,7 @@ Output MUST follow this exact markdown structure:
     }
 
     const matrix = result.matrix;
+    const inputSnapshotIds = matrix.inputSnapshots.map((item) => item.snapshotId);
     const baseline = matrix.inputSnapshots.find(
       (item) => item.snapshotId === matrix.baselineSnapshotId,
     );
@@ -8651,7 +8807,7 @@ Output MUST follow this exact markdown structure:
             (item) => item.snapshotId === snapshot.snapshotId,
           );
           const title = snapshot.title || snapshot.traceLabel || snapshot.snapshotId;
-          return `${title}: ${this.formatComparisonMetricValue(cell, row.unit)}, Δ ${this.formatComparisonDelta(delta, row)}`;
+          return `${title} (${formatAnalysisResultRef(snapshot.snapshotId, inputSnapshotIds)}): ${this.formatComparisonMetricValue(cell, row.unit)}, Δ ${this.formatComparisonDelta(delta, row)}`;
         })
         .join('; ');
       return [
@@ -8678,14 +8834,18 @@ Output MUST follow this exact markdown structure:
     const baselineTitle =
       baseline?.title || baseline?.traceLabel || baseline?.snapshotId || 'baseline';
     const candidateTitles = candidates
-      .map((item) => item.title || item.traceLabel || item.snapshotId)
+      .map((item) =>
+        `${item.title || item.traceLabel || item.snapshotId} (${formatAnalysisResultRef(item.snapshotId, inputSnapshotIds)})`)
       .join(', ');
+    const baselineRef = baseline?.snapshotId
+      ? ` (${formatAnalysisResultRef(baseline.snapshotId, inputSnapshotIds)})`
+      : '';
 
     return [
       '**分析结果对比已完成**',
       '',
       `Comparison: \`${comparison.id}\``,
-      `Baseline: ${baselineTitle}`,
+      `Baseline: ${baselineTitle}${baselineRef}`,
       `Candidates: ${candidateTitles || 'n/a'}`,
       `Significant changes: ${result.significantChanges.length}`,
       '',
@@ -8696,24 +8856,22 @@ Output MUST follow this exact markdown structure:
     ].join('\n');
   }
 
-  private async startSelectedResultComparison(): Promise<void> {
+  private async createAnalysisResultComparison(input: {
+    baseline: AnalysisResultPickerItem;
+    candidates: AnalysisResultPickerItem[];
+    query: string;
+    closePicker?: boolean;
+  }): Promise<void> {
     if (this.state.resultComparisonLoading) return;
-    const baseline = this.availableAnalysisResults.find(
-      (item) => item.id === this.state.selectedResultBaselineId,
-    );
-    const candidates = this.availableAnalysisResults.filter((item) =>
-      this.state.selectedResultCandidateIds.has(item.id),
-    );
-    if (!baseline || candidates.length === 0) return;
+    if (input.candidates.length === 0) return;
 
     this.state.resultComparisonLoading = true;
     this.state.resultComparisonError = null;
     m.redraw();
 
     try {
-      const query =
-        this.state.input.trim() ||
-        `Compare ${baseline.title || baseline.id} with ${candidates
+      const query = input.query.trim() ||
+        `Compare ${input.baseline.title || input.baseline.id} with ${input.candidates
           .map((item) => item.title || item.id)
           .join(', ')}`;
       const url = buildSmartPerfettoWorkspaceApiUrl(
@@ -8724,8 +8882,8 @@ Output MUST follow this exact markdown structure:
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          baselineSnapshotId: baseline.id,
-          candidateSnapshotIds: candidates.map((item) => item.id),
+          baselineSnapshotId: input.baseline.id,
+          candidateSnapshotIds: input.candidates.map((item) => item.id),
           query,
         }),
       });
@@ -8750,7 +8908,9 @@ Output MUST follow this exact markdown structure:
         content: this.formatComparisonResultMessage(comparison),
         timestamp: Date.now(),
       });
-      this.state.showResultPicker = false;
+      if (input.closePicker !== false) {
+        this.state.showResultPicker = false;
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to create comparison';
@@ -8765,6 +8925,27 @@ Output MUST follow this exact markdown structure:
       this.state.resultComparisonLoading = false;
       m.redraw();
     }
+  }
+
+  private async startSelectedResultComparison(): Promise<void> {
+    const baseline = this.availableAnalysisResults.find(
+      (item) => item.id === this.state.selectedResultBaselineId,
+    );
+    const candidates = this.availableAnalysisResults.filter((item) =>
+      this.state.selectedResultCandidateIds.has(item.id),
+    );
+    if (!baseline || candidates.length === 0) return;
+    const query =
+      this.state.input.trim() ||
+      `Compare ${baseline.title || baseline.id} with ${candidates
+        .map((item) => item.title || item.id)
+        .join(', ')}`;
+    await this.createAnalysisResultComparison({
+      baseline,
+      candidates,
+      query,
+      closePicker: true,
+    });
   }
 
   private formatAnalysisResultTime(timestamp: number): string {
@@ -8898,6 +9079,14 @@ Output MUST follow this exact markdown structure:
         m('div.ai-result-picker-item-main', [
           m('div.ai-result-picker-title-row', [
             m('div.ai-result-picker-item-name', item.title || item.id),
+            m(
+              'span.ai-result-picker-pill.ref-id',
+              {title: `Snapshot: ${item.id}`},
+              formatAnalysisResultRef(
+                item.id,
+                this.availableAnalysisResults.map((result) => result.id),
+              ),
+            ),
             isCurrent
               ? m('span.ai-result-picker-pill.current', 'Current')
               : null,

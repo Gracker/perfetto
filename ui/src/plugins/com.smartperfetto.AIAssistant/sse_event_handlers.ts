@@ -56,6 +56,7 @@ import {
 import {CONTRACT_ALIASES} from './conclusion_contract_aliases';
 import {STEP_TO_OVERLAY} from './track_overlay';
 import {updateAISharedState} from './ai_shared_state';
+import {formatAnalysisResultRef} from './analysis_result_references';
 
 /** Set to true for verbose SSE event logging during development. */
 const DEBUG_SSE = false;
@@ -69,6 +70,7 @@ type AnalysisCompletedPayload = {
   summary?: string;
   conclusionContract?: ConclusionContract | Record<string, unknown>;
   reportUrl?: string;
+  resultSnapshotId?: string;
   findings?: unknown[];
   suggestions?: string[];
   answer?: string;
@@ -131,6 +133,9 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   const reportUrl = readStringField(source, 'reportUrl');
   if (reportUrl) payload.reportUrl = reportUrl;
 
+  const resultSnapshotId = readStringField(source, 'resultSnapshotId');
+  if (resultSnapshotId) payload.resultSnapshotId = resultSnapshotId;
+
   if (Array.isArray(source.findings)) {
     payload.findings = source.findings;
   }
@@ -169,6 +174,28 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   }
 
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function appendAnalysisResultReference(
+  content: string,
+  resultSnapshotId: string | undefined,
+): string {
+  if (!resultSnapshotId) return content;
+  const ref = formatAnalysisResultRef(resultSnapshotId);
+  const hasResultIdLine = new RegExp(
+    `(?:^|\\n)Result ID:\\s*\`?${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\`?`,
+    'i',
+  ).test(content);
+  if (!ref || content.includes(resultSnapshotId) || hasResultIdLine) {
+    return content;
+  }
+  return [
+    content.trimEnd(),
+    '',
+    '---',
+    `Result ID: \`${ref}\``,
+    `Snapshot: \`${resultSnapshotId}\``,
+  ].join('\n');
 }
 
 function eventPayload(event: RawSSEEvent): Record<string, unknown> {
@@ -2032,20 +2059,31 @@ export function handleAnalysisCompletedEvent(
   if (ctx.completionHandled) {
     if (DEBUG_SSE) console.log('[SSEHandlers] Completion already handled, extracting reportUrl only');
     const reportUrl = payload?.reportUrl;
-    if (reportUrl) {
+    const resultSnapshotId = payload?.resultSnapshotId;
+    if (reportUrl || resultSnapshotId) {
       // Attach reportUrl to the existing answer/conclusion message
       const answerMsgId = ctx.streamingAnswer.messageId;
       if (answerMsgId) {
+        const existing = ctx.getMessages().find((msg) => msg.id === answerMsgId);
         ctx.updateMessage(answerMsgId, {
-          reportUrl: `${ctx.backendUrl}${reportUrl}`,
+          ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+          ...(existing
+            ? {content: appendAnalysisResultReference(existing.content, resultSnapshotId)}
+            : {}),
         }, {persist: true});
       } else {
         // No streamed answer — find the last assistant message (conclusion added by 'conclusion' event)
         const messages = ctx.getMessages();
         for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant' && !messages[i].reportUrl) {
+          if (messages[i].role === 'assistant') {
             ctx.updateMessage(messages[i].id, {
-              reportUrl: `${ctx.backendUrl}${reportUrl}`,
+              ...(reportUrl && !messages[i].reportUrl
+                ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
+                : {}),
+              content: appendAnalysisResultReference(
+                messages[i].content,
+                resultSnapshotId,
+              ),
             }, {persist: true});
             break;
           }
@@ -2071,7 +2109,10 @@ export function handleAnalysisCompletedEvent(
     completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
-    let content = answerContent;
+    let content = appendAnalysisResultReference(
+      answerContent,
+      payload?.resultSnapshotId,
+    );
 
     const isAgentDriven = architecture === 'v2-agent-driven' || architecture === 'agent-driven';
     if (isAgentDriven && payload?.hypotheses) {

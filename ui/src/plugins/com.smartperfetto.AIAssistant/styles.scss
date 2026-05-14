@@ -4302,6 +4302,11 @@ tr.detail-row {
     color: var(--chat-primary);
   }
 
+  &.ref-id {
+    color: var(--chat-text);
+    font-family: var(--monospace-font, monospace);
+  }
+
   &.active-window {
     color: var(--chat-warning);
   }

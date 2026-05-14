@@ -803,6 +803,7 @@ export interface AISession {
   agentRunId?: string; // Backend run ID
   agentRequestId?: string; // Backend request ID
   agentRunSequence?: number; // Backend run sequence
+  latestAnalysisSnapshot?: LatestAnalysisSnapshot; // Latest persisted analysis result for result comparison
   createdAt: number;
   lastActiveAt: number;
   messages: Message[];

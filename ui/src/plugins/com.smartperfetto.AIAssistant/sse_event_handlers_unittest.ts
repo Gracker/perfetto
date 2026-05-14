@@ -705,6 +705,60 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
   });
 
+  it('should append result snapshot reference to conclusion message', () => {
+    const data = {
+      data: {
+        conclusion: 'Analysis complete.',
+        resultSnapshotId: 'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages[0].content).toContain('Result ID: `AR-12345678`');
+    expect(ctx.messages[0].content).toContain(
+      'Snapshot: `analysis-result-12345678-aaaa-bbbb-cccc-123456789abc`',
+    );
+  });
+
+  it('should append full snapshot reference even when conclusion mentions the short ref', () => {
+    const data = {
+      data: {
+        conclusion: 'Analysis complete. Mentioned AR-12345678 in narrative.',
+        resultSnapshotId: 'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages[0].content).toContain('Result ID: `AR-12345678`');
+    expect(ctx.messages[0].content).toContain(
+      'Snapshot: `analysis-result-12345678-aaaa-bbbb-cccc-123456789abc`',
+    );
+  });
+
+  it('should append result snapshot reference when conclusion arrived earlier', () => {
+    ctx.addMessage({
+      id: 'existing-answer',
+      role: 'assistant',
+      content: 'Earlier conclusion.',
+      timestamp: Date.now(),
+    });
+    ctx.setCompletionHandled(true);
+
+    const data = {
+      data: {
+        resultSnapshotId: 'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+        reportUrl: '/reports/123.html',
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages[0].content).toContain('Result ID: `AR-abcdef12`');
+    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
+  });
+
   it('should backfill conversation timeline from analysis_completed payload', () => {
     const data = {
       data: {

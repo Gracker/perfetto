@@ -33,6 +33,7 @@ import {
   SessionsStorage,
   Message,
   PinnedResult,
+  LatestAnalysisSnapshot,
   DEFAULT_SETTINGS,
   SETTINGS_KEY,
   HISTORY_KEY,
@@ -489,6 +490,7 @@ export class SessionManager {
       agentRunId?: string;
       agentRequestId?: string;
       agentRunSequence?: number;
+      latestAnalysisSnapshot?: LatestAnalysisSnapshot;
       summary?: string;
     }
   ): boolean {
