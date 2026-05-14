@@ -85,6 +85,7 @@ describe('HttpRpcEngine target selection', () => {
       websocketUrl: 'ws://127.0.0.1:9817/websocket',
     });
     expect(HttpRpcEngine.hostAndPort).toBe('127.0.0.1:9817');
+    expect(HttpRpcEngine.isSmartPerfettoBackendTarget()).toBe(false);
   });
 
   it('uses backend lease proxy targets when configured', () => {
@@ -107,6 +108,27 @@ describe('HttpRpcEngine target selection', () => {
       websocketUrl: 'ws://backend/api/tp/lease-a/websocket',
     });
     expect(HttpRpcEngine.hostAndPort).toBe('backend shared lease lease-a');
+    expect(HttpRpcEngine.isSmartPerfettoBackendTarget()).toBe(true);
+  });
+
+  it('keeps backend-owned direct port targets distinguishable from user ports', () => {
+    HttpRpcEngine.setRpcTarget({
+      mode: 'direct-port',
+      targetOwner: 'smartperfetto-backend',
+      port: '9817',
+      statusUrl: 'http://127.0.0.1:9817/status',
+      websocketUrl: 'ws://127.0.0.1:9817/websocket',
+      displayName: '127.0.0.1:9817',
+    });
+
+    expect(HttpRpcEngine.getCurrentTarget()).toMatchObject({
+      mode: 'direct-port',
+      targetOwner: 'smartperfetto-backend',
+      port: '9817',
+      statusUrl: 'http://127.0.0.1:9817/status',
+      websocketUrl: 'ws://127.0.0.1:9817/websocket',
+    });
+    expect(HttpRpcEngine.isSmartPerfettoBackendTarget()).toBe(true);
   });
 
   it('sends a frontend lease heartbeat when a backend lease target is configured', async () => {

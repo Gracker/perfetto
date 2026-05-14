@@ -241,6 +241,7 @@ export function buildSmartPerfettoTraceProcessorProxyTarget(
 
   return {
     mode: 'backend-lease-proxy' as const,
+    targetOwner: 'smartperfetto-backend' as const,
     leaseId,
     leaseMode: leaseStatus.leaseMode,
     leaseModeReason: leaseStatus.leaseModeReason,

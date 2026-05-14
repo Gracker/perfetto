@@ -20,8 +20,8 @@ import {
   isMetatracingEnabled,
 } from './metatracing';
 import {featureFlags} from './feature_flags';
-import {Engine, EngineBase} from '../trace_processor/engine';
-import {HttpRpcEngine} from '../trace_processor/http_rpc_engine';
+import {Engine, EngineBase, NewEngineMode} from '../trace_processor/engine';
+import {HttpRpcEngine, HttpRpcTarget} from '../trace_processor/http_rpc_engine';
 import {
   LONG,
   LONG_NULL,
@@ -130,6 +130,68 @@ async function defineMaxLayoutDepthSqlFunction(engine: Engine): Promise<void> {
 }
 
 let lastEngineId = 0;
+let nextTraceSourceObjectId = 0;
+const traceSourceObjectIds = new WeakMap<object, number>();
+
+function getTraceSourceObjectId(value: object): number {
+  let id = traceSourceObjectIds.get(value);
+  if (id === undefined) {
+    id = ++nextTraceSourceObjectId;
+    traceSourceObjectIds.set(value, id);
+  }
+  return id;
+}
+
+export function shouldProbeHttpRpcForTraceSource(
+  newEngineMode: NewEngineMode,
+  traceSource: TraceSource,
+  target: HttpRpcTarget,
+): boolean {
+  if (newEngineMode !== 'USE_HTTP_RPC_IF_AVAILABLE') return false;
+  if (traceSource.type === 'HTTP_RPC') return true;
+  return !HttpRpcEngine.isSmartPerfettoBackendTarget(target);
+}
+
+export function backendUploadSourceKey(traceSource: TraceSource): string {
+  switch (traceSource.type) {
+    case 'FILE':
+      return [
+        traceSource.type,
+        getTraceSourceObjectId(traceSource.file),
+        traceSource.file.name,
+        traceSource.file.size,
+        traceSource.file.lastModified,
+      ].join(':');
+    case 'ARRAY_BUFFER':
+      return [
+        traceSource.type,
+        getTraceSourceObjectId(traceSource.buffer),
+        traceSource.fileName ?? '',
+        traceSource.title ?? '',
+        traceSource.buffer.byteLength,
+      ].join(':');
+    case 'URL':
+      return `${traceSource.type}:${traceSource.url}`;
+    case 'MULTIPLE_FILES':
+      return [
+        traceSource.type,
+        ...traceSource.files.map((file) =>
+          [
+            getTraceSourceObjectId(file),
+            file.name,
+            file.size,
+            file.lastModified,
+          ].join(':'),
+        ),
+      ].join('|');
+    case 'STREAM':
+      return `${traceSource.type}:${Date.now()}:${Math.random()}`;
+    case 'HTTP_RPC':
+      return traceSource.type;
+    default:
+      return JSON.stringify(traceSource);
+  }
+}
 
 export async function loadTrace(
   app: AppImpl,
@@ -156,10 +218,17 @@ async function createEngine(
     // Guard: skip if an upload is already in progress to prevent duplicate uploads
     // (Perfetto lifecycle can call createEngine multiple times for the same trace)
     const currentUploadState = getBackendUploadState();
-    if (currentUploadState.state === 'uploading') {
+    const sourceKey = backendUploadSourceKey(traceSource);
+    if (
+      currentUploadState.state === 'uploading' &&
+      currentUploadState.sourceKey === sourceKey
+    ) {
       console.log('[AutoRPC] Upload already in progress, skipping duplicate');
     } else {
+      const uploadToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       setBackendUploadState({
+        uploadToken,
+        sourceKey,
         state: 'uploading',
       });
 
@@ -174,6 +243,10 @@ async function createEngine(
       void (async () => {
         try {
           const backendAvailable = await uploader.checkAvailable();
+          if (getBackendUploadState().uploadToken !== uploadToken) {
+            console.log('[AutoRPC] Ignoring stale backend availability result');
+            return;
+          }
           if (!backendAvailable) {
             notifyUploadFailed('AI backend unavailable');
             return;
@@ -181,6 +254,10 @@ async function createEngine(
 
           console.log('[AutoRPC] Starting background upload...');
           const result = await uploader.upload(traceSource);
+          if (getBackendUploadState().uploadToken !== uploadToken) {
+            console.log('[AutoRPC] Ignoring stale backend upload result');
+            return;
+          }
 
           if (result.success && (result.rpcTarget || result.port)) {
             if (result.rpcTarget) {
@@ -194,6 +271,8 @@ async function createEngine(
                 + `leaseMode=${result.leaseMode ?? 'n/a'}, queue=${result.leaseQueueLength ?? 'n/a'}`,
             );
             setBackendUploadState({
+              uploadToken,
+              sourceKey,
               state: 'ready',
               traceId: result.traceId ?? '',
               port: result.port,
@@ -209,6 +288,10 @@ async function createEngine(
             notifyUploadFailed(error);
           }
         } catch (error) {
+          if (getBackendUploadState().uploadToken !== uploadToken) {
+            console.log('[AutoRPC] Ignoring stale backend upload error');
+            return;
+          }
           console.warn('[AutoRPC] Background upload error:', error);
           notifyUploadFailed(String(error));
         }
@@ -224,8 +307,20 @@ async function createEngine(
   // Check if there is any instance of the trace_processor_shell running in
   // HTTP RPC mode (i.e. trace_processor_shell -D).
   let useRpc = false;
-  if (app.httpRpc.newEngineMode === 'USE_HTTP_RPC_IF_AVAILABLE') {
+  const currentRpcTarget = HttpRpcEngine.getCurrentTarget();
+  if (
+    shouldProbeHttpRpcForTraceSource(
+      app.httpRpc.newEngineMode,
+      traceSource,
+      currentRpcTarget,
+    )
+  ) {
     useRpc = (await HttpRpcEngine.checkConnection()).connected;
+  } else if (HttpRpcEngine.isSmartPerfettoBackendTarget(currentRpcTarget)) {
+    console.log(
+      '[AutoRPC] Using WASM UI engine for local trace load; ' +
+        'backend trace processor targets are reserved for AI analysis',
+    );
   }
 
   const descriptorBlobs: Uint8Array[] = [];

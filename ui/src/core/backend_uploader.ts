@@ -267,13 +267,16 @@ export class BackendUploader {
       };
     }
 
-    const rpcTarget = leaseId
-      ? buildSmartPerfettoTraceProcessorProxyTarget(this.backendUrl, leaseId, {
+    let rpcTarget: HttpRpcTarget | undefined;
+    if (leaseId) {
+      rpcTarget = buildSmartPerfettoTraceProcessorProxyTarget(this.backendUrl, leaseId, {
         leaseMode,
         leaseModeReason,
         leaseQueueLength,
-      })
-      : undefined;
+      });
+    } else if (port) {
+      rpcTarget = this.buildBackendDirectPortTarget(port);
+    }
     console.log(
       `[BackendUploader] ${label} successful! traceId=${traceId}, `
         + `port=${port ?? 'n/a'}, leaseId=${leaseId ?? 'n/a'}, `
@@ -289,6 +292,19 @@ export class BackendUploader {
       leaseModeReason,
       leaseQueueLength,
       rpcTarget,
+    };
+  }
+
+  private buildBackendDirectPortTarget(port: number): HttpRpcTarget {
+    const host = '127.0.0.1';
+    return {
+      mode: 'direct-port',
+      targetOwner: 'smartperfetto-backend',
+      host,
+      port: String(port),
+      statusUrl: `http://${host}:${port}/status`,
+      websocketUrl: `ws://${host}:${port}/websocket`,
+      displayName: `${host}:${port}`,
     };
   }
 }

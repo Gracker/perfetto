@@ -33,6 +33,7 @@ export interface HttpRpcState {
 
 export interface HttpRpcTarget {
   mode: 'direct-port' | 'backend-lease-proxy';
+  targetOwner?: 'user' | 'smartperfetto-backend';
   host?: string;
   port?: string;
   leaseId?: string;
@@ -51,6 +52,7 @@ function directPortTarget(port: string): HttpRpcTarget {
   const host = '127.0.0.1';
   return {
     mode: 'direct-port',
+    targetOwner: 'user',
     host,
     port,
     statusUrl: `http://${host}:${port}/status`,
@@ -191,16 +193,32 @@ export class HttpRpcEngine extends EngineBase {
   static setRpcTarget(target: HttpRpcTarget): void {
     HttpRpcEngine.stopLeaseHeartbeat();
     HttpRpcEngine.rpcTarget = target;
-    if (target.mode === 'direct-port' && target.port) {
+    if (
+      target.mode === 'direct-port' &&
+      target.port &&
+      target.targetOwner !== 'smartperfetto-backend'
+    ) {
       HttpRpcEngine.rpcPort = String(target.port);
       HttpRpcEngine.rpcTarget = undefined;
       return;
+    }
+    if (target.mode === 'direct-port' && target.port) {
+      HttpRpcEngine.rpcPort = String(target.port);
     }
     HttpRpcEngine.startLeaseHeartbeat(target);
   }
 
   static getCurrentTarget(): HttpRpcTarget {
     return HttpRpcEngine.rpcTarget ?? directPortTarget(HttpRpcEngine.rpcPort);
+  }
+
+  static isSmartPerfettoBackendTarget(
+    target: HttpRpcTarget = HttpRpcEngine.getCurrentTarget(),
+  ): boolean {
+    return (
+      target.targetOwner === 'smartperfetto-backend' ||
+      target.mode === 'backend-lease-proxy'
+    );
   }
 
   static get hostAndPort() {

@@ -162,31 +162,84 @@ export default class GpuPlugin implements PerfettoPlugin {
 
   private groups = new Map<string, TrackNode>();
   private gpuCount = 0;
+  private hasGpuTable = false;
+  private hasGpuCounterTrackUgpu = false;
 
   async onTraceLoad(ctx: Trace): Promise<void> {
-    const gpuCountResult = await ctx.engine.query(`
-      select count(*) as cnt from gpu
-    `);
-    this.gpuCount = gpuCountResult.firstRow({cnt: NUM}).cnt;
+    this.hasGpuTable = await this.tableExists(ctx, 'gpu');
+    this.hasGpuCounterTrackUgpu = await this.tableColumnExists(
+      ctx,
+      'gpu_counter_track',
+      'ugpu',
+    );
+    this.gpuCount = await this.countGpus(ctx);
 
     await this.addGpuFreq(ctx);
     await this.addCounters(ctx);
     await this.addSlices(ctx);
   }
 
+  private async tableExists(ctx: Trace, table: string): Promise<boolean> {
+    const result = await ctx.engine.tryQuery(`
+      select count(*) as cnt
+      from sqlite_master
+      where name = '${table}'
+    `);
+    return result.ok && result.value.firstRow({cnt: NUM}).cnt > 0;
+  }
+
+  private async tableColumnExists(
+    ctx: Trace,
+    table: string,
+    column: string,
+  ): Promise<boolean> {
+    const result = await ctx.engine.tryQuery(`
+      select count(*) as cnt
+      from pragma_table_info('${table}')
+      where name = '${column}'
+    `);
+    return result.ok && result.value.firstRow({cnt: NUM}).cnt > 0;
+  }
+
+  private async countGpus(ctx: Trace): Promise<number> {
+    if (this.hasGpuTable) {
+      const result = await ctx.engine.tryQuery(`
+        select count(*) as cnt from gpu
+      `);
+      if (result.ok) return result.value.firstRow({cnt: NUM}).cnt;
+    }
+    const result = await ctx.engine.tryQuery(`
+      select count(distinct gpu_id) as cnt
+      from gpu_counter_track
+      where gpu_id is not null
+    `);
+    return result.ok ? result.value.firstRow({cnt: NUM}).cnt : 0;
+  }
+
   private async addGpuFreq(ctx: Trace) {
+    const canJoinGpuTable = this.hasGpuTable && this.hasGpuCounterTrackUgpu;
+    const ugpuSelect = this.hasGpuCounterTrackUgpu
+      ? 'gct.ugpu'
+      : 'null as ugpu';
+    const gpuNameSelect = canJoinGpuTable
+      ? 'g.name as gpuName'
+      : 'null as gpuName';
+    const gpuJoin = canJoinGpuTable
+      ? 'left join gpu g on gct.ugpu = g.id'
+      : '';
+    const gpuOrder = this.hasGpuCounterTrackUgpu ? 'gct.ugpu' : 'gct.gpu_id';
     const result = await ctx.engine.query(`
       select
         gct.id,
         gct.gpu_id as gpuId,
         gct.machine_id as machineId,
-        gct.ugpu,
-        g.name as gpuName
+        ${ugpuSelect},
+        ${gpuNameSelect}
       from gpu_counter_track gct
       join _counter_track_summary using (id)
-      left join gpu g on gct.ugpu = g.id
+      ${gpuJoin}
       where gct.name = 'gpufreq'
-      order by machineId, gct.ugpu
+      order by machineId, ${gpuOrder}
     `);
 
     const tracks: Array<{
@@ -318,6 +371,12 @@ export default class GpuPlugin implements PerfettoPlugin {
     const counterTypes = GPU_COUNTER_SCHEMAS.map((s) => `'${s.type}'`).join(
       ',',
     );
+    const gpuNameSelect = this.hasGpuTable
+      ? 'g.name as gpu_name'
+      : 'null as gpu_name';
+    const gpuJoin = this.hasGpuTable
+      ? "left join gpu g on extract_arg(ct.dimension_arg_set_id, 'ugpu') = g.id"
+      : '';
     const result = await ctx.engine.query(`
       with tracks_summary as (
         select
@@ -329,10 +388,10 @@ export default class GpuPlugin implements PerfettoPlugin {
           extract_arg(ct.dimension_arg_set_id, 'ugpu') as ugpu,
           extract_arg(ct.dimension_arg_set_id, 'gpu') as gpu_id,
           extract_arg(ct.source_arg_set_id, 'description') as description,
-          g.name as gpu_name
+          ${gpuNameSelect}
         from counter_track ct
         join _counter_track_summary using (id)
-        left join gpu g on extract_arg(ct.dimension_arg_set_id, 'ugpu') = g.id
+        ${gpuJoin}
         where ct.type in (${counterTypes})
         order by ct.name
       )
@@ -417,7 +476,7 @@ export default class GpuPlugin implements PerfettoPlugin {
     }
 
     // Query custom counter groups.
-    const groupResult = await ctx.engine.query(`
+    const groupResult = await ctx.engine.tryQuery(`
       select
         group_id as groupId,
         name as groupName,
@@ -434,22 +493,24 @@ export default class GpuPlugin implements PerfettoPlugin {
       {groupId: number; groupName: string}
     >();
     const uniqueGroups = new Map<number, string>();
-    const groupIt = groupResult.iter({
-      groupId: NUM,
-      groupName: STR_NULL,
-      trackId: NUM,
-    });
-    for (; groupIt.valid(); groupIt.next()) {
-      if (groupIt.groupName !== null) {
-        // Use the first named group for each track.
-        if (!trackGroupMap.has(groupIt.trackId)) {
-          trackGroupMap.set(groupIt.trackId, {
-            groupId: groupIt.groupId,
-            groupName: groupIt.groupName,
-          });
-        }
-        if (!uniqueGroups.has(groupIt.groupId)) {
-          uniqueGroups.set(groupIt.groupId, groupIt.groupName);
+    if (groupResult.ok) {
+      const groupIt = groupResult.value.iter({
+        groupId: NUM,
+        groupName: STR_NULL,
+        trackId: NUM,
+      });
+      for (; groupIt.valid(); groupIt.next()) {
+        if (groupIt.groupName !== null) {
+          // Use the first named group for each track.
+          if (!trackGroupMap.has(groupIt.trackId)) {
+            trackGroupMap.set(groupIt.trackId, {
+              groupId: groupIt.groupId,
+              groupName: groupIt.groupName,
+            });
+          }
+          if (!uniqueGroups.has(groupIt.groupId)) {
+            uniqueGroups.set(groupIt.groupId, groupIt.groupName);
+          }
         }
       }
     }
@@ -565,6 +626,12 @@ export default class GpuPlugin implements PerfettoPlugin {
 
   private async addSlices(ctx: Trace) {
     const sliceTypes = GPU_SLICE_SCHEMAS.map((s) => `'${s.type}'`).join(',');
+    const gpuNameSelect = this.hasGpuTable
+      ? 'g.name as gpu_name'
+      : 'null as gpu_name';
+    const gpuJoin = this.hasGpuTable
+      ? "left join gpu g on extract_arg(t.dimension_arg_set_id, 'ugpu') = g.id"
+      : '';
 
     await using _ = await createPerfettoTable({
       name: '__gpu_tracks_to_create',
@@ -583,10 +650,10 @@ export default class GpuPlugin implements PerfettoPlugin {
             count() as trackCount,
             __max_layout_depth(count(), group_concat(t.id)) as maxDepth,
             extract_arg(t.dimension_arg_set_id, 'gpu') as gpu_id,
-            g.name as gpu_name
+            ${gpuNameSelect}
           from _slice_track_summary s
           join track t using (id)
-          left join gpu g on extract_arg(t.dimension_arg_set_id, 'ugpu') = g.id
+          ${gpuJoin}
           where t.type in (${sliceTypes})
           group by type, t.track_group_id, ifnull(t.track_group_id, t.id),
             extract_arg(t.dimension_arg_set_id, 'ugpu')

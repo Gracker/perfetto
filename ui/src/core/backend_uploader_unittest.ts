@@ -94,7 +94,18 @@ describe('BackendUploader request context', () => {
       url: 'https://example.com/trace.perfetto',
     } as any);
 
-    expect(result).toMatchObject({success: true, traceId: 'trace-url', port: 9818});
+    expect(result).toMatchObject({
+      success: true,
+      traceId: 'trace-url',
+      port: 9818,
+      rpcTarget: {
+        mode: 'direct-port',
+        targetOwner: 'smartperfetto-backend',
+        port: '9818',
+        statusUrl: 'http://127.0.0.1:9818/status',
+        websocketUrl: 'ws://127.0.0.1:9818/websocket',
+      },
+    });
     expect(requestHeaders(0)).toMatchObject({
       'Content-Type': 'application/json',
       'X-Window-Id': 'window-upload',
