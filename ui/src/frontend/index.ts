@@ -13,11 +13,12 @@
 // limitations under the License.
 
 // Keep this import first.
-import z from 'zod';
 import '../base/disposable_polyfill';
 import '../base/static_initializers';
-import NON_CORE_PLUGINS from '../gen/all_plugins';
-import CORE_PLUGINS from '../gen/all_core_plugins';
+import '../assets/perfetto.scss';
+import z from 'zod';
+import NON_CORE_PLUGINS from 'virtual:perfetto/all_plugins';
+import CORE_PLUGINS from 'virtual:perfetto/all_core_plugins';
 import m from 'mithril';
 import {defer} from '../base/deferred';
 import {addErrorHandler, reportError} from '../base/logging';
@@ -29,16 +30,15 @@ import {UiMain} from './ui_main';
 import {registerDebugGlobals} from './debug';
 import {maybeShowErrorDialog} from './error_dialog';
 import {installFileDropHandler} from './file_drop_handler';
-import {tryLoadIsInternalUserScript} from './is_internal_user_script_loader';
 import {HomePage} from './home_page';
 import {postMessageHandler} from './post_message_handler';
-import {Route, Router} from '../core/router';
+import {type Route, Router} from '../core/router';
 import {checkHttpRpcConnection} from './rpc_http_dialog';
 import {maybeOpenTraceFromRoute} from './trace_url_handler';
 import {HttpRpcEngine} from '../trace_processor/http_rpc_engine';
 import {showModal} from '../widgets/modal';
 import {IdleDetector} from './idle_detector';
-import {IdleDetectorWindow} from './idle_detector_interface';
+import type {IdleDetectorWindow} from './idle_detector_interface';
 import {AppImpl} from '../core/app_impl';
 import {addLegacyTableTab} from '../components/details/sql_table_tab';
 import {configureExtensions} from '../components/extensions';
@@ -52,18 +52,18 @@ import {
   PERFETTO_SETTINGS_STORAGE_KEY,
   SettingsManagerImpl,
 } from '../core/settings_manager';
-import { LocalStorage } from '../core/local_storage';
-import { DurationPrecision, TimestampFormat } from '../public/timeline';
-import { timezoneOffsetMap } from '../base/time';
-import { ThemeProvider } from './theme_provider';
-import { OverlayContainer } from '../widgets/overlay_container';
-import { JsonSettingsEditor } from '../components/json_settings_editor';
+import {LocalStorage} from '../core/local_storage';
+import {DurationPrecision, TimestampFormat} from '../public/timeline';
+import {timezoneOffsetMap} from '../base/time';
+import {ThemeProvider} from './theme_provider';
+import {OverlayContainer} from '../widgets/overlay_container';
+import {JsonSettingsEditor} from '../components/json_settings_editor';
 import {
-  CommandInvocation,
+  type CommandInvocation,
   commandInvocationArraySchema,
 } from '../core/command_manager';
-import { HotkeyConfig, HotkeyContext } from '../widgets/hotkey_context';
-import { sleepMs } from '../base/utils';
+import {type HotkeyConfig, HotkeyContext} from '../widgets/hotkey_context';
+import {sleepMs} from '../base/utils';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -313,7 +313,7 @@ function main() {
   const cssLoadPromise = defer<void>();
   const css = document.createElement('link');
   css.rel = 'stylesheet';
-  css.href = assetSrc('perfetto.css');
+  css.href = assetSrc('frontend.css');
   css.onload = () => cssLoadPromise.resolve();
   css.onerror = (err) => cssLoadPromise.reject(err);
   const favicon = document.head.querySelector('#favicon');
@@ -327,10 +327,7 @@ function main() {
     document.body.classList.remove('pf-fonts-loading');
   });
 
-  // Load the script to detect if this is a Googler (see comments on globals.ts).
-  // This registers macros, SQL packages, and proto descriptors.
   const app = AppImpl.instance;
-  tryLoadIsInternalUserScript(app);
 
   // Route errors to both the UI bugreport dialog and Analytics (if enabled).
   addErrorHandler(maybeShowErrorDialog);

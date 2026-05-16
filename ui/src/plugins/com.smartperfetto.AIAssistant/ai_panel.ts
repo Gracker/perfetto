@@ -20,21 +20,20 @@ import m from 'mithril';
 import {BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
 import {ProviderQuickSwitcher} from './provider_switcher';
-import {SqlResultTable, UserInteraction} from './sql_result_table';
+import {SqlResultTable} from './sql_result_table';
+import type {UserInteraction} from './sql_result_table';
 import {ChartVisualizer} from './chart_visualizer';
-import {
-  NavigationBookmarkBar,
-  NavigationBookmark,
-} from './navigation_bookmark_bar';
+import {NavigationBookmarkBar} from './navigation_bookmark_bar';
+import type {NavigationBookmark} from './navigation_bookmark_bar';
 import {SceneNavigationBar} from './scene_navigation_bar';
 import {
   getActivityHintFromBufferTxTrackName,
   getMaxPinsForPattern,
   needsActiveDisambiguation,
 } from './auto_pin_utils';
-import {Engine} from '../../trace_processor/engine';
+import type {Engine} from '../../trace_processor/engine';
 import {LONG, NUM_NULL, STR_NULL} from '../../trace_processor/query_result';
-import {Trace} from '../../public/trace';
+import type {Trace} from '../../public/trace';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
 import {AppImpl} from '../../core/app_impl';
 import {getBackendUploader} from '../../core/backend_uploader';
@@ -49,13 +48,13 @@ import {
   subscribeBackendUploadState,
   type BackendUploadSnapshot,
 } from '../../core/backend_upload_state';
-import {TraceSource} from '../../core/trace_source';
+import type {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
 // Note: generated types are used by SSE event handlers module
 // import {FullAnalysis, ExpandableSections, isFrameDetailData} from './generated';
 
 // Refactored modules - centralized types and utilities
-import {
+import type {
   Message,
   SqlQueryResult,
   AIPanelState,
@@ -63,14 +62,8 @@ import {
   AISettings,
   AISession,
   ServerStatus,
-  createStreamingFlowState,
-  createStreamingAnswerState,
-  createStoryPanelState,
   InterventionState,
   StreamingFlowState,
-  DEFAULT_SETTINGS,
-  PRESET_QUESTIONS,
-  COMPARISON_PRESET_QUESTIONS,
   SelectionContext,
   SelectionTrackInfo,
   SliceCardInfo,
@@ -94,6 +87,14 @@ import {
   TeachingPipelineResult,
   TeachingTrackHint,
   TeachingWarning,
+} from './types';
+import {
+  createStreamingFlowState,
+  createStreamingAnswerState,
+  createStoryPanelState,
+  DEFAULT_SETTINGS,
+  PRESET_QUESTIONS,
+  COMPARISON_PRESET_QUESTIONS,
 } from './types';
 // Agent-Driven Architecture v2.0 - Intervention Panel
 import {
@@ -121,8 +122,8 @@ import {
 import {clearComparisonState} from './comparison_state_manager';
 import {
   handleSSEEvent as handleSSEEventExternal,
-  SSEHandlerContext,
 } from './sse_event_handlers';
+import type {SSEHandlerContext} from './sse_event_handlers';
 import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
 import {
   subscribeClearChat,
@@ -130,7 +131,8 @@ import {
 } from './assistant_command_bus';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
 import {SCENE_DISPLAY_NAMES} from './scene_constants';
-import {StoryController, StoryControllerContext} from './story_controller';
+import {StoryController} from './story_controller';
+import type {StoryControllerContext} from './story_controller';
 // AI Everywhere: cross-component shared state + timeline notes
 import {
   updateAISharedState,
@@ -139,12 +141,12 @@ import {
 } from './ai_shared_state';
 import {addBookmarkNotes, clearAIFindingNotes} from './ai_timeline_notes';
 import {
-  TransientState,
   consumeTransientState,
   registerTransientSaver,
   switchFloatingMode,
   unregisterTransientSaver,
 } from './ai_transient_state';
+import type {TransientState} from './ai_transient_state';
 import {
   clampSidebarHeight,
   clampSidebarWidth,
@@ -249,7 +251,7 @@ export interface AIPanelAttrs {
 }
 
 // Re-export types for backward compatibility with external consumers
-export {
+export type {
   Message,
   SqlQueryResult,
   AISettings,

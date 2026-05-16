@@ -2,11 +2,13 @@
 
 import m from 'mithril';
 
-import {
+import type {
   ProviderConfig,
   ProviderTemplate,
   ProviderPanelAttrs,
   HealthStatus,
+} from './provider_types';
+import {
   providerRuntimeLabel,
   resolveProviderRuntime,
   buildHeaders,
@@ -16,7 +18,7 @@ import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 import {ProviderForm} from './provider_form';
 
-export {ProviderPanelAttrs};
+export type {ProviderPanelAttrs};
 
 export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private providers: ProviderConfig[] = [];

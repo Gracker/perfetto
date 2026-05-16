@@ -17,6 +17,7 @@
 // limitations under the License.
 
 import m from 'mithril';
+import './styles.scss';
 import {isTimelineRouteActive} from '../../frontend/timeline_route';
 import {App} from '../../public/app';
 import {PerfettoPlugin} from '../../public/plugin';
