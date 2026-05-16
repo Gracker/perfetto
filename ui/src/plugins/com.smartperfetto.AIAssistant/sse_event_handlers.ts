@@ -32,6 +32,7 @@
 
 import {
   ConversationStepTimelineItem,
+  DataSourceContext,
   Message,
   InterventionPoint,
   InterventionState,
@@ -949,6 +950,123 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
   return `${title} (${envelope.display?.format || 'table'})`;
 }
 
+function inferDataSourceReason(input: {
+  source?: string;
+  layer?: string;
+  title?: string;
+  query?: string;
+}): string {
+  const source = (input.source || '').toLowerCase();
+  const title = (input.title || '').toLowerCase();
+  const layer = (input.layer || '').toLowerCase();
+
+  if (input.query || source === 'execute_sql') {
+    return '临时 SQL 查询，用来验证模型提出的具体数据点或补齐 Skill 未覆盖的字段。';
+  }
+  if (source.includes('invoke_skill') || source.includes('skill') || source.includes(':')) {
+    return 'Skill 返回的结构化证据，用来支撑后续筛选、下钻或结论判断。';
+  }
+
+  switch (layer) {
+    case 'overview':
+      return '概览层数据，用来快速判断是否存在明显异常。';
+    case 'list':
+      return '候选列表数据，用来从会话、帧或事件中筛选需要下钻的对象。';
+    case 'session':
+      return '会话/区间层数据，用来解释单个时间段的行为。';
+    case 'deep':
+      return '下钻层数据，用来验证具体帧、线程或调用链的根因。';
+    case 'diagnosis':
+      return '诊断层数据，用来直接支撑结论和建议。';
+  }
+
+  if (/overview|概览|summary|统计/.test(title)) {
+    return '汇总数据，用来建立本轮分析的基线判断。';
+  }
+  return '中间证据表，用来连接时间线动作和最终结论。';
+}
+
+function inferDataMeaning(title: string, columns: string[]): string {
+  const text = `${title} ${columns.join(' ')}`.toLowerCase();
+  if (/startup|launch|启动/.test(text)) {
+    return '每行通常对应一次启动、启动阶段或启动相关候选事件。';
+  }
+  if (/frame|jank|doframe|帧|掉帧|卡顿/.test(text)) {
+    return '每行通常对应一帧、一个掉帧事件或一组帧级统计。';
+  }
+  if (/thread|utid|tid|runnable|sched|线程|调度/.test(text)) {
+    return '每行通常对应一个线程、线程状态片段或调度统计。';
+  }
+  if (/binder|ipc/.test(text)) {
+    return '每行通常对应一次 Binder/IPC 调用或聚合后的跨进程延迟。';
+  }
+  if (/cpu|freq|core|cluster|小核|大核/.test(text)) {
+    return '每行通常对应 CPU 频率、核型分布或调度供给指标。';
+  }
+  if (/memory|gc|lmk|内存/.test(text)) {
+    return '每行通常对应内存、GC 或 LMK 压力相关指标。';
+  }
+  if (/io|file|database|sqlite|文件|数据库/.test(text)) {
+    return '每行通常对应一次 I/O、文件或数据库操作统计。';
+  }
+  return '每行是一条命中的证据记录；列是本步骤用于判断的指标、实体或时间字段。';
+}
+
+function registerDataSourceContext(
+  ctx: SSEHandlerContext,
+  input: {
+    title: string;
+    source?: string;
+    layer?: string;
+    rowCount?: number;
+    columns?: string[];
+    query?: string;
+  }
+): DataSourceContext {
+  const flow = ctx.streamingFlow;
+  flow.dataSourceOrdinal = (flow.dataSourceOrdinal || 0) + 1;
+  const sourceContext: DataSourceContext = {
+    ref: `表 ${flow.dataSourceOrdinal}`,
+    title: normalizeFlowLine(input.title || '数据表') || '数据表',
+    source: normalizeFlowLine(input.source || input.layer || 'analysis') || 'analysis',
+    reason: inferDataSourceReason(input),
+    meaning: inferDataMeaning(input.title || '', input.columns || []),
+    rowCount: input.rowCount,
+    phase: input.layer ? `DataEnvelope.${input.layer}` : undefined,
+  };
+  flow.dataSourceRefs.push(sourceContext);
+  if (flow.dataSourceRefs.length > 80) {
+    flow.dataSourceRefs.splice(0, flow.dataSourceRefs.length - 80);
+  }
+  return sourceContext;
+}
+
+function dataSourceLine(ref: DataSourceContext): string {
+  const count = typeof ref.rowCount === 'number' ? `，${ref.rowCount} 行` : '';
+  const phase = ref.phase ? `，${ref.phase}` : '';
+  return `- ${ref.ref}: ${ref.title}${count}（来源: ${ref.source}${phase}）`;
+}
+
+function appendDataSourceIndex(content: string, ctx: SSEHandlerContext): string {
+  const refs = ctx.streamingFlow.dataSourceRefs;
+  if (refs.length === 0) return content;
+  if (/(^|\n)##\s*数据来源索引/.test(content)) return content;
+
+  const shown = refs.slice(-8);
+  const omitted = refs.length > shown.length
+    ? `\n- 另有 ${refs.length - shown.length} 个更早的数据表未列出。`
+    : '';
+  return [
+    content.trimEnd(),
+    '',
+    '---',
+    '## 数据来源索引',
+    '以下是本轮结论可核对的数据表。当前为表级来源索引；逐句数字到具体行/列的引用需要后端结论合同输出结构化 evidenceRef。',
+    ...shown.map(dataSourceLine),
+    omitted,
+  ].filter(Boolean).join('\n');
+}
+
 /**
  * Process a progress event - shows analysis phase updates.
  */
@@ -1089,6 +1207,13 @@ export function handleSqlExecutedEvent(
     const sql = readStringField(payload, 'sql');
     const expandableData = readExpandableData(result.expandableData);
     const summary = readLegacySummary(result.summary);
+    const sourceContext = registerDataSourceContext(ctx, {
+      title: 'SQL 查询结果',
+      source: 'execute_sql',
+      rowCount,
+      columns: columns.map((col) => String(col)),
+      query: sql,
+    });
     pushStreamingTool(ctx, '执行 SQL 查询');
     pushStreamingOutput(ctx, `SQL 结果返回 ${rowCount} 行`);
     ctx.addMessage({
@@ -1103,6 +1228,7 @@ export function handleSqlExecutedEvent(
         query: sql,
         expandableData,
         summary,
+        sourceContext,
       },
     });
   }
@@ -1126,6 +1252,14 @@ export function handleSkillSectionEvent(
     const rows = Array.isArray(section.rows) ? section.rows : [];
     const expandableData = readExpandableData(section.expandableData);
     const summary = readLegacySummary(section.summary);
+    const sourceContext = rowCount > 0
+      ? registerDataSourceContext(ctx, {
+          title: sectionTitle,
+          source: 'skill_section',
+          rowCount,
+          columns: columns.map((col) => String(col)),
+        })
+      : undefined;
     pushStreamingOutput(
       ctx,
       `${sectionTitle} (${rowCount} 行)`
@@ -1144,6 +1278,7 @@ export function handleSkillSectionEvent(
         sectionTitle: `${sectionTitle} (${sectionIndex}/${totalSections})`,
         expandableData,
         summary,
+        sourceContext,
       } : undefined,
     });
   }
@@ -1368,6 +1503,13 @@ function processOverviewLayer(
         const rows = dataArray.map((item) =>
           orderedColumns.map(col => item[col])
         );
+        const sourceContext = registerDataSourceContext(ctx, {
+          title,
+          source: readStringField(metadata, 'skillName') || 'skill_overview',
+          layer: 'overview',
+          rowCount: rows.length,
+          columns: orderedColumns,
+        });
 
         ctx.addMessage({
           id: ctx.generateId(),
@@ -1380,6 +1522,7 @@ function processOverviewLayer(
             rowCount: rows.length,
             columnDefinitions: filteredColumnDefs,
             sectionTitle: `📊 ${title}`,
+            sourceContext,
           },
         });
       }
@@ -1387,6 +1530,13 @@ function processOverviewLayer(
       // Nested object: display as single-row table
       const objColumns = Object.keys(val);
       const objRow = objColumns.map(col => val[col]);
+      const sourceContext = registerDataSourceContext(ctx, {
+        title: formatLayerName(key),
+        source: readStringField(metadata, 'skillName') || 'skill_overview',
+        layer: 'overview',
+        rowCount: 1,
+        columns: objColumns,
+      });
 
       ctx.addMessage({
         id: ctx.generateId(),
@@ -1398,6 +1548,7 @@ function processOverviewLayer(
           rows: [objRow],
           rowCount: 1,
           sectionTitle: `📈 ${formatLayerName(key)}`,
+          sourceContext,
         },
       });
     }
@@ -1744,6 +1895,13 @@ function processListLayer(
         }
       }
     }
+    const sourceContext = registerDataSourceContext(ctx, {
+      title: displayTitle,
+      source: key,
+      layer: 'list',
+      rowCount: rows.length,
+      columns,
+    });
 
     ctx.addMessage({
       id: ctx.generateId(),
@@ -1759,6 +1917,7 @@ function processListLayer(
         expandableData,
         metadata: Object.keys(extractedMetadata).length > 0 ? extractedMetadata : undefined,
         summaryReport: readSummaryReport(summaryReport),
+        sourceContext,
       },
     });
   }
@@ -2068,7 +2227,10 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(answerMsgId, {
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
           ...(existing
-            ? {content: appendAnalysisResultReference(existing.content, resultSnapshotId)}
+            ? {content: appendDataSourceIndex(
+                appendAnalysisResultReference(existing.content, resultSnapshotId),
+                ctx,
+              )}
             : {}),
         }, {persist: true});
       } else {
@@ -2081,7 +2243,7 @@ export function handleAnalysisCompletedEvent(
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
               content: appendAnalysisResultReference(
-                messages[i].content,
+                appendDataSourceIndex(messages[i].content, ctx),
                 resultSnapshotId,
               ),
             }, {persist: true});
@@ -2110,7 +2272,7 @@ export function handleAnalysisCompletedEvent(
 
     // Build content with agent-driven metadata if available
     let content = appendAnalysisResultReference(
-      answerContent,
+      appendDataSourceIndex(answerContent, ctx),
       payload?.resultSnapshotId,
     );
 
@@ -2597,6 +2759,18 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
       }
 
       if (filteredRows.length > 0) {
+        const source = [
+          envelope.meta.skillId || envelope.meta.source,
+          envelope.meta.stepId,
+        ].filter(Boolean).join('#');
+        const sourceContext = registerDataSourceContext(ctx, {
+          title,
+          source: source || envelope.meta.source || 'data_envelope',
+          layer: envelope.display.layer,
+          rowCount: filteredRows.length,
+          columns: filteredColumns,
+          query: sql,
+        });
         ctx.addMessage({
           id: ctx.generateId(),
           role: 'assistant',
@@ -2614,6 +2788,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             defaultCollapsed: envelope.display.defaultCollapsed,
             maxVisibleRows: envelope.display.maxVisibleRows,
             expandableData: rawResult.expandableData,  // 【修复】传递 expandableData 用于行展开功能
+            sourceContext,
           },
         });
       }
@@ -3428,7 +3603,7 @@ function handleSSEEventInner(
         ctx.addMessage({
           id: ctx.generateId(),
           role: 'assistant',
-          content: conclusionText,
+          content: appendDataSourceIndex(conclusionText, ctx),
           timestamp: Date.now(),
         });
       }

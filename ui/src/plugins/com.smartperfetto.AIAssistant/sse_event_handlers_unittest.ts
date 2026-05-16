@@ -1755,6 +1755,12 @@ describe('handleDataEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].sqlResult).toBeDefined();
+    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+      ref: '表 1',
+      title: 'Test Data',
+      source: 'test_skill:step1',
+      rowCount: 1,
+    });
   });
 
   it('should handle array of envelopes', () => {
@@ -1910,6 +1916,41 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].content).toContain('## 📊 洞见摘要');
     expect(ctx.messages[0].content).toContain('（无显式洞见，见指标）\n\n### 关键指标');
     expect(ctx.messages[0].content).not.toMatch(/\n{3,}/);
+  });
+
+  it('should append a table-level data source index to conclusions', () => {
+    handleDataEvent({
+      id: 'data-1',
+      envelope: {
+        meta: {
+          type: 'skill_result',
+          version: '2.0',
+          source: 'scrolling_analysis',
+          skillId: 'scrolling_analysis',
+          stepId: 'jank_frames',
+        },
+        data: {
+          columns: ['frame_id', 'dur_ms'],
+          rows: [[123, 45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '掉帧帧列表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '最终结论引用了 45.6ms 的帧耗时。',
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[1].content).toContain('## 数据来源索引');
+    expect(ctx.messages[1].content).toContain('表 1: 掉帧帧列表');
+    expect(ctx.messages[1].content).toContain('逐句数字到具体行/列的引用需要后端结论合同');
   });
 });
 

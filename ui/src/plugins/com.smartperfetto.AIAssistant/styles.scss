@@ -2049,6 +2049,61 @@
   color: var(--chat-text-secondary);
 }
 
+.ai-table-context {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--chat-border-light);
+  border-radius: 4px;
+  background: var(--chat-bg-secondary);
+  color: var(--chat-text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ai-table-context-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ai-table-ref {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--chat-border);
+  border-radius: 4px;
+  background: var(--chat-bg);
+  color: var(--chat-primary);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ai-table-context-reason {
+  color: var(--chat-text);
+  font-weight: 500;
+}
+
+.ai-table-context-meaning {
+  margin-top: 3px;
+}
+
+.ai-table-context-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.ai-table-context-chip {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--chat-bg);
+  color: var(--chat-text-secondary);
+  font-family: var(--monospace-font, monospace);
+  font-size: 10px;
+}
+
 .sql-result-actions,
 .ai-sql-actions {
   display: flex;

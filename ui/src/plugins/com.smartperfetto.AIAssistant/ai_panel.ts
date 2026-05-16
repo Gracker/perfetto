@@ -69,6 +69,7 @@ import type {
   SliceCardInfo,
   AreaCardInfo,
   TraceDataset,
+  DataSourceContext,
   LatestAnalysisSnapshot,
   AnalysisResultPickerItem,
   AnalysisResultWindowState,
@@ -465,6 +466,34 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.copiedMessageIds.delete(msg.id);
       m.redraw();
     }, 1200);
+  }
+
+  private renderTableSourceContext(
+    context: DataSourceContext | undefined,
+  ): m.Children {
+    if (!context) return null;
+    const chips: string[] = [];
+    if (context.phase) chips.push(context.phase);
+    if (typeof context.rowCount === 'number') {
+      chips.push(`${context.rowCount.toLocaleString()} 行`);
+    }
+    if (context.source) chips.push(context.source);
+
+    return m('div.ai-table-context', [
+      m('div.ai-table-context-main', [
+        m('span.ai-table-ref', context.ref),
+        m('span.ai-table-context-reason', context.reason),
+      ]),
+      m('div.ai-table-context-meaning', context.meaning),
+      chips.length > 0
+        ? m(
+            'div.ai-table-context-meta',
+            chips.slice(0, 4).map((chip) =>
+              m('span.ai-table-context-chip', chip),
+            ),
+          )
+        : null,
+    ]);
   }
 
   private trackFullPathToString(trackNode: any): string {
@@ -2053,10 +2082,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           const roundA = roundIndexMap.get(a.id) ?? 0;
                           const roundB = roundIndexMap.get(b.id) ?? 0;
                           if (roundA !== roundB) return roundA - roundB;
-                          const order = (msg: {flowTag?: string}) => {
+                          const order = (msg: Message) => {
+                            if (msg.role === 'user') return 0;
                             if (msg.flowTag === 'streaming_flow') return 1;
-                            if (msg.flowTag === 'answer_stream') return 2;
-                            return 0;
+                            if (msg.flowTag === 'answer_stream') return 3;
+                            return 2;
                           };
                           return order(a) - order(b);
                         },
@@ -2278,51 +2308,59 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
                                       if (isCollapsed) {
                                         // Render collapsed: just a clickable title bar
-                                        return m(
-                                          'div.ai-collapsed-table',
-                                          {
-                                            style: {
-                                              padding: '8px 12px',
-                                              background:
-                                                'var(--chat-bg-secondary)',
-                                              border:
-                                                '1px solid var(--chat-border)',
-                                              borderRadius: '6px',
-                                              cursor: 'pointer',
-                                              display: 'flex',
-                                              alignItems: 'center',
-                                              gap: '8px',
-                                              opacity: '0.7',
-                                            },
-                                            onclick: () => {
-                                              this.state.collapsedTables.delete(
-                                                msg.id,
-                                              );
-                                              m.redraw();
-                                            },
-                                          },
-                                          [
-                                            m(
-                                              'i.pf-icon',
-                                              {style: {fontSize: '14px'}},
-                                              'chevron_right',
-                                            ),
-                                            m(
-                                              'span',
-                                              {
-                                                style: {
-                                                  fontSize: '13px',
-                                                  fontWeight: '500',
-                                                },
+                                        return m('div', [
+                                          this.renderTableSourceContext(
+                                            sqlResult.sourceContext,
+                                          ),
+                                          m(
+                                            'div.ai-collapsed-table',
+                                            {
+                                              style: {
+                                                padding: '8px 12px',
+                                                background:
+                                                  'var(--chat-bg-secondary)',
+                                                border:
+                                                  '1px solid var(--chat-border)',
+                                                borderRadius: '6px',
+                                                cursor: 'pointer',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '8px',
+                                                opacity: '0.7',
                                               },
-                                              `${sqlResult.sectionTitle} (${sqlResult.rowCount} 条)`,
-                                            ),
-                                          ],
-                                        );
+                                              onclick: () => {
+                                                this.state.collapsedTables.delete(
+                                                  msg.id,
+                                                );
+                                                m.redraw();
+                                              },
+                                            },
+                                            [
+                                              m(
+                                                'i.pf-icon',
+                                                {style: {fontSize: '14px'}},
+                                                'chevron_right',
+                                              ),
+                                              m(
+                                                'span',
+                                                {
+                                                  style: {
+                                                    fontSize: '13px',
+                                                    fontWeight: '500',
+                                                  },
+                                                },
+                                                `${sqlResult.sectionTitle} (${sqlResult.rowCount} 条)`,
+                                              ),
+                                            ],
+                                          ),
+                                        ]);
                                       }
 
                                       // Render expanded table with optional collapse toggle
                                       return m('div', [
+                                        this.renderTableSourceContext(
+                                          sqlResult.sourceContext,
+                                        ),
                                         sqlResult.collapsible
                                           ? m(
                                               'div.ai-table-collapse-toggle',
@@ -2383,83 +2421,88 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     }
 
                                     // Regular SQL result with outer header
-                                    return m('div.ai-sql-card', [
-                                      m('div.ai-sql-header', [
-                                        m('div.ai-sql-title', [
-                                          m('i.pf-icon', 'table_chart'),
-                                          m(
-                                            'span',
-                                            `${sqlResult.rowCount.toLocaleString()} rows`,
-                                          ),
+                                    return m('div', [
+                                      this.renderTableSourceContext(
+                                        sqlResult.sourceContext,
+                                      ),
+                                      m('div.ai-sql-card', [
+                                        m('div.ai-sql-header', [
+                                          m('div.ai-sql-title', [
+                                            m('i.pf-icon', 'table_chart'),
+                                            m(
+                                              'span',
+                                              `${sqlResult.rowCount.toLocaleString()} rows`,
+                                            ),
+                                          ]),
+                                          m('div.ai-sql-actions', [
+                                            m(
+                                              'button.ai-sql-action-btn',
+                                              {
+                                                onclick: () =>
+                                                  this.copyToClipboard(
+                                                    formattedSql?.text || query,
+                                                  ),
+                                                title:
+                                                  formattedSql?.status ===
+                                                  'failed'
+                                                    ? 'Copy SQL (formatter unavailable)'
+                                                    : 'Copy formatted SQL',
+                                              },
+                                              [
+                                                m('i.pf-icon', 'content_copy'),
+                                                m('span', 'Copy'),
+                                              ],
+                                            ),
+                                            query
+                                              ? m(
+                                                  'button.ai-sql-action-btn',
+                                                  {
+                                                    onclick: () =>
+                                                      this.handlePin({
+                                                        query:
+                                                          formattedSql?.text ||
+                                                          query,
+                                                        columns:
+                                                          sqlResult.columns,
+                                                        rows: sqlResult.rows.slice(
+                                                          0,
+                                                          100,
+                                                        ),
+                                                        timestamp: Date.now(),
+                                                      }),
+                                                    title: 'Pin result',
+                                                  },
+                                                  [
+                                                    m('i.pf-icon', 'push_pin'),
+                                                    m('span', 'Pin'),
+                                                  ],
+                                                )
+                                              : null,
+                                          ]),
                                         ]),
-                                        m('div.ai-sql-actions', [
-                                          m(
-                                            'button.ai-sql-action-btn',
-                                            {
-                                              onclick: () =>
-                                                this.copyToClipboard(
-                                                  formattedSql?.text || query,
-                                                ),
-                                              title:
-                                                formattedSql?.status ===
-                                                'failed'
-                                                  ? 'Copy SQL (formatter unavailable)'
-                                                  : 'Copy formatted SQL',
-                                            },
-                                            [
-                                              m('i.pf-icon', 'content_copy'),
-                                              m('span', 'Copy'),
-                                            ],
-                                          ),
-                                          query
-                                            ? m(
-                                                'button.ai-sql-action-btn',
-                                                {
-                                                  onclick: () =>
-                                                    this.handlePin({
-                                                      query:
-                                                        formattedSql?.text ||
-                                                        query,
-                                                      columns:
-                                                        sqlResult.columns,
-                                                      rows: sqlResult.rows.slice(
-                                                        0,
-                                                        100,
-                                                      ),
-                                                      timestamp: Date.now(),
-                                                    }),
-                                                  title: 'Pin result',
-                                                },
-                                                [
-                                                  m('i.pf-icon', 'push_pin'),
-                                                  m('span', 'Pin'),
-                                                ],
-                                              )
-                                            : null,
-                                        ]),
+                                        query
+                                          ? m(
+                                              'div.ai-sql-query',
+                                              formattedSql?.text || query.trim(),
+                                            )
+                                          : null,
+                                        m(SqlResultTable, {
+                                          columns: sqlResult.columns,
+                                          rows: sqlResult.rows,
+                                          rowCount: sqlResult.rowCount,
+                                          query: formattedSql?.text || query,
+                                          trace: vnode.attrs.trace, // 传入 trace 对象以支持时间戳跳转
+                                          onPin: (data) => this.handlePin(data),
+                                          onExport: (format) =>
+                                            this.exportResult(sqlResult, format),
+                                          onInteraction: (interaction) =>
+                                            this.handleInteraction(interaction), // v2.0 Focus Tracking
+                                          expandableData:
+                                            sqlResult.expandableData,
+                                          summary: sqlResult.summary,
+                                          metadata: sqlResult.metadata, // Pass metadata for header display
+                                        }),
                                       ]),
-                                      query
-                                        ? m(
-                                            'div.ai-sql-query',
-                                            formattedSql?.text || query.trim(),
-                                          )
-                                        : null,
-                                      m(SqlResultTable, {
-                                        columns: sqlResult.columns,
-                                        rows: sqlResult.rows,
-                                        rowCount: sqlResult.rowCount,
-                                        query: formattedSql?.text || query,
-                                        trace: vnode.attrs.trace, // 传入 trace 对象以支持时间戳跳转
-                                        onPin: (data) => this.handlePin(data),
-                                        onExport: (format) =>
-                                          this.exportResult(sqlResult, format),
-                                        onInteraction: (interaction) =>
-                                          this.handleInteraction(interaction), // v2.0 Focus Tracking
-                                        expandableData:
-                                          sqlResult.expandableData,
-                                        summary: sqlResult.summary,
-                                        metadata: sqlResult.metadata, // Pass metadata for header display
-                                      }),
                                     ]);
                                   })(),
 
@@ -8021,6 +8064,7 @@ Output MUST follow this exact markdown structure:
       conversationPendingSteps: {...f.conversationPendingSteps},
       conversationSeenEventIds: new Set(f.conversationSeenEventIds),
       subAgents: f.subAgents.map((s) => ({...s})),
+      dataSourceRefs: f.dataSourceRefs.map((ref) => ({...ref})),
       // Timer must NOT be carried across — it references a window-scoped
       // handle that will expire/fire on the old instance's event loop.
       // New instance will schedule its own timer if needed.
@@ -8062,7 +8106,14 @@ Output MUST follow this exact markdown structure:
       this.state.displayedSkillProgress = new Set(a.displayedSkillProgress);
       this.state.completionHandled = a.completionHandled;
       this.state.collectedErrors = [...a.collectedErrors];
-      this.state.streamingFlow = a.streamingFlow;
+      this.state.streamingFlow = {
+        ...createStreamingFlowState(),
+        ...a.streamingFlow,
+        dataSourceRefs: a.streamingFlow.dataSourceRefs || [],
+        dataSourceOrdinal:
+          a.streamingFlow.dataSourceOrdinal ||
+          (a.streamingFlow.dataSourceRefs || []).length,
+      };
       this.state.streamingAnswer = a.streamingAnswer;
       // Mark loading + resume SSE. The resumeFromLastEventId flag tells
       // listenToAgentSSE to preserve sseLastEventId so the initial fetch

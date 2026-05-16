@@ -317,6 +317,16 @@ export interface SubAgentCard {
   toolUses?: number;
 }
 
+export interface DataSourceContext {
+  ref: string;
+  title: string;
+  source: string;
+  reason: string;
+  meaning: string;
+  rowCount?: number;
+  phase?: string;
+}
+
 export interface StreamingFlowState {
   messageId: string | null;
   phaseMessageId: string | null;
@@ -340,6 +350,9 @@ export interface StreamingFlowState {
   error: string | null;
   /** Active/completed sub-agent cards for visual tracking. */
   subAgents: SubAgentCard[];
+  /** Per-run data table references used to connect tables and conclusions. */
+  dataSourceRefs: DataSourceContext[];
+  dataSourceOrdinal: number;
   /** Deferred retry timer for throttled conversation timeline steps. */
   conversationFlushTimer?: number;
 }
@@ -367,6 +380,8 @@ export function createStreamingFlowState(): StreamingFlowState {
     lastUpdatedAt: null,
     error: null,
     subAgents: [],
+    dataSourceRefs: [],
+    dataSourceOrdinal: 0,
     conversationFlushTimer: undefined,
   };
 }
@@ -447,6 +462,9 @@ export interface SqlQueryResult {
   // Metadata: fixed values extracted from the list (e.g., layer_name, process_name)
   // These values are the same across all rows, displayed in the header area
   metadata?: Record<string, any>;
+  // UI-only source context that explains why the table appeared and how it
+  // relates to the analysis timeline/conclusion.
+  sourceContext?: DataSourceContext;
 }
 
 /**
