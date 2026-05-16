@@ -390,7 +390,7 @@ export class ProviderQuickSwitcher
           m(
             'div',
             {style: {fontSize: '11px', color: t.textSecondary}},
-            '.env config · server-selected SDK',
+            'Claude Code, backend/.env, or Docker .env',
           ),
         ]),
         noActiveProvider ? m('div', {style: s.activeDot}) : null,

@@ -317,12 +317,15 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   private onCheckStatus!: SettingsModalAttrs['onCheckStatus'];
   private currentTab: SettingsTab = 'connection';
   private workspaceId = '';
+  private showBackendAuth = false;
 
   oninit(vnode: m.Vnode<SettingsModalAttrs>) {
     this.settings = {...vnode.attrs.settings};
     this.onCheckStatus = vnode.attrs.onCheckStatus;
     this.serverStatus = vnode.attrs.initialStatus ?? null;
     this.workspaceId = vnode.attrs.workspaceContext.workspaceId;
+    this.showBackendAuth =
+      !!this.settings.backendApiKey || !!vnode.attrs.initialStatus?.authRequired;
   }
 
   private async checkStatus() {
@@ -441,7 +444,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               m('span', {style: MODAL_STYLES.alertIcon}, '!'),
               m(
                 'div',
-                'Backend requires API key authentication (SMARTPERFETTO_API_KEY). Make sure the API Key field above is correctly configured.',
+                'Backend requires SMARTPERFETTO_API_KEY authentication. Open Advanced backend auth and enter the same value configured on the backend.',
               ),
             ],
           )
@@ -553,26 +556,55 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                   }),
                 ]),
                 m('div', {style: MODAL_STYLES.field}, [
-                  m('label', {style: MODAL_STYLES.fieldLabel}, [
-                    m('span', {style: MODAL_STYLES.fieldIcon}, '🔐'),
-                    'API Key',
-                  ]),
-                  m('input[type=password]', {
-                    style: MODAL_STYLES.input,
-                    value: this.settings.backendApiKey || '',
-                    onchange: (e: Event) => {
-                      this.settings.backendApiKey = (
-                        e.target as HTMLInputElement
-                      ).value;
+                  m(
+                    'button',
+                    {
+                      type: 'button',
+                      style: {
+                        ...MODAL_STYLES.btn,
+                        ...MODAL_STYLES.btnSecondary,
+                        width: '100%',
+                        justifyContent: 'space-between',
+                        padding: '10px 12px',
+                      },
+                      onclick: () => {
+                        this.showBackendAuth = !this.showBackendAuth;
+                      },
                     },
-                    placeholder: 'Optional: SMARTPERFETTO_API_KEY',
-                  }),
+                    [
+                      m('span', 'Advanced backend auth'),
+                      m('span', this.showBackendAuth ? '▲' : '▼'),
+                    ],
+                  ),
                   m(
                     'div',
-                    {style: MODAL_STYLES.hint},
-                    'Required only if backend has SMARTPERFETTO_API_KEY configured.',
+                    {style: {...MODAL_STYLES.hint, marginTop: '6px'}},
+                    'Leave this empty for local single-user runs. Only fill it when the backend was started with SMARTPERFETTO_API_KEY.',
                   ),
                 ]),
+                this.showBackendAuth
+                  ? m('div', {style: MODAL_STYLES.field}, [
+                      m('label', {style: MODAL_STYLES.fieldLabel}, [
+                        m('span', {style: MODAL_STYLES.fieldIcon}, '🔐'),
+                        'Backend Access Token',
+                      ]),
+                      m('input[type=password]', {
+                        style: MODAL_STYLES.input,
+                        value: this.settings.backendApiKey || '',
+                        onchange: (e: Event) => {
+                          this.settings.backendApiKey = (
+                            e.target as HTMLInputElement
+                          ).value;
+                        },
+                        placeholder: 'Optional SMARTPERFETTO_API_KEY',
+                      }),
+                      m(
+                        'div',
+                        {style: MODAL_STYLES.hint},
+                        'This protects SmartPerfetto backend APIs. It is not a model provider key; model provider keys belong on the Providers tab.',
+                      ),
+                    ])
+                  : null,
               ]),
 
               m('div', {style: MODAL_STYLES.section}, [
@@ -610,7 +642,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                     m('strong', 'Providers'),
                     m(
                       'span',
-                      ' tab to add and switch between AI providers (Anthropic, Bedrock, DeepSeek, Ollama, etc.) without restarting the backend.',
+                      ' tab to add, test, activate, and switch AI provider profiles. Saving a provider is not enough; the active profile is what overrides backend/.env.',
                     ),
                   ]),
                 ],

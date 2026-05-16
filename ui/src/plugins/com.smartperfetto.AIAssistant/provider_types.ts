@@ -168,7 +168,11 @@ export const CONNECTION_FIELD_LABELS: Record<
   string,
   {label: string; type: string; placeholder: string}
 > = {
-  apiKey: {label: 'API Key', type: 'password', placeholder: 'sk-...'},
+  apiKey: {
+    label: 'Provider API Key (shared)',
+    type: 'password',
+    placeholder: 'sk-...',
+  },
   baseUrl: {
     label: 'Base URL',
     type: 'text',
@@ -179,18 +183,26 @@ export const CONNECTION_FIELD_LABELS: Record<
     type: 'text',
     placeholder: 'https://api.example.com/anthropic',
   },
-  claudeApiKey: {label: 'Claude API Key', type: 'password', placeholder: 'sk-...'},
-  claudeAuthToken: {
-    label: 'Claude Auth Token',
+  claudeApiKey: {
+    label: 'Claude-compatible API Key',
     type: 'password',
-    placeholder: 'Bearer token...',
+    placeholder: 'sk-...',
+  },
+  claudeAuthToken: {
+    label: 'Claude-compatible Auth Token',
+    type: 'password',
+    placeholder: 'token without Bearer prefix',
   },
   openaiBaseUrl: {
     label: 'OpenAI-compatible Base URL',
     type: 'text',
     placeholder: 'https://api.example.com/v1',
   },
-  openaiApiKey: {label: 'OpenAI API Key', type: 'password', placeholder: 'sk-...'},
+  openaiApiKey: {
+    label: 'OpenAI-compatible API Key',
+    type: 'password',
+    placeholder: 'sk-...',
+  },
   awsRegion: {label: 'AWS Region', type: 'text', placeholder: 'us-east-1'},
   awsBearerToken: {
     label: 'AWS Bearer Token',

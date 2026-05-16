@@ -255,7 +255,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         templates: this.templates,
         onSaved: () => {
           this.success =
-            this.view_mode === 'edit' ? 'Provider updated' : 'Provider created';
+            this.view_mode === 'edit'
+              ? 'Provider updated. Test it again if credentials changed.'
+              : 'Provider created. Test it, then activate it to use it.';
           this.view_mode = 'list';
           this.editingId = null;
           this.cloneSource = null;
@@ -310,7 +312,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
             m(
               'p',
               {style: s.subtitle},
-              'Configure and switch between AI providers',
+              'Model provider credentials live here; backend auth stays on the Connection tab',
             ),
           ]),
           m(
@@ -322,6 +324,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
             '+ Add Provider',
           ),
         ]),
+
+        this.renderProviderGuide(),
 
         m(
           'div',
@@ -350,6 +354,29 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     );
   }
 
+  private renderProviderGuide(): m.Children {
+    const t = getTokens();
+    return m(
+      'div',
+      {
+        style: {
+          marginBottom: '14px',
+          padding: '10px 12px',
+          borderRadius: '8px',
+          border: `1px solid ${t.border}`,
+          backgroundColor: t.surface,
+          color: t.textSecondary,
+          fontSize: '12px',
+          lineHeight: '1.5',
+        },
+      },
+      [
+        m('strong', {style: {color: t.text}}, 'Provider Manager priority: '),
+        'a saved profile only affects analysis after it is active. Active profiles override backend/.env or Docker .env; System Default returns to env or local Claude Code config.',
+      ],
+    );
+  }
+
   private renderEmpty(): m.Children {
     const t = getTokens();
     const s = getStyles(t);
@@ -363,7 +390,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       m(
         'p',
         {style: {margin: 0, fontSize: '14px'}},
-        'Add a provider to start using AI analysis',
+        'Add a UI provider profile, or use System Default for backend/.env, Docker .env, or local Claude Code config.',
       ),
       m(
         'button',
@@ -499,7 +526,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                       marginTop: '2px',
                     },
                   },
-                  'Use .env configuration (SMARTPERFETTO_AGENT_RUNTIME; default Claude SDK)',
+                  'Uses local Claude Code, backend/.env, or Docker .env. Select this to ignore active UI providers.',
                 ),
               ],
             ),
@@ -689,57 +716,59 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
               ],
             ),
 
-            isHovered
-              ? m(
-                  'div',
+            m(
+              'div',
+              {
+                style: {display: 'flex', gap: '4px', flexShrink: 0},
+                onclick: (e: Event) => e.stopPropagation(),
+              },
+              [
+                m(
+                  'button',
                   {
-                    style: {display: 'flex', gap: '4px', flexShrink: 0},
-                    onclick: (e: Event) => e.stopPropagation(),
+                    style: this.listActionBtnStyle(t),
+                    onclick: () => this.testConnection(provider.id),
+                    disabled: this.testingId === provider.id,
+                    title: 'Test Connection',
+                    'aria-label': 'Test Connection',
                   },
-                  [
-                    m(
-                      'button',
-                      {
-                        style: this.listActionBtnStyle(t),
-                        onclick: () => this.testConnection(provider.id),
-                        disabled: this.testingId === provider.id,
-                        title: 'Test Connection',
-                      },
-                      this.testingId === provider.id ? '⏳' : '\u{1F50C}',
-                    ),
-                    m(
-                      'button',
-                      {
-                        style: this.listActionBtnStyle(t),
-                        onclick: () => this.startEdit(provider),
-                        title: 'Edit Provider',
-                      },
-                      '✏️',
-                    ),
-                    m(
-                      'button',
-                      {
-                        style: this.listActionBtnStyle(t),
-                        onclick: () => this.cloneProvider(provider),
-                        title: 'Clone Provider',
-                      },
-                      '📋',
-                    ),
-                    m(
-                      'button',
-                      {
-                        style: {...this.listActionBtnStyle(t), color: t.error},
-                        onclick: () => this.deleteProvider(provider.id),
-                        disabled: this.deleting === provider.id || isActive,
-                        title: isActive
-                          ? 'Cannot delete active provider'
-                          : 'Delete Provider',
-                      },
-                      this.deleting === provider.id ? '⏳' : '\u{1F5D1}️',
-                    ),
-                  ],
-                )
-              : null,
+                  this.testingId === provider.id ? '⏳' : '\u{1F50C}',
+                ),
+                m(
+                  'button',
+                  {
+                    style: this.listActionBtnStyle(t),
+                    onclick: () => this.startEdit(provider),
+                    title: 'Edit Provider',
+                    'aria-label': 'Edit Provider',
+                  },
+                  '✏️',
+                ),
+                m(
+                  'button',
+                  {
+                    style: this.listActionBtnStyle(t),
+                    onclick: () => this.cloneProvider(provider),
+                    title: 'Clone Provider',
+                    'aria-label': 'Clone Provider',
+                  },
+                  '📋',
+                ),
+                m(
+                  'button',
+                  {
+                    style: {...this.listActionBtnStyle(t), color: t.error},
+                    onclick: () => this.deleteProvider(provider.id),
+                    disabled: this.deleting === provider.id || isActive,
+                    title: isActive
+                      ? 'Cannot delete active provider'
+                      : 'Delete Provider',
+                    'aria-label': 'Delete Provider',
+                  },
+                  this.deleting === provider.id ? '⏳' : '\u{1F5D1}️',
+                ),
+              ],
+            ),
 
             m(
               'button',
@@ -909,7 +938,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
             m(
               'span',
               {style: {fontSize: '13px', fontWeight: 600, color: t.text}},
-              'Effective Configuration',
+              'Active Provider Env Override',
             ),
             m(
               'span',
@@ -939,7 +968,21 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   animation: 'fadeSlideIn 0.15s ease-out',
                 },
               },
-              [this.renderEffectiveBody()],
+              [
+                m(
+                  'div',
+                  {
+                    style: {
+                      fontSize: '12px',
+                      color: t.textSecondary,
+                      margin: '2px 0 8px',
+                      lineHeight: '1.4',
+                    },
+                  },
+                  'These values are what the active Provider Manager profile sends to the backend runtime. They override backend/.env until you switch to System Default.',
+                ),
+                this.renderEffectiveBody(),
+              ],
             )
           : null,
       ],

@@ -54,6 +54,21 @@ function isDualSurfaceProviderType(type: ProviderType): boolean {
   return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
 }
 
+const CONNECTION_FIELD_HINTS: Record<string, string> = {
+  apiKey:
+    'This is the model provider key stored in Provider Manager. Preset providers reuse it for both SDK runtimes unless an override below is set.',
+  claudeApiKey:
+    'Used only by the Claude SDK path and sent as x-api-key. Leave empty when the shared provider key should be reused.',
+  claudeAuthToken:
+    'Used only by the Claude SDK path and sent as Authorization: Bearer <token>. Do not include the Bearer prefix.',
+  claudeBaseUrl:
+    'Used only by Claude SDK. Keep the preset unless your provider console shows a different Claude/Anthropic-compatible URL.',
+  openaiApiKey:
+    'Used only by the OpenAI SDK path. Leave empty when the shared provider key should be reused.',
+  openaiBaseUrl:
+    'Used only by OpenAI SDK. OpenAI-compatible gateways usually use a URL ending in /v1.',
+};
+
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private form: FormState = createEmptyForm();
   private expandedSection: AccordionSection = 'name';
@@ -314,8 +329,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               'p',
               {style: s.subtitle},
               this.isEdit
-                ? 'Modify provider configuration'
-                : 'Configure a new AI provider',
+                ? 'Modify provider credentials, runtime, and models'
+                : 'Save the provider, then test and activate it from the list',
             ),
           ]),
           m(
@@ -525,6 +540,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         },
         placeholder: `My ${template?.displayName || 'Provider'}`,
       }),
+      m(
+        'div',
+        {style: s.formHint},
+        'Saving creates a profile only. It affects analysis after you activate it or choose it from the provider switcher.',
+      ),
     ]);
   }
 
@@ -544,7 +564,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       return this.renderBedrockConnection(s);
     }
 
-    if (this.supportsClaudeSurface(this.form.type) && this.supportsOpenAISurface(this.form.type)) {
+    if (
+      this.supportsClaudeSurface(this.form.type) &&
+      this.supportsOpenAISurface(this.form.type)
+    ) {
       return this.renderDualSdkConnection(s);
     }
 
@@ -590,17 +613,29 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             },
             placeholder: meta.placeholder,
           }),
+          CONNECTION_FIELD_HINTS[field]
+            ? m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS[field])
+            : null,
         ]);
       }),
     );
   }
 
   private supportsClaudeSurface(type: ProviderType): boolean {
-    return type === 'anthropic' || type === 'deepseek' || type === 'custom';
+    return (
+      type === 'anthropic' ||
+      isDualSurfaceProviderType(type) ||
+      type === 'custom'
+    );
   }
 
   private supportsOpenAISurface(type: ProviderType): boolean {
-    return type === 'openai' || type === 'ollama' || type === 'deepseek' || type === 'custom';
+    return (
+      type === 'openai' ||
+      type === 'ollama' ||
+      isDualSurfaceProviderType(type) ||
+      type === 'custom'
+    );
   }
 
   private currentRuntime(): AgentRuntimeKind {
@@ -621,7 +656,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     return m('div', [
       this.renderRuntimeSelector(s),
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, 'Shared API Key'),
+        m('label', {style: s.formLabel}, 'Provider API Key (shared)'),
         m('input[type=password]', {
           style: s.formInput,
           value: this.form.connection.apiKey || '',
@@ -630,6 +665,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           },
           placeholder: 'sk-...',
         }),
+        m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS.apiKey),
       ]),
       m(
         'div',
@@ -711,6 +747,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           );
         }),
       ),
+      m(
+        'div',
+        {style: s.formHint},
+        'Claude SDK uses the Claude-compatible fields. OpenAI SDK uses the OpenAI-compatible fields. Switching runtime changes which side is active.',
+      ),
     ]);
   }
 
@@ -738,7 +779,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     return m('div', [
       options.includeApiKey
         ? this.renderConnectionInput(s, 'claudeApiKey')
-        : this.renderConnectionInput(s, 'claudeApiKey', 'Claude API Key Override'),
+        : this.renderConnectionInput(
+            s,
+            'claudeApiKey',
+            'Claude-compatible API Key Override',
+          ),
       this.renderConnectionInput(s, 'claudeAuthToken'),
       this.renderConnectionInput(s, 'claudeBaseUrl'),
     ]);
@@ -751,13 +796,19 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     return m('div', [
       options.includeApiKey
         ? this.renderConnectionInput(s, 'openaiApiKey')
-        : this.renderConnectionInput(s, 'openaiApiKey', 'OpenAI API Key Override'),
+        : this.renderConnectionInput(
+            s,
+            'openaiApiKey',
+            'OpenAI-compatible API Key Override',
+          ),
       this.renderConnectionInput(s, 'openaiBaseUrl'),
       this.renderOpenAIProtocolSelect(s),
     ]);
   }
 
-  private renderOpenAIProtocolSelect(s: ReturnType<typeof getStyles>): m.Children {
+  private renderOpenAIProtocolSelect(
+    s: ReturnType<typeof getStyles>,
+  ): m.Children {
     const protocol =
       this.form.connection.openaiProtocol ||
       (this.form.type === 'openai' ? 'responses' : 'chat_completions');
@@ -777,6 +828,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           m('option', {value: 'responses'}, 'Responses'),
           m('option', {value: 'chat_completions'}, 'Chat Completions'),
         ],
+      ),
+      m(
+        'div',
+        {style: s.formHint},
+        'Use Responses for official OpenAI. Use Chat Completions for Ollama and most OpenAI-compatible gateways.',
       ),
     ]);
   }
@@ -802,6 +858,9 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         },
         placeholder: meta.placeholder,
       }),
+      CONNECTION_FIELD_HINTS[field]
+        ? m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS[field])
+        : null,
     ]);
   }
 
