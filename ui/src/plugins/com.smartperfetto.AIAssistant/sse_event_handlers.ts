@@ -2394,9 +2394,13 @@ export function handleDataEvent(
     }
 
     const envelope = candidate;
+    const envelopeRecord = asRecord(candidate);
+    const envelopeSql = readStringField(envelopeRecord, 'sql');
 
     // Generate deduplication key
-    const deduplicationKey = envelope.meta.source ||
+    const deduplicationKey = envelopeSql
+      ? `${envelope.meta.source || 'sql'}:${envelopeSql}`
+      : envelope.meta.source ||
       `${envelope.meta.skillId || 'unknown'}:${envelope.meta.stepId || 'unknown'}`;
 
     if (ctx.displayedSkillProgress.has(deduplicationKey)) {
@@ -2430,6 +2434,8 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
   const format = envelope.display.format || 'table';
   const payload = envelope.data;
   const title = envelope.display.title;
+  const envelopeRecord = asRecord(envelope);
+  const sql = readStringField(envelopeRecord, 'sql');
 
   switch (format) {
     case 'text':
@@ -2600,8 +2606,9 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             columns: filteredColumns,
             rows: filteredRows,
             rowCount: filteredRows.length,
+            query: sql || undefined,
             columnDefinitions: filteredColumnDefs,
-            sectionTitle: title,
+            sectionTitle: sql ? undefined : title,
             group: envelope.display.group,
             collapsible: envelope.display.collapsible,
             defaultCollapsed: envelope.display.defaultCollapsed,

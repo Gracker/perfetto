@@ -164,7 +164,7 @@ describe('handleProgressEvent', () => {
     expect(ctx.flowMessages).toHaveLength(1);
     expect(ctx.flowMessages[0].content).toContain('Analyzing frames...');
     expect(ctx.flowMessages[0].role).toBe('assistant');
-    expect(result).toEqual({});
+    expect(result).toEqual({loadingPhase: 'Analyzing frames...'});
   });
 
   it('should keep existing messages and update streaming flow for new progress', () => {
@@ -506,13 +506,12 @@ describe('handleRoundStartEvent', () => {
     expect(ctx.messages[0].content).toContain('Analyzing CPU scheduling');
   });
 
-  it('should use default values when not provided', () => {
+  it('should ignore empty payloads', () => {
     const data = {data: {}};
 
     handleRoundStartEvent(data, ctx);
 
-    expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('1/5');
+    expect(ctx.messages).toHaveLength(0);
   });
 });
 
@@ -587,13 +586,12 @@ describe('handleSynthesisCompleteEvent', () => {
     expect(ctx.messages[0].content).toContain('2 个假设');
   });
 
-  it('should use defaults when counts not provided', () => {
+  it('should ignore empty payloads', () => {
     const data = {data: {}};
 
     handleSynthesisCompleteEvent(data, ctx);
 
-    expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('0 个发现');
+    expect(ctx.messages).toHaveLength(0);
   });
 });
 
@@ -1146,7 +1144,7 @@ describe('handleSkillErrorEvent', () => {
   });
 
   it('should handle missing fields gracefully', () => {
-    const data = {};
+    const data = {data: {error: 'Unknown error'}};
 
     handleSkillErrorEvent(data, ctx);
 
@@ -1451,12 +1449,12 @@ describe('handleStrategyFallbackEvent', () => {
     expect(ctx.messages[0].content).toContain('No matching strategy');
   });
 
-  it('should use default reason if not provided', () => {
-    const data = {data: {}};
+  it('should use default reason if payload is present without a reason', () => {
+    const data = {data: {fallback: true}};
 
     handleStrategyFallbackEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('未匹配到预设策略');
+    expect(ctx.messages[0].content).toContain('未命中预设策略');
   });
 });
 
@@ -1798,6 +1796,45 @@ describe('handleDataEvent', () => {
     expect(ctx.messages).toHaveLength(1);
   });
 
+  it('should keep executable SQL from execute_sql envelopes', () => {
+    const sql = 'INCLUDE PERFETTO MODULE slices.self_dur; SELECT * FROM _slice_self_dur;';
+    const data = {
+      id: 'sql-data-1',
+      envelope: {
+        meta: {type: 'sql_result', version: '2.0', source: 'execute_sql'},
+        sql,
+        data: {columns: ['id'], rows: [[1]]},
+        display: {layer: 'list', format: 'table', title: 'SQL Query (1 rows)'},
+      },
+    };
+
+    handleDataEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult?.query).toBe(sql);
+    expect(ctx.messages[0].sqlResult?.sectionTitle).toBeUndefined();
+  });
+
+  it('should deduplicate execute_sql envelopes by SQL text', () => {
+    const makeData = (sql: string) => ({
+      id: sql,
+      envelope: {
+        meta: {type: 'sql_result', version: '2.0', source: 'execute_sql'},
+        sql,
+        data: {columns: ['id'], rows: [[1]]},
+        display: {layer: 'list', format: 'table', title: 'SQL Query'},
+      },
+    });
+
+    handleDataEvent(makeData('SELECT 1;'), ctx);
+    handleDataEvent(makeData('SELECT 2;'), ctx);
+    handleDataEvent(makeData('SELECT 1;'), ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[0].sqlResult?.query).toBe('SELECT 1;');
+    expect(ctx.messages[1].sqlResult?.query).toBe('SELECT 2;');
+  });
+
   it('should handle null data gracefully', () => {
     const result = handleDataEvent(null, ctx);
 
@@ -2050,10 +2087,11 @@ describe('handleSSEEvent', () => {
     expect(ctx.messages).toHaveLength(0);
   });
 
-  it('should skip conclusion events (handled in analysis_completed)', () => {
+  it('should show conclusion events before analysis_completed metadata arrives', () => {
     handleSSEEvent('conclusion', {data: {conclusion: 'Final conclusion'}}, ctx);
 
-    expect(ctx.messages).toHaveLength(0);
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toBe('Final conclusion');
   });
 
   it('should route answer_token events to incremental answer stream', () => {

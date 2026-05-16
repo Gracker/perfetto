@@ -119,6 +119,7 @@ import {
   buildAgentSseStreamInit,
   buildAgentSseStreamUrl,
 } from './agent_sse_transport';
+import {formatPerfettoSql} from './sql_formatter';
 import {clearComparisonState} from './comparison_state_manager';
 import {
   handleSSEEvent as handleSSEEventExternal,
@@ -271,6 +272,13 @@ function detectDarkMode(): boolean {
   );
 }
 
+interface CachedSqlFormat {
+  raw: string;
+  text: string;
+  status: 'pending' | 'formatted' | 'failed';
+  error?: string;
+}
+
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
@@ -377,6 +385,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private revealedBlockCounts = new Map<string, number>();
   private renderedMessageContent = new WeakMap<HTMLElement, string>();
   private copiedMessageIds = new Set<string>();
+  private formattedSqlCache = new Map<string, CachedSqlFormat>();
   // Transient state saver — bound closure registered in oncreate, cleared in onremove.
   // Captures input draft, collapsed tables, and active SSE analysis when the
   // user switches between tab and floating window mode.
@@ -2241,9 +2250,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     if (!sqlResult) return null;
                                     const query =
                                       sqlResult.query || msg.query || '';
+                                    const formattedSql = query
+                                      ? this.sqlFormatForMessage(msg.id, query)
+                                      : null;
 
                                     // For skill_section messages with sectionTitle, render compact table only
-                                    if (sqlResult.sectionTitle) {
+                                    if (sqlResult.sectionTitle && !query) {
                                       // Auto-collapse tables marked as defaultCollapsed on first render
                                       if (
                                         sqlResult.defaultCollapsed &&
@@ -2385,8 +2397,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                             'button.ai-sql-action-btn',
                                             {
                                               onclick: () =>
-                                                this.copyToClipboard(query),
-                                              title: 'Copy SQL',
+                                                this.copyToClipboard(
+                                                  formattedSql?.text || query,
+                                                ),
+                                              title:
+                                                formattedSql?.status ===
+                                                'failed'
+                                                  ? 'Copy SQL (formatter unavailable)'
+                                                  : 'Copy formatted SQL',
                                             },
                                             [
                                               m('i.pf-icon', 'content_copy'),
@@ -2399,7 +2417,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                 {
                                                   onclick: () =>
                                                     this.handlePin({
-                                                      query,
+                                                      query:
+                                                        formattedSql?.text ||
+                                                        query,
                                                       columns:
                                                         sqlResult.columns,
                                                       rows: sqlResult.rows.slice(
@@ -2419,13 +2439,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         ]),
                                       ]),
                                       query
-                                        ? m('div.ai-sql-query', query.trim())
+                                        ? m(
+                                            'div.ai-sql-query',
+                                            formattedSql?.text || query.trim(),
+                                          )
                                         : null,
                                       m(SqlResultTable, {
                                         columns: sqlResult.columns,
                                         rows: sqlResult.rows,
                                         rowCount: sqlResult.rowCount,
-                                        query,
+                                        query: formattedSql?.text || query,
                                         trace: vnode.attrs.trace, // 传入 trace 对象以支持时间戳跳转
                                         onPin: (data) => this.handlePin(data),
                                         onExport: (format) =>
@@ -3102,6 +3125,31 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     } catch {
       // Ignore
     }
+  }
+
+  private sqlFormatForMessage(messageId: string, rawSql: string): CachedSqlFormat {
+    const raw = rawSql.trim();
+    if (!raw) {
+      return {raw, text: '', status: 'formatted'};
+    }
+
+    const cached = this.formattedSqlCache.get(messageId);
+    if (cached && cached.raw === raw) return cached;
+
+    const pending: CachedSqlFormat = {raw, text: raw, status: 'pending'};
+    this.formattedSqlCache.set(messageId, pending);
+    formatPerfettoSql(raw).then((result) => {
+      const current = this.formattedSqlCache.get(messageId);
+      if (!current || current.raw !== raw) return;
+      this.formattedSqlCache.set(messageId, {
+        raw,
+        text: result.text || raw,
+        status: result.ok ? 'formatted' : 'failed',
+        error: result.error,
+      });
+      m.redraw();
+    });
+    return pending;
   }
 
   private saveSettings(newSettings: AISettings) {

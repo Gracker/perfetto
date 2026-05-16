@@ -2096,8 +2096,8 @@
   font-size: 11px;
   color: var(--chat-text-secondary);
   white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 60px;
+  word-break: break-word;
+  max-height: 180px;
   overflow-y: auto;
 
   pre {
