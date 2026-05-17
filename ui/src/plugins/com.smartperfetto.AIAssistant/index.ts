@@ -215,7 +215,7 @@ export default class implements PerfettoPlugin {
       },
     });
 
-    // Restore persisted overlay tracks after hot-reload (build.js --watch).
+    // Restore persisted overlay tracks after hot-reload (build.mjs --watch).
     // Deferred to onTraceReady to ensure workspace is fully initialized.
     ctx.onTraceReady.addListener(() => {
       restoreOverlayTracks(ctx).catch((e) => {

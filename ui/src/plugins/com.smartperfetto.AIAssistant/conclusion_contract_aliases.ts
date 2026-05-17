@@ -21,6 +21,7 @@ export const CONTRACT_ALIASES = {
     conclusions: ['conclusion', 'conclusions'],
     clusters: ['clusters'],
     evidenceChain: ['evidence_chain', 'evidenceChain'],
+    claims: ['claims', 'claim_refs', 'claimRefs', 'claimReferences'],
     uncertainties: ['uncertainties'],
     nextSteps: ['next_steps', 'nextSteps'],
     metadata: ['metadata'],
@@ -56,5 +57,20 @@ export const CONTRACT_ALIASES = {
     text: ['text'],
     statement: ['statement'],
     data: ['data'],
+  },
+  claim: {
+    id: ['id', 'claimId', 'claim_id'],
+    conclusionId: ['conclusionId', 'conclusion_id', 'conclusion'],
+    text: ['text', 'statement', 'claim'],
+    references: ['references', 'refs', 'evidenceRefs', 'evidence_refs'],
+  },
+  claimRef: {
+    evidenceRefId: ['evidenceRefId', 'evidence_ref_id', 'evidenceId', 'evidence_id'],
+    rowIndex: ['rowIndex', 'row_index'],
+    rowSelector: ['rowSelector', 'row_selector'],
+    column: ['column', 'col'],
+    value: ['value'],
+    sourceRef: ['sourceRef', 'source_ref', 'ref'],
+    sourceToolCallId: ['sourceToolCallId', 'source_tool_call_id', 'toolCallId', 'tool_call_id'],
   },
 } as const;

@@ -44,6 +44,7 @@ export interface Message {
   sqlResult?: SqlQueryResult;
   query?: string;
   reportUrl?: string; // HTML report link
+  sourceContext?: DataSourceContext;
   // Chart data for visualization (display.format: 'chart')
   chartData?: {
     type: 'pie' | 'bar' | 'histogram';
@@ -323,8 +324,22 @@ export interface DataSourceContext {
   source: string;
   reason: string;
   meaning: string;
+  kind?: 'table' | 'summary' | 'metric' | 'chart' | 'text' | 'timeline' | 'diagnostic';
   rowCount?: number;
   phase?: string;
+  evidenceRefId?: string;
+  traceSide?: 'current' | 'reference';
+  traceId?: string;
+  queryHash?: string;
+  sourceToolCallId?: string;
+  paramsHash?: string;
+  planPhaseId?: string;
+  planPhaseTitle?: string;
+  planPhaseGoal?: string;
+  planPhaseAttribution?: 'active' | 'inferred' | 'missing' | 'ambiguous' | 'unexpected_tool' | 'none';
+  planPhaseWarning?: string;
+  producerReason?: string;
+  toolNarration?: string;
 }
 
 export interface StreamingFlowState {
@@ -340,6 +355,13 @@ export interface StreamingFlowState {
   conversationLastRenderedAt: number | null;
   conversationPendingSteps: Record<number, ConversationStepTimelineItem>;
   conversationSeenEventIds: Set<string>;
+  /** Synthetic answer-stream checkpoints rendered into the conversation timeline. */
+  answerTimelineStarted: boolean;
+  answerTimelineOrdinal: number;
+  answerTimelineLastSnapshot: string;
+  answerTimelineLastSnapshotCharCount: number;
+  answerTimelineLastSnapshotAt: number | null;
+  answerTimelineCompleted: boolean;
   status: 'idle' | 'running' | 'completed' | 'failed';
   phases: string[];
   thoughts: string[];
@@ -353,6 +375,7 @@ export interface StreamingFlowState {
   /** Per-run data table references used to connect tables and conclusions. */
   dataSourceRefs: DataSourceContext[];
   dataSourceOrdinal: number;
+  dataSourceKindOrdinals: Record<string, number>;
   /** Deferred retry timer for throttled conversation timeline steps. */
   conversationFlushTimer?: number;
 }
@@ -371,6 +394,12 @@ export function createStreamingFlowState(): StreamingFlowState {
     conversationLastRenderedAt: null,
     conversationPendingSteps: {},
     conversationSeenEventIds: new Set<string>(),
+    answerTimelineStarted: false,
+    answerTimelineOrdinal: 0,
+    answerTimelineLastSnapshot: '',
+    answerTimelineLastSnapshotCharCount: 0,
+    answerTimelineLastSnapshotAt: null,
+    answerTimelineCompleted: false,
     status: 'idle',
     phases: [],
     thoughts: [],
@@ -382,6 +411,7 @@ export function createStreamingFlowState(): StreamingFlowState {
     subAgents: [],
     dataSourceRefs: [],
     dataSourceOrdinal: 0,
+    dataSourceKindOrdinals: {},
     conversationFlushTimer: undefined,
   };
 }
@@ -428,6 +458,7 @@ export interface SqlQueryResult {
   // Column definitions for schema-driven rendering (v2.0)
   columnDefinitions?: Array<{
     name: string;
+    label?: string;
     type?: string;
     format?: string;
     clickAction?: string;

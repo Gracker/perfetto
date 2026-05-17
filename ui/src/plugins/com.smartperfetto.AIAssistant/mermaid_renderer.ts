@@ -62,7 +62,7 @@ export class MermaidRenderer {
    * Returns a promise that resolves when loaded.
    *
    * The script is loaded from assets/mermaid.min.js which is copied
-   * by build.js to comply with CSP (Content Security Policy).
+   * by build.mjs to comply with CSP (Content Security Policy).
    */
   loadMermaidScript(): Promise<void> {
     if (this.mermaidLoadPromise) return this.mermaidLoadPromise;
@@ -70,7 +70,7 @@ export class MermaidRenderer {
 
     this.mermaidLoadPromise = new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      // Load mermaid from local assets (copied by build.js) to comply with CSP.
+      // Load mermaid from local assets (copied by build.mjs) to comply with CSP.
       script.src = assetSrc('assets/mermaid.min.js');
       script.async = true;
       script.onload = () => {

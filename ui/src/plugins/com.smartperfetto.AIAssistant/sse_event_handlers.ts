@@ -446,6 +446,11 @@ const STREAM_FLOW_LIMITS = {
 
 const ANSWER_STREAM_RENDER_INTERVAL_MS = 16;
 const ANSWER_STREAM_PENDING_CHUNK_SIZE = 24;
+const ANSWER_TIMELINE_SNAPSHOT_MIN_CHARS = 24;
+const ANSWER_TIMELINE_SNAPSHOT_MIN_DELTA_CHARS = 48;
+const ANSWER_TIMELINE_SNAPSHOT_FORCE_DELTA_CHARS = 160;
+const ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
+const ANSWER_TIMELINE_SNIPPET_MAX_CHARS = 220;
 
 type StreamingFlowSection = 'phase' | 'thought' | 'tool' | 'output' | 'conversation';
 
@@ -652,7 +657,7 @@ function ensureStreamingFlowMessage(
 function refreshStreamingFlowMessage(
   ctx: SSEHandlerContext,
   section: StreamingFlowSection,
-  options: {createIfMissing?: boolean} = {}
+  options: {createIfMissing?: boolean; persist?: boolean} = {}
 ): void {
   const flow = ctx.streamingFlow;
   const messageId = options.createIfMissing === false
@@ -664,7 +669,7 @@ function refreshStreamingFlowMessage(
     content: buildStreamingFlowContent(flow, section),
     timestamp: flow.lastUpdatedAt,
     flowTag: 'streaming_flow',
-  }, {persist: false});
+  }, {persist: options.persist === true});
 }
 
 function isConversationTimelineEnabled(ctx: SSEHandlerContext): boolean {
@@ -759,6 +764,174 @@ function renderConversationStepLine(step: ConversationStepTimelineItem): string 
   return `${timePrefix}#${step.ordinal} [${phaseLabel}/${roleLabel}] ${step.text}`;
 }
 
+function renderAnswerTimelineLine(
+  flow: StreamingFlowState,
+  phase: ConversationStepTimelineItem['phase'],
+  role: ConversationStepTimelineItem['role'],
+  text: string
+): string {
+  const phaseLabel = getConversationPhaseLabel(phase);
+  const roleLabel = getConversationRoleLabel(role);
+  const timeStr = new Date().toLocaleTimeString('zh-CN', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  flow.answerTimelineOrdinal += 1;
+  return `\`${timeStr}\` #A${flow.answerTimelineOrdinal} [${phaseLabel}/${roleLabel}] ${text}`;
+}
+
+function appendAnswerTimelineLine(
+  ctx: SSEHandlerContext,
+  phase: ConversationStepTimelineItem['phase'],
+  role: ConversationStepTimelineItem['role'],
+  text: string
+): boolean {
+  const lineText = normalizeFlowLine(text);
+  if (!lineText) return false;
+
+  const flow = ctx.streamingFlow;
+  flow.conversationEnabled = true;
+  if (flow.status === 'idle') {
+    flow.status = 'running';
+    flow.startedAt = Date.now();
+  }
+
+  const line = renderAnswerTimelineLine(flow, phase, role, lineText);
+  const changed = appendFlowLine(
+    flow.conversationLines,
+    line,
+    STREAM_FLOW_LIMITS.conversation
+  );
+  if (changed) {
+    refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
+  }
+  return changed;
+}
+
+function ensureAnswerTimelineStarted(ctx: SSEHandlerContext): void {
+  const flow = ctx.streamingFlow;
+  if (flow.answerTimelineStarted) return;
+  flow.answerTimelineStarted = true;
+  appendAnswerTimelineLine(ctx, 'progress', 'agent', '开始流式输出分析结果。');
+}
+
+function compactAnswerTimelineLine(line: string): string {
+  return line
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLowSignalAnswerTimelineLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (/^```/.test(trimmed)) return true;
+  if (/^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed)) {
+    return true;
+  }
+  if (/^\|?\s*[-:\s|]+\s*\|?$/.test(trimmed)) return true;
+  if (/^#{1,6}\s*$/.test(trimmed)) return true;
+  return false;
+}
+
+function trimAnswerTimelineSnippet(value: string): string {
+  if (value.length <= ANSWER_TIMELINE_SNIPPET_MAX_CHARS) return value;
+  return `${value.slice(0, ANSWER_TIMELINE_SNIPPET_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function extractAnswerTimelineSnippet(answerText: string): string {
+  const lines = answerText
+    .split(/\n+/)
+    .map((line) => compactAnswerTimelineLine(line))
+    .filter((line) => !isLowSignalAnswerTimelineLine(line));
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const candidate = trimAnswerTimelineSnippet(lines[i]);
+    if (candidate.length >= 8) return candidate;
+  }
+
+  return trimAnswerTimelineSnippet(compactAnswerTimelineLine(answerText));
+}
+
+function shouldAppendAnswerTimelineSnapshot(
+  flow: StreamingFlowState,
+  token: string,
+  snippet: string,
+  textLength: number,
+  options: {force?: boolean} = {}
+): boolean {
+  if (!snippet || snippet === flow.answerTimelineLastSnapshot) return false;
+  if (options.force === true) return true;
+  if (snippet.length < ANSWER_TIMELINE_SNAPSHOT_MIN_CHARS) return false;
+
+  const now = Date.now();
+  const charDelta = Math.max(0, textLength - flow.answerTimelineLastSnapshotCharCount);
+  const intervalOk = (
+    flow.answerTimelineLastSnapshotAt === null ||
+    now - flow.answerTimelineLastSnapshotAt >= ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS
+  );
+  const boundary = token.includes('\n') || /[。！？!?；;：:]$/.test(token);
+
+  return (
+    charDelta >= ANSWER_TIMELINE_SNAPSHOT_FORCE_DELTA_CHARS ||
+    (boundary && charDelta >= ANSWER_TIMELINE_SNAPSHOT_MIN_DELTA_CHARS) ||
+    (intervalOk && charDelta >= ANSWER_TIMELINE_SNAPSHOT_MIN_DELTA_CHARS)
+  );
+}
+
+function recordAnswerTimelineSnapshot(
+  ctx: SSEHandlerContext,
+  snippet: string,
+  textLength: number,
+  label = '流式更新'
+): void {
+  const flow = ctx.streamingFlow;
+  if (appendAnswerTimelineLine(ctx, 'result', 'agent', `${label}: ${snippet}`)) {
+    flow.answerTimelineLastSnapshot = snippet;
+    flow.answerTimelineLastSnapshotCharCount = textLength;
+    flow.answerTimelineLastSnapshotAt = Date.now();
+  }
+}
+
+function syncAnswerStreamToConversationTimeline(
+  ctx: SSEHandlerContext,
+  token: string,
+  options: {force?: boolean; completed?: boolean} = {}
+): void {
+  const answer = ctx.streamingAnswer;
+  const answerText = `${answer.content}${answer.pending}`.trim();
+  if (!answerText) return;
+
+  if (answerText) {
+    ensureAnswerTimelineStarted(ctx);
+  }
+
+  const flow = ctx.streamingFlow;
+  const snippet = extractAnswerTimelineSnippet(answerText);
+  const textLength = answerText.length;
+  if (shouldAppendAnswerTimelineSnapshot(flow, token, snippet, textLength, options)) {
+    recordAnswerTimelineSnapshot(
+      ctx,
+      snippet,
+      textLength,
+      options.completed === true ? '最终更新' : '流式更新'
+    );
+  }
+
+  if (options.completed === true && !flow.answerTimelineCompleted) {
+    flow.answerTimelineCompleted = true;
+    appendAnswerTimelineLine(ctx, 'result', 'agent', `最终回答已输出（${textLength} 字）。`);
+    refreshStreamingFlowMessage(ctx, 'conversation', {
+      createIfMissing: true,
+      persist: true,
+    });
+  }
+}
+
 function getConversationPhaseMinGapMs(phase: ConversationStepTimelineItem['phase']): number {
   switch (phase) {
     case 'thinking':
@@ -839,10 +1012,14 @@ function completeStreamingFlow(ctx: SSEHandlerContext): void {
       ctx.streamingFlow.tools.length > 0 ||
       ctx.streamingFlow.outputs.length > 0
     );
-    refreshStreamingFlowMessage(ctx, 'phase', {createIfMissing: hasLegacyFlow});
+    refreshStreamingFlowMessage(ctx, 'phase', {
+      createIfMissing: hasLegacyFlow,
+      persist: true,
+    });
     if (ctx.streamingFlow.conversationEnabled) {
       refreshStreamingFlowMessage(ctx, 'conversation', {
         createIfMissing: ctx.streamingFlow.conversationLines.length > 0,
+        persist: true,
       });
     }
   }
@@ -864,10 +1041,14 @@ function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
     ctx.streamingFlow.tools.length > 0 ||
     ctx.streamingFlow.outputs.length > 0
   );
-  refreshStreamingFlowMessage(ctx, 'phase', {createIfMissing: hasLegacyFlow});
+  refreshStreamingFlowMessage(ctx, 'phase', {
+    createIfMissing: hasLegacyFlow,
+    persist: true,
+  });
   if (ctx.streamingFlow.conversationEnabled) {
     refreshStreamingFlowMessage(ctx, 'conversation', {
       createIfMissing: ctx.streamingFlow.conversationLines.length > 0,
+      persist: true,
     });
   }
 }
@@ -944,10 +1125,13 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
   const title = envelope.display?.title || envelope.meta?.stepId || envelope.meta?.skillId || '数据更新';
   const payload = envelope.data;
   const rowCount = Array.isArray(payload?.rows) ? payload.rows.length : undefined;
+  const traceLabel = traceSideLabel(readEnvelopeTraceSide(envelope))
+    ? `${traceSideLabel(readEnvelopeTraceSide(envelope))} · `
+    : '';
   if (typeof rowCount === 'number') {
-    return `${title} (${rowCount} 行)`;
+    return `${traceLabel}${title} (${rowCount} 行)`;
   }
-  return `${title} (${envelope.display?.format || 'table'})`;
+  return `${traceLabel}${title} (${envelope.display?.format || 'table'})`;
 }
 
 function inferDataSourceReason(input: {
@@ -980,7 +1164,7 @@ function inferDataSourceReason(input: {
       return '诊断层数据，用来直接支撑结论和建议。';
   }
 
-  if (/overview|概览|summary|统计/.test(title)) {
+  if (source === 'summary' || /overview|概览|summary|摘要|统计/.test(title)) {
     return '汇总数据，用来建立本轮分析的基线判断。';
   }
   return '中间证据表，用来连接时间线动作和最终结论。';
@@ -1012,59 +1196,354 @@ function inferDataMeaning(title: string, columns: string[]): string {
   return '每行是一条命中的证据记录；列是本步骤用于判断的指标、实体或时间字段。';
 }
 
+function normalizeTraceSide(value: unknown): 'current' | 'reference' | undefined {
+  return value === 'current' || value === 'reference' ? value : undefined;
+}
+
+function readPlanPhaseAttribution(
+  source: Record<string, unknown>
+): DataSourceContext['planPhaseAttribution'] | undefined {
+  const value = source.planPhaseAttribution;
+  switch (value) {
+    case 'active':
+    case 'inferred':
+    case 'missing':
+    case 'ambiguous':
+    case 'unexpected_tool':
+    case 'none':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function traceSideLabel(traceSide: 'current' | 'reference' | undefined): string {
+  if (traceSide === 'current') return '当前 Trace';
+  if (traceSide === 'reference') return '参考 Trace';
+  return '';
+}
+
+function compactEvidenceRef(value: string | undefined): string {
+  if (!value) return '';
+  if (value.length <= 56) return value;
+  const parts = value.split(':').filter(Boolean);
+  const tail = parts.slice(-3).join(':');
+  return tail ? `...${tail}` : `${value.slice(0, 24)}...${value.slice(-16)}`;
+}
+
+function readEnvelopeTraceSide(envelope: DataEnvelope): 'current' | 'reference' | undefined {
+  const envelopeRecord = asRecord(envelope);
+  const provenance = asRecord(envelopeRecord.traceProvenance);
+  return normalizeTraceSide(envelope.meta?.traceSide)
+    || normalizeTraceSide(envelopeRecord.traceSide)
+    || normalizeTraceSide(provenance.traceSide);
+}
+
+function readEnvelopeTraceId(envelope: DataEnvelope): string | undefined {
+  const envelopeRecord = asRecord(envelope);
+  const provenance = asRecord(envelopeRecord.traceProvenance);
+  return readStringField(envelope.meta as unknown as Record<string, unknown>, 'traceId')
+    || readStringField(envelopeRecord, 'traceId')
+    || readStringField(provenance, 'traceId')
+    || undefined;
+}
+
+function stableEnvelopeContentHash(envelope: DataEnvelope): string {
+  const stableContent = JSON.stringify({
+    source: envelope.meta?.source,
+    skillId: envelope.meta?.skillId,
+    stepId: envelope.meta?.stepId,
+    title: envelope.display?.title,
+    data: envelope.data,
+  }, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
+  let hash = 0;
+  for (let i = 0; i < stableContent.length; i++) {
+    hash = ((hash << 5) - hash + stableContent.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function dataEnvelopeDeduplicationKey(
+  envelope: DataEnvelope,
+  eventId?: string,
+  occurrenceIndex = 0,
+): string {
+  const envelopeRecord = asRecord(envelope);
+  const sql = readStringField(envelopeRecord, 'sql');
+  const evidenceRefId = envelope.meta?.evidenceRefId;
+  if (evidenceRefId) {
+    if (envelope.meta?.sourceToolCallId) {
+      return [evidenceRefId, envelope.meta.sourceToolCallId].join(':tool:');
+    }
+    const occurrence = [
+      eventId,
+      occurrenceIndex,
+      envelope.meta?.timestamp,
+      stableEnvelopeContentHash(envelope),
+    ].filter((part) => part !== undefined && part !== null && String(part) !== '').join(':');
+    return [evidenceRefId, occurrence || 'stable'].join(':occurrence:');
+  }
+  return [
+    envelope.meta?.source || 'data_envelope',
+    envelope.meta?.skillId || 'unknown_skill',
+    envelope.meta?.stepId || 'unknown_step',
+    readEnvelopeTraceSide(envelope) || 'trace',
+    readEnvelopeTraceId(envelope) || 'trace_id',
+    sql || envelope.meta?.timestamp || '',
+  ].join(':');
+}
+
+function normalizeDataSourceKind(value: unknown): DataSourceContext['kind'] {
+  switch (value) {
+    case 'summary':
+    case 'metric':
+    case 'chart':
+    case 'text':
+    case 'timeline':
+    case 'diagnostic':
+      return value;
+    case 'table':
+    default:
+      return 'table';
+  }
+}
+
+function envelopeColumnsForContext(envelope: DataEnvelope): string[] {
+  const payloadColumns = envelope.data?.columns;
+  if (Array.isArray(payloadColumns)) {
+    return payloadColumns.map((col) => String(col));
+  }
+  const displayColumns = envelope.display?.columns;
+  if (Array.isArray(displayColumns)) {
+    return displayColumns
+      .map((column) => asRecord(column).name)
+      .filter((name): name is string => typeof name === 'string' && name.length > 0);
+  }
+  return [];
+}
+
+function registerEnvelopeSourceContext(
+  ctx: SSEHandlerContext,
+  envelope: DataEnvelope,
+  title: string,
+  extra: Partial<{
+    rowCount: number;
+    columns: string[];
+    query: string;
+    kind: DataSourceContext['kind'];
+  }> = {}
+): DataSourceContext {
+  const envelopeRecord = asRecord(envelope);
+  const metaRecord = asRecord(envelope.meta as unknown);
+  const sql = extra.query || readStringField(envelopeRecord, 'sql') || undefined;
+  const rows = envelope.data?.rows;
+  const rowCount = extra.rowCount ?? (Array.isArray(rows) ? rows.length : undefined);
+  const source = [
+    envelope.meta.skillId || envelope.meta.source,
+    envelope.meta.stepId,
+  ].filter(Boolean).join('#');
+
+  return registerDataSourceContext(ctx, {
+    title,
+    source: source || envelope.meta.source || 'data_envelope',
+    layer: envelope.display.layer,
+    kind: extra.kind || normalizeDataSourceKind(envelope.display.format),
+    rowCount,
+    columns: extra.columns || envelopeColumnsForContext(envelope),
+    query: sql,
+    evidenceRefId: readStringField(metaRecord, 'evidenceRefId') || undefined,
+    traceSide: readEnvelopeTraceSide(envelope),
+    traceId: readEnvelopeTraceId(envelope),
+    queryHash: readStringField(metaRecord, 'queryHash') || undefined,
+    sourceToolCallId: readStringField(metaRecord, 'sourceToolCallId') || undefined,
+    paramsHash: readStringField(metaRecord, 'paramsHash') || undefined,
+    planPhaseId: readStringField(metaRecord, 'planPhaseId') || undefined,
+    planPhaseTitle: readStringField(metaRecord, 'planPhaseTitle') || undefined,
+    planPhaseGoal: readStringField(metaRecord, 'planPhaseGoal') || undefined,
+    planPhaseAttribution: readPlanPhaseAttribution(metaRecord),
+    planPhaseWarning: readStringField(metaRecord, 'planPhaseWarning') || undefined,
+    producerReason: readStringField(metaRecord, 'producerReason') || undefined,
+    toolNarration: readStringField(metaRecord, 'toolNarration') || undefined,
+  });
+}
+
 function registerDataSourceContext(
   ctx: SSEHandlerContext,
   input: {
     title: string;
     source?: string;
     layer?: string;
+    kind?: DataSourceContext['kind'];
     rowCount?: number;
     columns?: string[];
     query?: string;
+    evidenceRefId?: string;
+    traceSide?: 'current' | 'reference';
+    traceId?: string;
+    queryHash?: string;
+    sourceToolCallId?: string;
+    paramsHash?: string;
+    planPhaseId?: string;
+    planPhaseTitle?: string;
+    planPhaseGoal?: string;
+    planPhaseAttribution?: DataSourceContext['planPhaseAttribution'];
+    planPhaseWarning?: string;
+    producerReason?: string;
+    toolNarration?: string;
   }
 ): DataSourceContext {
   const flow = ctx.streamingFlow;
   flow.dataSourceOrdinal = (flow.dataSourceOrdinal || 0) + 1;
+  flow.dataSourceKindOrdinals ||= {};
+  const isDiagnostic = input.kind === 'diagnostic';
+  const reason = isDiagnostic
+    ? '失败诊断：该步骤未产出可用数据，只用于解释失败和指导重试，不能作为结论证据。'
+    : normalizeFlowLine(input.producerReason || input.toolNarration || '')
+      || inferDataSourceReason(input);
+  const meaning = isDiagnostic
+    ? '包含失败工具、错误信息、原始 SQL 或上下文；它说明数据缺失原因，不证明性能结论。'
+    : inferDataMeaning(input.title || '', input.columns || []);
+  const refPrefix = input.kind === 'summary'
+    ? '摘要'
+    : input.kind === 'metric'
+      ? '指标'
+      : input.kind === 'chart'
+        ? '图'
+        : input.kind === 'text'
+          ? '文本'
+          : input.kind === 'diagnostic'
+            ? '诊断'
+            : input.kind === 'timeline'
+              ? '时间线'
+              : '表';
+  const refKind = input.kind || 'table';
+  const refOrdinal = (flow.dataSourceKindOrdinals[refKind] || 0) + 1;
+  flow.dataSourceKindOrdinals[refKind] = refOrdinal;
   const sourceContext: DataSourceContext = {
-    ref: `表 ${flow.dataSourceOrdinal}`,
+    ref: `${refPrefix} ${refOrdinal}`,
     title: normalizeFlowLine(input.title || '数据表') || '数据表',
     source: normalizeFlowLine(input.source || input.layer || 'analysis') || 'analysis',
-    reason: inferDataSourceReason(input),
-    meaning: inferDataMeaning(input.title || '', input.columns || []),
+    reason,
+    meaning,
+    kind: input.kind,
     rowCount: input.rowCount,
     phase: input.layer ? `DataEnvelope.${input.layer}` : undefined,
+    evidenceRefId: input.evidenceRefId,
+    traceSide: input.traceSide,
+    traceId: input.traceId,
+    queryHash: input.queryHash,
+    sourceToolCallId: input.sourceToolCallId,
+    paramsHash: input.paramsHash,
+    planPhaseId: input.planPhaseId,
+    planPhaseTitle: input.planPhaseTitle,
+    planPhaseGoal: input.planPhaseGoal,
+    planPhaseAttribution: input.planPhaseAttribution,
+    planPhaseWarning: input.planPhaseWarning,
+    producerReason: input.producerReason,
+    toolNarration: input.toolNarration,
   };
   flow.dataSourceRefs.push(sourceContext);
-  if (flow.dataSourceRefs.length > 80) {
-    flow.dataSourceRefs.splice(0, flow.dataSourceRefs.length - 80);
-  }
   return sourceContext;
 }
 
 function dataSourceLine(ref: DataSourceContext): string {
   const count = typeof ref.rowCount === 'number' ? `，${ref.rowCount} 行` : '';
   const phase = ref.phase ? `，${ref.phase}` : '';
-  return `- ${ref.ref}: ${ref.title}${count}（来源: ${ref.source}${phase}）`;
+  const planPhase = ref.planPhaseTitle || ref.planPhaseId
+    ? `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`
+    : '';
+  const phaseAttribution = ref.planPhaseAttribution && ref.planPhaseAttribution !== 'active'
+    ? `，阶段归因: ${ref.planPhaseAttribution}`
+    : '';
+  const phaseWarning = ref.planPhaseWarning ? `，${ref.planPhaseWarning}` : '';
+  const trace = traceSideLabel(ref.traceSide);
+  const tracePrefix = trace ? `${trace} · ` : '';
+  const evidence = ref.evidenceRefId ? `，证据: ${compactEvidenceRef(ref.evidenceRefId)}` : '';
+  const tool = ref.sourceToolCallId ? `，工具: ${compactEvidenceRef(ref.sourceToolCallId)}` : '';
+  const reason = ref.reason ? `；用途: ${ref.reason}` : '';
+  const meaning = ref.meaning ? `；含义: ${ref.meaning}` : '';
+  return `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${phaseAttribution}${phaseWarning}${tool}${evidence}）${reason}${meaning}`;
 }
 
-function appendDataSourceIndex(content: string, ctx: SSEHandlerContext): string {
-  const refs = ctx.streamingFlow.dataSourceRefs;
-  if (refs.length === 0) return content;
-  if (/(^|\n)##\s*数据来源索引/.test(content)) return content;
+function collectClaimReferencedSourceContexts(
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+  refs: DataSourceContext[],
+): Set<DataSourceContext> {
+  const referenced = new Set<DataSourceContext>();
+  if (!contract || typeof contract !== 'object') return referenced;
 
-  const shown = refs.slice(-8);
-  const omitted = refs.length > shown.length
-    ? `\n- 另有 ${refs.length - shown.length} 个更早的数据表未列出。`
-    : '';
+  const claims = readAliasedRecordArray(asRecord(contract), CONTRACT_ALIASES.root.claims);
+  for (const claim of claims) {
+    const references = readAliasedRecordArray(claim, CONTRACT_ALIASES.claim.references);
+    for (const ref of references) {
+      const evidenceRefId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId));
+      const sourceRef = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef));
+      const sourceToolCallId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId));
+      if (!evidenceRefId && !sourceRef && !sourceToolCallId) continue;
+      for (const context of refs) {
+        if (sourceContextMatchesClaim(context, evidenceRefId, sourceRef, sourceToolCallId)) {
+          referenced.add(context);
+        }
+      }
+    }
+  }
+  return referenced;
+}
+
+function renderDataSourceIndexSection(
+  ctx: SSEHandlerContext,
+  contract?: ConclusionContract | Record<string, unknown> | null,
+): string {
+  const refs = ctx.streamingFlow.dataSourceRefs;
+  if (refs.length === 0) return '';
+  const maxInlineRefs = 120;
+  const headCount = 100;
+  const tailCount = 20;
+  const referencedRefs = collectClaimReferencedSourceContexts(contract, refs);
+  const displayedRefs = refs.length > maxInlineRefs
+    ? refs.filter((ref, index) =>
+        index < headCount ||
+        index >= refs.length - tailCount ||
+        referencedRefs.has(ref)
+      )
+    : refs;
+  const omittedCount = Math.max(0, refs.length - displayedRefs.length);
+  const pinnedReferencedCount = refs.filter((ref, index) =>
+    referencedRefs.has(ref) &&
+    index >= headCount &&
+    index < refs.length - tailCount
+  ).length;
+
+  return [
+    '---',
+    '## 数据来源索引（系统生成）',
+    '以下是本轮结论可核对的数据输出；证据 ID 可在报告和结果快照中对齐。若结论合同提供逐句引用，会在“逐句数据引用”里标出行/列和值。',
+    omittedCount > 0
+      ? `本轮共有 ${refs.length} 个数据来源；为避免结论过长，这里列出前 ${headCount} 个和后 ${tailCount} 个${pinnedReferencedCount > 0 ? `，并额外保留 ${pinnedReferencedCount} 个被逐句引用命中的来源` : ''}，省略中间 ${omittedCount} 个。完整来源仍保留在本轮表格消息中；结果快照可能受快照上限裁剪。`
+      : '',
+    ...displayedRefs.map(dataSourceLine),
+  ].filter(Boolean).join('\n');
+}
+
+function appendDataSourceIndex(
+  content: string,
+  ctx: SSEHandlerContext,
+  contract?: ConclusionContract | Record<string, unknown> | null,
+): string {
+  const section = renderDataSourceIndexSection(ctx, contract);
+  if (!section) return content;
+
+  const existingSystemIndex = /(?:\n---)?\n##\s*数据来源索引（系统生成）[\s\S]*?(?=\n---\n|$)/;
+  if (existingSystemIndex.test(content)) {
+    if (!contract) return content;
+    return content.replace(existingSystemIndex, `\n\n${section}`);
+  }
+
   return [
     content.trimEnd(),
     '',
-    '---',
-    '## 数据来源索引',
-    '以下是本轮结论可核对的数据表。当前为表级来源索引；逐句数字到具体行/列的引用需要后端结论合同输出结构化 evidenceRef。',
-    ...shown.map(dataSourceLine),
-    omitted,
-  ].filter(Boolean).join('\n');
+    section,
+  ].join('\n');
 }
 
 /**
@@ -1174,6 +1653,7 @@ function normalizeColumnDefinitions(columns: unknown): SqlColumnDefinition[] | u
       }
       if (isRecord(col) && typeof col.name === 'string') {
         const normalized: SqlColumnDefinition = {name: col.name};
+        if (typeof col.label === 'string') normalized.label = col.label;
         if (typeof col.type === 'string') normalized.type = col.type;
         if (typeof col.format === 'string') normalized.format = col.format;
         if (typeof col.clickAction === 'string') normalized.clickAction = col.clickAction;
@@ -1252,12 +1732,14 @@ export function handleSkillSectionEvent(
     const rows = Array.isArray(section.rows) ? section.rows : [];
     const expandableData = readExpandableData(section.expandableData);
     const summary = readLegacySummary(section.summary);
-    const sourceContext = rowCount > 0
+    const normalizedColumns = columns.map((col) => String(col));
+    const hasTableShape = normalizedColumns.length > 0 || rows.length > 0;
+    const sourceContext = hasTableShape
       ? registerDataSourceContext(ctx, {
           title: sectionTitle,
           source: 'skill_section',
           rowCount,
-          columns: columns.map((col) => String(col)),
+          columns: normalizedColumns,
         })
       : undefined;
     pushStreamingOutput(
@@ -1268,9 +1750,11 @@ export function handleSkillSectionEvent(
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: '',  // No message content, title is in table header
+      content: hasTableShape
+        ? ''  // No message content, title is in table header
+        : `📊 ${sectionTitle}：0 行，未返回可展示列`,
       timestamp: Date.now(),
-      sqlResult: rowCount > 0 ? {
+      sqlResult: hasTableShape ? {
         columns,
         rows,
         rowCount,
@@ -1971,6 +2455,13 @@ function renderConclusionCard(conclusion: Record<string, unknown>, ctx: SSEHandl
 function renderSummary(summary: string, ctx: SSEHandlerContext): void {
   const summaryTableData = parseSummaryToTable(summary);
   if (summaryTableData) {
+    const sourceContext = registerDataSourceContext(ctx, {
+      title: '分析摘要',
+      source: 'summary',
+      kind: 'summary',
+      rowCount: summaryTableData.rows.length,
+      columns: summaryTableData.columns,
+    });
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
@@ -1981,6 +2472,7 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
         rows: summaryTableData.rows,
         rowCount: summaryTableData.rows.length,
         sectionTitle: '📝 分析摘要',
+        sourceContext,
       },
     });
   } else {
@@ -1993,8 +2485,394 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
   }
 }
 
+function conclusionNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const n = Number(value.replace(/[%％]/g, '').trim());
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function conclusionText(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function normalizeClaimSourceRef(value: string): string {
+  const text = normalizeFlowLine(value).replace(/：/g, ':').toLowerCase();
+  const localized = text.match(/^(表|摘要|指标|图|文本|时间线|诊断)\s*([0-9]+)/);
+  if (localized) return `${localized[1]} ${Number(localized[2])}`;
+  const english = text.match(/^(table|summary|metric|chart|figure|text|timeline|diagnostic|diagnosis)\s*#?\s*([0-9]+)/);
+  if (english) {
+    const prefixMap: Record<string, string> = {
+      table: '表',
+      summary: '摘要',
+      metric: '指标',
+      chart: '图',
+      figure: '图',
+      text: '文本',
+      timeline: '时间线',
+      diagnostic: '诊断',
+      diagnosis: '诊断',
+    };
+    return `${prefixMap[english[1]]} ${Number(english[2])}`;
+  }
+  return text;
+}
+
+function sourceRefMatches(contextRef: string, sourceRef: string): boolean {
+  return contextRef === sourceRef ||
+    normalizeClaimSourceRef(contextRef) === normalizeClaimSourceRef(sourceRef);
+}
+
+function claimValueMatches(actual: unknown, expected: unknown): boolean {
+  if (expected === undefined || expected === null) return false;
+  const actualNumber = conclusionNumber(actual);
+  const expectedNumber = conclusionNumber(expected);
+  if (actualNumber !== undefined && expectedNumber !== undefined) {
+    return Math.abs(actualNumber - expectedNumber) <= 1e-9;
+  }
+  return String(actual ?? '') === String(expected);
+}
+
+type ParsedClaimNumber = {
+  value: number;
+  integerLiteral: boolean;
+  tolerance: number;
+};
+
+type ClaimValueComparison = {
+  matches: boolean;
+  approximate?: boolean;
+};
+
+function parseClaimNumberLiteral(value: unknown): ParsedClaimNumber | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const raw = String(value)
+    .replace(/,/g, '')
+    .replace(/％/g, '%')
+    .trim();
+  const match = raw.match(/^([+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?)\s*(?:%|ms|s|ns|us|µs|fps|hz|mhz|ghz|帧|次|行)?$/i);
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed)) return undefined;
+
+  const literal = match[1].toLowerCase();
+  const mantissa = literal.split('e')[0];
+  const decimalPart = mantissa.includes('.') ? mantissa.split('.')[1] : '';
+  const integerLiteral = decimalPart.length === 0;
+  const tolerance = decimalPart.length > 0
+    ? (0.5 * Math.pow(10, -decimalPart.length)) + 1e-9
+    : 0.5 + 1e-9;
+  return {value: parsed, integerLiteral, tolerance};
+}
+
+function compareClaimValue(actual: unknown, expected: unknown): ClaimValueComparison {
+  if (claimValueMatches(actual, expected)) return {matches: true};
+
+  const actualParsed = parseClaimNumberLiteral(actual);
+  const expectedParsed = parseClaimNumberLiteral(expected);
+  if (actualParsed && expectedParsed) {
+    const tolerance = expectedParsed.integerLiteral &&
+      Number.isInteger(actualParsed.value) &&
+      Number.isInteger(expectedParsed.value)
+      ? 1e-9
+      : expectedParsed.tolerance;
+    if (Math.abs(actualParsed.value - expectedParsed.value) <= tolerance) {
+      return {matches: true, approximate: true};
+    }
+  }
+
+  return {matches: false};
+}
+
+function sourceContextMatchesClaim(
+  context: DataSourceContext | undefined,
+  evidenceRefId: string,
+  sourceRef: string,
+  sourceToolCallId: string,
+): boolean {
+  if (!context) return false;
+  if (!evidenceRefId && !sourceRef && !sourceToolCallId) return false;
+  if (evidenceRefId && context.evidenceRefId !== evidenceRefId) return false;
+  if (sourceToolCallId && context.sourceToolCallId !== sourceToolCallId) return false;
+  // evidenceRefId and sourceToolCallId are machine identifiers. sourceRef is
+  // an LLM-visible label such as "表 1" or "摘要 2", so it must not veto an
+  // otherwise exact machine-id match when ref numbering changes.
+  if (!evidenceRefId && !sourceToolCallId && sourceRef && !sourceRefMatches(context.ref, sourceRef)) return false;
+  return true;
+}
+
+function findClaimSource(
+  ctx: SSEHandlerContext | undefined,
+  evidenceRefId: string,
+  sourceRef: string,
+  sourceToolCallId: string,
+): { source?: DataSourceContext; sqlResult?: SqlResultData; ambiguous?: boolean } {
+  if (!ctx) return {};
+
+  const sources = ctx.streamingFlow.dataSourceRefs.filter((ref) =>
+    sourceContextMatchesClaim(ref, evidenceRefId, sourceRef, sourceToolCallId)
+  );
+  const messages = ctx.getMessages().filter((msg) => {
+    const context = msg.sqlResult?.sourceContext || msg.sourceContext;
+    return sourceContextMatchesClaim(context, evidenceRefId, sourceRef, sourceToolCallId);
+  });
+  return {
+    source: sources[0],
+    sqlResult: messages[0]?.sqlResult,
+    ambiguous: sources.length > 1 || messages.length > 1,
+  };
+}
+
+function parseClaimSelectorScalar(value: string): string | number | boolean {
+  const text = normalizeFlowLine(value).replace(/^['"]|['"]$/g, '');
+  if (/^(true|false)$/i.test(text)) return /^true$/i.test(text);
+  const numeric = Number(text);
+  if (Number.isFinite(numeric) && /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?$/i.test(text)) {
+    return numeric;
+  }
+  return text;
+}
+
+function parseClaimRowSelectorString(value: string): Record<string, unknown> {
+  const text = value.trim();
+  if (!text) return {};
+  if (text.startsWith('{')) {
+    try {
+      return asRecord(JSON.parse(text));
+    } catch {
+      return {};
+    }
+  }
+
+  const selector: Record<string, unknown> = {};
+  for (const part of text.split(/[,，]/)) {
+    const match = part.trim().match(/^([^=：:]+)\s*(?:=|:|：)\s*(.+)$/);
+    if (!match) continue;
+    const key = normalizeFlowLine(match[1]);
+    if (!key) continue;
+    selector[key] = parseClaimSelectorScalar(match[2]);
+  }
+  return selector;
+}
+
+function readClaimRowSelector(ref: Record<string, unknown>): Record<string, unknown> {
+  const value = readAliasedValue(ref, CONTRACT_ALIASES.claimRef.rowSelector);
+  if (typeof value === 'string') return parseClaimRowSelectorString(value);
+  return readAliasedRecord(ref, CONTRACT_ALIASES.claimRef.rowSelector);
+}
+
+function normalizeClaimColumnName(value: string): string {
+  return normalizeFlowLine(value).toLowerCase();
+}
+
+function resolveClaimColumn(
+  sqlResult: SqlResultData,
+  column: string,
+): { index?: number; status?: string } {
+  const exactIndex = sqlResult.columns.indexOf(column);
+  if (exactIndex >= 0) return {index: exactIndex};
+
+  const normalizedColumn = normalizeClaimColumnName(column);
+  const normalizedMatches = sqlResult.columns
+    .map((name, index) => ({name, index}))
+    .filter(({name}) => normalizeClaimColumnName(String(name)) === normalizedColumn);
+  if (normalizedMatches.length === 1) return {index: normalizedMatches[0].index};
+  if (normalizedMatches.length > 1) return {status: '未核验: 列名不唯一'};
+
+  const labelMatches = (sqlResult.columnDefinitions || [])
+    .map((definition, index) => ({definition, index}))
+    .filter(({definition}) =>
+      typeof definition.label === 'string' &&
+      normalizeClaimColumnName(definition.label) === normalizedColumn &&
+      sqlResult.columns.includes(definition.name)
+    );
+  if (labelMatches.length === 1) {
+    return {index: sqlResult.columns.indexOf(labelMatches[0].definition.name)};
+  }
+  if (labelMatches.length > 1) return {status: '未核验: 列标签不唯一'};
+
+  return {status: '未通过: 列不存在'};
+}
+
+function rowMatchesSelector(row: unknown[], sqlResult: SqlResultData, selector: Record<string, unknown>): boolean {
+  for (const [column, expected] of Object.entries(selector)) {
+    const resolvedColumn = resolveClaimColumn(sqlResult, column);
+    if (resolvedColumn.index === undefined) return false;
+    if (!claimValueMatches(row[resolvedColumn.index], expected)) return false;
+  }
+  return true;
+}
+
+function resolveClaimRow(
+  sqlResult: SqlResultData,
+  rowIndexValue: unknown,
+  rowIndex: number | undefined,
+  rowSelector: Record<string, unknown>,
+): { row?: unknown[]; rowLabel?: string; status?: string } {
+  const hasRowIndex = rowIndexValue !== undefined && rowIndexValue !== null && conclusionText(rowIndexValue) !== '';
+  if (hasRowIndex) {
+    if (rowIndex === undefined || !Number.isInteger(rowIndex) || rowIndex < 0) {
+      return {rowLabel: rowIndex !== undefined ? `row ${rowIndex}` : '', status: '未通过: 行号无效'};
+    }
+    const row = sqlResult.rows[rowIndex];
+    return row
+      ? {row, rowLabel: `row ${rowIndex}`}
+      : {rowLabel: `row ${rowIndex}`, status: '未通过: 行不存在'};
+  }
+
+  const selectorEntries = Object.entries(rowSelector);
+  if (selectorEntries.length === 0) return {};
+
+  const matches = sqlResult.rows
+    .map((row, idx) => ({row, idx}))
+    .filter(({row}) => rowMatchesSelector(row, sqlResult, rowSelector));
+  const selectorLabel = `rowSelector ${selectorEntries.map(([key, value]) => `${key}=${String(value)}`).join(', ')}`;
+  if (matches.length === 0) return {rowLabel: selectorLabel, status: '未通过: rowSelector 未命中'};
+  if (matches.length > 1) return {rowLabel: selectorLabel, status: '未核验: rowSelector 不唯一'};
+  return {row: matches[0].row, rowLabel: `${selectorLabel} -> row ${matches[0].idx}`};
+}
+
+function renderClaimReferenceDetail(
+  ref: Record<string, unknown>,
+  ctx: SSEHandlerContext | undefined,
+): string {
+  const evidenceRefId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId));
+  const sourceRef = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef));
+  const sourceToolCallId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId));
+  const rowIndexValue = readAliasedValue(ref, CONTRACT_ALIASES.claimRef.rowIndex);
+  const rowIndex = conclusionNumber(rowIndexValue);
+  const rowSelector = readClaimRowSelector(ref);
+  const column = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.column));
+  const expectedValue = readAliasedValue(ref, CONTRACT_ALIASES.claimRef.value);
+  const hasExpectedValue = expectedValue !== undefined && expectedValue !== null && `${expectedValue}` !== '';
+  const matched = findClaimSource(ctx, evidenceRefId, sourceRef, sourceToolCallId);
+  const sourceRefMismatch = Boolean(
+    sourceRef &&
+    matched.source &&
+    !sourceRefMatches(matched.source.ref, sourceRef)
+  );
+  const label = sourceRef && !sourceRefMismatch
+    ? sourceRef
+    : matched.source?.ref || sourceRef || (evidenceRefId ? compactEvidenceRef(evidenceRefId) : '');
+  const resolvedRow = matched.sqlResult
+    ? resolveClaimRow(matched.sqlResult, rowIndexValue, rowIndex, rowSelector)
+    : {};
+  const parts = [
+    label,
+    resolvedRow.rowLabel || (rowIndex !== undefined ? `row ${rowIndex}` : ''),
+    column ? `列 ${column}` : '',
+    hasExpectedValue ? `值 ${String(expectedValue)}` : '',
+    sourceToolCallId ? `工具 ${compactEvidenceRef(sourceToolCallId)}` : '',
+  ].filter(Boolean);
+
+  let status = '';
+  if (!evidenceRefId && !sourceRef && !sourceToolCallId) {
+    status = '未核验: 未提供 evidenceRef/sourceRef/toolCallId';
+  } else if (matched.ambiguous) {
+    status = '未核验: 来源不唯一';
+  } else if (!matched.source && !matched.sqlResult) {
+    status = '未核验: 未找到来源';
+  } else if (!matched.sqlResult) {
+    status = rowIndex !== undefined || Object.keys(rowSelector).length > 0 || column || expectedValue !== undefined
+      ? '未核验: 来源不是表格数据'
+      : '已找到来源';
+  } else if (resolvedRow.status) {
+    status = resolvedRow.status;
+  } else if (resolvedRow.row) {
+    const row = resolvedRow.row;
+    if (column) {
+      const resolvedColumn = resolveClaimColumn(matched.sqlResult, column);
+      if (resolvedColumn.index === undefined) {
+        status = resolvedColumn.status || '未通过: 列不存在';
+      } else if (!hasExpectedValue) {
+        status = '未核验: 未提供期望值';
+      } else {
+        const comparison = compareClaimValue(row[resolvedColumn.index], expectedValue);
+        if (!comparison.matches) {
+          status = `未通过: 值不匹配，实际 ${String(row[resolvedColumn.index] ?? '')}`;
+        } else {
+          status = comparison.approximate ? '已核对: 近似匹配' : '已核对';
+        }
+      }
+    } else {
+      status = expectedValue !== undefined ? '未核验: 未提供列名' : '已核对';
+    }
+  } else {
+    status = column || expectedValue !== undefined
+      ? '未核验: 未提供行号或 rowSelector'
+      : '已找到来源';
+  }
+
+  const sourceRefWarning = sourceRefMismatch && matched.source
+    ? `；source_ref ${sourceRef} 与系统来源 ${matched.source.ref} 不一致，已按机器 ID 核对`
+    : '';
+  return `${parts.join('，') || '未命名来源'}，${status}${sourceRefWarning}`;
+}
+
+function renderConclusionClaimsSection(
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+  ctx?: SSEHandlerContext,
+): string {
+  if (!contract || typeof contract !== 'object') return '';
+  const contractRecord = asRecord(contract);
+  const claims = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.claims);
+  if (claims.length === 0) return '';
+
+  const lines: string[] = ['## 逐句数据引用（系统核对结果）'];
+  const maxClaims = 20;
+  const maxReferencesPerClaim = 5;
+  claims.slice(0, maxClaims).forEach((item, idx: number) => {
+    const claimId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.id)) || `Q${idx + 1}`;
+    const conclusionId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.conclusionId));
+    const claimText = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.text)) || '未命名结论片段';
+    const references = readAliasedRecordArray(item, CONTRACT_ALIASES.claim.references);
+    const renderedRefs = references.slice(0, maxReferencesPerClaim)
+      .map((entry) => renderClaimReferenceDetail(entry, ctx));
+    if (references.length > maxReferencesPerClaim) {
+      renderedRefs.push(`另有 ${references.length - maxReferencesPerClaim} 个引用未展开`);
+    }
+    const refText = references.length > 0
+      ? renderedRefs.join('；')
+      : '未提供行/列引用';
+    const cid = conclusionId ? ` / ${conclusionId}` : '';
+    lines.push(`- ${claimId}${cid}: ${claimText}（${refText}）`);
+  });
+  if (claims.length > maxClaims) {
+    lines.push(`- 其余 ${claims.length - maxClaims} 条 claim 未展开；完整结构化引用仍保留在结果快照中。`);
+  }
+  return lines.join('\n');
+}
+
+function appendConclusionClaims(
+  content: string,
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+  ctx: SSEHandlerContext,
+): string {
+  if (/(^|\n)##\s*逐句数据引用（系统核对结果）/.test(content)) return content;
+  const section = renderConclusionClaimsSection(contract, ctx);
+  if (!section) return content;
+  const withoutStructuredClaims = content
+    .replace(/(?:\n---)?\n##\s*逐句数据引用（结构化来源）[\s\S]*?(?=\n##\s+|\n---\n|$)/, '')
+    .trimEnd();
+  return [withoutStructuredClaims, '', '---', section].join('\n');
+}
+
+function appendFinalEvidenceSections(
+  content: string,
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+  ctx: SSEHandlerContext,
+  resultSnapshotId?: string,
+): string {
+  const withSources = appendDataSourceIndex(content, ctx, contract);
+  const withSnapshot = appendAnalysisResultReference(withSources, resultSnapshotId);
+  return appendConclusionClaims(withSnapshot, contract, ctx);
+}
+
 function renderConclusionContract(
-  contract: ConclusionContract | Record<string, unknown> | null | undefined
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+  ctx?: SSEHandlerContext,
 ): string | null {
   if (!contract || typeof contract !== 'object') return null;
 
@@ -2047,6 +2925,7 @@ function renderConclusionContract(
   const conclusions = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.conclusions);
   const clusters = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.clusters);
   const evidenceChain = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.evidenceChain);
+  const claims = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.claims);
   const uncertainties = readAliasedUnknownArray(contractRecord, CONTRACT_ALIASES.root.uncertainties);
   const nextSteps = readAliasedUnknownArray(contractRecord, CONTRACT_ALIASES.root.nextSteps);
   const metadata = readAliasedRecord(contractRecord, CONTRACT_ALIASES.root.metadata);
@@ -2073,6 +2952,7 @@ function renderConclusionContract(
     conclusions.length > 0 ||
     clusters.length > 0 ||
     evidenceChain.length > 0 ||
+    claims.length > 0 ||
     uncertainties.length > 0 ||
     nextSteps.length > 0;
   if (!hasSignal) return null;
@@ -2159,6 +3039,12 @@ function renderConclusionContract(
   }
   lines.push('');
 
+  const claimsSection = renderConclusionClaimsSection(contractRecord, ctx);
+  if (claimsSection) {
+    lines.push(claimsSection);
+    lines.push('');
+  }
+
   lines.push('## 不确定性与反例');
   if (uncertainties.length === 0) {
     lines.push('- 暂无');
@@ -2209,6 +3095,9 @@ export function handleAnalysisCompletedEvent(
   const architecture = readStringField(eventRecord, 'architecture');
   const rawPayload = asRecord(eventRecord.data);
   const payload = toAnalysisCompletedPayload(eventRecord.data);
+  const rawConclusionContract = rawPayload.conclusionContract;
+  const conclusionContract = payload?.conclusionContract ??
+    (isRecord(rawConclusionContract) ? rawConclusionContract : undefined);
   if (DEBUG_SSE) console.log('[SSEHandlers] analysis_completed received, architecture:', architecture || 'unknown');
 
   mergeConversationTimelineFromAnalysisCompleted(rawPayload, ctx);
@@ -2219,7 +3108,7 @@ export function handleAnalysisCompletedEvent(
     if (DEBUG_SSE) console.log('[SSEHandlers] Completion already handled, extracting reportUrl only');
     const reportUrl = payload?.reportUrl;
     const resultSnapshotId = payload?.resultSnapshotId;
-    if (reportUrl || resultSnapshotId) {
+    if (reportUrl || resultSnapshotId || conclusionContract) {
       // Attach reportUrl to the existing answer/conclusion message
       const answerMsgId = ctx.streamingAnswer.messageId;
       if (answerMsgId) {
@@ -2227,25 +3116,24 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(answerMsgId, {
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
           ...(existing
-            ? {content: appendDataSourceIndex(
-                appendAnalysisResultReference(existing.content, resultSnapshotId),
-                ctx,
-              )}
+            ? {content: appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId)}
             : {}),
         }, {persist: true});
       } else {
         // No streamed answer — find the last assistant message (conclusion added by 'conclusion' event)
         const messages = ctx.getMessages();
         for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
+          if (
+            messages[i].role === 'assistant' &&
+            messages[i].flowTag !== 'streaming_flow' &&
+            !messages[i].sqlResult &&
+            messages[i].content.trim().length > 0
+          ) {
             ctx.updateMessage(messages[i].id, {
               ...(reportUrl && !messages[i].reportUrl
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
-              content: appendAnalysisResultReference(
-                appendDataSourceIndex(messages[i].content, ctx),
-                resultSnapshotId,
-              ),
+              content: appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId),
             }, {persist: true});
             break;
           }
@@ -2259,8 +3147,11 @@ export function handleAnalysisCompletedEvent(
 
   // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
   // and fall back to structured conclusionContract when narrative text is absent.
-  const contractContent = renderConclusionContract(payload?.conclusionContract);
-  const answerContent = payload?.answer || payload?.conclusion || contractContent;
+  const contractContent = renderConclusionContract(conclusionContract, ctx);
+  const narrativeContent = payload?.answer || payload?.conclusion;
+  const answerContent = narrativeContent
+    ? appendConclusionClaims(narrativeContent, conclusionContract, ctx)
+    : contractContent;
 
   if (answerContent) {
     ctx.setCompletionHandled(true);
@@ -2271,10 +3162,7 @@ export function handleAnalysisCompletedEvent(
     completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
-    let content = appendAnalysisResultReference(
-      appendDataSourceIndex(answerContent, ctx),
-      payload?.resultSnapshotId,
-    );
+    let content = appendFinalEvidenceSections(answerContent, conclusionContract, ctx, payload?.resultSnapshotId);
 
     const isAgentDriven = architecture === 'v2-agent-driven' || architecture === 'agent-driven';
     if (isAgentDriven && payload?.hypotheses) {
@@ -2549,21 +3437,15 @@ export function handleDataEvent(
     ? rawEnvelope
     : (rawEnvelope ? [rawEnvelope] : []);
 
-  for (const candidate of envelopeCandidates) {
+  for (let i = 0; i < envelopeCandidates.length; i++) {
+    const candidate = envelopeCandidates[i];
     if (!isDataEnvelope(candidate)) {
       console.warn('[SSEHandlers] Invalid DataEnvelope:', candidate);
       continue;
     }
 
     const envelope = candidate;
-    const envelopeRecord = asRecord(candidate);
-    const envelopeSql = readStringField(envelopeRecord, 'sql');
-
-    // Generate deduplication key
-    const deduplicationKey = envelopeSql
-      ? `${envelope.meta.source || 'sql'}:${envelopeSql}`
-      : envelope.meta.source ||
-      `${envelope.meta.skillId || 'unknown'}:${envelope.meta.stepId || 'unknown'}`;
+    const deduplicationKey = dataEnvelopeDeduplicationKey(envelope, readStringField(eventRecord, 'id'), i);
 
     if (ctx.displayedSkillProgress.has(deduplicationKey)) {
       if (DEBUG_SSE) console.log('[SSEHandlers] Skipping duplicate data envelope:', deduplicationKey);
@@ -2602,17 +3484,28 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
   switch (format) {
     case 'text':
       if (payload.text) {
+        const isDiagnostic = envelope.meta.type === 'diagnostic';
+        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
+          kind: isDiagnostic ? 'diagnostic' : 'text',
+        });
+        const notice = isDiagnostic
+          ? '> 这是失败诊断，不是可引用的数据表或性能证据。需要修正 SQL/工具参数后重试。'
+          : '';
         ctx.addMessage({
           id: ctx.generateId(),
           role: 'assistant',
-          content: `**${title}**\n\n${payload.text}`,
+          content: [`**${title}**`, notice, String(payload.text)].filter(Boolean).join('\n\n'),
           timestamp: Date.now(),
+          sourceContext,
         });
       }
       break;
 
     case 'summary':
       if (payload.summary) {
+        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, payload.summary.title || title, {
+          kind: 'summary',
+        });
         const sections: string[] = [`## 📊 ${payload.summary.title || title}`];
 
         const normalizedBody = normalizeMarkdownSpacing(String(payload.summary.content || ''));
@@ -2638,12 +3531,16 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
           role: 'assistant',
           content: summaryContent,
           timestamp: Date.now(),
+          sourceContext,
         });
       }
       break;
 
     case 'metric':
       if (payload.summary && payload.summary.metrics) {
+        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
+          kind: 'metric',
+        });
         let metricContent = `### 📈 ${title}\n\n`;
         for (const metric of payload.summary.metrics) {
           const icon = metric.severity === 'critical' ? '🔴' :
@@ -2656,6 +3553,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
           role: 'assistant',
           content: metricContent,
           timestamp: Date.now(),
+          sourceContext,
         });
       }
       break;
@@ -2666,6 +3564,11 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
         const chartColumns = Array.isArray(chartConfig.columns) ? chartConfig.columns : [];
         const chartRows = Array.isArray(chartConfig.rows) ? chartConfig.rows : [];
         const chartData = Array.isArray(chartConfig.data) ? chartConfig.data : [];
+        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
+          kind: 'chart',
+          rowCount: chartRows.length > 0 ? chartRows.length : chartData.length || undefined,
+          columns: chartColumns.map((column) => String(column)),
+        });
 
         if (chartColumns.length > 0 && chartRows.length > 0) {
           // Render chart data as a markdown table
@@ -2680,6 +3583,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             role: 'assistant',
             content: chartContent,
             timestamp: Date.now(),
+            sourceContext,
           });
         } else if (chartData.length > 0) {
           // Try to render from data array (objects with label/value)
@@ -2698,6 +3602,15 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
               role: 'assistant',
               content: chartContent,
               timestamp: Date.now(),
+              sourceContext,
+            });
+          } else {
+            ctx.addMessage({
+              id: ctx.generateId(),
+              role: 'assistant',
+              content: `### 📉 ${title}\n\n*[图表数据已记录，但数据不是可表格化的对象数组]*`,
+              timestamp: Date.now(),
+              sourceContext,
             });
           }
         } else {
@@ -2710,17 +3623,22 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             role: 'assistant',
             content: chartContent,
             timestamp: Date.now(),
+            sourceContext,
           });
         }
       }
       break;
 
     case 'timeline':
+      const timelineSourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
+        kind: 'timeline',
+      });
       ctx.addMessage({
         id: ctx.generateId(),
         role: 'assistant',
         content: `### ⏱️ ${title}\n\n*[时间线渲染暂未实现]*\n`,
         timestamp: Date.now(),
+        sourceContext: timelineSourceContext,
       });
       break;
 
@@ -2758,15 +3676,9 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
         }
       }
 
-      if (filteredRows.length > 0) {
-        const source = [
-          envelope.meta.skillId || envelope.meta.source,
-          envelope.meta.stepId,
-        ].filter(Boolean).join('#');
-        const sourceContext = registerDataSourceContext(ctx, {
-          title,
-          source: source || envelope.meta.source || 'data_envelope',
-          layer: envelope.display.layer,
+      if (filteredColumns.length > 0 || filteredRows.length === 0) {
+        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
+          kind: 'table',
           rowCount: filteredRows.length,
           columns: filteredColumns,
           query: sql,
@@ -3398,6 +4310,7 @@ export function handleAnswerTokenEvent(
   if (token) {
     const answer = ctx.streamingAnswer;
     if (answer.status === 'idle') {
+      ensureAnswerTimelineStarted(ctx);
       pushStreamingOutput(ctx, '最终回答生成中...');
     }
     answer.status = 'streaming';
@@ -3415,9 +4328,11 @@ export function handleAnswerTokenEvent(
     if (shouldFlush) {
       flushStreamingAnswer(ctx, {persist: false});
     }
+    syncAnswerStreamToConversationTimeline(ctx, token);
   }
 
   if (done) {
+    syncAnswerStreamToConversationTimeline(ctx, '', {force: true, completed: true});
     pushStreamingOutput(ctx, '最终回答已输出');
     completeStreamingAnswer(ctx);
   }
@@ -3608,7 +4523,9 @@ function handleSSEEventInner(
         });
       }
 
-      ctx.setCompletionHandled(true);
+      if (conclusionText || alreadyStreamed) {
+        ctx.setCompletionHandled(true);
+      }
       // Not terminal — analysis_completed with reportUrl still follows
       return { stopLoading: true };
     }

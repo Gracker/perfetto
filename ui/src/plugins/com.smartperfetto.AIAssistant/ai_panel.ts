@@ -472,11 +472,55 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     context: DataSourceContext | undefined,
   ): m.Children {
     if (!context) return null;
+    const traceLabel = context.traceSide === 'current'
+      ? '当前 Trace'
+      : context.traceSide === 'reference'
+        ? '参考 Trace'
+        : '';
+    const compactEvidence = (value: string | undefined) => {
+      if (!value) return '';
+      if (value.length <= 40) return value;
+      const parts = value.split(':').filter(Boolean);
+      const tail = parts.slice(-2).join(':');
+      return tail ? `...${tail}` : `${value.slice(0, 18)}...${value.slice(-12)}`;
+    };
+    const kindLabel = (kind: DataSourceContext['kind']) => {
+      switch (kind) {
+        case 'summary':
+          return '摘要';
+        case 'metric':
+          return '指标';
+        case 'chart':
+          return '图表';
+        case 'text':
+          return '文本';
+        case 'timeline':
+          return '时间线';
+        case 'table':
+          return '表格';
+        default:
+          return '';
+      }
+    };
     const chips: string[] = [];
+    const kind = kindLabel(context.kind);
+    if (kind) chips.push(kind);
+    if (traceLabel) chips.push(traceLabel);
     if (context.phase) chips.push(context.phase);
+    const planPhase = [context.planPhaseId, context.planPhaseTitle]
+      .filter(Boolean)
+      .join(' · ');
+    if (planPhase) chips.push(`阶段 ${planPhase}`);
+    if (context.planPhaseAttribution && context.planPhaseAttribution !== 'active') {
+      chips.push(`阶段归因 ${context.planPhaseAttribution}`);
+    }
     if (typeof context.rowCount === 'number') {
       chips.push(`${context.rowCount.toLocaleString()} 行`);
     }
+    if (context.sourceToolCallId) {
+      chips.push(`工具 ${compactEvidence(context.sourceToolCallId)}`);
+    }
+    if (context.evidenceRefId) chips.push(`证据 ${compactEvidence(context.evidenceRefId)}`);
     if (context.source) chips.push(context.source);
 
     return m('div.ai-table-context', [
@@ -485,10 +529,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         m('span.ai-table-context-reason', context.reason),
       ]),
       m('div.ai-table-context-meaning', context.meaning),
+      context.planPhaseWarning
+        ? m('div.ai-table-context-meaning', context.planPhaseWarning)
+        : null,
       chips.length > 0
         ? m(
             'div.ai-table-context-meta',
-            chips.slice(0, 4).map((chip) =>
+            chips.map((chip) =>
               m('span.ai-table-context-chip', chip),
             ),
           )
@@ -2258,6 +2305,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         },
                                       }),
 
+                                  this.renderTableSourceContext(
+                                    msg.sourceContext,
+                                  ),
+
                                   // HTML Report Link (问题1修复)
                                   msg.reportUrl
                                     ? m('div.ai-report-link', [
@@ -3482,6 +3533,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.currentSessionId = session.sessionId;
     this.state.currentTraceFingerprint = session.traceFingerprint;
     this.state.messages = session.messages;
+    this.rebuildDataSourceRefsFromMessages();
     this.state.pinnedResults = session.pinnedResults || [];
     this.state.bookmarks = session.bookmarks || [];
     this.state.agentSessionId = session.agentSessionId || null;
@@ -3836,6 +3888,49 @@ Click ⚙️ to configure backend connection.`;
 
   private resetStreamingFlow() {
     this.state.streamingFlow = createStreamingFlowState();
+  }
+
+  private dataSourceKindOrdinalsFromRefs(refs: DataSourceContext[]): Record<string, number> {
+    const ordinals: Record<string, number> = {};
+    for (const ref of refs) {
+      const kind = ref.kind || 'table';
+      const ordinal = Number(ref.ref.match(/(\d+)$/)?.[1]);
+      if (Number.isFinite(ordinal)) {
+        ordinals[kind] = Math.max(ordinals[kind] || 0, ordinal);
+      }
+    }
+    return ordinals;
+  }
+
+  private rebuildDataSourceRefsFromMessages() {
+    const refs: DataSourceContext[] = [];
+    const seen = new Set<string>();
+    let maxOrdinal = 0;
+
+    for (const msg of this.state.messages) {
+      const context = msg.sqlResult?.sourceContext || msg.sourceContext;
+      if (!context?.ref) continue;
+      const key = [
+        context.ref,
+        context.evidenceRefId || '',
+        context.sourceToolCallId || '',
+        context.title,
+      ].join('\0');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      refs.push({...context});
+      const ordinal = Number(context.ref.match(/(\d+)$/)?.[1]);
+      if (Number.isFinite(ordinal)) {
+        maxOrdinal = Math.max(maxOrdinal, ordinal);
+      }
+    }
+
+    this.state.streamingFlow = {
+      ...createStreamingFlowState(),
+      dataSourceRefs: refs,
+      dataSourceOrdinal: Math.max(maxOrdinal, refs.length),
+      dataSourceKindOrdinals: this.dataSourceKindOrdinalsFromRefs(refs),
+    };
   }
 
   private resetStreamingAnswer() {
@@ -8065,6 +8160,7 @@ Output MUST follow this exact markdown structure:
       conversationSeenEventIds: new Set(f.conversationSeenEventIds),
       subAgents: f.subAgents.map((s) => ({...s})),
       dataSourceRefs: f.dataSourceRefs.map((ref) => ({...ref})),
+      dataSourceKindOrdinals: {...f.dataSourceKindOrdinals},
       // Timer must NOT be carried across — it references a window-scoped
       // handle that will expire/fire on the old instance's event loop.
       // New instance will schedule its own timer if needed.
@@ -8113,6 +8209,9 @@ Output MUST follow this exact markdown structure:
         dataSourceOrdinal:
           a.streamingFlow.dataSourceOrdinal ||
           (a.streamingFlow.dataSourceRefs || []).length,
+        dataSourceKindOrdinals:
+          a.streamingFlow.dataSourceKindOrdinals ||
+          this.dataSourceKindOrdinalsFromRefs(a.streamingFlow.dataSourceRefs || []),
       };
       this.state.streamingAnswer = a.streamingAnswer;
       // Mark loading + resume SSE. The resumeFromLastEventId flag tells

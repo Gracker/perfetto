@@ -20,7 +20,51 @@ import {describe, it, expect, jest} from '@jest/globals';
 
 import {AIPanel} from './ai_panel';
 
+function collectVNodeText(node: any): string {
+  if (node === null || node === undefined || node === false) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(collectVNodeText).join(' ');
+  const parts = [
+    node.text,
+    node.children,
+  ].filter((part) => part !== undefined);
+  return parts.map(collectVNodeText).join(' ');
+}
+
 describe('AIPanel /goto navigation', () => {
+  it('renders all table source metadata chips', () => {
+    const panel = new AIPanel() as any;
+
+    const view = panel.renderTableSourceContext({
+      ref: '表 9',
+      title: 'Detailed Table',
+      source: 'execute_sql',
+      reason: 'why this table exists',
+      meaning: 'what this table means',
+      kind: 'table',
+      rowCount: 42,
+      phase: 'DataEnvelope.list',
+      traceSide: 'reference',
+      planPhaseId: 'phase-2',
+      planPhaseTitle: 'Validate contention',
+      planPhaseAttribution: 'inferred',
+      sourceToolCallId: 'execute_sql_on:12:abcdef1234567890',
+      evidenceRefId: 'data:sql_table:reference:trace:query:params',
+    });
+
+    const text = collectVNodeText(view);
+
+    expect(text).toContain('表 9');
+    expect(text).toContain('表格');
+    expect(text).toContain('参考 Trace');
+    expect(text).toContain('阶段 phase-2 · Validate contention');
+    expect(text).toContain('阶段归因 inferred');
+    expect(text).toContain('42 行');
+    expect(text).toContain('工具');
+    expect(text).toContain('证据');
+    expect(text).toContain('execute_sql');
+  });
+
   it('keeps rendered assistant content stable across unrelated redraws', () => {
     const panel = new AIPanel() as any;
     panel.renderMermaidInElement = jest.fn();

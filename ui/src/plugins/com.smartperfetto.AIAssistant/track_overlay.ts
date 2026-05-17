@@ -234,7 +234,7 @@ export const STEP_TO_OVERLAY = new Map<string, OverlayId>([
 const activeTrackNodes = new Map<OverlayId, string[]>();
 
 // ---------------------------------------------------------------------------
-// sessionStorage persistence — survives build.js --watch hot-reload
+// sessionStorage persistence — survives build.mjs --watch hot-reload
 // ---------------------------------------------------------------------------
 
 const OVERLAY_STORAGE_KEY = 'smartperfetto_overlay_data_v1';

@@ -348,6 +348,35 @@ describe('handleSkillSectionEvent', () => {
     handleSkillSectionEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult).toBeDefined();
+    expect(ctx.messages[0].sqlResult?.columns).toEqual(['col1']);
+    expect(ctx.messages[0].sqlResult?.rows).toEqual([]);
+    expect(ctx.messages[0].sqlResult?.rowCount).toBe(0);
+    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+      ref: '表 1',
+      source: 'skill_section',
+      rowCount: 0,
+      reason: 'Skill 返回的结构化证据，用来支撑后续筛选、下钻或结论判断。',
+    });
+  });
+
+  it('shows a visible empty-state message when a section has no table shape', () => {
+    const data = {
+      data: {
+        sectionTitle: 'No Columns Section',
+        sectionIndex: 1,
+        totalSections: 1,
+        columns: [],
+        rows: [],
+        rowCount: 0,
+      },
+    };
+
+    handleSkillSectionEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('No Columns Section');
+    expect(ctx.messages[0].content).toContain('未返回可展示列');
     expect(ctx.messages[0].sqlResult).toBeUndefined();
   });
 });
@@ -1508,6 +1537,37 @@ describe('handleSkillLayeredResultEvent', () => {
     expect(ctx.messages.length).toBeGreaterThan(0);
   });
 
+  it('indexes parsed summary tables as data sources', () => {
+    const data = {
+      data: {
+        skillId: 'scrolling_analysis',
+        layers: {
+          overview: {},
+        },
+        summary: 'FPS: 60, Jank Rate: 5%',
+      },
+    };
+
+    handleSkillLayeredResultEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+      ref: '摘要 1',
+      title: '分析摘要',
+      kind: 'summary',
+      rowCount: 1,
+    });
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '摘要已生成。',
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('摘要 1: 分析摘要');
+    expect(ctx.messages[1].content).toContain('汇总数据，用来建立本轮分析的基线判断。');
+  });
+
   it('should deduplicate repeated skill results', () => {
     const data = {
       data: {
@@ -1738,6 +1798,10 @@ describe('handleDataEvent', () => {
           type: 'table',
           version: '2.0',
           source: 'test_skill:step1',
+          evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
+          traceSide: 'current',
+          traceId: 'trace-a',
+          queryHash: 'hash',
         },
         data: {
           columns: ['col1', 'col2'],
@@ -1760,6 +1824,51 @@ describe('handleDataEvent', () => {
       title: 'Test Data',
       source: 'test_skill:step1',
       rowCount: 1,
+      evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
+      traceSide: 'current',
+      traceId: 'trace-a',
+    });
+  });
+
+  it('renders DataEnvelope object rows using display columns when data columns are absent', () => {
+    const data = {
+      id: 'data-object-rows',
+      envelope: {
+        meta: {
+          type: 'skill_result',
+          version: '2.0',
+          source: 'skill:object_rows',
+          evidenceRefId: 'data:skill:object_rows',
+        },
+        data: {
+          rows: [
+            {frame_id: 1435508, dur_ms: 45.6},
+          ],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: 'Object Row Data',
+          columns: [
+            {name: 'frame_id', label: '帧 ID', type: 'number'},
+            {name: 'dur_ms', label: '帧耗时', type: 'duration', unit: 'ms'},
+          ],
+        },
+      },
+    };
+
+    handleDataEvent(data, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult).toMatchObject({
+      columns: ['frame_id', 'dur_ms'],
+      rows: [[1435508, 45.6]],
+      rowCount: 1,
+    });
+    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+      ref: '表 1',
+      title: 'Object Row Data',
+      evidenceRefId: 'data:skill:object_rows',
     });
   });
 
@@ -1864,6 +1973,45 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].content).toContain('This is a text message');
   });
 
+  it('renders diagnostic text envelopes as non-evidence diagnostics', () => {
+    handleDataEvent({
+      id: 'sql-diagnostic',
+      envelope: {
+        meta: {
+          type: 'diagnostic',
+          version: '2.0',
+          source: 'execute_sql',
+          sourceToolCallId: 'execute_sql:7:params',
+          evidenceRefId: 'data:sql_diagnostic:current:trace:query:tool',
+        },
+        sql: 'SELECT name FROM slice s JOIN thread t ON 1=1',
+        data: {
+          text: [
+            'SQL 执行未产出可用表格。',
+            '这是一条失败诊断，不是可引用的性能证据；需要修正 SQL 后重试。',
+            'Error: ambiguous column name: name',
+          ].join('\n'),
+        },
+        display: {
+          layer: 'diagnosis',
+          format: 'text',
+          title: 'SQL 执行诊断',
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('失败诊断');
+    expect(ctx.messages[0].sourceContext).toMatchObject({
+      ref: '诊断 1',
+      kind: 'diagnostic',
+      reason: expect.stringContaining('不能作为结论证据'),
+      meaning: expect.stringContaining('不证明性能结论'),
+      sourceToolCallId: 'execute_sql:7:params',
+    });
+    expect(ctx.streamingFlow.dataSourceRefs[0].ref).toBe('诊断 1');
+  });
+
   it('should ignore malformed envelopes in a mixed envelope batch', () => {
     const data = {
       id: 'mixed-batch',
@@ -1891,6 +2039,16 @@ describe('handleDataEvent', () => {
           type: 'summary',
           version: '2.0',
           source: 'summary_source',
+          evidenceRefId: 'data:sql_summary:current:trace-a:query-a:tool-a',
+          traceSide: 'current',
+          traceId: 'trace-a',
+          queryHash: 'query-a',
+          sourceToolCallId: 'execute_sql:1:params_hash',
+          paramsHash: 'params_hash',
+          planPhaseId: 'p1',
+          planPhaseTitle: '概览采集',
+          planPhaseGoal: '获取帧统计',
+          producerReason: '执行当前 Trace SQL，验证本阶段的具体数据点。',
         },
         data: {
           summary: {
@@ -1916,6 +2074,20 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].content).toContain('## 📊 洞见摘要');
     expect(ctx.messages[0].content).toContain('（无显式洞见，见指标）\n\n### 关键指标');
     expect(ctx.messages[0].content).not.toMatch(/\n{3,}/);
+    expect(ctx.messages[0].sourceContext).toMatchObject({
+      ref: '摘要 1',
+      kind: 'summary',
+      evidenceRefId: 'data:sql_summary:current:trace-a:query-a:tool-a',
+      traceSide: 'current',
+      traceId: 'trace-a',
+      queryHash: 'query-a',
+      sourceToolCallId: 'execute_sql:1:params_hash',
+      paramsHash: 'params_hash',
+      planPhaseId: 'p1',
+      planPhaseTitle: '概览采集',
+      planPhaseGoal: '获取帧统计',
+      reason: '执行当前 Trace SQL，验证本阶段的具体数据点。',
+    });
   });
 
   it('should append a table-level data source index to conclusions', () => {
@@ -1950,7 +2122,1174 @@ describe('handleDataEvent', () => {
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).toContain('## 数据来源索引');
     expect(ctx.messages[1].content).toContain('表 1: 掉帧帧列表');
-    expect(ctx.messages[1].content).toContain('逐句数字到具体行/列的引用需要后端结论合同');
+    expect(ctx.messages[1].content).toContain('证据 ID 可在报告和结果快照中对齐');
+  });
+
+  it('numbers data source refs per kind so summaries do not shift table refs', () => {
+    handleDataEvent({
+      id: 'summary-first',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_summary:current:trace-a:query-a:summary',
+        },
+        data: {
+          summary: {
+            title: '概览摘要',
+            metrics: [{label: 'total_rows', value: 1}],
+          },
+        },
+        display: {
+          layer: 'overview',
+          format: 'summary',
+          title: '概览摘要',
+        },
+      },
+    }, ctx);
+    handleDataEvent({
+      id: 'table-after-summary',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:table',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '最终结论引用帧耗时表。',
+      },
+    }, ctx);
+
+    expect(ctx.messages[0].sourceContext?.ref).toBe('摘要 1');
+    expect(ctx.messages[1].sqlResult?.sourceContext?.ref).toBe('表 1');
+    expect(ctx.messages[2].content).toContain('摘要 1: 概览摘要');
+    expect(ctx.messages[2].content).toContain('表 1: 帧耗时表');
+    expect(ctx.messages[2].content).not.toContain('表 2: 帧耗时表');
+  });
+
+  it('includes all registered data sources in the conclusion index', () => {
+    for (let i = 1; i <= 85; i++) {
+      handleDataEvent({
+        id: `data-${i}`,
+        envelope: {
+          meta: {
+            type: 'skill_result',
+            version: '2.0',
+            source: `skill:step_${i}`,
+            evidenceRefId: `data:skill:test:step_${i}:current:trace-a:hash_${i}`,
+          },
+          data: {
+            columns: ['value'],
+            rows: [[i]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: `证据表 ${i}`,
+          },
+        },
+      }, ctx);
+    }
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '最终结论需要核对全部证据表。',
+      },
+    }, ctx);
+
+    const conclusion = ctx.messages[85].content;
+    expect(conclusion).toContain('表 1: 证据表 1');
+    expect(conclusion).toContain('表 85: 证据表 85');
+    expect(conclusion).not.toContain('另有');
+  });
+
+  it('bounds the inline data source index and calls out omitted sources', () => {
+    for (let i = 1; i <= 125; i++) {
+      handleDataEvent({
+        id: `data-${i}`,
+        envelope: {
+          meta: {
+            type: 'skill_result',
+            version: '2.0',
+            source: `skill:step_${i}`,
+            evidenceRefId: `data:skill:test:step_${i}:current:trace-a:hash_${i}`,
+          },
+          data: {
+            columns: ['value'],
+            rows: [[i]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: `证据表 ${i}`,
+          },
+        },
+      }, ctx);
+    }
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '最终结论需要核对大量证据表。',
+      },
+    }, ctx);
+
+    const conclusion = ctx.messages[125].content;
+    expect(conclusion).toContain('本轮共有 125 个数据来源');
+    expect(conclusion).toContain('省略中间 5 个');
+    expect(conclusion).toContain('结果快照可能受快照上限裁剪');
+    expect(conclusion).toContain('表 1: 证据表 1');
+    expect(conclusion).toContain('表 125: 证据表 125');
+    expect(conclusion).not.toContain('表 101: 证据表 101');
+  });
+
+  it('renders zero-row table envelopes as auditable sources', () => {
+    handleDataEvent({
+      id: 'empty-table',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:empty',
+          planPhaseAttribution: 'active',
+        },
+        data: {
+          columns: ['id', 'name'],
+          rows: [],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '空结果 SQL',
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult).toMatchObject({
+      columns: ['id', 'name'],
+      rows: [],
+      rowCount: 0,
+    });
+    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+      ref: '表 1',
+      title: '空结果 SQL',
+      rowCount: 0,
+      evidenceRefId: 'data:sql_table:current:trace-a:empty',
+    });
+  });
+
+  it('renders non-tabular chart data instead of registering an orphan source', () => {
+    handleDataEvent({
+      id: 'chart-primitive',
+      envelope: {
+        meta: {
+          type: 'chart',
+          version: '2.0',
+          source: 'chart_skill',
+          evidenceRefId: 'data:chart:current:trace-a:primitive',
+        },
+        data: {
+          chart: {
+            type: 'bar',
+            data: [1, 2, 3],
+          },
+        },
+        display: {
+          layer: 'overview',
+          format: 'chart',
+          title: 'Primitive Chart',
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('Primitive Chart');
+    expect(ctx.messages[0].sourceContext).toMatchObject({
+      ref: '图 1',
+      evidenceRefId: 'data:chart:current:trace-a:primitive',
+    });
+  });
+
+  it('keeps repeated stable evidence separate by tool-call occurrence', () => {
+    const envelope = (sourceToolCallId: string) => ({
+      meta: {
+        type: 'sql_result',
+        version: '2.0',
+        source: 'execute_sql',
+        evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        sourceToolCallId,
+      },
+      data: {
+        columns: ['value'],
+        rows: [[1]],
+      },
+      display: {
+        layer: 'list',
+        format: 'table',
+        title: 'Same SQL',
+      },
+    });
+
+    handleDataEvent({id: 'same-1', envelope: envelope('execute_sql_on:1:params-a')}, ctx);
+    handleDataEvent({id: 'same-2', envelope: envelope('execute_sql_on:2:params-a')}, ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[0].sqlResult?.sourceContext?.sourceToolCallId).toBe('execute_sql_on:1:params-a');
+    expect(ctx.messages[1].sqlResult?.sourceContext?.sourceToolCallId).toBe('execute_sql_on:2:params-a');
+  });
+
+  it('renders claim-level row and column references from conclusion contracts', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          schemaVersion: 'conclusion_contract_v1',
+          mode: 'initial_report',
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          clusters: [],
+          evidence_chain: [{conclusion_id: 'C1', text: '帧耗时 45.6ms'}],
+          claims: [{
+            id: 'Q1',
+            conclusion_id: 'C1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+          uncertainties: [],
+          next_steps: [],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[1].content).toContain('## 逐句数据引用');
+    expect(ctx.messages[1].content).toContain('Q1 / C1: 帧耗时 45.6ms');
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，值 45.6，已核对');
+  });
+
+  it('accepts common source_ref formatting variants without losing source binding', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表1: 帧耗时表',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('表1: 帧耗时表，row 0，列 dur_ms，值 45.6，已核对');
+  });
+
+  it('resolves claim columns by displayed column label when available', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+          columns: [{name: 'dur_ms', label: '帧耗时(ms)', type: 'number'}],
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: '帧耗时(ms)',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 帧耗时(ms)，值 45.6，已核对');
+  });
+
+  it('verifies claim values with units and explicit approximate status for rounded numbers', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.64]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时约 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: '45.6ms',
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，值 45.6ms，已核对: 近似匹配');
+  });
+
+  it('marks claim references that do not match the sourced table value', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 99ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 99,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('未通过: 值不匹配，实际 45.6');
+  });
+
+  it('does not mark column-only claim references as value-verified', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时异常',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，未核验: 未提供期望值');
+    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 dur_ms，已核对');
+  });
+
+  it('uses exact evidence_ref over stale source_ref labels and reports the mismatch', () => {
+    const envelope = (id: string, evidenceRefId: string, value: number) => ({
+      meta: {
+        type: 'sql_result',
+        version: '2.0',
+        source: 'execute_sql',
+        evidenceRefId,
+      },
+      data: {
+        columns: ['dur_ms'],
+        rows: [[value]],
+      },
+      display: {
+        layer: 'list',
+        format: 'table',
+        title: id,
+      },
+    });
+
+    handleDataEvent({id: 'table-a', envelope: envelope('表A', 'data:sql_table:current:trace-a:query-a:params-a', 45.6)}, ctx);
+    handleDataEvent({id: 'table-b', envelope: envelope('表B', 'data:sql_table:current:trace-a:query-b:params-b', 99)}, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              source_ref: '表 2',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[2].content).toContain('表 1，row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[2].content).toContain('source_ref 表 2 与系统来源 表 1 不一致，已按机器 ID 核对');
+    expect(ctx.messages[2].content).not.toContain('表 2，row 0，列 dur_ms，值 45.6，已核对');
+  });
+
+  it('rejects fractional or negative claim row indexes instead of rounding them', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: -0.4,
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('row -0.4，列 dur_ms，值 45.6，未通过: 行号无效');
+  });
+
+  it('marks duplicate evidence refs as ambiguous unless tool call id disambiguates them', () => {
+    const envelope = (sourceToolCallId: string, value: number) => ({
+      meta: {
+        type: 'sql_result',
+        version: '2.0',
+        source: 'execute_sql',
+        evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        sourceToolCallId,
+      },
+      data: {
+        columns: ['dur_ms'],
+        rows: [[value]],
+      },
+      display: {
+        layer: 'list',
+        format: 'table',
+        title: '重复 SQL',
+      },
+    });
+
+    handleDataEvent({id: 'same-1', envelope: envelope('execute_sql:1:params-a', 45.6)}, ctx);
+    handleDataEvent({id: 'same-2', envelope: envelope('execute_sql:2:params-a', 99)}, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [
+            {
+              id: 'Q1',
+              text: '帧耗时 45.6ms',
+              references: [{
+                evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+                row_index: 0,
+                column: 'dur_ms',
+                value: 45.6,
+              }],
+            },
+            {
+              id: 'Q2',
+              text: '第二次帧耗时 99ms',
+              references: [{
+                evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+                source_tool_call_id: 'execute_sql:2:params-a',
+                row_index: 0,
+                column: 'dur_ms',
+                value: 99,
+              }],
+            },
+          ],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[2].content).toContain('Q1: 帧耗时 45.6ms');
+    expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
+    expect(ctx.messages[2].content).toContain('Q2: 第二次帧耗时 99ms');
+    expect(ctx.messages[2].content).toContain('工具 execute_sql:2:params-a，已核对');
+  });
+
+  it('keeps duplicate evidence refs without tool call ids visible so claims become ambiguous', () => {
+    const envelope = (value: number) => ({
+      meta: {
+        type: 'sql_result',
+        version: '2.0',
+        source: 'execute_sql',
+        evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+      },
+      data: {
+        columns: ['dur_ms'],
+        rows: [[value]],
+      },
+      display: {
+        layer: 'list',
+        format: 'table',
+        title: '重复 SQL',
+      },
+    });
+
+    handleDataEvent({id: 'same-1', envelope: envelope(45.6)}, ctx);
+    handleDataEvent({id: 'same-2', envelope: envelope(99)}, ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
+    expect(ctx.messages[2].content).not.toContain('值 45.6，已核对');
+  });
+
+  it('verifies claim rows by rowSelector when no row_index is provided', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['frame_id', 'dur_ms'],
+          rows: [[123, 45.6], [456, 16.7]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧 123 耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_selector: {frame_id: 123},
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('rowSelector frame_id=123 -> row 0，列 dur_ms，值 45.6，已核对');
+  });
+
+  it('parses prompt-style row_selector strings for claim verification', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['frame_id', 'thread', 'dur_ms'],
+          rows: [[123, 'main', 45.6], [456, 'render', 16.7]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧 123 耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_selector: 'frame_id=123, thread=main',
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，值 45.6，已核对');
+  });
+
+  it('keeps claim-referenced middle data sources visible when the source index is truncated', () => {
+    for (let i = 1; i <= 125; i++) {
+      handleDataEvent({
+        id: `source-${i}`,
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: `data:sql_table:current:trace-a:query-${i}:params-a`,
+          },
+          data: {
+            columns: ['value'],
+            rows: [[i]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: i === 105 ? 'Middle pinned table' : `Table ${i}`,
+          },
+        },
+      }, ctx);
+    }
+
+    handleSSEEvent('conclusion', {
+      data: {
+        conclusion: '已有结论',
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '中间表数据被引用'}],
+          claims: [{
+            id: 'Q1',
+            text: '第 105 张表的值是 105',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-105:params-a',
+              source_ref: '表 105',
+              row_index: 0,
+              column: 'value',
+              value: 105,
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    const conclusion = ctx.messages[125].content;
+    expect(conclusion).toContain('已有结论');
+    expect(conclusion).toContain('并额外保留 1 个被逐句引用命中的来源');
+    expect(conclusion).toContain('表 105: Middle pinned table');
+    expect(conclusion).toContain('表 105，row 0，列 value，值 105，已核对');
+  });
+
+  it('discloses claim and per-claim reference truncation instead of silently dropping them', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['value'],
+          rows: [[1]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '裁剪测试表',
+        },
+      },
+    }, ctx);
+
+    const reference = {
+      evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+      row_index: 0,
+      column: 'value',
+      value: 1,
+      source_ref: '表 1',
+    };
+
+    handleAnalysisCompletedEvent({
+      data: {
+        resultSnapshotId: 'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '多 claim 结论'}],
+          claims: Array.from({length: 21}, (_, index) => ({
+            id: `Q${index + 1}`,
+            text: `claim ${index + 1}`,
+            references: Array.from({length: index === 0 ? 6 : 1}, () => reference),
+          })),
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('另有 1 个引用未展开');
+    expect(ctx.messages[1].content).toContain('其余 1 条 claim 未展开；完整结构化引用仍保留在结果快照中。');
+  });
+
+  it('appends system-generated evidence sections even when narrative has same headings', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '已有结论\n\n## 数据来源索引\n模型写的来源\n\n## 逐句数据引用\n模型写的引用',
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).toContain('## 数据来源索引（系统生成）');
+    expect(ctx.messages[1].content).toContain('## 逐句数据引用（系统核对结果）');
+    expect(ctx.messages[1].content).toContain('已核对');
+  });
+
+  it('keeps late conclusionContract claim refs when conclusion arrived first', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleSSEEvent('conclusion', {
+      data: {
+        conclusion: '已有结论',
+      },
+    }, ctx);
+    expect(ctx.completionHandled).toBe(true);
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[1].content).toContain('已有结论');
+    expect(ctx.messages[1].content).toContain('## 逐句数据引用');
+    expect(ctx.messages[1].content).toContain('已核对');
+  });
+
+  it('replaces unverified structured claim refs with system-checked claim refs', () => {
+    handleDataEvent({
+      id: 'claim-source',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+        },
+        data: {
+          columns: ['dur_ms'],
+          rows: [[45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '帧耗时表',
+        },
+      },
+    }, ctx);
+
+    handleSSEEvent('conclusion', {
+      data: {
+        conclusion: [
+          '已有结论',
+          '',
+          '## 逐句数据引用（结构化来源）',
+          '- Q1 / C1: 帧耗时 45.6ms',
+          '  - evidence_ref_id=data:sql_table:current:trace-a:query-a:params-a; source_ref=表 1; row_index=0; column=dur_ms; value=45.6',
+          '',
+          '## 不确定性与反例',
+          '- 暂无',
+        ].join('\n'),
+      },
+    }, ctx);
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusionContract: {
+          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+          claims: [{
+            id: 'Q1',
+            conclusion_id: 'C1',
+            text: '帧耗时 45.6ms',
+            references: [{
+              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
+              row_index: 0,
+              column: 'dur_ms',
+              value: 45.6,
+              source_ref: '表 1',
+            }],
+          }],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[1].content).not.toContain('## 逐句数据引用（结构化来源）');
+    expect(ctx.messages[1].content).toContain('## 逐句数据引用（系统核对结果）');
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('## 不确定性与反例');
+  });
+
+  it('keeps current/reference DataEnvelope tables separate by evidence ref and trace side', () => {
+    handleDataEvent({
+      id: 'data-compare',
+      envelope: [
+        {
+          meta: {
+            type: 'skill_result',
+            version: '2.0',
+            source: 'scrolling_analysis:jank_frames',
+            skillId: 'scrolling_analysis',
+            stepId: 'jank_frames',
+            evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
+            traceSide: 'current',
+            traceId: 'trace-a',
+          },
+          data: {
+            columns: ['frame_id', 'dur_ms'],
+            rows: [[123, 45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '掉帧帧列表',
+          },
+        },
+        {
+          meta: {
+            type: 'skill_result',
+            version: '2.0',
+            source: 'scrolling_analysis:jank_frames',
+            skillId: 'scrolling_analysis',
+            stepId: 'jank_frames',
+            evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
+            traceSide: 'reference',
+            traceId: 'trace-b',
+          },
+          data: {
+            columns: ['frame_id', 'dur_ms'],
+            rows: [[456, 22.1]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '掉帧帧列表',
+          },
+        },
+      ],
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+      ref: '表 1',
+      traceSide: 'current',
+      evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
+    });
+    expect(ctx.messages[1].sqlResult?.sourceContext).toMatchObject({
+      ref: '表 2',
+      traceSide: 'reference',
+      evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
+    });
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: '当前 Trace 掉帧更重。',
+      },
+    }, ctx);
+
+    const conclusion = ctx.messages[2].content;
+    expect(conclusion).toContain('表 1: 当前 Trace · 掉帧帧列表');
+    expect(conclusion).toContain('表 2: 参考 Trace · 掉帧帧列表');
+    expect(conclusion).toContain('...current:trace-a:hash');
+    expect(conclusion).toContain('...reference:trace-b:hash');
+  });
+
+  it('does not mutate the latest table when an empty conclusion precedes report metadata', () => {
+    handleDataEvent({
+      id: 'data-1',
+      envelope: {
+        meta: {
+          type: 'skill_result',
+          version: '2.0',
+          source: 'scrolling_analysis',
+          skillId: 'scrolling_analysis',
+          stepId: 'jank_frames',
+          evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
+        },
+        data: {
+          columns: ['frame_id', 'dur_ms'],
+          rows: [[123, 45.6]],
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: '掉帧帧列表',
+        },
+      },
+    }, ctx);
+
+    handleSSEEvent('conclusion', {data: {conclusion: ''}}, ctx);
+    handleAnalysisCompletedEvent({
+      data: {
+        reportUrl: '/reports/123.html',
+        resultSnapshotId: 'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sqlResult).toBeDefined();
+    expect(ctx.messages[0].content).toBe('');
+    expect(ctx.messages[0].reportUrl).toBeUndefined();
   });
 });
 
@@ -1974,6 +3313,56 @@ describe('handleAnswerTokenEvent', () => {
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
     expect(ctx.messages[0].content).toBe('你好，世界');
     expect(ctx.streamingAnswer.status).toBe('completed');
+  });
+
+  it('should mirror streamed answer checkpoints into the conversation timeline', () => {
+    handleAnswerTokenEvent({
+      data: {
+        token: 'Phase 1 发现冷启动 dur=1338ms，TTID=1912ms，需要进入 Phase 2。',
+      },
+    }, ctx);
+    handleAnswerTokenEvent({
+      data: {
+        token: '\n主线程 Running=63%，Q4b Sleeping=35.1%，需要深挖阻塞原因。',
+      },
+    }, ctx);
+    handleAnswerTokenEvent({data: {done: true}}, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].flowTag).toBe('answer_stream');
+    expect(ctx.flowMessages).toHaveLength(1);
+    const timeline = ctx.flowMessages[0].content;
+    expect(timeline).toContain('🧵 对话时间线');
+    expect(timeline).toContain('#A1');
+    expect(timeline).toContain('开始流式输出分析结果');
+    expect(timeline).toContain('流式更新');
+    expect(timeline).toContain('最终更新');
+    expect(timeline).toContain('最终回答已输出');
+    expect(ctx.streamingFlow.conversationLastOrdinal).toBe(0);
+  });
+
+  it('should keep answer checkpoints separate from backend conversation ordinals', () => {
+    handleConversationStepEvent({
+      id: 'evt-1',
+      data: {
+        ordinal: 1,
+        phase: 'progress',
+        role: 'system',
+        content: {text: '开始分析'},
+      },
+    }, ctx);
+
+    handleAnswerTokenEvent({
+      data: {
+        token: '关键发现：主线程 Running=63%，Q4b Sleeping=35.1%，需要继续定位。',
+      },
+    }, ctx);
+    handleAnswerTokenEvent({data: {done: true}}, ctx);
+
+    const timeline = ctx.flowMessages[0].content;
+    expect(timeline).toContain('#1');
+    expect(timeline).toContain('#A1');
+    expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
   });
 });
 

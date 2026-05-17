@@ -1202,7 +1202,7 @@ function mklink(src, dst) {
     if (fs.lstatSync(dst).isSymbolicLink() && fs.readlinkSync(dst) === src) {
       return;
     } else {
-      fs.unlinkSync(dst);
+      fs.rmSync(dst, {recursive: true, force: true});
     }
   }
   fs.symlinkSync(src, dst);

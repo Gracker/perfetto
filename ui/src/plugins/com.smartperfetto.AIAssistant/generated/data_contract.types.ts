@@ -52,6 +52,23 @@ export interface ConclusionContractEvidenceItem {
   text: string;
 }
 
+export interface ConclusionContractClaimReference {
+  evidenceRefId: string;
+  rowIndex?: number;
+  rowSelector?: Record<string, string | number | boolean>;
+  column?: string;
+  value?: string | number | boolean;
+  sourceRef?: string;
+  sourceToolCallId?: string;
+}
+
+export interface ConclusionContractClaimItem {
+  id?: string;
+  conclusionId?: string;
+  text: string;
+  references: ConclusionContractClaimReference[];
+}
+
 export interface ConclusionContractMetadata {
   confidencePercent?: number;
   rounds?: number;
@@ -65,6 +82,7 @@ export interface ConclusionContract {
   conclusions: ConclusionContractConclusionItem[];
   clusters: ConclusionContractClusterItem[];
   evidenceChain: ConclusionContractEvidenceItem[];
+  claims?: ConclusionContractClaimItem[];
   uncertainties: string[];
   nextSteps: string[];
   metadata?: ConclusionContractMetadata;
@@ -226,6 +244,48 @@ export interface DataEnvelopeMeta {
 
   /** Optional step ID within a skill */
   stepId?: string;
+
+  /** Stable evidence reference shared by UI, reports, and snapshots */
+  evidenceRefId?: string;
+
+  /** Trace side for comparison-mode outputs */
+  traceSide?: 'current' | 'reference';
+
+  /** Backend trace identifier used to produce this data */
+  traceId?: string;
+
+  /** Stable hash of the SQL or data-producing query */
+  queryHash?: string;
+
+  /** Tool-call identifier that produced this data, when available */
+  sourceToolCallId?: string;
+
+  /** Stable hash of the producing tool parameters */
+  paramsHash?: string;
+
+  /** Matched analysis plan phase ID when this data was produced */
+  planPhaseId?: string;
+
+  /** Matched analysis plan phase title when this data was produced */
+  planPhaseTitle?: string;
+
+  /** Matched analysis plan phase goal when this data was produced */
+  planPhaseGoal?: string;
+
+  /** Whether the plan phase binding is explicit enough to trust */
+  planPhaseAttribution?: 'active' | 'inferred' | 'missing' | 'ambiguous' | 'unexpected_tool' | 'none';
+
+  /** Warning when the phase binding is missing, ambiguous, or tool-mismatched */
+  planPhaseWarning?: string;
+
+  /** One-line producer narration for this specific data output */
+  toolNarration?: string;
+
+  /** Human-readable reason this output was produced */
+  producerReason?: string;
+
+  /** Short producer intent for explaining why this table exists */
+  intent?: string;
 }
 
 /**
@@ -749,12 +809,45 @@ export function isValidDisplayLayer(layer: string | undefined): layer is Display
 /**
  * Convert a DataEnvelope to SqlQueryResult for frontend display
  */
+function isRecordRow(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function displayColumnNames(columns: ColumnDefinition[] | undefined): string[] {
+  return Array.isArray(columns)
+    ? columns.map((column) => column.name).filter((name): name is string => typeof name === 'string' && name.length > 0)
+    : [];
+}
+
+function inferObjectRowColumns(rows: unknown[]): string[] {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!isRecordRow(row)) continue;
+    for (const key of Object.keys(row)) {
+      if (!seen.has(key)) seen.add(key);
+    }
+  }
+  return [...seen];
+}
+
 export function envelopeToSqlQueryResult(envelope: DataEnvelope): SqlQueryResult {
   const data = envelope.data;
-  const rows = data.rows || [];
+  const rawRows = Array.isArray(data.rows) ? data.rows : [];
+  const dataColumns = Array.isArray(data.columns) ? data.columns.map(String) : [];
+  const displayColumns = displayColumnNames(envelope.display.columns);
+  const columns = dataColumns.length > 0
+    ? dataColumns
+    : displayColumns.length > 0
+      ? displayColumns
+      : inferObjectRowColumns(rawRows);
+  const rows = rawRows.map((row) => {
+    if (Array.isArray(row)) return row;
+    if (isRecordRow(row)) return columns.map((column) => row[column]);
+    return [row];
+  });
 
   return {
-    columns: data.columns || [],
+    columns,
     rows: rows,
     rowCount: rows.length,
     columnDefinitions: envelope.display.columns,
