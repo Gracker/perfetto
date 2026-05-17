@@ -317,6 +317,7 @@ Env-var overrides:
 
   function terminateChildProcesses() {
     for (const proc of subprocesses) {
+      if (proc === undefined) continue;
       console.log(`Terminating child process with PID ${proc.pid}`);
       proc.kill(); // SIGTERM is the default
     }
