@@ -3524,6 +3524,34 @@ describe('handleSSEEvent', () => {
     expect(ctx.messages[0].content).toBe('Final conclusion');
   });
 
+  it('should replace early streamed answer tokens with canonical conclusion text', () => {
+    handleSSEEvent('answer_token', {data: {token: 'Interim pre-plan text'}}, ctx);
+
+    handleSSEEvent('conclusion', {
+      data: {
+        conclusion: '## 综合结论\n\nFinal report body.',
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].flowTag).toBe('answer_stream');
+    expect(ctx.messages[0].content).toContain('## 综合结论');
+    expect(ctx.messages[0].content).not.toContain('Interim pre-plan text');
+
+    handleSSEEvent('analysis_completed', {
+      data: {
+        conclusion: '## 综合结论\n\nFinal report body with snapshot.',
+        reportUrl: '/reports/123.html',
+        resultSnapshotId: 'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('Final report body with snapshot.');
+    expect(ctx.messages[0].content).toContain('Result ID: `AR-12345678`');
+    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
+  });
+
   it('should route answer_token events to incremental answer stream', () => {
     handleSSEEvent('answer_token', {data: {token: 'A'}}, ctx);
     handleSSEEvent('answer_token', {data: {token: 'B'}}, ctx);

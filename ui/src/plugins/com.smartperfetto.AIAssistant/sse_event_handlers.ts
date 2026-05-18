@@ -3108,16 +3108,29 @@ export function handleAnalysisCompletedEvent(
     if (DEBUG_SSE) console.log('[SSEHandlers] Completion already handled, extracting reportUrl only');
     const reportUrl = payload?.reportUrl;
     const resultSnapshotId = payload?.resultSnapshotId;
-    if (reportUrl || resultSnapshotId || conclusionContract) {
-      // Attach reportUrl to the existing answer/conclusion message
+    const canonicalConclusion = payload?.conclusion || payload?.answer;
+    const canonicalContent = canonicalConclusion
+      ? appendFinalEvidenceSections(
+          canonicalConclusion,
+          conclusionContract,
+          ctx,
+          resultSnapshotId,
+        )
+      : undefined;
+    if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent) {
+      // Attach reportUrl to the existing answer/conclusion message. If the
+      // final payload includes narrative text, treat it as canonical and
+      // replace any earlier streamed placeholder tokens.
       const answerMsgId = ctx.streamingAnswer.messageId;
       if (answerMsgId) {
         const existing = ctx.getMessages().find((msg) => msg.id === answerMsgId);
         ctx.updateMessage(answerMsgId, {
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
-          ...(existing
-            ? {content: appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId)}
-            : {}),
+          ...(canonicalContent
+            ? {content: canonicalContent}
+            : existing
+              ? {content: appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId)}
+              : {}),
         }, {persist: true});
       } else {
         // No streamed answer — find the last assistant message (conclusion added by 'conclusion' event)
@@ -3133,10 +3146,20 @@ export function handleAnalysisCompletedEvent(
               ...(reportUrl && !messages[i].reportUrl
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
-              content: appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId),
+              content: canonicalContent ||
+                appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId),
             }, {persist: true});
             break;
           }
+        }
+        if (canonicalContent && !messages.some((msg) => msg.role === 'assistant' && !msg.sqlResult && msg.content.trim().length > 0)) {
+          ctx.addMessage({
+            id: ctx.generateId(),
+            role: 'assistant',
+            content: canonicalContent,
+            timestamp: Date.now(),
+            ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+          });
         }
       }
     } else if (payload?.reportError) {
@@ -4511,19 +4534,33 @@ function handleSSEEventInner(
         completeStreamingAnswer(ctx);
       }
 
-      // If the conclusion text was NOT already streamed via answer_token events,
-      // add it as a proper conversation message bubble so the user can see it.
-      const alreadyStreamed = ctx.streamingAnswer.content.length > 0;
-      if (conclusionText && !alreadyStreamed) {
-        ctx.addMessage({
-          id: ctx.generateId(),
-          role: 'assistant',
-          content: appendDataSourceIndex(conclusionText, ctx),
-          timestamp: Date.now(),
-        });
+      if (conclusionText) {
+        const content = appendDataSourceIndex(conclusionText, ctx);
+        const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
+        const hasStreamedAnswerMessage = Boolean(
+          streamedAnswerMessageId &&
+          ctx.getMessages().some((msg) => msg.id === streamedAnswerMessageId)
+        );
+        if (hasStreamedAnswerMessage && streamedAnswerMessageId) {
+          ctx.streamingAnswer.content = content;
+          ctx.streamingAnswer.pending = '';
+          ctx.streamingAnswer.status = 'completed';
+          ctx.updateMessage(streamedAnswerMessageId, {
+            content,
+            timestamp: Date.now(),
+            flowTag: 'answer_stream',
+          }, {persist: true});
+        } else {
+          ctx.addMessage({
+            id: ctx.generateId(),
+            role: 'assistant',
+            content,
+            timestamp: Date.now(),
+          });
+        }
       }
 
-      if (conclusionText || alreadyStreamed) {
+      if (conclusionText || ctx.streamingAnswer.content.length > 0) {
         ctx.setCompletionHandled(true);
       }
       // Not terminal — analysis_completed with reportUrl still follows
