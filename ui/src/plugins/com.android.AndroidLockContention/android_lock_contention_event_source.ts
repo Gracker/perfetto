@@ -328,7 +328,9 @@ export class AndroidLockContentionEventSource {
 
     const monitorQuery = await this.trace.engine.query(`
       SELECT 
-        id, ts, dur, lock_name, waiter_count,
+        id, ts, dur,
+        COALESCE(short_blocking_method, blocking_method, 'Unknown Lock') AS lock_name,
+        waiter_count,
         blocked_thread_name, blocking_thread_name, blocking_thread_tid as owner_tid,
         short_blocked_method, short_blocking_method,
         parent_id, binder_reply_id, blocking_utid,

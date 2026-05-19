@@ -686,7 +686,6 @@ export interface AIPanelState {
   isLoading: boolean;
   loadingPhase: string; // Current analysis phase text (from SSE progress events)
   showSettings: boolean;
-  aiService: any | null; // AIService type from ai_service.ts
   settings: AISettings;
   commandHistory: string[];
   historyIndex: number;

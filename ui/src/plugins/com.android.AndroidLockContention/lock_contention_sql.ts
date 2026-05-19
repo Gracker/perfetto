@@ -41,7 +41,10 @@ SELECT
   obt.utid AS owner_utid,
   bt.name AS blocked_thread_name,
   obt.name AS blocking_thread_name,
-  regexp_extract(r.name, 'Lock contention on (?:a )?(.*) lock') AS lock_type
+  COALESCE(
+    regexp_extract(r.name, 'Lock contention on a (.*) lock'),
+    regexp_extract(r.name, 'Lock contention on (.*) lock')
+  ) AS lock_type
 FROM raw_contentions AS r
 JOIN thread AS bt
   ON r.utid = bt.utid
@@ -69,7 +72,7 @@ SELECT
   id,
   ts,
   dur,
-  lock_name,
+  COALESCE(short_blocking_method, blocking_method, 'Unknown Lock') AS lock_name,
   blocking_tid AS owner_tid,
   blocking_utid AS owner_utid,
   blocked_thread_name,

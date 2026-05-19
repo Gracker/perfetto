@@ -17,7 +17,6 @@
 // limitations under the License.
 
 import m from 'mithril';
-import {BackendProxyService} from './ai_service';
 import {SettingsModal} from './settings_modal';
 import {ProviderQuickSwitcher} from './provider_switcher';
 import {SqlResultTable} from './sql_result_table';
@@ -291,7 +290,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     isLoading: false,
     loadingPhase: '',
     showSettings: false,
-    aiService: null,
     settings: {...DEFAULT_SETTINGS},
     commandHistory: [],
     historyIndex: -1,
@@ -1002,7 +1000,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
-  // oninit is called before view(), so AI service is initialized before first render
+  // oninit is called before view(), so backend status is initialized before first render
   oninit(vnode: m.Vnode<AIPanelAttrs>) {
     this.engine = vnode.attrs.engine;
     this.trace = vnode.attrs.trace;
@@ -1010,8 +1008,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // Load settings from localStorage
     this.loadSettings();
 
-    // Initialize AI service - must happen before first render
-    this.initAIService();
+    // Initialize backend status - must happen before first render
+    this.initBackendStatus();
 
     // 检测 Trace 变化并加载对应的历史
     this.handleTraceChange();
@@ -2898,9 +2896,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m('div.ai-input-wrapper', [
                       m('textarea#ai-input.ai-input', {
                         'class':
-                          this.state.isLoading ||
-                          !this.state.aiService ||
-                          !isInRpcMode
+                          this.state.isLoading || !isInRpcMode
                             ? 'disabled'
                             : '',
                         'aria-label': '\u8F93\u5165\u5206\u6790\u95EE\u9898',
@@ -2917,9 +2913,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         'onkeydown': (e: KeyboardEvent) =>
                           this.handleKeyDown(e),
                         'disabled':
-                          this.state.isLoading ||
-                          !this.state.aiService ||
-                          !isInRpcMode,
+                          this.state.isLoading || !isInRpcMode,
                       }),
                       m('div.ai-input-controls', [
                         this.renderPresetQuestionButtons(isInRpcMode),
@@ -2945,13 +2939,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           : m(
                               'button.ai-send-btn',
                               {
-                                'class':
-                                  !this.state.aiService || !isInRpcMode
-                                    ? 'disabled'
-                                    : '',
+                                'class': !isInRpcMode ? 'disabled' : '',
                                 'onclick': () => this.sendMessage(),
-                                'disabled':
-                                  !this.state.aiService || !isInRpcMode,
+                                'disabled': !isInRpcMode,
                                 'title': 'Send (Enter)',
                                 'aria-label': '\u53D1\u9001',
                               },
@@ -2963,15 +2953,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       'div.ai-input-hint',
                       'Press Enter to send, Shift+Enter for new line',
                     ),
-                    !this.state.aiService
-                      ? m('div.ai-warning', [
-                          m('i.pf-icon', 'warning'),
-                          m(
-                            'span',
-                            'AI service not configured. Click settings to set up.',
-                          ),
-                        ])
-                      : null,
                   ])
                 : null,
             ]), // End of ai-main-content
@@ -3249,7 +3230,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private saveSettings(newSettings: AISettings) {
     this.state.settings = newSettings;
     sessionManager.saveSettings(newSettings);
-    this.initAIService();
+    this.initBackendStatus();
     m.redraw();
   }
 
@@ -3701,11 +3682,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       });
   }
 
-  private initAIService() {
-    const {backendUrl} = this.state.settings;
-    // All AI requests go through the backend (agentv3 architecture).
-    // The backend handles provider/model selection via its .env config.
-    this.state.aiService = new BackendProxyService(backendUrl, 'default');
+  private initBackendStatus() {
     // Refresh server status on init (non-blocking)
     this.refreshServerStatus();
   }
@@ -4054,23 +4031,27 @@ Click ⚙️ to configure backend connection.`;
    * Builds a smart query and sends it through the normal agent flow.
    * The selectionContext is auto-injected by handleChatMessage().
    */
-  private async analyzeCurrentSelection() {
-    if (this.state.isLoading || !this.trace) return;
+  private buildCurrentSelectionAnalysisQuery(): string | null {
+    if (!this.trace) return null;
     const sel = this.trace.selection.selection;
 
-    let query: string;
     if (sel.kind === 'area') {
       const timeSpan = this.trace.selection.getTimeSpanOfSelection();
       const durMs = timeSpan
         ? (Number(timeSpan.duration) / 1e6).toFixed(1)
         : '?';
-      query = `分析用户选中区间的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
-    } else if (sel.kind === 'track_event') {
-      query =
-        '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常';
-    } else {
-      return;
+      return `分析用户选中区间的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
     }
+    if (sel.kind === 'track_event') {
+      return '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常';
+    }
+    return null;
+  }
+
+  private async analyzeCurrentSelection() {
+    if (this.state.isLoading || !this.trace) return;
+    const query = this.buildCurrentSelectionAnalysisQuery();
+    if (!query) return;
 
     this.state.input = query;
     const datasets = await this.querySelectionData();
@@ -4516,15 +4497,15 @@ Click ⚙️ to configure backend connection.`;
       return;
     }
 
-    // Handle track_event selection (selected slice)
-    if (selection.kind === 'track_event') {
-      await this.analyzeSelectedSlice(selection.trackUri, selection.eventId);
-      return;
-    }
-
-    // Handle area selection
-    if (selection.kind === 'area') {
-      await this.analyzeAreaSelection(selection);
+    const query = this.buildCurrentSelectionAnalysisQuery();
+    if (query) {
+      const last = this.state.messages[this.state.messages.length - 1];
+      if (last?.role === 'user' && last.content.trim() === '/analyze') {
+        last.content = query;
+      }
+      const datasets = await this.querySelectionData();
+      this.state.pendingTraceContext = datasets.length > 0 ? datasets : null;
+      await this.handleChatMessage(query);
       return;
     }
 
@@ -4536,220 +4517,6 @@ Click ⚙️ to configure backend connection.`;
     });
   }
 
-  private async analyzeSelectedSlice(_trackUri: string, eventId: number) {
-    this.setLoadingState(true);
-    m.redraw();
-
-    try {
-      // Query the selected slice details
-      const query = `
-        SELECT
-          s.id,
-          s.name,
-          s.category,
-          s.ts,
-          s.dur / 1e6 as dur_ms,
-          s.track_id,
-          s.depth,
-          t.name AS track_name,
-          thread.name AS thread_name,
-          thread.tid AS tid,
-          process.name AS process_name,
-          process.pid AS pid
-        FROM slice s
-        LEFT JOIN track t ON s.track_id = t.id
-        LEFT JOIN thread_track tt ON s.track_id = tt.id
-        LEFT JOIN thread USING (utid)
-        LEFT JOIN process USING (upid)
-        WHERE s.id = ${eventId}
-        LIMIT 1
-      `;
-
-      const result = await this.engine?.query(query);
-      if (!result || result.numRows() === 0) {
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content:
-            '**Error:** Could not find slice details. The slice may have been removed or the track may not be a slice track.',
-          timestamp: Date.now(),
-        });
-        this.setLoadingState(false);
-        m.redraw();
-        return;
-      }
-
-      const columns = result.columns();
-      const it = result.iter({});
-      it.valid();
-
-      const sliceData: Record<string, any> = {};
-      for (const col of columns) {
-        sliceData[col] = it.get(col);
-      }
-
-      // Format the slice information for AI
-      const sliceInfo = `
-Selected Slice Information:
-- ID: ${sliceData.id}
-- Name: ${sliceData.name}
-- Category: ${sliceData.category || 'N/A'}
-- Timestamp: ${sliceData.ts} (ns, absolute)
-- Duration: ${sliceData.dur_ms?.toFixed(2) || 'N/A'} ms
-- Process: ${sliceData.process_name || 'N/A'} (pid=${sliceData.pid ?? 'N/A'})
-- Thread: ${sliceData.thread_name || 'N/A'} (tid=${sliceData.tid ?? 'N/A'})
-- Track: ${sliceData.track_name || 'N/A'}
-- Track ID: ${sliceData.track_id}
-- Depth: ${sliceData.depth}
-      `.trim();
-
-      // If AI service is configured, ask for analysis
-      if (this.state.aiService) {
-        const systemPrompt = `You are an Android performance analysis expert.
-
-You will be given ONE slice row from a Perfetto trace (plus any joined context like thread/process/track if available).
-
-Rules:
-- Base your analysis ONLY on the provided slice data. Do NOT invent missing context.
-- If data is insufficient, explicitly say what is missing and suggest how to obtain it (what tables/joins to query).
-- Use nanoseconds (ns) for raw timestamps and milliseconds (ms) for durations in your narrative.
-
-Output MUST follow this exact markdown structure:
-
-## What It Is
-## Is It Abnormal?
-## Why It Matters
-## Next Checks (Perfetto SQL)
-- Provide up to 2 SQL queries, each in a \`\`\`sql\`\`\` block, and nothing else.`;
-
-        const userPrompt = `Analyze this slice:\n\n${sliceInfo}`;
-
-        try {
-          const response = await this.state.aiService.chat([
-            {role: 'system', content: systemPrompt},
-            {role: 'user', content: userPrompt},
-          ]);
-
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `**Slice Analysis:**\n\n${sliceInfo}\n\n---\n\n${response}`,
-            timestamp: Date.now(),
-          });
-        } catch (e: any) {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: `**Error calling AI:** ${e.message || e}\n\n**Slice Info:**\n\`\`\`\n${sliceInfo}\n\`\`\``,
-            timestamp: Date.now(),
-          });
-        }
-      } else {
-        // No AI service configured, just show the slice info
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: `**Selected Slice:**\n\`\`\`\n${sliceInfo}\n\`\`\`\n\nCheck backend connection in settings (⚙️) to enable AI-powered analysis.`,
-          timestamp: Date.now(),
-        });
-      }
-    } catch (e: any) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `**Error analyzing slice:** ${e.message || e}`,
-        timestamp: Date.now(),
-      });
-    }
-
-    this.setLoadingState(false);
-    m.redraw();
-  }
-
-  private async analyzeAreaSelection(
-    selection: import('../../public/selection').AreaSelection,
-  ) {
-    this.setLoadingState(true);
-    m.redraw();
-
-    try {
-      // Get time span info
-      const timeSpan = await this.trace!.selection.getTimeSpanOfSelection();
-      const duration = timeSpan ? timeSpan.duration : 0;
-      const start = timeSpan?.start || 0;
-      const end = timeSpan?.end || 0;
-
-      // Query slices in the selected area
-      const query = `
-        SELECT
-          name,
-          category,
-          COUNT(*) as count,
-          SUM(dur) / 1e6 as total_dur_ms,
-          AVG(dur) / 1e6 as avg_dur_ms,
-          MIN(dur) / 1e6 as min_dur_ms,
-          MAX(dur) / 1e6 as max_dur_ms
-        FROM slice
-        WHERE ts >= ${start} AND ts + dur <= ${end}
-        GROUP BY name, category
-        ORDER BY total_dur_ms DESC
-        LIMIT 20
-      `;
-
-      const result = await this.engine?.query(query);
-      if (!result || result.numRows() === 0) {
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: '**No slices found** in the selected time range.',
-          timestamp: Date.now(),
-        });
-        this.setLoadingState(false);
-        m.redraw();
-        return;
-      }
-
-      const columns = result.columns();
-      const rows: any[][] = [];
-      const it = result.iter({});
-      while (it.valid()) {
-        const row: any[] = [];
-        for (const col of columns) {
-          row.push(it.get(col));
-        }
-        rows.push(row);
-        it.next();
-      }
-
-      const summary = `**Area Selection Analysis:**\n`;
-      const timeInfo = `- Time range: ${start} to ${end}\n- Duration: ${(Number(duration) / 1e6).toFixed(2)} ms\n- Tracks: ${selection.trackUris.length}\n`;
-
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content:
-          summary +
-          timeInfo +
-          `\nFound **${rows.length}** slice types in this selection.`,
-        timestamp: Date.now(),
-        sqlResult: {columns, rows, rowCount: rows.length},
-      });
-    } catch (e: any) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: `**Error analyzing area:** ${e.message || e}`,
-        timestamp: Date.now(),
-      });
-    }
-
-    this.setLoadingState(false);
-    m.redraw();
-  }
-
-  /**
-   * Capture the current Perfetto UI selection and resolve track metadata.
-   * Returns null if nothing is selected.
   /**
    * Query slice metadata for the Slice Selected card.
    * Called when selection changes to a track_event.
