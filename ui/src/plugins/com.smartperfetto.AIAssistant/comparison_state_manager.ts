@@ -24,10 +24,13 @@
  *   4. Comparison bar and mode are restored seamlessly
  */
 
-const COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v1';
+const COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v2';
+const LEGACY_COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v1';
 
 /** Persisted comparison state — survives plugin re-instantiation. */
 export interface PersistedComparisonState {
+  schemaVersion?: 2;
+  sourceKind?: 'raw_trace_pair';
   /** Which trace is the "primary" (the one user originally opened) */
   primaryTraceId: string;
   primaryTraceName: string;
@@ -62,7 +65,15 @@ export interface ViewportSnapshot {
 /** Save comparison state to sessionStorage before trace switch. */
 export function saveComparisonState(state: PersistedComparisonState): void {
   try {
-    sessionStorage.setItem(COMPARISON_STATE_KEY, JSON.stringify(state));
+    sessionStorage.setItem(
+      COMPARISON_STATE_KEY,
+      JSON.stringify({
+        ...state,
+        schemaVersion: 2,
+        sourceKind: 'raw_trace_pair',
+      } satisfies PersistedComparisonState),
+    );
+    sessionStorage.removeItem(LEGACY_COMPARISON_STATE_KEY);
   } catch (e) {
     console.warn('[ComparisonState] Failed to save:', e);
   }
@@ -76,9 +87,14 @@ export function saveComparisonState(state: PersistedComparisonState): void {
  */
 export function restoreComparisonState(currentTraceFingerprint?: string): PersistedComparisonState | null {
   try {
-    const raw = sessionStorage.getItem(COMPARISON_STATE_KEY);
+    const raw = sessionStorage.getItem(COMPARISON_STATE_KEY)
+      || sessionStorage.getItem(LEGACY_COMPARISON_STATE_KEY);
     if (!raw) return null;
-    const state: PersistedComparisonState = JSON.parse(raw);
+    const state: PersistedComparisonState = {
+      ...JSON.parse(raw),
+      schemaVersion: 2,
+      sourceKind: 'raw_trace_pair',
+    };
     // Stale check: 30 minutes TTL (users may spend time analyzing reference trace)
     if (Date.now() - state.savedAt > 30 * 60 * 1000) {
       clearComparisonState();
@@ -94,6 +110,7 @@ export function restoreComparisonState(currentTraceFingerprint?: string): Persis
         return null;
       }
     }
+    saveComparisonState(state);
     return state;
   } catch {
     return null;
@@ -104,6 +121,7 @@ export function restoreComparisonState(currentTraceFingerprint?: string): Persis
 export function clearComparisonState(): void {
   try {
     sessionStorage.removeItem(COMPARISON_STATE_KEY);
+    sessionStorage.removeItem(LEGACY_COMPARISON_STATE_KEY);
   } catch { /* non-fatal */ }
 }
 

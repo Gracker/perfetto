@@ -9223,6 +9223,11 @@ Click ⚙️ to configure backend connection.`;
     refTraceId: string,
     refTraceName: string,
   ): Promise<void> {
+    if (this.state.agentSessionId) {
+      this.state.agentSessionId = null;
+      this.state.agentRunId = null;
+      this.clearAgentObservability();
+    }
     this.state.referenceTraceId = refTraceId;
     this.state.referenceTraceName = refTraceName;
     this.state.showTracePicker = false;
@@ -9239,24 +9244,34 @@ Click ⚙️ to configure backend connection.`;
         `点击 **[切换]** 可在 Perfetto 中查看参考 Trace。`,
       timestamp: Date.now(),
     });
+    this.saveCurrentSession();
     m.redraw();
   }
 
   /** Exit comparison mode. */
   private exitComparisonMode(): void {
+    const hadComparisonSession = !!this.state.agentSessionId;
     this.state.referenceTraceId = null;
     this.state.referenceTraceName = null;
     this.state.isReferenceActive = false;
     this.state.showTracePicker = false;
     this.state.comparisonTraceLoading = false;
+    this.state.agentSessionId = null;
+    this.state.agentRunId = null;
+    if (hadComparisonSession) {
+      this.clearAgentObservability();
+    }
     clearComparisonState();
 
     this.addMessage({
       id: this.generateId(),
       role: 'system',
-      content: '已退出对比模式，回到单 Trace 分析。',
+      content: hadComparisonSession
+        ? '已退出对比模式，回到单 Trace 分析。后续问题将开始新的单 Trace 会话。'
+        : '已退出对比模式，回到单 Trace 分析。',
       timestamp: Date.now(),
     });
+    this.saveCurrentSession();
     m.redraw();
   }
 
