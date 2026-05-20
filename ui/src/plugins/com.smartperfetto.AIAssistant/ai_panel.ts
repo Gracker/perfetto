@@ -3711,13 +3711,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       );
       if (!response.ok) return {connected: false};
       const data = await response.json();
+      const aiEngine = data.aiEngine || {};
       return {
         connected: true,
-        runtime: data.aiEngine?.runtime,
-        model: data.aiEngine?.model,
-        configured: data.aiEngine?.configured,
+        runtime: aiEngine.runtime,
+        model: aiEngine.model,
+        providerMode: aiEngine.providerMode,
+        configured: aiEngine.configured,
         environment: data.environment,
-        authRequired: data.aiEngine?.authRequired,
+        source: aiEngine.source,
+        credentialSource: aiEngine.credentialSource,
+        envCredentialSources: Array.isArray(aiEngine.envCredentialSources)
+          ? aiEngine.envCredentialSources
+          : [],
+        providerOverridesEnv: aiEngine.providerOverridesEnv,
+        activeProvider: aiEngine.activeProvider,
+        authRequired: aiEngine.authRequired,
+        diagnostics: aiEngine.diagnostics,
       };
     } catch {
       return {connected: false};

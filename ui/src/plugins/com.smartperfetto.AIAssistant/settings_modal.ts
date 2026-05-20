@@ -223,16 +223,41 @@ const MODAL_STYLES = {
     display: 'flex' as const,
     justifyContent: 'space-between' as const,
     alignItems: 'center' as const,
+    gap: '12px',
     padding: '6px 0',
     fontSize: '13px',
   },
   statusLabel: {
     color: 'var(--chat-text-secondary)',
     fontWeight: 500,
+    flexShrink: 0,
   },
   statusValue: {
     color: 'var(--chat-text)',
     fontWeight: 600,
+    minWidth: 0,
+    textAlign: 'right' as const,
+    overflowWrap: 'anywhere' as const,
+  },
+  statusValueMono: {
+    fontFamily: 'monospace',
+    fontSize: '12px',
+    wordBreak: 'break-all' as const,
+  },
+  debugDetails: {
+    marginTop: '12px',
+    borderTop: '1px solid var(--chat-border)',
+    paddingTop: '10px',
+  },
+  debugSummary: {
+    cursor: 'pointer',
+    color: 'var(--chat-text)',
+    fontSize: '13px',
+    fontWeight: 600,
+    userSelect: 'none' as const,
+  },
+  debugRows: {
+    marginTop: '8px',
   },
   statusDot: {
     display: 'inline-block',
@@ -310,6 +335,30 @@ const TAB_STYLES = {
 
 type SettingsTab = 'connection' | 'providers';
 
+function formatRuntimeSource(source: ServerStatus['source']): string {
+  switch (source) {
+    case 'provider':
+      return 'Provider Manager';
+    case 'snapshot':
+      return 'Session snapshot';
+    case 'env':
+      return 'backend/.env / environment';
+    case 'default':
+      return 'Default runtime';
+    default:
+      return 'Unknown';
+  }
+}
+
+function formatList(values: readonly string[] | undefined): string {
+  return values && values.length > 0 ? values.join(', ') : 'None';
+}
+
+function formatBoolean(value: boolean | undefined): string {
+  if (value === undefined) return 'Unknown';
+  return value ? 'Yes' : 'No';
+}
+
 export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   private settings!: AISettings;
   private isChecking = false;
@@ -339,6 +388,121 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     );
     this.isChecking = false;
     m.redraw();
+  }
+
+  private renderStatusRow(
+    label: string,
+    value: m.Children,
+    mono = false,
+  ): m.Children {
+    return m('div', {style: MODAL_STYLES.statusRow}, [
+      m('span', {style: MODAL_STYLES.statusLabel}, label),
+      m(
+        'span',
+        {
+          style: {
+            ...MODAL_STYLES.statusValue,
+            ...(mono ? MODAL_STYLES.statusValueMono : {}),
+          },
+        },
+        value,
+      ),
+    ]);
+  }
+
+  private renderEffectiveConfigDebug(status: ServerStatus): m.Children {
+    const diagnostics = status.diagnostics || {};
+    const providerMode = status.providerMode || diagnostics.providerMode;
+    const lightModel = diagnostics.lightModel;
+    const protocol = diagnostics.protocol;
+    const baseUrl = diagnostics.baseUrl
+      || (diagnostics.baseUrlConfigured === false ? 'SDK default / not set' : undefined);
+    const outputLanguage = diagnostics.outputLanguage?.displayName
+      || diagnostics.outputLanguage?.value;
+    const sdkBinary = diagnostics.sdkBinary;
+    const sdkBinaryLabel = sdkBinary
+      ? [
+          sdkBinary.source || 'unknown',
+          sdkBinary.fallbackUsed ? 'fallback' : '',
+          sdkBinary.chosenPath || sdkBinary.error || '',
+        ].filter(Boolean).join(' | ')
+      : undefined;
+
+    return m('details', {style: MODAL_STYLES.debugDetails, open: true}, [
+      m('summary', {style: MODAL_STYLES.debugSummary}, 'Effective Configuration'),
+      m('div', {style: MODAL_STYLES.debugRows}, [
+        this.renderStatusRow('Config Source', formatRuntimeSource(status.source)),
+        status.credentialSource
+          ? this.renderStatusRow('Credential Source', status.credentialSource, true)
+          : null,
+        status.activeProvider
+          ? this.renderStatusRow(
+              'Active Provider',
+              `${status.activeProvider.name} (${status.activeProvider.type})`,
+            )
+          : null,
+        providerMode
+          ? this.renderStatusRow('Provider Mode', providerMode, true)
+          : null,
+        protocol
+          ? this.renderStatusRow('Protocol', protocol, true)
+          : null,
+        baseUrl
+          ? this.renderStatusRow('Base URL', baseUrl, true)
+          : null,
+        lightModel
+          ? this.renderStatusRow('Light Model', lightModel, true)
+          : null,
+        diagnostics.credentialSources
+          ? this.renderStatusRow(
+              'Effective Credentials',
+              formatList(diagnostics.credentialSources),
+              true,
+            )
+          : null,
+        this.renderStatusRow(
+          'Env Credentials Present',
+          formatList(status.envCredentialSources),
+          true,
+        ),
+        this.renderStatusRow(
+          'Provider Overrides Env',
+          formatBoolean(status.providerOverridesEnv),
+        ),
+        outputLanguage
+          ? this.renderStatusRow('Output Language', outputLanguage)
+          : null,
+        sdkBinaryLabel
+          ? this.renderStatusRow('Claude SDK Binary', sdkBinaryLabel, true)
+          : null,
+      ]),
+      status.providerOverridesEnv
+        ? m(
+            'div',
+            {
+              style: {
+                ...MODAL_STYLES.alertBox,
+                ...MODAL_STYLES.alertWarning,
+                marginTop: '10px',
+              },
+            },
+            [
+              m('span', {style: MODAL_STYLES.alertIcon}, '!'),
+              m(
+                'div',
+                `Active provider is overriding backend/.env. Env credentials still present: ${formatList(status.envCredentialSources)}.`,
+              ),
+            ],
+          )
+        : null,
+      diagnostics.configHint
+        ? m(
+            'div',
+            {style: {...MODAL_STYLES.hint, marginTop: '8px'}},
+            diagnostics.configHint,
+          )
+        : null,
+    ]);
   }
 
   private renderStatusCard(): m.Children {
@@ -429,6 +593,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
             m('span', {style: MODAL_STYLES.statusValue}, status.environment),
           ])
         : null,
+      this.renderEffectiveConfigDebug(status),
       // Auth warning
       status.authRequired
         ? m(

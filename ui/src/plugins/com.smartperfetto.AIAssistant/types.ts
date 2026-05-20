@@ -830,13 +830,52 @@ export interface AISettings {
 /**
  * Server status returned from backend /health endpoint.
  */
+export interface ServerStatusActiveProvider {
+  id: string;
+  name: string;
+  type: string;
+}
+
+export interface ServerRuntimeDiagnostics {
+  runtime?: 'claude-agent-sdk' | 'openai-agents-sdk';
+  providerMode?: string;
+  model?: string;
+  lightModel?: string;
+  protocol?: string;
+  baseUrl?: string;
+  baseUrlConfigured?: boolean;
+  configured?: boolean;
+  credentialSources?: string[];
+  outputLanguage?: {
+    value?: string;
+    displayName?: string;
+    env?: string;
+    default?: string;
+  };
+  configHint?: string;
+  sdkBinary?: {
+    detectedPlatformKey?: string | null;
+    chosenPath?: string | null;
+    fallbackUsed?: boolean;
+    source?: string;
+    error?: string;
+  };
+}
+
 export interface ServerStatus {
   connected: boolean;
   runtime?: 'claude-agent-sdk' | 'openai-agents-sdk';
   model?: string;
+  providerMode?: string;
   configured?: boolean;
   environment?: string;
+  source?: 'provider' | 'snapshot' | 'env' | 'default';
+  credentialSource?: string;
+  envCredentialSources?: string[];
+  providerOverridesEnv?: boolean;
+  activeProvider?: ServerStatusActiveProvider;
   authRequired?: boolean;
+  diagnostics?: ServerRuntimeDiagnostics;
 }
 
 /**
