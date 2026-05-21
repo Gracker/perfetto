@@ -58,6 +58,7 @@ import {
 } from './sse_event_handlers';
 
 import {Message, InterventionState, createStreamingAnswerState, createStreamingFlowState} from './types';
+import {getAISharedState, resetAISharedState} from './ai_shared_state';
 
 // =============================================================================
 // Test Helpers
@@ -153,6 +154,7 @@ describe('handleProgressEvent', () => {
 
   beforeEach(() => {
     ctx = createMockContext();
+    resetAISharedState();
   });
 
   it('should add progress message with correct format', () => {
@@ -254,6 +256,7 @@ describe('handleSqlExecutedEvent', () => {
 
   beforeEach(() => {
     ctx = createMockContext();
+    resetAISharedState();
   });
 
   it('should add message with SQL result data', () => {
@@ -3153,6 +3156,73 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[1].content).toContain('已核对');
   });
 
+  it('renders verifier metadata from analysis_completed payload', () => {
+    handleAnalysisCompletedEvent({
+      architecture: 'agent-driven',
+      data: {
+        conclusion: '最终结论',
+        claimSupport: [{
+          claimId: 'Q1',
+          kind: 'numeric',
+          text: 'blocked_ms 为 120',
+          anchors: [{
+            evidenceRefId: 'evidence:blocked',
+            context: {
+              traceSide: 'current',
+              artifactId: 'artifact:blocked',
+              sourceToolCallId: 'tool:sql-1',
+            },
+            cells: [{
+              rowIndex: 2,
+              column: 'blocked_ms',
+              value: 120,
+              actualValue: 90,
+            }],
+            identity: {
+              identityRefId: 'identity:test',
+              status: 'weak',
+            },
+          }],
+          supportLevel: 'unsupported',
+        }],
+        claimVerificationResult: {
+          schemaVersion: 'claim_verifier@1',
+          status: 'failed',
+          policy: 'record_only',
+          passed: false,
+          checkedClaimCount: 1,
+          unsupportedClaimCount: 1,
+          claimResults: [],
+          issues: [{
+            claimId: 'Q1',
+            severity: 'error',
+            code: 'claim_reference_value_mismatch',
+            message: 'value mismatch for blocked_ms',
+          }],
+        },
+        identityResolutions: [{
+          version: 'identity_contract@1',
+          identityRefId: 'identity:test',
+          status: 'weak',
+          target: {traceId: 'trace-a', source: 'derived'},
+          processes: [],
+          threads: [],
+          warnings: [],
+        }],
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('## 断言验证结果');
+    expect(ctx.messages[0].content).toContain('Verifier: failed');
+    expect(ctx.messages[0].content).toContain('claim_reference_value_mismatch');
+    expect(ctx.messages[0].content).toContain('Q1: unsupported (numeric)');
+    expect(ctx.messages[0].content).toContain('anchor 1: evidence:blocked / artifact:blocked / tool:sql-1');
+    expect(ctx.messages[0].content).toContain('current, col=blocked_ms, row=2, actual=90, expected=120');
+    expect(ctx.messages[0].content).toContain('identity=identity:test(weak)');
+    expect(ctx.messages[0].content).toContain('Identity sidecars: 1');
+  });
+
   it('replaces unverified structured claim refs with system-checked claim refs', () => {
     handleDataEvent({
       id: 'claim-source',
@@ -3481,6 +3551,7 @@ describe('handleSSEEvent', () => {
 
   beforeEach(() => {
     ctx = createMockContext();
+    resetAISharedState();
   });
 
   it('should route progress events correctly', () => {
@@ -3586,6 +3657,18 @@ describe('handleSSEEvent', () => {
     expect(ctx.messages[0].content).toContain('Final report body with snapshot.');
     expect(ctx.messages[0].content).toContain('Result ID: `AR-12345678`');
     expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
+  });
+
+  it('preserves quota_exceeded terminal status from analysis_completed payload', () => {
+    handleSSEEvent('analysis_completed', {
+      data: {
+        conclusion: 'Partial conclusion',
+        terminalRunStatus: 'quota_exceeded',
+      },
+    }, ctx);
+
+    expect(getAISharedState().status).toBe('quota_exceeded');
+    expect(getAISharedState().lastAnalysisTime).not.toBeNull();
   });
 
   it('should route answer_token events to incremental answer stream', () => {

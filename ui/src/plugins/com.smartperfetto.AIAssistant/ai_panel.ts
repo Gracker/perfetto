@@ -5828,11 +5828,16 @@ Click ⚙️ to configure backend connection.`;
           this.state.agentSessionId = null;
           this.clearAgentObservability();
           // Note: Don't return early - let finally block handle cleanup
-          throw new Error('TRACE_NOT_FOUND'); // Will be caught and cleanup will run
+          const error = new Error('TRACE_NOT_FOUND');
+          (error as any).code = 'TRACE_NOT_FOUND';
+          throw error; // Will be caught and cleanup will run
         }
-        throw new Error(
+        const error = new Error(
           `API error: ${response.status} ${errorData.error || response.statusText}`,
         );
+        (error as any).code = errorData.code;
+        (error as any).terminalStatus = errorData.status;
+        throw error;
       }
 
       const data = await response.json();
@@ -5893,12 +5898,22 @@ Click ⚙️ to configure backend connection.`;
           console.log('[AIPanel] No sessionId in response, data:', data);
       }
     } catch (e: any) {
+      const message = e?.message || 'Failed to start analysis';
+      const quotaStopped =
+        e?.terminalStatus === 'quota_exceeded' ||
+        e?.code === 'QUOTA_EXCEEDED' ||
+        e?.code === 'BUDGET_EXCEEDED' ||
+        /quota|budget|配额|预算/i.test(message);
+      updateAISharedState({
+        status: quotaStopped ? 'quota_exceeded' : 'error',
+        currentPhase: '',
+      });
       // Don't show duplicate error message for TRACE_NOT_FOUND (already shown above)
-      if (e.message !== 'TRACE_NOT_FOUND') {
+      if (message !== 'TRACE_NOT_FOUND') {
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: `**Error:** ${e.message || 'Failed to start analysis'}`,
+          content: `**Error:** ${message}`,
           timestamp: Date.now(),
         });
       }
@@ -6252,7 +6267,7 @@ Click ⚙️ to configure backend connection.`;
       if (!res.ok) return false;
       const body = await res.json();
       const status = body.status || body.state;
-      if (status === 'completed' || status === 'failed') {
+      if (status === 'completed' || status === 'quota_exceeded' || status === 'failed') {
         if (DEBUG_AI_PANEL)
           console.log(
             '[AIPanel] Session already',
@@ -6261,6 +6276,16 @@ Click ⚙️ to configure backend connection.`;
           );
         this.state.sseConnectionState = 'disconnected';
         this.setLoadingState(false);
+        updateAISharedState({
+          status:
+            status === 'failed'
+              ? 'error'
+              : status === 'quota_exceeded'
+                ? 'quota_exceeded'
+                : 'completed',
+          currentPhase: '',
+          ...(status === 'failed' ? {} : {lastAnalysisTime: Date.now()}),
+        });
         // Remove reconnecting indicator if present
         const lastMsg = this.state.messages[this.state.messages.length - 1];
         if (
@@ -6274,6 +6299,25 @@ Click ⚙️ to configure backend connection.`;
             id: this.generateId(),
             role: 'assistant',
             content: `**Analysis failed** while reconnecting. Please try again.`,
+            timestamp: Date.now(),
+          });
+        } else if (body.result && typeof body.result === 'object') {
+          this.handleSSEEvent('analysis_completed', {
+            type: 'analysis_completed',
+            architecture: 'agent-driven',
+            data: {
+              ...body.result,
+              terminalRunStatus: status === 'quota_exceeded'
+                ? 'quota_exceeded'
+                : 'completed',
+            },
+            timestamp: Date.now(),
+          });
+        } else if (status === 'quota_exceeded') {
+          this.addMessage({
+            id: this.generateId(),
+            role: 'assistant',
+            content: `**Analysis stopped by quota limit** while reconnecting. The partial result is available from the completed session.`,
             timestamp: Date.now(),
           });
         }

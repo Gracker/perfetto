@@ -70,6 +70,9 @@ type AnalysisHypothesisItem = {
 type AnalysisCompletedPayload = {
   summary?: string;
   conclusionContract?: ConclusionContract | Record<string, unknown>;
+  claimSupport?: unknown[];
+  claimVerificationResult?: Record<string, unknown>;
+  identityResolutions?: unknown[];
   reportUrl?: string;
   resultSnapshotId?: string;
   findings?: unknown[];
@@ -79,6 +82,7 @@ type AnalysisCompletedPayload = {
   confidence?: number;
   rounds?: number;
   reportError?: string;
+  terminalRunStatus?: 'completed' | 'quota_exceeded';
   hypotheses?: AnalysisHypothesisItem[];
 };
 
@@ -130,6 +134,15 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   if (isRecord(conclusionContract)) {
     payload.conclusionContract = conclusionContract;
   }
+  if (Array.isArray(source.claimSupport)) {
+    payload.claimSupport = source.claimSupport;
+  }
+  if (isRecord(source.claimVerificationResult)) {
+    payload.claimVerificationResult = source.claimVerificationResult;
+  }
+  if (Array.isArray(source.identityResolutions)) {
+    payload.identityResolutions = source.identityResolutions;
+  }
 
   const reportUrl = readStringField(source, 'reportUrl');
   if (reportUrl) payload.reportUrl = reportUrl;
@@ -158,6 +171,11 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
 
   const reportError = readStringField(source, 'reportError');
   if (reportError) payload.reportError = reportError;
+
+  const terminalRunStatus = readStringField(source, 'terminalRunStatus');
+  if (terminalRunStatus === 'completed' || terminalRunStatus === 'quota_exceeded') {
+    payload.terminalRunStatus = terminalRunStatus;
+  }
 
   if (Array.isArray(source.hypotheses)) {
     const hypotheses: AnalysisHypothesisItem[] = [];
@@ -2969,6 +2987,80 @@ function appendFinalEvidenceSections(
   return appendConclusionClaims(withCodeRefs, contract, ctx);
 }
 
+function appendClaimVerificationSummary(
+  content: string,
+  payload: AnalysisCompletedPayload | undefined,
+): string {
+  if (!payload) return content;
+  if (/(^|\n)##\s*断言验证结果/.test(content)) return content;
+  const verifier = asRecord(payload.claimVerificationResult);
+  const hasVerifier = Object.keys(verifier).length > 0;
+  const claimSupportCount = payload.claimSupport?.length || 0;
+  const identityCount = payload.identityResolutions?.length || 0;
+  if (!hasVerifier && claimSupportCount === 0 && identityCount === 0) return content;
+
+  const status = readStringField(verifier, 'status', 'not_checked');
+  const checked = readOptionalNumberField(verifier, 'checkedClaimCount') ?? 0;
+  const unsupported = readOptionalNumberField(verifier, 'unsupportedClaimCount') ?? 0;
+  const issues = Array.isArray(verifier.issues) ? verifier.issues : [];
+  const lines = [
+    '## 断言验证结果',
+    `- Verifier: ${status}`,
+    `- Checked claims: ${checked}`,
+    `- Unsupported claims: ${unsupported}`,
+    `- Claim support entries: ${claimSupportCount}`,
+    `- Identity sidecars: ${identityCount}`,
+  ];
+  issues.slice(0, 5).forEach((issue) => {
+    const item = asRecord(issue);
+    const code = readStringField(item, 'code', 'issue');
+    const claimId = readStringField(item, 'claimId', 'unknown');
+    const message = readStringField(item, 'message', '');
+    lines.push(`- ${claimId} \`${code}\`${message ? `: ${message}` : ''}`);
+  });
+  if (issues.length > 5) {
+    lines.push(`- ${issues.length - 5} more verifier issues are available in the HTML report/export.`);
+  }
+  payload.claimSupport?.slice(0, 5).forEach((support, index) => {
+    const item = asRecord(support);
+    const claimId = readStringField(item, 'claimId', `claim-${index + 1}`);
+    const level = readStringField(item, 'supportLevel', 'unknown');
+    const kind = readStringField(item, 'kind', 'claim');
+    lines.push(`- ${claimId}: ${level} (${kind})`);
+    const anchors = Array.isArray(item.anchors) ? item.anchors : [];
+    anchors.slice(0, 3).forEach((anchor, anchorIndex) => {
+      const anchorRecord = asRecord(anchor);
+      const context = asRecord(anchorRecord.context);
+      const cells = Array.isArray(anchorRecord.cells) ? anchorRecord.cells : [];
+      const cell = asRecord(cells[0]);
+      const refs = [
+        readStringField(anchorRecord, 'evidenceRefId'),
+        readStringField(context, 'artifactId'),
+        readStringField(context, 'sourceArtifactId'),
+        readStringField(context, 'sourceToolCallId'),
+      ].filter(Boolean).join(' / ');
+      const loc = [
+        readStringField(context, 'traceSide'),
+        cell.column ? `col=${String(cell.column)}` : '',
+        cell.rowIndex !== undefined ? `row=${String(cell.rowIndex)}` : '',
+        cell.actualValue !== undefined ? `actual=${String(cell.actualValue)}` : '',
+        cell.value !== undefined ? `expected=${String(cell.value)}` : '',
+      ].filter(Boolean).join(', ');
+      const identity = asRecord(anchorRecord.identity);
+      const identityText = readStringField(identity, 'identityRefId')
+        ? `, identity=${readStringField(identity, 'identityRefId')}(${readStringField(identity, 'status', 'unknown')})`
+        : '';
+      lines.push(`  - anchor ${anchorIndex + 1}: ${refs || 'unreferenced'}${loc ? ` [${loc}]` : ''}${identityText}`);
+    });
+  });
+  payload.identityResolutions?.slice(0, 5).forEach((identity, index) => {
+    const item = asRecord(identity);
+    const warnings = Array.isArray(item.warnings) ? item.warnings.map(String).filter(Boolean) : [];
+    lines.push(`- identity ${readStringField(item, 'identityRefId', String(index + 1))}: ${readStringField(item, 'status', 'unknown')}${warnings.length ? ` - ${warnings.slice(0, 2).join('; ')}` : ''}`);
+  });
+  return [content.trimEnd(), '', '---', lines.join('\n')].join('\n');
+}
+
 function renderConclusionContract(
   contract: ConclusionContract | Record<string, unknown> | null | undefined,
   ctx?: SSEHandlerContext,
@@ -3209,12 +3301,12 @@ export function handleAnalysisCompletedEvent(
     const resultSnapshotId = payload?.resultSnapshotId;
     const canonicalConclusion = payload?.conclusion || payload?.answer;
     const canonicalContent = canonicalConclusion
-      ? appendFinalEvidenceSections(
+      ? appendClaimVerificationSummary(appendFinalEvidenceSections(
           canonicalConclusion,
           conclusionContract,
           ctx,
           resultSnapshotId,
-        )
+        ), payload)
       : undefined;
     if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent) {
       // Attach reportUrl to the existing answer/conclusion message. If the
@@ -3228,7 +3320,7 @@ export function handleAnalysisCompletedEvent(
           ...(canonicalContent
             ? {content: canonicalContent}
             : existing
-              ? {content: appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId)}
+              ? {content: appendClaimVerificationSummary(appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId), payload)}
               : {}),
         }, {persist: true});
       } else {
@@ -3246,7 +3338,7 @@ export function handleAnalysisCompletedEvent(
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
               content: canonicalContent ||
-                appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId),
+                appendClaimVerificationSummary(appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId), payload),
             }, {persist: true});
             break;
           }
@@ -3284,7 +3376,10 @@ export function handleAnalysisCompletedEvent(
     completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
-    let content = appendFinalEvidenceSections(answerContent, conclusionContract, ctx, payload?.resultSnapshotId);
+    let content = appendClaimVerificationSummary(
+      appendFinalEvidenceSections(answerContent, conclusionContract, ctx, payload?.resultSnapshotId),
+      payload,
+    );
 
     const isAgentDriven = architecture === 'v2-agent-driven' || architecture === 'agent-driven';
     if (isAgentDriven && payload?.hypotheses) {
@@ -4484,7 +4579,11 @@ export function handleSSEEvent(
   if (eventType === 'error' || eventType === 'skill_error') {
     updateAISharedState({status: 'error'});
   } else if (eventType === 'analysis_completed') {
-    updateAISharedState({status: 'completed', lastAnalysisTime: Date.now()});
+    const payload = toAnalysisCompletedPayload(eventData.data);
+    updateAISharedState({
+      status: payload?.terminalRunStatus === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
+      lastAnalysisTime: Date.now(),
+    });
   }
 
   return result;
