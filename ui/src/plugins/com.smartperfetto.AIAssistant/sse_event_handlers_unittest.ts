@@ -764,6 +764,42 @@ describe('handleAnalysisCompletedEvent', () => {
     );
   });
 
+  it('should append code references and patch status without rendering raw diff text', () => {
+    const data = {
+      data: {
+        conclusion: 'Analysis complete.',
+        conclusionContract: {
+          codeReferences: [
+            {
+              chunkId: 'chunk-main',
+              codebaseId: 'cb_app',
+              filePath: 'app/src/main/MainActivity.kt',
+              lineRange: {start: 10, end: 18},
+              symbol: 'MainActivity.onCreate',
+            },
+          ],
+          patchProposals: [
+            {
+              id: 'patch-1',
+              status: 'sketch',
+              rationale: 'Needs manual rewrite.',
+              diff: 'SECRET_RAW_DIFF_SHOULD_NOT_RENDER',
+            },
+          ],
+        },
+      },
+    };
+
+    handleAnalysisCompletedEvent(data, ctx);
+
+    expect(ctx.messages[0].content).toContain('## Code references');
+    expect(ctx.messages[0].content).toContain('`chunk-main`');
+    expect(ctx.messages[0].content).toContain('app/src/main/MainActivity.kt:L10-18');
+    expect(ctx.messages[0].content).toContain('## Patch proposals');
+    expect(ctx.messages[0].content).toContain('sketch only; no copyable diff');
+    expect(ctx.messages[0].content).not.toContain('SECRET_RAW_DIFF_SHOULD_NOT_RENDER');
+  });
+
   it('should append result snapshot reference when conclusion arrived earlier', () => {
     ctx.addMessage({
       id: 'existing-answer',

@@ -2859,6 +2859,104 @@ function appendConclusionClaims(
   return [withoutStructuredClaims, '', '---', section].join('\n');
 }
 
+function readCodeAwareRecordArray(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown>[] {
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) {
+      return value.filter((item): item is Record<string, unknown> => isRecord(item));
+    }
+  }
+  return [];
+}
+
+function formatCodeLineRange(value: unknown): string {
+  if (Array.isArray(value) && value.length >= 2) {
+    const start = conclusionNumber(value[0]);
+    const end = conclusionNumber(value[1]);
+    if (start !== undefined && end !== undefined) return `${Math.round(start)}-${Math.round(end)}`;
+  }
+  const record = asRecord(value);
+  const start = conclusionNumber(record.start ?? record.startLine);
+  const end = conclusionNumber(record.end ?? record.endLine);
+  if (start === undefined && end === undefined) return '';
+  if (start !== undefined && end !== undefined) return `${Math.round(start)}-${Math.round(end)}`;
+  return String(Math.round(start ?? end ?? 0));
+}
+
+function renderCodeAwareReferencesSection(
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+): string {
+  if (!contract || typeof contract !== 'object') return '';
+  const contractRecord = asRecord(contract);
+  const refs = readCodeAwareRecordArray(contractRecord, [
+    'codeReferences',
+    'code_refs',
+    'codeRefs',
+  ]);
+  const patches = readCodeAwareRecordArray(contractRecord, [
+    'patchProposals',
+    'patch_proposals',
+    'patches',
+  ]);
+  if (refs.length === 0 && patches.length === 0) return '';
+
+  const lines: string[] = ['## Code references'];
+  if (refs.length === 0) {
+    lines.push('- None');
+  } else {
+    refs.slice(0, 12).forEach((ref, index) => {
+      const chunkId = conclusionText(ref.chunkId || ref.chunk_id || `ref-${index + 1}`);
+      const filePath = conclusionText(ref.filePath || ref.file_path);
+      const lineRange = formatCodeLineRange(ref.lineRange || ref.line_range);
+      const symbol = conclusionText(ref.symbol);
+      const codebaseId = conclusionText(ref.codebaseId || ref.codebase_id);
+      const location = [filePath, lineRange ? `L${lineRange}` : '']
+        .filter(Boolean)
+        .join(':');
+      const meta = [
+        location || 'metadata-only',
+        symbol ? `symbol ${symbol}` : '',
+        codebaseId ? `codebase ${codebaseId}` : '',
+      ].filter(Boolean);
+      lines.push(`- \`${chunkId}\`${meta.length > 0 ? ` - ${meta.join('；')}` : ''}`);
+    });
+    if (refs.length > 12) {
+      lines.push(`- ${refs.length - 12} more code references are available in the result snapshot.`);
+    }
+  }
+
+  if (patches.length > 0) {
+    lines.push('');
+    lines.push('## Patch proposals');
+    patches.slice(0, 8).forEach((patch, index) => {
+      const id = conclusionText(patch.id || patch.patchId || patch.patch_id || `patch-${index + 1}`);
+      const status = conclusionText(patch.status || patch.patchStatus || patch.patch_status) || 'unverified';
+      const rationale = conclusionText(patch.rationale || patch.reason || patch.summary);
+      const copyHint = status === 'verified'
+        ? 'verified by backend apply-check'
+        : status === 'sketch'
+          ? 'sketch only; no copyable diff'
+          : 'unverified; no copyable diff';
+      lines.push(`- \`${id}\` - ${status} (${copyHint})${rationale ? `: ${rationale}` : ''}`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function appendCodeAwareReferences(
+  content: string,
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+): string {
+  if (/(^|\n)##\s*Code references/.test(content)) return content;
+  const section = renderCodeAwareReferencesSection(contract);
+  if (!section) return content;
+  return [content.trimEnd(), '', '---', section].join('\n');
+}
+
 function appendFinalEvidenceSections(
   content: string,
   contract: ConclusionContract | Record<string, unknown> | null | undefined,
@@ -2867,7 +2965,8 @@ function appendFinalEvidenceSections(
 ): string {
   const withSources = appendDataSourceIndex(content, ctx, contract);
   const withSnapshot = appendAnalysisResultReference(withSources, resultSnapshotId);
-  return appendConclusionClaims(withSnapshot, contract, ctx);
+  const withCodeRefs = appendCodeAwareReferences(withSnapshot, contract);
+  return appendConclusionClaims(withCodeRefs, contract, ctx);
 }
 
 function renderConclusionContract(

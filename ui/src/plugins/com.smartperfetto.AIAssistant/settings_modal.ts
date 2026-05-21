@@ -19,6 +19,7 @@
 import m from 'mithril';
 import type {AISettings, ServerStatus} from './types';
 import {ProviderPanel} from './provider_panel';
+import {CodebasePanel} from './codebase_panel';
 import {providerRuntimeLabel} from './provider_types';
 import type {SmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
 
@@ -333,7 +334,7 @@ const TAB_STYLES = {
   },
 };
 
-type SettingsTab = 'connection' | 'providers';
+type SettingsTab = 'connection' | 'providers' | 'codebases';
 
 function formatRuntimeSource(source: ServerStatus['source']): string {
   switch (source) {
@@ -668,6 +669,21 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
             },
             '\u{1F916} Providers',
           ),
+          m(
+            'button',
+            {
+              style: {
+                ...TAB_STYLES.tab,
+                ...(this.currentTab === 'codebases'
+                  ? TAB_STYLES.tabActive
+                  : {}),
+              },
+              onclick: () => {
+                this.currentTab = 'codebases';
+              },
+            },
+            'Codebases',
+          ),
         ]),
 
         this.currentTab === 'providers'
@@ -678,6 +694,13 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                 onClose: () => vnode.attrs.onClose(),
               }),
             ])
+          : this.currentTab === 'codebases'
+            ? m('div', {style: {...MODAL_STYLES.content, padding: 0}}, [
+                m(CodebasePanel, {
+                  backendUrl: this.settings.backendUrl,
+                  apiKey: this.settings.backendApiKey || undefined,
+                }),
+              ])
           : m('div', {style: MODAL_STYLES.content}, [
               m('div', {style: MODAL_STYLES.section}, [
                 m(
