@@ -6282,6 +6282,8 @@ Click ⚙️ to configure backend connection.`;
               ? 'error'
               : status === 'quota_exceeded'
                 ? 'quota_exceeded'
+                : body.result?.partial === true
+                  ? 'partial'
                 : 'completed',
           currentPhase: '',
           ...(status === 'failed' ? {} : {lastAnalysisTime: Date.now()}),

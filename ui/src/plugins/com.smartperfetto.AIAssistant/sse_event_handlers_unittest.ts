@@ -3671,6 +3671,37 @@ describe('handleSSEEvent', () => {
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
   });
 
+  it('surfaces partial analysis_completed warning and shared partial status', () => {
+    handleSSEEvent('analysis_completed', {
+      data: {
+        conclusion: '## 综合结论\n\n降级结论',
+        partial: true,
+        terminationMessage: '最终结果质量闸门发现 provider 没有产出可独立交付的完整结论',
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toContain('结果完整性提示');
+    expect(ctx.messages[0].content).toContain('最终结果质量闸门');
+    expect(getAISharedState().status).toBe('partial');
+    expect(getAISharedState().lastAnalysisTime).not.toBeNull();
+  });
+
+  it('does not silently ignore degraded events', () => {
+    const result = handleSSEEvent('degraded', {
+      content: {
+        message: '结果已标记 partial',
+        partial: true,
+        code: 'plan_summary_fallback',
+      },
+    }, ctx);
+
+    expect(result.loadingPhase).toBe('结果已标记为部分完成');
+    expect(ctx.flowMessages).toHaveLength(1);
+    expect(ctx.flowMessages[0].content).toContain('结果完整性提示');
+    expect(ctx.flowMessages[0].content).toContain('结果已标记 partial');
+  });
+
   it('should route answer_token events to incremental answer stream', () => {
     handleSSEEvent('answer_token', {data: {token: 'A'}}, ctx);
     handleSSEEvent('answer_token', {data: {token: 'B'}}, ctx);

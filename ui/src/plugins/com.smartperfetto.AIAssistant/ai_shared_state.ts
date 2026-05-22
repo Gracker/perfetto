@@ -38,7 +38,7 @@ export interface AIFinding {
  */
 export interface AISharedState {
   /** Current analysis lifecycle phase. */
-  status: 'idle' | 'ready' | 'analyzing' | 'completed' | 'quota_exceeded' | 'error';
+  status: 'idle' | 'ready' | 'analyzing' | 'completed' | 'partial' | 'quota_exceeded' | 'error';
   /** Number of issues found in the latest analysis. */
   issueCount: number;
   /** Human-readable phase label (e.g. "Executing scrolling_analysis"). */

@@ -27,7 +27,7 @@
  * - sql_generated/sql_executed: SQL query lifecycle
  * - skill_section/skill_layered_result: Skill execution results
  * - hypothesis_generated/round_start: Agent-driven analysis
- * - analysis_completed/error: Terminal events
+ * - analysis_completed/degraded/error: Terminal events and degraded-result notices
  */
 
 import {
@@ -83,7 +83,18 @@ type AnalysisCompletedPayload = {
   rounds?: number;
   reportError?: string;
   terminalRunStatus?: 'completed' | 'quota_exceeded';
+  partial?: boolean;
+  terminationReason?: string;
+  terminationMessage?: string;
   hypotheses?: AnalysisHypothesisItem[];
+};
+
+type DegradedPayload = {
+  code?: string;
+  fallback?: string;
+  message?: string;
+  partial?: boolean;
+  terminationReason?: string;
 };
 
 type RawSSEEvent = Record<string, unknown> | null | undefined;
@@ -172,6 +183,14 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   const reportError = readStringField(source, 'reportError');
   if (reportError) payload.reportError = reportError;
 
+  if (source.partial === true) payload.partial = true;
+
+  const terminationReason = readStringField(source, 'terminationReason');
+  if (terminationReason) payload.terminationReason = terminationReason;
+
+  const terminationMessage = readStringField(source, 'terminationMessage');
+  if (terminationMessage) payload.terminationMessage = terminationMessage;
+
   const terminalRunStatus = readStringField(source, 'terminalRunStatus');
   if (terminalRunStatus === 'completed' || terminalRunStatus === 'quota_exceeded') {
     payload.terminalRunStatus = terminalRunStatus;
@@ -193,6 +212,21 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   }
 
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function toDegradedPayload(value: unknown): DegradedPayload {
+  const source = asRecord(value);
+  const payload: DegradedPayload = {};
+  const message = readStringField(source, 'message');
+  if (message) payload.message = message;
+  const code = readStringField(source, 'code');
+  if (code) payload.code = code;
+  const fallback = readStringField(source, 'fallback');
+  if (fallback) payload.fallback = fallback;
+  const terminationReason = readStringField(source, 'terminationReason');
+  if (terminationReason) payload.terminationReason = terminationReason;
+  if (source.partial === true) payload.partial = true;
+  return payload;
 }
 
 function appendAnalysisResultReference(
@@ -3061,6 +3095,27 @@ function appendClaimVerificationSummary(
   return [content.trimEnd(), '', '---', lines.join('\n')].join('\n');
 }
 
+function buildPartialResultWarning(payload: AnalysisCompletedPayload | undefined): string | undefined {
+  if (payload?.partial !== true) return undefined;
+  const reason =
+    payload.terminationMessage ||
+    payload.terminationReason ||
+    '本次分析结果已标记为 partial，结论可能不完整。';
+  return [
+    '> **结果完整性提示**',
+    ...reason.split(/\r?\n/).filter(Boolean).map(line => `> ${line}`),
+  ].join('\n');
+}
+
+function prependPartialResultWarning(
+  content: string,
+  payload: AnalysisCompletedPayload | undefined,
+): string {
+  const warning = buildPartialResultWarning(payload);
+  if (!warning || /结果完整性提示|Result Completeness Notice/i.test(content)) return content;
+  return [warning, '', content.trimStart()].join('\n');
+}
+
 function renderConclusionContract(
   contract: ConclusionContract | Record<string, unknown> | null | undefined,
   ctx?: SSEHandlerContext,
@@ -3301,12 +3356,12 @@ export function handleAnalysisCompletedEvent(
     const resultSnapshotId = payload?.resultSnapshotId;
     const canonicalConclusion = payload?.conclusion || payload?.answer;
     const canonicalContent = canonicalConclusion
-      ? appendClaimVerificationSummary(appendFinalEvidenceSections(
+      ? prependPartialResultWarning(appendClaimVerificationSummary(appendFinalEvidenceSections(
           canonicalConclusion,
           conclusionContract,
           ctx,
           resultSnapshotId,
-        ), payload)
+        ), payload), payload)
       : undefined;
     if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent) {
       // Attach reportUrl to the existing answer/conclusion message. If the
@@ -3320,7 +3375,10 @@ export function handleAnalysisCompletedEvent(
           ...(canonicalContent
             ? {content: canonicalContent}
             : existing
-              ? {content: appendClaimVerificationSummary(appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId), payload)}
+              ? {content: prependPartialResultWarning(
+                appendClaimVerificationSummary(appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId), payload),
+                payload,
+              )}
               : {}),
         }, {persist: true});
       } else {
@@ -3338,7 +3396,10 @@ export function handleAnalysisCompletedEvent(
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
               content: canonicalContent ||
-                appendClaimVerificationSummary(appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId), payload),
+                prependPartialResultWarning(
+                  appendClaimVerificationSummary(appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId), payload),
+                  payload,
+                ),
             }, {persist: true});
             break;
           }
@@ -3380,6 +3441,7 @@ export function handleAnalysisCompletedEvent(
       appendFinalEvidenceSections(answerContent, conclusionContract, ctx, payload?.resultSnapshotId),
       payload,
     );
+    content = prependPartialResultWarning(content, payload);
 
     const isAgentDriven = architecture === 'v2-agent-driven' || architecture === 'agent-driven';
     if (isAgentDriven && payload?.hypotheses) {
@@ -3473,6 +3535,22 @@ export function handleAnalysisCompletedEvent(
   }
 
   return { isTerminal: true, stopLoading: true };
+}
+
+export function handleDegradedEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext,
+): SSEHandlerResult {
+  const eventRecord = asRecord(data);
+  const payload = toDegradedPayload(eventRecord.data ?? eventRecord.content ?? eventRecord);
+  const message =
+    payload.message ||
+    payload.terminationReason ||
+    payload.fallback ||
+    payload.code ||
+    '本次分析结果已标记为 partial，结论可能不完整。';
+  pushStreamingPhase(ctx, `结果完整性提示: ${message}`);
+  return {loadingPhase: '结果已标记为部分完成'};
 }
 
 /**
@@ -4581,7 +4659,11 @@ export function handleSSEEvent(
   } else if (eventType === 'analysis_completed') {
     const payload = toAnalysisCompletedPayload(eventData.data);
     updateAISharedState({
-      status: payload?.terminalRunStatus === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
+      status: payload?.terminalRunStatus === 'quota_exceeded'
+        ? 'quota_exceeded'
+        : payload?.partial === true
+          ? 'partial'
+          : 'completed',
       lastAnalysisTime: Date.now(),
     });
   }
@@ -4627,6 +4709,9 @@ function handleSSEEventInner(
 
     case 'analysis_completed':
       return handleAnalysisCompletedEvent(eventData, ctx);
+
+    case 'degraded':
+      return handleDegradedEvent(eventData, ctx);
 
     case 'thought':
       return handleThoughtEvent(eventData, ctx, 'assistant');

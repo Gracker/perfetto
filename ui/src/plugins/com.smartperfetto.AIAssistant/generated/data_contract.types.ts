@@ -93,6 +93,13 @@ export interface ConclusionContractMetadata {
   rounds?: number;
   clusterPolicy?: ConclusionContractClusterPolicy;
   sceneId?: string;
+  /**
+   * Claims were derived by matching the final narrative against captured
+   * DataEnvelope cells, not emitted explicitly by the model.
+   */
+  derivedFromNarrativeEvidenceMatch?: boolean;
+  claimDerivation?: 'explicit_model_contract' | 'narrative_evidence_match';
+  claimVerificationScope?: 'explicit_claims' | 'sampled_narrative_evidence';
 }
 
 export interface ConclusionContract {
@@ -935,6 +942,8 @@ export interface AnalysisCompletedEvent {
     rounds?: number;
     totalDurationMs?: number;
     partial?: boolean;
+    terminationReason?: string;
+    terminationMessage?: string;
     findings: DiagnosticFinding[];
     suggestions: string[];
   };
