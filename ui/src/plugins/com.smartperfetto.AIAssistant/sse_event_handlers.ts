@@ -3416,6 +3416,120 @@ function prependPartialResultWarning(
   return [warning, '', content.trimStart()].join('\n');
 }
 
+function normalizeAppendixHeading(line: string): string {
+  return line
+    .trim()
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^>\s*/, '')
+    .replace(/^\*\*(.*?)\*\*$/, '$1')
+    .replace(/[：:]\s*$/, '')
+    .trim();
+}
+
+function isFrontendHiddenAppendixHeading(line: string): boolean {
+  const heading = normalizeAppendixHeading(line);
+  return (
+    /^(?:证据|证据来源|数据来源)索引(?:（.*?）|\(.*?\))?$/i.test(heading) ||
+    /^逐句数据引用(?:（.*?）|\(.*?\))?$/i.test(heading) ||
+    /^数据来源索引(?:（.*?）|\(.*?\))?$/i.test(heading) ||
+    /^断言验证结果$/i.test(heading) ||
+    /^分析元数据$/i.test(heading) ||
+    /^Evidence Index$/i.test(heading) ||
+    /^Evidence Sources$/i.test(heading) ||
+    /^Claim Verification Results$/i.test(heading) ||
+    /^Data Source Index/i.test(heading) ||
+    /^Analysis Metadata$/i.test(heading)
+  );
+}
+
+function isVisibleReportSectionHeading(line: string): boolean {
+  const trimmed = line.trim();
+  return /^#{1,2}\s+\S/.test(trimmed);
+}
+
+function isSectionSeparator(line: string): boolean {
+  return line.trim() === '---';
+}
+
+function isSnapshotReferenceLine(line: string): boolean {
+  return /^\s*(?:[-*]\s*)?(?:Result\s*ID|Snapshot(?:\s*ID)?|结果\s*ID|快照)\s*[:：]\s*/i.test(line);
+}
+
+function removeTrailingAppendixSeparator(lines: string[]): void {
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
+  }
+  if (lines.length > 0 && isSectionSeparator(lines[lines.length - 1])) {
+    lines.pop();
+  }
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
+  }
+}
+
+function stripFrontendHiddenReportAppendix(content: string): string {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const kept: string[] = [];
+  let skippingHiddenSection = false;
+
+  for (const line of lines) {
+    if (skippingHiddenSection) {
+      if (isFrontendHiddenAppendixHeading(line)) {
+        continue;
+      }
+      if (isSectionSeparator(line)) {
+        skippingHiddenSection = false;
+        continue;
+      }
+      if (isVisibleReportSectionHeading(line)) {
+        skippingHiddenSection = false;
+      } else {
+        continue;
+      }
+    }
+
+    if (isFrontendHiddenAppendixHeading(line)) {
+      removeTrailingAppendixSeparator(kept);
+      skippingHiddenSection = true;
+      continue;
+    }
+
+    if (isSnapshotReferenceLine(line)) {
+      removeTrailingAppendixSeparator(kept);
+      continue;
+    }
+
+    kept.push(line);
+  }
+
+  removeTrailingAppendixSeparator(kept);
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function buildVisibleConclusionContent(
+  content: string,
+  payload?: AnalysisCompletedPayload,
+): string {
+  return prependPartialResultWarning(
+    stripFrontendHiddenReportAppendix(content),
+    payload,
+  );
+}
+
+function buildVisibleConclusionContentWithReportAppendix(
+  content: string,
+  contract: ConclusionContract | Record<string, unknown> | null | undefined,
+  ctx: SSEHandlerContext,
+  resultSnapshotId?: string,
+  payload?: AnalysisCompletedPayload,
+): string {
+  const reportContent = appendClaimVerificationSummary(
+    appendFinalEvidenceSections(content, contract, ctx, resultSnapshotId),
+    payload,
+  );
+  return buildVisibleConclusionContent(reportContent, payload);
+}
+
 function renderConclusionContract(
   contract: ConclusionContract | Record<string, unknown> | null | undefined,
   ctx?: SSEHandlerContext,
@@ -3656,12 +3770,13 @@ export function handleAnalysisCompletedEvent(
     const resultSnapshotId = payload?.resultSnapshotId;
     const canonicalConclusion = payload?.conclusion || payload?.answer;
     const canonicalContent = canonicalConclusion
-      ? prependPartialResultWarning(appendClaimVerificationSummary(appendFinalEvidenceSections(
+      ? buildVisibleConclusionContentWithReportAppendix(
           canonicalConclusion,
           conclusionContract,
           ctx,
           resultSnapshotId,
-        ), payload), payload)
+          payload,
+        )
       : undefined;
     if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent) {
       // Attach reportUrl to the existing answer/conclusion message. If the
@@ -3675,8 +3790,11 @@ export function handleAnalysisCompletedEvent(
           ...(canonicalContent
             ? {content: canonicalContent}
             : existing
-              ? {content: prependPartialResultWarning(
-                appendClaimVerificationSummary(appendFinalEvidenceSections(existing.content, conclusionContract, ctx, resultSnapshotId), payload),
+              ? {content: buildVisibleConclusionContentWithReportAppendix(
+                existing.content,
+                conclusionContract,
+                ctx,
+                resultSnapshotId,
                 payload,
               )}
               : {}),
@@ -3696,8 +3814,11 @@ export function handleAnalysisCompletedEvent(
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
               content: canonicalContent ||
-                prependPartialResultWarning(
-                  appendClaimVerificationSummary(appendFinalEvidenceSections(messages[i].content, conclusionContract, ctx, resultSnapshotId), payload),
+                buildVisibleConclusionContentWithReportAppendix(
+                  messages[i].content,
+                  conclusionContract,
+                  ctx,
+                  resultSnapshotId,
                   payload,
                 ),
             }, {persist: true});
@@ -3724,9 +3845,7 @@ export function handleAnalysisCompletedEvent(
   // and fall back to structured conclusionContract when narrative text is absent.
   const contractContent = renderConclusionContract(conclusionContract, ctx);
   const narrativeContent = payload?.answer || payload?.conclusion;
-  const answerContent = narrativeContent
-    ? appendConclusionClaims(narrativeContent, conclusionContract, ctx)
-    : contractContent;
+  const answerContent = narrativeContent || contractContent;
 
   if (answerContent) {
     ctx.setCompletionHandled(true);
@@ -3737,28 +3856,13 @@ export function handleAnalysisCompletedEvent(
     completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
-    let content = appendClaimVerificationSummary(
-      appendFinalEvidenceSections(answerContent, conclusionContract, ctx, payload?.resultSnapshotId),
+    const content = buildVisibleConclusionContentWithReportAppendix(
+      answerContent,
+      conclusionContract,
+      ctx,
+      payload?.resultSnapshotId,
       payload,
     );
-    content = prependPartialResultWarning(content, payload);
-
-    const isAgentDriven = architecture === 'v2-agent-driven' || architecture === 'agent-driven';
-    if (isAgentDriven && payload?.hypotheses) {
-      const hypotheses = payload.hypotheses;
-      const confirmed = hypotheses.filter((h: AnalysisHypothesisItem) => h.status === 'confirmed');
-      const confidence = payload.confidence || 0;
-
-      const hasMetadataSection = /(?:^|\n)(?:##\s*分析元数据|\*\*分析元数据\*\*)/m.test(content);
-      if (!hasMetadataSection && (confirmed.length > 0 || confidence > 0)) {
-        content += `\n\n---\n**分析元数据**\n`;
-        content += `- 置信度: ${(confidence * 100).toFixed(0)}%\n`;
-        content += `- 分析轮次: ${payload.rounds || 1}\n`;
-        if (confirmed.length > 0) {
-          content += `- 确认假设: ${confirmed.map((h: AnalysisHypothesisItem) => h.description).join(', ')}\n`;
-        }
-      }
-    }
 
     const reportUrl = payload?.reportUrl;
     if (!reportUrl && payload?.reportError) {
@@ -5119,7 +5223,11 @@ function handleSSEEventInner(
       }
 
       if (conclusionText) {
-        const content = appendDataSourceIndex(conclusionText, ctx);
+        const content = buildVisibleConclusionContentWithReportAppendix(
+          conclusionText,
+          undefined,
+          ctx,
+        );
         const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
         const hasStreamedAnswerMessage = Boolean(
           streamedAnswerMessageId &&
