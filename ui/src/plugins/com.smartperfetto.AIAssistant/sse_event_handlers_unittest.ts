@@ -1966,7 +1966,8 @@ describe('handleDataEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].sqlResult?.query).toBe(sql);
-    expect(ctx.messages[0].sqlResult?.sectionTitle).toBeUndefined();
+    expect(ctx.messages[0].sqlResult?.hideQuery).toBe(true);
+    expect(ctx.messages[0].sqlResult?.sectionTitle).toBe('SQL 结果 · 数据验证');
   });
 
   it('should deduplicate execute_sql envelopes by SQL text', () => {
@@ -2125,7 +2126,7 @@ describe('handleDataEvent', () => {
       planPhaseId: 'p1',
       planPhaseTitle: '概览采集',
       planPhaseGoal: '获取帧统计',
-      reason: '执行当前 Trace SQL，验证本阶段的具体数据点。',
+      reason: '压缩本轮启动的关键指标、异常提示和候选方向，用来决定后续优先下钻哪些问题。',
     });
   });
 
@@ -2161,7 +2162,7 @@ describe('handleDataEvent', () => {
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).toContain('## 数据来源索引');
     expect(ctx.messages[1].content).toContain('表 1: 掉帧帧列表');
-    expect(ctx.messages[1].content).toContain('证据 ID 可在报告和结果快照中对齐');
+    expect(ctx.messages[1].content).toContain('这里保留来源、阶段和用途');
   });
 
   it('numbers data source refs per kind so summaries do not shift table refs', () => {
@@ -2444,7 +2445,7 @@ describe('handleDataEvent', () => {
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).toContain('## 逐句数据引用');
     expect(ctx.messages[1].content).toContain('Q1 / C1: 帧耗时 45.6ms');
-    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，已核对');
   });
 
   it('accepts common source_ref formatting variants without losing source binding', () => {
@@ -2488,7 +2489,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('表1: 帧耗时表，row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('表1: 帧耗时表，row 0，列 dur_ms，已核对');
   });
 
   it('resolves claim columns by displayed column label when available', () => {
@@ -2533,7 +2534,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('表 1，row 0，列 帧耗时(ms)，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 帧耗时(ms)，已核对');
   });
 
   it('verifies claim values with units and explicit approximate status for rounded numbers', () => {
@@ -2577,7 +2578,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，值 45.6ms，已核对: 近似匹配');
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，已核对（含近似匹配）');
   });
 
   it('marks claim references that do not match the sourced table value', () => {
@@ -2709,9 +2710,9 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[2].content).toContain('表 1，row 0，列 dur_ms，值 45.6，已核对');
-    expect(ctx.messages[2].content).toContain('source_ref 表 2 与系统来源 表 1 不一致，已按机器 ID 核对');
-    expect(ctx.messages[2].content).not.toContain('表 2，row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[2].content).toContain('表 1，row 0，列 dur_ms，已核对');
+    expect(ctx.messages[2].content).toContain('source_ref 已按系统来源校正');
+    expect(ctx.messages[2].content).not.toContain('表 2，row 0，列 dur_ms，已核对');
   });
 
   it('rejects fractional or negative claim row indexes instead of rounding them', () => {
@@ -2755,7 +2756,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('row -0.4，列 dur_ms，值 45.6，未通过: 行号无效');
+    expect(ctx.messages[1].content).toContain('row -0.4，列 dur_ms，未通过: 行号无效');
   });
 
   it('marks duplicate evidence refs as ambiguous unless tool call id disambiguates them', () => {
@@ -2815,7 +2816,7 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[2].content).toContain('Q1: 帧耗时 45.6ms');
     expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
     expect(ctx.messages[2].content).toContain('Q2: 第二次帧耗时 99ms');
-    expect(ctx.messages[2].content).toContain('工具 execute_sql:2:params-a，已核对');
+    expect(ctx.messages[2].content).toContain('表 2，row 0，列 dur_ms，已核对');
   });
 
   it('keeps duplicate evidence refs without tool call ids visible so claims become ambiguous', () => {
@@ -2905,7 +2906,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('rowSelector frame_id=123 -> row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('rowSelector frame_id=123 -> row 0，列 dur_ms，已核对');
   });
 
   it('parses prompt-style row_selector strings for claim verification', () => {
@@ -2949,7 +2950,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，已核对');
   });
 
   it('keeps claim-referenced middle data sources visible when the source index is truncated', () => {
@@ -3005,7 +3006,7 @@ describe('handleDataEvent', () => {
     expect(conclusion).toContain('已有结论');
     expect(conclusion).toContain('并额外保留 1 个被逐句引用命中的来源');
     expect(conclusion).toContain('表 105: Middle pinned table');
-    expect(conclusion).toContain('表 105，row 0，列 value，值 105，已核对');
+    expect(conclusion).toContain('表 105，row 0，列 value，已核对');
   });
 
   it('discloses claim and per-claim reference truncation instead of silently dropping them', () => {
@@ -3052,7 +3053,7 @@ describe('handleDataEvent', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[1].content).toContain('另有 1 个引用未展开');
+    expect(ctx.messages[1].content).toContain('Q1: claim 1（表 1，row 0，列 value，已核对）');
     expect(ctx.messages[1].content).toContain('其余 1 条 claim 未展开；完整结构化引用仍保留在结果快照中。');
   });
 
@@ -3282,7 +3283,7 @@ describe('handleDataEvent', () => {
 
     expect(ctx.messages[1].content).not.toContain('## 逐句数据引用（结构化来源）');
     expect(ctx.messages[1].content).toContain('## 逐句数据引用（系统核对结果）');
-    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，值 45.6，已核对');
+    expect(ctx.messages[1].content).toContain('表 1，row 0，列 dur_ms，已核对');
     expect(ctx.messages[1].content).toContain('## 不确定性与反例');
   });
 
@@ -3356,8 +3357,8 @@ describe('handleDataEvent', () => {
     const conclusion = ctx.messages[2].content;
     expect(conclusion).toContain('表 1: 当前 Trace · 掉帧帧列表');
     expect(conclusion).toContain('表 2: 参考 Trace · 掉帧帧列表');
-    expect(conclusion).toContain('...current:trace-a:hash');
-    expect(conclusion).toContain('...reference:trace-b:hash');
+    expect(conclusion).not.toContain('...current:trace-a:hash');
+    expect(conclusion).not.toContain('...reference:trace-b:hash');
   });
 
   it('does not mutate the latest table when an empty conclusion precedes report metadata', () => {

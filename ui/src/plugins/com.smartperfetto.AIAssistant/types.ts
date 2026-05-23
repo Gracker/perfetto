@@ -447,6 +447,7 @@ export interface SqlQueryResult {
   rows: any[][];
   rowCount: number;
   query?: string;
+  hideQuery?: boolean; // Keep query for audit/export, but do not render raw SQL in analysis tables.
   sectionTitle?: string; // For skill_section messages - shows title in table header
   stepId?: string; // Skill step identifier (from DataEnvelope.meta.stepId)
   layer?: string; // Display layer (overview/list/detail/deep)

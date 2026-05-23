@@ -475,13 +475,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       : context.traceSide === 'reference'
         ? '参考 Trace'
         : '';
-    const compactEvidence = (value: string | undefined) => {
-      if (!value) return '';
-      if (value.length <= 40) return value;
-      const parts = value.split(':').filter(Boolean);
-      const tail = parts.slice(-2).join(':');
-      return tail ? `...${tail}` : `${value.slice(0, 18)}...${value.slice(-12)}`;
-    };
     const kindLabel = (kind: DataSourceContext['kind']) => {
       switch (kind) {
         case 'summary':
@@ -509,16 +502,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       .filter(Boolean)
       .join(' · ');
     if (planPhase) chips.push(`阶段 ${planPhase}`);
-    if (context.planPhaseAttribution && context.planPhaseAttribution !== 'active') {
-      chips.push(`阶段归因 ${context.planPhaseAttribution}`);
-    }
     if (typeof context.rowCount === 'number') {
       chips.push(`${context.rowCount.toLocaleString()} 行`);
     }
-    if (context.sourceToolCallId) {
-      chips.push(`工具 ${compactEvidence(context.sourceToolCallId)}`);
-    }
-    if (context.evidenceRefId) chips.push(`证据 ${compactEvidence(context.evidenceRefId)}`);
     if (context.source) chips.push(context.source);
 
     return m('div.ai-table-context', [
@@ -527,9 +513,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         m('span.ai-table-context-reason', context.reason),
       ]),
       m('div.ai-table-context-meaning', context.meaning),
-      context.planPhaseWarning
-        ? m('div.ai-table-context-meaning', context.planPhaseWarning)
-        : null,
       chips.length > 0
         ? m(
             'div.ai-table-context-meta',
@@ -2327,8 +2310,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   (() => {
                                     const sqlResult = msg.sqlResult;
                                     if (!sqlResult) return null;
-                                    const query =
+                                    const rawQuery =
                                       sqlResult.query || msg.query || '';
+                                    const query = sqlResult.hideQuery
+                                      ? ''
+                                      : rawQuery;
                                     const formattedSql = query
                                       ? this.sqlFormatForMessage(msg.id, query)
                                       : null;

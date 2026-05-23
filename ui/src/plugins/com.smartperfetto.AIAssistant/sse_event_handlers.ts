@@ -1174,7 +1174,12 @@ function failStreamingAnswer(ctx: SSEHandlerContext): void {
 }
 
 function describeEnvelopeOutput(envelope: DataEnvelope): string {
-  const title = envelope.display?.title || envelope.meta?.stepId || envelope.meta?.skillId || '数据更新';
+  const title = inferDataSourceTitle({
+    source: envelope.meta?.source,
+    title: envelope.display?.title || envelope.meta?.stepId || envelope.meta?.skillId || '数据更新',
+    columns: envelopeColumnsForContext(envelope),
+    query: readStringField(asRecord(envelope), 'sql') || undefined,
+  });
   const payload = envelope.data;
   const rowCount = Array.isArray(payload?.rows) ? payload.rows.length : undefined;
   const traceLabel = traceSideLabel(readEnvelopeTraceSide(envelope))
@@ -1191,13 +1196,130 @@ function inferDataSourceReason(input: {
   layer?: string;
   title?: string;
   query?: string;
-}): string {
+  columns?: string[];
+  planPhaseId?: string;
+  planPhaseTitle?: string;
+}, fallbackReason = ''): string {
   const source = (input.source || '').toLowerCase();
   const title = (input.title || '').toLowerCase();
   const layer = (input.layer || '').toLowerCase();
+  const planPhase = `${input.planPhaseId || ''} ${input.planPhaseTitle || ''}`.toLowerCase();
+  const identity = `${title} ${source} ${planPhase}`;
+  const columns = (input.columns || []).map((col) => col.toLowerCase());
+  const joinedColumns = columns.join(' ');
 
+  if (/洞见摘要|__synthesize_summary__|insight/.test(identity)) {
+    return '压缩本轮启动的关键指标、异常提示和候选方向，用来决定后续优先下钻哪些问题。';
+  }
+  if (/启动数据质量|startup_quality/.test(identity)) {
+    return '核对采样完整性、缺失项和质量警告，用来判断本轮结论是否可靠、是否需要降级为假设。';
+  }
+  if (/证据矩阵|evidence matrix/.test(identity)) {
+    return '汇总本阶段命中的规则、证据和归因标签，用来把根因树里的判断落到可核对的证据记录。';
+  }
+  if (/主线程可操作热点|actionable_main_thread_slices/.test(identity)) {
+    return '定位启动窗口内主线程最值得优化的热点 slice，用来判断耗时是否集中在 App/业务负载而不是框架包裹。';
+  }
+  if (/热点\s*slice\s*线程状态|hot_slice_states/.test(identity)) {
+    return '拆分热点 slice 的 Running、Sleep、Runnable 或阻塞占比，用来区分 CPU 执行、主动等待、调度等待和锁/IO 阻塞。';
+  }
+  if (/主线程耗时操作|main_thread_slices/.test(identity)) {
+    return '按耗时聚合启动期间主线程操作，用来先圈出影响启动墙钟时间的最大候选阶段。';
+  }
+  if (/主线程文件\s*io|main_thread_file_io/.test(identity)) {
+    return '筛出启动期间主线程文件 IO，用来判断是否存在磁盘访问拖慢启动，或证明 IO 不是主因。';
+  }
+  if (/主线程同步\s*binder|main_thread_sync_binder/.test(identity)) {
+    return '只看主线程同步 Binder 调用，用来判断主线程是否被跨进程返回时间卡住。';
+  }
+  if (/启动期间\s*binder|startup_binder/.test(identity)) {
+    return '汇总启动窗口内 Binder 调用耗时和次数，用来评估跨进程通信是否对启动耗时有实质贡献。';
+  }
+  if (/binder\s*阻塞|binder_blocking/.test(identity)) {
+    return '检查主线程 Binder 等待和远端阻塞关系，用来判断慢启动是否由服务端响应或线程池排队触发。';
+  }
+  if (/启动期间主线程状态|main_thread_state_during_startup/.test(identity)) {
+    return '汇总启动窗口主线程 Running、Sleep、D、Runnable 占比，用来区分 CPU 忙、主动等待、IO 等待和调度等待。';
+  }
+  if (/启动期间类加载|class_loading/.test(identity)) {
+    return '检查启动窗口类加载记录，用来判断冷启动是否被类加载或反射初始化放大。';
+  }
+  if (/启动期间\s*gc|gc_during_startup/.test(identity)) {
+    return '统计启动窗口 GC 类型、线程和耗时占比，用来判断内存回收是否干扰主线程启动路径。';
+  }
+  if (/启动期间调度延迟|sched_latency_during_startup/.test(identity)) {
+    return '量化 Runnable 等待和最大调度延迟，用来判断系统调度是否让主线程迟迟拿不到 CPU。';
+  }
+  if (/启动延迟归因|startup_breakdown/.test(identity)) {
+    return '把启动总耗时拆到阶段和候选原因，用来确定后续应下钻 bindApplication、activityStart 还是系统等待。';
+  }
+  if (/启动\s*#?\d*\s*详情|startup_info/.test(identity)) {
+    return '校准单次启动 ID、起止时间、dur 和 TTID/TTFD，用来保证详情深钻沿用同一个启动窗口。';
+  }
+  if (/初始化\s*cpu\s*拓扑|init_cpu_topology/.test(identity)) {
+    return '确认 CPU 核型和拓扑信息是否可用，用来判断后续大小核、频率和调度分析的可信度。';
+  }
+  if (/大小核占比|cpu_core_analysis/.test(identity)) {
+    return '统计主线程 Running 时间落在大核/小核的比例，用来判断启动是否受小核执行或摆核策略影响。';
+  }
+  if (/cpu\s*频率爬升|freq_rampup/.test(identity)) {
+    return '比较启动早期和稳定阶段的 CPU 频率，用来判断是否存在频率爬升过慢导致的启动拖延。';
+  }
+  if (/cpu\s*频率|cpu_freq_analysis/.test(identity)) {
+    return '汇总启动期间 CPU 频率水平，用来判断系统算力供给是否偏低。';
+  }
+  if (/四大象限|quadrant_analysis/.test(identity)) {
+    return '把主线程耗时拆成大核运行、小核运行、Runnable、IO 阻塞和 Sleep，用来定位根因所属象限。';
+  }
+  if (/主线程摆核时序|cpu_placement_timeline/.test(identity)) {
+    return '按时间桶展示主线程落在大核/小核的变化，用来定位慢阶段是否伴随小核执行或频繁迁移。';
+  }
+  if (/binder\s*线程池|binder_pool/.test(identity)) {
+    return '检查 Binder 线程池容量、占用和评估结论，用来排除或确认远端线程池饱和。';
+  }
+  if (/启动关键任务|critical_tasks/.test(identity)) {
+    return '列出启动窗口全线程关键任务的 CPU、睡眠和摆核情况，用来识别主线程外的竞争或依赖任务。';
+  }
+  if (/线程阻塞关系图|thread_blocking_graph/.test(identity)) {
+    return '构建线程间等待关系，用来验证是否存在锁、Binder 或线程依赖形成的阻塞链。';
+  }
+  if (/jit\s*影响|jit_analysis/.test(identity)) {
+    return '检查 JIT/编译活动是否落在启动关键路径，用来判断代码热身是否拖慢冷启动。';
+  }
+  if (/检测到的慢启动原因|slow_reason_checks/.test(identity)) {
+    return '列出慢启动规则命中的原因，用来确认哪些根因已经被数据满足、哪些只是候选。';
+  }
+  if (/问题诊断|startup_diagnosis/.test(identity)) {
+    return '承接技能内置诊断输出，用来确认是否已有明确问题标签、严重度或可执行建议。';
+  }
+  if (/启动事件|startup_overview|get_startups/.test(identity)) {
+    return '确定本轮分析对应的启动窗口、TTID/TTFD 和边界时间，避免后续表格查错时间段。';
+  }
+
+  if (/slice_name/.test(joinedColumns) && /state_pct|state_dur_ms/.test(joinedColumns)) {
+    return '验证目标 slice 在不同线程状态下的耗时分布，用来判断这段时间是在真正运行还是在等待。';
+  }
+  if (/slice_name/.test(joinedColumns) && /self_ms|self_percent/.test(joinedColumns)) {
+    return '核对热点 slice 的自耗时贡献，用来判断优化应落到哪个函数、任务或业务标签。';
+  }
+  if (/slice_name/.test(joinedColumns) && /dur_ms/.test(joinedColumns)) {
+    return '列出目标时间窗内命中的 slice 及耗时，用来验证结论里提到的具体事件是否真实存在。';
+  }
+  if (/state/.test(joinedColumns) && /dur|pct|percent/.test(joinedColumns)) {
+    return '汇总线程状态耗时占比，用来判断瓶颈更像 CPU 忙、调度等待、睡眠等待还是不可中断阻塞。';
+  }
+  if (/reason|severity|evidence/.test(joinedColumns)) {
+    return '汇总诊断规则的命中原因、严重度和证据文本，用来决定根因优先级。';
+  }
+
+  if (fallbackReason && !isLowSignalReason(fallbackReason)) {
+    return fallbackReason;
+  }
   if (input.query || source === 'execute_sql') {
-    return '临时 SQL 查询，用来验证模型提出的具体数据点或补齐 Skill 未覆盖的字段。';
+    if (/webview|p2_10/.test(identity)) {
+      return '验证启动和 TTID 差值区间内是否存在 WebView/渲染相关 slice，用来排除 WebView 启动路径误判。';
+    }
+    return '补齐 Skill 未直接覆盖的验证点；重点看结果是否命中目标时间窗、目标线程和结论提到的实体。';
   }
   if (source.includes('invoke_skill') || source.includes('skill') || source.includes(':')) {
     return 'Skill 返回的结构化证据，用来支撑后续筛选、下钻或结论判断。';
@@ -1224,6 +1346,66 @@ function inferDataSourceReason(input: {
 
 function inferDataMeaning(title: string, columns: string[]): string {
   const text = `${title} ${columns.join(' ')}`.toLowerCase();
+  if (/洞见摘要|insight/.test(text)) {
+    return '看摘要里的启动类型、总耗时、主要异常和候选瓶颈，确定本轮分析的优先方向。';
+  }
+  if (/启动数据质量/.test(text)) {
+    return '看 warning_count、issue_codes 和 quality_status，判断当前 trace 数据是否足够支撑结论。';
+  }
+  if (/证据矩阵|evidence matrix/.test(text)) {
+    return '看规则/证据编号、命中条件、严重度和建议，确认根因树的每个判断是否有对应证据。';
+  }
+  if (/主线程可操作热点|actionable_main_thread_slices/.test(text)) {
+    return '看 slice_name 定位对象，看 self_ms/total_ms/avg_ms 衡量贡献，看 self_percent 判断是否值得优先优化。';
+  }
+  if (/热点\s*slice\s*线程状态|hot_slice_states/.test(text)) {
+    return '每行是一个热点 slice 的一种线程状态；Running 占比高指向 CPU 执行，Sleep/D/Runnable 占比高指向等待或调度问题。';
+  }
+  if (/主线程文件\s*io/.test(text)) {
+    return '每行是一类主线程文件 IO；看 total_dur_ms 和 percent_of_startup 判断磁盘访问是否值得进入根因。';
+  }
+  if (/binder/.test(text) && /call_count|aidl_name|server_process/.test(text)) {
+    return '每行是一类 Binder 调用聚合；看 server_process、call_count、total_dur_ms 和主线程调用数判断 IPC 影响。';
+  }
+  if (/启动期间主线程状态/.test(text)) {
+    return '每行是一种主线程状态；看 percent、total_dur_ms 和 blocked_functions 判断主线程是在跑、睡眠、可运行等待还是不可中断等待。';
+  }
+  if (/启动期间\s*gc/.test(text)) {
+    return '每行是一类 GC 聚合；看 is_main_thread、total_dur_ms 和 percent_of_startup 判断 GC 是否干扰启动。';
+  }
+  if (/启动期间调度延迟/.test(text)) {
+    return '每行是一类调度等待聚合；看 total_wait_ms、avg_wait_ms、max_wait_ms 和 severe_delays 判断调度压力。';
+  }
+  if (/大小核占比/.test(text)) {
+    return '看 big_core_pct、little_core_pct 和 total_running_ms，判断主线程执行时间主要落在哪类 CPU 核。';
+  }
+  if (/cpu\s*频率爬升/.test(text)) {
+    return '看 early_avg_freq_mhz、steady_avg_freq_mhz 和 rampup_pct，判断启动早期是否频率供给不足。';
+  }
+  if (/cpu\s*频率/.test(text)) {
+    return '看 avg_freq_mhz、max_freq_mhz 和 core_type，判断启动期间 CPU 频率是否偏低。';
+  }
+  if (/四大象限/.test(text)) {
+    return '看 q1/q2/q3/q4a/q4b 的毫秒和占比，把慢启动归到大核运行、小核运行、调度等待、IO 或 Sleep。';
+  }
+  if (/主线程摆核时序/.test(text)) {
+    return '每行是一个时间桶；看 big_core_pct 和 used_cpus，定位慢阶段是否伴随小核执行或迁移。';
+  }
+  if (/启动关键任务/.test(text)) {
+    return '每行是一个关键线程任务；看 running_pct、big_core_pct、migrations 和 sleeping_ms 判断竞争与依赖。';
+  }
+  if (/检测到的慢启动原因|reason_id/.test(text)) {
+    return '每行是一条慢启动规则命中；看 reason、severity、evidence 和 suggestion 判断是否进入最终建议。';
+  }
+  if (/slice_name/.test(text) && /state_pct|state_dur_ms/.test(text)) {
+    return '每行把一个 slice 拆到一个线程状态；重点看 state、state_dur_ms 和 state_pct。';
+  }
+  if (/slice_name/.test(text) && /dur_ms/.test(text)) {
+    return '每行是一段命中的 trace slice；重点看 slice_name、dur_ms 和 ts，确认事件名称、耗时和发生时间。';
+  }
+  if (/reason|severity|evidence/.test(text)) {
+    return '每行是一条诊断规则或证据命中；重点看原因、严重度、证据字段和是否可操作。';
+  }
   if (/startup|launch|启动/.test(text)) {
     return '每行通常对应一次启动、启动阶段或启动相关候选事件。';
   }
@@ -1246,6 +1428,57 @@ function inferDataMeaning(title: string, columns: string[]): string {
     return '每行通常对应一次 I/O、文件或数据库操作统计。';
   }
   return '每行是一条命中的证据记录；列是本步骤用于判断的指标、实体或时间字段。';
+}
+
+function isGenericSqlTitle(title: string): boolean {
+  return /^sql\s+query(?:\s*\(\s*\d+\s*rows?\s*\))?$/i.test(normalizeFlowLine(title));
+}
+
+function inferDataSourceTitle(input: {
+  source?: string;
+  title?: string;
+  columns?: string[];
+  query?: string;
+}): string {
+  const rawTitle = normalizeFlowLine(input.title || '');
+  if (rawTitle && !isGenericSqlTitle(rawTitle)) return rawTitle;
+
+  const columns = (input.columns || []).map((col) => col.toLowerCase());
+  const text = columns.join(' ');
+  if (/slice_name/.test(text) && /state_pct|state_dur_ms/.test(text)) {
+    return 'SQL 结果 · Slice 线程状态分布';
+  }
+  if (/slice_name/.test(text) && /self_ms|self_percent/.test(text)) {
+    return 'SQL 结果 · 主线程热点 Slice';
+  }
+  if (/slice_name/.test(text) && /dur_ms/.test(text)) {
+    return 'SQL 结果 · Slice 命中明细';
+  }
+  if (/reason|severity|evidence/.test(text)) {
+    return 'SQL 结果 · 诊断规则命中';
+  }
+  if (/state/.test(text) && /dur|pct|percent/.test(text)) {
+    return 'SQL 结果 · 线程状态分布';
+  }
+  if (/count|total|avg|max|min/.test(text) && /dur|ms/.test(text)) {
+    return 'SQL 结果 · 耗时聚合统计';
+  }
+  if (/process|thread|pid|tid|utid/.test(text)) {
+    return 'SQL 结果 · 线程/进程明细';
+  }
+  return 'SQL 结果 · 数据验证';
+}
+
+function isLowSignalReason(reason: string): boolean {
+  const text = normalizeFlowLine(reason).toLowerCase();
+  if (!text) return true;
+  return [
+    /执行当前\s*trace\s*sql，?验证本阶段的具体数据点/,
+    /run sql on the current trace to verify this phase of evidence/,
+    /调用 skill .+，?收集本阶段结构化证据/,
+    /run skill .+ to collect structured evidence for this phase/,
+    /临时 sql 查询，用来验证模型提出的具体数据点/,
+  ].some((pattern) => pattern.test(text));
 }
 
 function normalizeTraceSide(value: unknown): 'current' | 'reference' | undefined {
@@ -1448,13 +1681,18 @@ function registerDataSourceContext(
   flow.dataSourceOrdinal = (flow.dataSourceOrdinal || 0) + 1;
   flow.dataSourceKindOrdinals ||= {};
   const isDiagnostic = input.kind === 'diagnostic';
+  const title = inferDataSourceTitle(input);
+  const producerReason = normalizeFlowLine(input.producerReason || '');
+  const toolNarration = normalizeFlowLine(input.toolNarration || '');
+  const fallbackReason = isLowSignalReason(producerReason)
+    ? toolNarration
+    : producerReason || toolNarration;
   const reason = isDiagnostic
     ? '失败诊断：该步骤未产出可用数据，只用于解释失败和指导重试，不能作为结论证据。'
-    : normalizeFlowLine(input.producerReason || input.toolNarration || '')
-      || inferDataSourceReason(input);
+    : inferDataSourceReason({...input, title}, fallbackReason);
   const meaning = isDiagnostic
     ? '包含失败工具、错误信息、原始 SQL 或上下文；它说明数据缺失原因，不证明性能结论。'
-    : inferDataMeaning(input.title || '', input.columns || []);
+    : inferDataMeaning(title, input.columns || []);
   const refPrefix = input.kind === 'summary'
     ? '摘要'
     : input.kind === 'metric'
@@ -1473,7 +1711,7 @@ function registerDataSourceContext(
   flow.dataSourceKindOrdinals[refKind] = refOrdinal;
   const sourceContext: DataSourceContext = {
     ref: `${refPrefix} ${refOrdinal}`,
-    title: normalizeFlowLine(input.title || '数据表') || '数据表',
+    title: title || '数据表',
     source: normalizeFlowLine(input.source || input.layer || 'analysis') || 'analysis',
     reason,
     meaning,
@@ -1504,17 +1742,10 @@ function dataSourceLine(ref: DataSourceContext): string {
   const planPhase = ref.planPhaseTitle || ref.planPhaseId
     ? `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`
     : '';
-  const phaseAttribution = ref.planPhaseAttribution && ref.planPhaseAttribution !== 'active'
-    ? `，阶段归因: ${ref.planPhaseAttribution}`
-    : '';
-  const phaseWarning = ref.planPhaseWarning ? `，${ref.planPhaseWarning}` : '';
   const trace = traceSideLabel(ref.traceSide);
   const tracePrefix = trace ? `${trace} · ` : '';
-  const evidence = ref.evidenceRefId ? `，证据: ${compactEvidenceRef(ref.evidenceRefId)}` : '';
-  const tool = ref.sourceToolCallId ? `，工具: ${compactEvidenceRef(ref.sourceToolCallId)}` : '';
-  const reason = ref.reason ? `；用途: ${ref.reason}` : '';
-  const meaning = ref.meaning ? `；含义: ${ref.meaning}` : '';
-  return `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${phaseAttribution}${phaseWarning}${tool}${evidence}）${reason}${meaning}`;
+  const reason = ref.reason ? `，用途: ${ref.reason}` : '';
+  return `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${reason}）`;
 }
 
 function collectClaimReferencedSourceContexts(
@@ -1569,7 +1800,7 @@ function renderDataSourceIndexSection(
   return [
     '---',
     '## 数据来源索引（系统生成）',
-    '以下是本轮结论可核对的数据输出；证据 ID 可在报告和结果快照中对齐。若结论合同提供逐句引用，会在“逐句数据引用”里标出行/列和值。',
+    '以下是本轮结论可核对的数据输出；这里保留来源、阶段和用途，详细证据 ID 保留在结果快照中。',
     omittedCount > 0
       ? `本轮共有 ${refs.length} 个数据来源；为避免结论过长，这里列出前 ${headCount} 个和后 ${tailCount} 个${pinnedReferencedCount > 0 ? `，并额外保留 ${pinnedReferencedCount} 个被逐句引用命中的来源` : ''}，省略中间 ${omittedCount} 个。完整来源仍保留在本轮表格消息中；结果快照可能受快照上限裁剪。`
       : '',
@@ -1758,6 +1989,8 @@ export function handleSqlExecutedEvent(
         rows,
         rowCount,
         query: sql,
+        hideQuery: Boolean(sql),
+        sectionTitle: sourceContext.title,
         expandableData,
         summary,
         sourceContext,
@@ -2786,10 +3019,18 @@ function resolveClaimRow(
   return {row: matches[0].row, rowLabel: `${selectorLabel} -> row ${matches[0].idx}`};
 }
 
-function renderClaimReferenceDetail(
+type ClaimReferenceAudit = {
+  label: string;
+  rowLabel: string;
+  column: string;
+  status: string;
+  sourceRefMismatch: boolean;
+};
+
+function auditClaimReference(
   ref: Record<string, unknown>,
   ctx: SSEHandlerContext | undefined,
-): string {
+): ClaimReferenceAudit {
   const evidenceRefId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId));
   const sourceRef = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef));
   const sourceToolCallId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId));
@@ -2811,13 +3052,6 @@ function renderClaimReferenceDetail(
   const resolvedRow = matched.sqlResult
     ? resolveClaimRow(matched.sqlResult, rowIndexValue, rowIndex, rowSelector)
     : {};
-  const parts = [
-    label,
-    resolvedRow.rowLabel || (rowIndex !== undefined ? `row ${rowIndex}` : ''),
-    column ? `列 ${column}` : '',
-    hasExpectedValue ? `值 ${String(expectedValue)}` : '',
-    sourceToolCallId ? `工具 ${compactEvidenceRef(sourceToolCallId)}` : '',
-  ].filter(Boolean);
 
   let status = '';
   if (!evidenceRefId && !sourceRef && !sourceToolCallId) {
@@ -2857,10 +3091,82 @@ function renderClaimReferenceDetail(
       : '已找到来源';
   }
 
-  const sourceRefWarning = sourceRefMismatch && matched.source
-    ? `；source_ref ${sourceRef} 与系统来源 ${matched.source.ref} 不一致，已按机器 ID 核对`
-    : '';
-  return `${parts.join('，') || '未命名来源'}，${status}${sourceRefWarning}`;
+  return {
+    label: label || '未命名来源',
+    rowLabel: resolvedRow.rowLabel || (rowIndex !== undefined ? `row ${rowIndex}` : ''),
+    column,
+    status,
+    sourceRefMismatch: sourceRefMismatch && Boolean(matched.source),
+  };
+}
+
+function compactClaimAuditStatus(statuses: string[]): string {
+  const failed = statuses.find((status) => status.startsWith('未通过'));
+  if (failed) return failed;
+  const unverified = statuses.find((status) => status.startsWith('未核验'));
+  if (unverified) return unverified;
+  if (statuses.some((status) => status.includes('近似匹配'))) return '已核对（含近似匹配）';
+  if (statuses.some((status) => status === '已找到来源')) return '已找到来源';
+  return '已核对';
+}
+
+function renderClaimReferencesSummary(
+  references: Record<string, unknown>[],
+  ctx: SSEHandlerContext | undefined,
+): string {
+  const groups = new Map<string, {
+    label: string;
+    rows: Set<string>;
+    columns: Set<string>;
+    statuses: string[];
+    mismatchCount: number;
+    referenceCount: number;
+  }>();
+
+  for (const ref of references) {
+    const audit = auditClaimReference(ref, ctx);
+    const key = [audit.label, audit.rowLabel].join('\0');
+    if (!groups.has(key)) {
+      groups.set(key, {
+        label: audit.label,
+        rows: new Set(),
+        columns: new Set(),
+        statuses: [],
+        mismatchCount: 0,
+        referenceCount: 0,
+      });
+    }
+    const group = groups.get(key)!;
+    if (audit.rowLabel) group.rows.add(audit.rowLabel);
+    if (audit.column) {
+      for (const column of audit.column.split(/[,，]/).map((part) => normalizeFlowLine(part)).filter(Boolean)) {
+        group.columns.add(column);
+      }
+    }
+    group.statuses.push(audit.status);
+    if (audit.sourceRefMismatch) group.mismatchCount += 1;
+    group.referenceCount += 1;
+  }
+
+  const maxGroups = 4;
+  const rendered = [...groups.values()].slice(0, maxGroups).map((group) => {
+    const rows = [...group.rows];
+    const columns = [...group.columns];
+    const rowText = rows.length > 0
+      ? `，${rows.slice(0, 2).join(' / ')}${rows.length > 2 ? ` 等 ${rows.length} 行` : ''}`
+      : '';
+    const columnText = columns.length > 0
+      ? `，列 ${columns.slice(0, 6).join('/')}${columns.length > 6 ? ` 等 ${columns.length} 列` : ''}`
+      : '';
+    const status = compactClaimAuditStatus(group.statuses);
+    const mismatchText = group.mismatchCount > 0 ? '，source_ref 已按系统来源校正' : '';
+    return `${group.label}${rowText}${columnText}，${status}${mismatchText}`;
+  });
+
+  if (groups.size > maxGroups) {
+    rendered.push(`另有 ${groups.size - maxGroups} 个来源组未展开`);
+  }
+  return rendered.join('；');
 }
 
 function renderConclusionClaimsSection(
@@ -2874,19 +3180,13 @@ function renderConclusionClaimsSection(
 
   const lines: string[] = ['## 逐句数据引用（系统核对结果）'];
   const maxClaims = 20;
-  const maxReferencesPerClaim = 5;
   claims.slice(0, maxClaims).forEach((item, idx: number) => {
     const claimId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.id)) || `Q${idx + 1}`;
     const conclusionId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.conclusionId));
     const claimText = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.text)) || '未命名结论片段';
     const references = readAliasedRecordArray(item, CONTRACT_ALIASES.claim.references);
-    const renderedRefs = references.slice(0, maxReferencesPerClaim)
-      .map((entry) => renderClaimReferenceDetail(entry, ctx));
-    if (references.length > maxReferencesPerClaim) {
-      renderedRefs.push(`另有 ${references.length - maxReferencesPerClaim} 个引用未展开`);
-    }
     const refText = references.length > 0
-      ? renderedRefs.join('；')
+      ? renderClaimReferencesSummary(references, ctx)
       : '未提供行/列引用';
     const cid = conclusionId ? ` / ${conclusionId}` : '';
     lines.push(`- ${claimId}${cid}: ${claimText}（${refText}）`);
@@ -3988,8 +4288,9 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             rows: filteredRows,
             rowCount: filteredRows.length,
             query: sql || undefined,
+            hideQuery: Boolean(sql),
             columnDefinitions: filteredColumnDefs,
-            sectionTitle: sql ? undefined : title,
+            sectionTitle: sourceContext.title || title,
             group: envelope.display.group,
             collapsible: envelope.display.collapsible,
             defaultCollapsed: envelope.display.defaultCollapsed,
