@@ -100,6 +100,7 @@ export interface ConclusionContractMetadata {
   derivedFromNarrativeEvidenceMatch?: boolean;
   claimDerivation?: 'explicit_model_contract' | 'narrative_evidence_match';
   claimVerificationScope?: 'explicit_claims' | 'sampled_narrative_evidence';
+  replacedUnresolvableProviderClaims?: boolean;
 }
 
 export interface ConclusionContract {
