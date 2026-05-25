@@ -66,6 +66,54 @@ export interface Message {
   };
   teachingPipeline?: TeachingPipelineResult;
   teachingPinExecution?: TeachingPinExecutionResult;
+  smartScenePreview?: SmartScenePreviewPayload;
+}
+
+export interface SmartDisplayedScene {
+  id: string;
+  sceneType: string;
+  startTs: string;
+  endTs: string;
+  durationMs: number;
+  processName?: string;
+  label?: string;
+  severity?: 'good' | 'warning' | 'bad' | 'unknown' | string;
+  analysisState?: string;
+  sceneRole?: 'action' | 'marker' | 'context' | string;
+  analysisEligible?: boolean;
+  confidenceScore?: number;
+  confidenceLevel?: 'high' | 'medium' | 'low' | string;
+  confidenceReasons?: string[];
+  parentSceneId?: string;
+  childSceneIds?: string[];
+}
+
+export interface SmartSceneVerificationPayload {
+  status?: 'passed' | 'needs_review' | 'skipped' | 'failed' | string;
+  verifier?: string;
+  summary?: string;
+  checkedSceneCount?: number;
+  lowConfidenceSceneIds?: string[];
+  conflictSceneIds?: string[];
+  issues?: Array<{
+    severity?: 'info' | 'warning' | 'bad' | string;
+    sceneId?: string;
+    type?: string;
+    message?: string;
+  }>;
+  llm?: {
+    status?: string;
+    summary?: string;
+    error?: string;
+  };
+}
+
+export interface SmartScenePreviewPayload {
+  reportId?: string;
+  scenes: SmartDisplayedScene[];
+  sceneVerification?: SmartSceneVerificationPayload;
+  eligibleSceneCount?: number;
+  sceneTypeCounts?: Record<string, number>;
 }
 
 export interface TeachingPipelineResult {
@@ -506,12 +554,14 @@ export interface SqlQueryResult {
  * State machine:
  *   idle → previewing → preview_cached → completed  (cache hit fast-path)
  *   idle → previewing → preview_cold   → running → completed | failed
+ *   idle → running → selection_ready → running → completed | failed (smart)
  */
 export type StoryPanelStatus =
   | 'idle' // Story tab opened, not yet previewed
   | 'previewing' // POST /preview in flight
   | 'preview_cached' // Preview returned a cached report
   | 'preview_cold' // Preview returned an estimate (no cache)
+  | 'selection_ready' // Smart preview has listed scenes and waits for a deep-dive scope
   | 'running' // POST /scene-reconstruct in flight (user confirmed)
   | 'completed' // Report ready (fresh or cached)
   | 'failed'; // Pipeline or preview error
@@ -946,6 +996,7 @@ export interface PresetQuestion {
   icon: string;
   isTeaching?: boolean;
   isScene?: boolean;
+  isSmart?: boolean;
 }
 
 export const PRESET_QUESTIONS: PresetQuestion[] = [
@@ -958,6 +1009,13 @@ export const PRESET_QUESTIONS: PresetQuestion[] = [
   },
   // Scene reconstruction - understand what happened in the trace
   {label: '🎬 场景还原', question: '/scene', icon: 'movie', isScene: true},
+  // Smart mixed-trace analysis - detect and deep-dive multiple user actions.
+  {
+    label: '🧠 智能',
+    question: '/smart',
+    icon: 'auto_awesome',
+    isSmart: true,
+  },
   // Analysis mode - actual performance analysis
   {label: '滑动', question: '分析滑动性能', icon: 'swipe'},
   {label: '启动', question: '分析启动性能', icon: 'rocket_launch'},

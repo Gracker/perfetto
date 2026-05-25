@@ -3747,6 +3747,46 @@ describe('handleSSEEvent', () => {
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
   });
 
+  it('preserves structured smart scene preview payload on analysis_completed messages', () => {
+    handleSSEEvent('analysis_completed', {
+      data: {
+        conclusion: '# 智能分析报告：场景盘点\n\n## 下一步',
+        smartScenePreview: {
+          reportId: 'report-smart-1',
+          eligibleSceneCount: 1,
+          scenes: [
+            {
+              id: 'scroll-1',
+              sceneType: 'scroll',
+              startTs: '1000000000',
+              endTs: '2000000000',
+              durationMs: 1000,
+              sceneRole: 'action',
+            },
+            {
+              id: 'scroll-start-1',
+              sceneType: 'scroll_start',
+              startTs: '1000000000',
+              endTs: '1000000000',
+              durationMs: 0,
+              sceneRole: 'marker',
+              analysisEligible: false,
+            },
+          ],
+          sceneVerification: {
+            status: 'passed',
+            summary: '场景还原复核通过。',
+          },
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].smartScenePreview?.reportId).toBe('report-smart-1');
+    expect(ctx.messages[0].smartScenePreview?.scenes).toHaveLength(2);
+    expect(ctx.messages[0].smartScenePreview?.eligibleSceneCount).toBe(1);
+  });
+
   it('surfaces partial analysis_completed warning and shared partial status', () => {
     handleSSEEvent('analysis_completed', {
       data: {

@@ -703,6 +703,208 @@
   }
 }
 
+.ai-smart-inline-actions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--chat-border);
+}
+
+.ai-smart-scene-preview {
+  margin-top: 12px;
+  border: 1px solid var(--chat-border);
+  border-radius: 8px;
+  background: var(--chat-bg-secondary);
+  overflow: hidden;
+}
+
+.ai-smart-scene-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--chat-border);
+}
+
+.ai-smart-scene-preview-title,
+.ai-smart-scene-preview-counts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ai-smart-scene-preview-title {
+  color: var(--chat-text);
+  font-size: 13px;
+  font-weight: 700;
+
+  .pf-icon {
+    color: var(--pf-color-accent);
+    font-size: 16px !important;
+  }
+}
+
+.ai-smart-scene-preview-counts {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  color: var(--chat-text-secondary);
+  font-size: 12px;
+}
+
+.ai-smart-scene-preview-status {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--chat-bg-tertiary);
+  color: var(--chat-text-secondary);
+  font-weight: 600;
+}
+
+.ai-smart-scene-preview-status--passed {
+  color: var(--chat-success);
+}
+
+.ai-smart-scene-preview-status--needs_review,
+.ai-smart-scene-preview-status--failed {
+  color: var(--chat-warning);
+}
+
+.ai-smart-scene-preview-summary,
+.ai-smart-scene-preview-more {
+  padding: 8px 12px;
+  color: var(--chat-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-smart-scene-preview-table {
+  max-height: 360px;
+  overflow: auto;
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 12px;
+  }
+
+  th,
+  td {
+    padding: 7px 8px;
+    border-top: 1px solid var(--chat-border);
+    text-align: left;
+    vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  th {
+    color: var(--chat-text-secondary);
+    font-weight: 700;
+    background: var(--chat-bg-tertiary);
+  }
+
+  .col-index {
+    width: 32px;
+    color: var(--chat-text-muted);
+  }
+
+  .col-type {
+    width: 120px;
+  }
+
+  .col-range {
+    width: 156px;
+  }
+
+  .col-duration,
+  .col-role,
+  .col-confidence {
+    width: 74px;
+  }
+
+  .col-process {
+    width: 160px;
+  }
+}
+
+.ai-smart-scene-row--context {
+  color: var(--chat-text-secondary);
+}
+
+.ai-smart-scene-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--chat-text-muted);
+  vertical-align: 1px;
+}
+
+.ai-smart-scene-dot--good {
+  background: var(--chat-success);
+}
+
+.ai-smart-scene-dot--warning {
+  background: var(--chat-warning);
+}
+
+.ai-smart-scene-dot--bad {
+  background: var(--chat-error);
+}
+
+.ai-smart-inline-actions-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--chat-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+
+  .pf-icon {
+    font-size: 14px !important;
+  }
+}
+
+.ai-smart-inline-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-smart-inline-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-bg-secondary);
+  color: var(--chat-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+
+  .pf-icon {
+    font-size: 14px !important;
+  }
+
+  &:hover:not(:disabled) {
+    color: var(--chat-primary);
+    border-color: var(--chat-primary);
+    background: var(--chat-bg-tertiary);
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+}
+
 // Selection analysis button — contextual CTA that appears when the user has
 // a Perfetto selection. Uses the warning intent so the orange reads as
 // "you have something selected, act on it" without the vivid SaaS-style

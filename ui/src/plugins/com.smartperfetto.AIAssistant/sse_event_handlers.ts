@@ -34,6 +34,7 @@ import {
   ConversationStepTimelineItem,
   DataSourceContext,
   Message,
+  SmartScenePreviewPayload,
   InterventionPoint,
   InterventionState,
   StreamingAnswerState,
@@ -87,6 +88,7 @@ type AnalysisCompletedPayload = {
   terminationReason?: string;
   terminationMessage?: string;
   hypotheses?: AnalysisHypothesisItem[];
+  smartScenePreview?: SmartScenePreviewPayload;
 };
 
 type DegradedPayload = {
@@ -153,6 +155,9 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   }
   if (Array.isArray(source.identityResolutions)) {
     payload.identityResolutions = source.identityResolutions;
+  }
+  if (isRecord(source.smartScenePreview) && Array.isArray(source.smartScenePreview.scenes)) {
+    payload.smartScenePreview = source.smartScenePreview as unknown as SmartScenePreviewPayload;
   }
 
   const reportUrl = readStringField(source, 'reportUrl');
@@ -3778,7 +3783,7 @@ export function handleAnalysisCompletedEvent(
           payload,
         )
       : undefined;
-    if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent) {
+    if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent || payload?.smartScenePreview) {
       // Attach reportUrl to the existing answer/conclusion message. If the
       // final payload includes narrative text, treat it as canonical and
       // replace any earlier streamed placeholder tokens.
@@ -3787,6 +3792,7 @@ export function handleAnalysisCompletedEvent(
         const existing = ctx.getMessages().find((msg) => msg.id === answerMsgId);
         ctx.updateMessage(answerMsgId, {
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+          ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
           ...(canonicalContent
             ? {content: canonicalContent}
             : existing
@@ -3813,6 +3819,7 @@ export function handleAnalysisCompletedEvent(
               ...(reportUrl && !messages[i].reportUrl
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
+              ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
               content: canonicalContent ||
                 buildVisibleConclusionContentWithReportAppendix(
                   messages[i].content,
@@ -3832,6 +3839,7 @@ export function handleAnalysisCompletedEvent(
             content: canonicalContent,
             timestamp: Date.now(),
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+            ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
           });
         }
       }
@@ -3887,6 +3895,7 @@ export function handleAnalysisCompletedEvent(
         timestamp: Date.now(),
         reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
         flowTag: 'answer_stream',
+        ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
       }, {persist: true});
     } else {
     // Check if conclusion was already shown
@@ -3902,6 +3911,7 @@ export function handleAnalysisCompletedEvent(
           content: content,
           timestamp: Date.now(),
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
+          ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
         });
       }
     }

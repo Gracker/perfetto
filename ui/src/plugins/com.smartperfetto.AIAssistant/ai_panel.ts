@@ -155,6 +155,11 @@ import {
   updateFloatingState,
 } from './ai_floating_state';
 import {providerRuntimeLabel} from './provider_types';
+import type {
+  SmartDisplayedScene,
+  SmartScenePreviewPayload,
+  SmartSceneVerificationPayload,
+} from './types';
 
 const DEBUG_AI_PANEL = false;
 
@@ -278,6 +283,27 @@ interface CachedSqlFormat {
   status: 'pending' | 'formatted' | 'failed';
   error?: string;
 }
+
+interface SmartSceneSelectionRequest {
+  scope: 'all' | 'scene_types' | 'scene_ids';
+  sceneTypes?: string[];
+  sceneIds?: string[];
+  label?: string;
+  reportId?: string;
+  sceneSnapshotId?: string;
+}
+
+const SMART_SCENE_SELECTION_GROUPS: Array<{
+  label: string;
+  sceneTypes: string[];
+}> = [
+  {label: '启动', sceneTypes: ['cold_start', 'warm_start', 'hot_start']},
+  {label: '滑动', sceneTypes: ['scroll', 'inertial_scroll']},
+  {label: '点击', sceneTypes: ['tap', 'long_press', 'screen_unlock']},
+  {label: '导航', sceneTypes: ['back_key', 'home_key', 'recents_key', 'navigation', 'window_transition', 'app_switch']},
+  {label: '设备', sceneTypes: ['screen_on', 'screen_off', 'screen_sleep', 'idle']},
+  {label: 'ANR', sceneTypes: ['anr', 'jank_region']},
+];
 
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
@@ -2306,6 +2332,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                       ])
                                     : null,
 
+                                  this.renderSmartScenePreviewCard(msg),
+                                  this.renderSmartSelectionInlineActions(msg),
+
                                   // SQL Result
                                   (() => {
                                     const sqlResult = msg.sqlResult;
@@ -2974,17 +3003,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : PRESET_QUESTIONS
       ).map((preset) =>
         m(
-          `button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}`,
+          `button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}${preset.isSmart ? '.ai-smart-btn' : ''}`,
           {
             onclick: () => this.sendPresetQuestion(preset.question),
             title: preset.isTeaching
               ? '检测当前 Trace 的渲染管线类型，自动 Pin 关键泳道'
-              : preset.question,
+              : preset.isSmart
+                ? '自动识别混合 Trace 中的启动、滑动、点击、导航、ANR 和设备状态'
+                : preset.question,
             disabled: this.state.isLoading,
           },
           [m('i.pf-icon', preset.icon), preset.label],
         ),
       ),
+      this.renderSmartSelectionButtons('preset'),
       this.hasActiveSelection()
         ? m(
             'button.ai-preset-btn.ai-selection-btn',
@@ -2997,6 +3029,258 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           )
         : null,
     ]);
+  }
+
+  private renderSmartSelectionButtons(
+    surface: 'preset' | 'story' | 'inline',
+  ): m.Children {
+    if (!this.hasSmartSceneSelectionReady() || this.state.isLoading) {
+      return null;
+    }
+
+    const payload = this.getSmartPreviewPayload();
+    const scenes = this.getSmartPreviewScenes().filter((scene) =>
+      this.isSmartSceneAnalysisEligible(scene));
+    const sceneTypeCounts = this.countSceneTypes(scenes);
+    const buttonClass = surface === 'story'
+      ? 'button.ai-story-btn-secondary'
+      : surface === 'inline'
+        ? 'button.ai-smart-inline-btn'
+        : 'button.ai-preset-btn.ai-smart-btn';
+
+    const buttons: m.Children[] = [
+      m(
+        buttonClass,
+        {
+          onclick: () => this.handleSmartAnalysisCommand({
+            scope: 'all',
+            label: '全部场景',
+            ...(payload?.reportId ? {reportId: payload.reportId} : {}),
+          }),
+          title: `深钻全部 ${scenes.length} 个可分析场景`,
+        },
+        [
+          m('i.pf-icon', 'select_all'),
+          surface === 'preset' ? '全部' : `全部 (${scenes.length})`,
+        ],
+      ),
+    ];
+
+    for (const group of SMART_SCENE_SELECTION_GROUPS) {
+      const count = group.sceneTypes.reduce(
+        (sum, type) => sum + (sceneTypeCounts[type] || 0),
+        0,
+      );
+      if (count === 0) continue;
+      buttons.push(m(
+        buttonClass,
+        {
+          onclick: () => this.handleSmartAnalysisCommand({
+            scope: 'scene_types',
+            sceneTypes: group.sceneTypes,
+            label: group.label,
+            ...(payload?.reportId ? {reportId: payload.reportId} : {}),
+          }),
+          title: `只深钻 ${group.label} 相关的 ${count} 个场景`,
+        },
+        [
+          m('i.pf-icon', this.smartSelectionIcon(group.label)),
+          surface === 'preset' ? group.label : `${group.label} (${count})`,
+        ],
+      ));
+    }
+
+    if (buttons.length <= 1) return buttons;
+    return surface === 'story'
+      ? m('div.ai-story-cold-preview-actions', buttons)
+      : surface === 'inline'
+        ? m('div.ai-smart-inline-button-row', buttons)
+      : buttons;
+  }
+
+  private renderSmartSelectionInlineActions(msg: Message): m.Children {
+    if (!this.isSmartSelectionMessage(msg)) return null;
+    const actions = this.renderSmartSelectionButtons('inline');
+    if (!actions) return null;
+    return m('div.ai-smart-inline-actions', [
+      m('div.ai-smart-inline-actions-title', [
+        m('i.pf-icon', 'account_tree'),
+        m('span', '选择深钻范围'),
+      ]),
+      actions,
+    ]);
+  }
+
+  private renderSmartScenePreviewCard(msg: Message): m.Children {
+    if (!this.isSmartSelectionMessage(msg)) return null;
+    const payload = msg.smartScenePreview || this.getSmartPreviewPayload();
+    const scenes = payload?.scenes || [];
+    if (scenes.length === 0) return null;
+
+    const eligibleCount = payload?.eligibleSceneCount ??
+      scenes.filter((scene) => this.isSmartSceneAnalysisEligible(scene)).length;
+    const verification = payload?.sceneVerification;
+    const previewRows = scenes.slice(0, 18);
+
+    return m('div.ai-smart-scene-preview', [
+      m('div.ai-smart-scene-preview-header', [
+        m('div.ai-smart-scene-preview-title', [
+          m('i.pf-icon', 'account_tree'),
+          m('span', '场景时间线'),
+        ]),
+        m('div.ai-smart-scene-preview-counts', [
+          m('span', `${scenes.length} 个场景`),
+          m('span', `${eligibleCount} 个可深钻`),
+          verification?.status
+            ? m(
+                `span.ai-smart-scene-preview-status.ai-smart-scene-preview-status--${verification.status}`,
+                this.formatSmartVerificationStatus(verification),
+              )
+            : null,
+        ]),
+      ]),
+      verification?.summary
+        ? m('div.ai-smart-scene-preview-summary', verification.summary)
+        : null,
+      m('div.ai-smart-scene-preview-table', [
+        m('table', [
+          m('thead',
+            m('tr', ['#', '类型', '时间', '时长', '进程', '角色', '置信度'].map((title) =>
+              m('th', title),
+            )),
+          ),
+          m('tbody', previewRows.map((scene, index) =>
+            m('tr', {
+              key: scene.id || `${scene.sceneType}-${index}`,
+              class: this.isSmartSceneAnalysisEligible(scene)
+                ? 'ai-smart-scene-row--eligible'
+                : 'ai-smart-scene-row--context',
+            }, [
+              m('td.col-index', `${index + 1}`),
+              m('td.col-type', [
+                m('span.ai-smart-scene-dot', {
+                  class: `ai-smart-scene-dot--${scene.severity || 'unknown'}`,
+                }),
+                SCENE_DISPLAY_NAMES[scene.sceneType] ?? scene.sceneType,
+              ]),
+              m('td.col-range', this.formatSmartSceneRange(scene)),
+              m('td.col-duration', this.formatSmartSceneDuration(scene.durationMs)),
+              m('td.col-process', scene.processName || '-'),
+              m('td.col-role', this.smartSceneRoleLabel(scene)),
+              m('td.col-confidence', this.formatSmartSceneConfidence(scene)),
+            ]),
+          )),
+        ]),
+      ]),
+      scenes.length > previewRows.length
+        ? m('div.ai-smart-scene-preview-more', `另有 ${scenes.length - previewRows.length} 个场景在 Story 面板中展示。`)
+        : null,
+    ]);
+  }
+
+  private isSmartSelectionMessage(msg: Message): boolean {
+    return msg.role === 'assistant' && (
+      !!msg.smartScenePreview ||
+      msg.content.includes('# 智能分析报告：场景盘点') &&
+      msg.content.includes('## 下一步')
+    );
+  }
+
+  private hasSmartSceneSelectionReady(): boolean {
+    return this.state.storyState.status === 'selection_ready' &&
+      this.getSmartPreviewScenes().some((scene) => this.isSmartSceneAnalysisEligible(scene));
+  }
+
+  private getSmartPreviewPayload(): SmartScenePreviewPayload | undefined {
+    for (let i = this.state.messages.length - 1; i >= 0; i--) {
+      const payload = this.state.messages[i].smartScenePreview;
+      if (payload && Array.isArray(payload.scenes)) return payload;
+    }
+    const report = this.state.storyState.cachedReport;
+    const scenes = Array.isArray(report?.displayedScenes) ? report.displayedScenes : [];
+    if (scenes.length === 0) return undefined;
+    return {
+      reportId: typeof report?.reportId === 'string' ? report.reportId : undefined,
+      scenes,
+      sceneVerification: report?.sceneVerification,
+      eligibleSceneCount: scenes.filter((scene: any) =>
+        this.isSmartSceneAnalysisEligible(scene)).length,
+      sceneTypeCounts: this.countSceneTypes(scenes),
+    };
+  }
+
+  private getSmartPreviewScenes(): SmartDisplayedScene[] {
+    return this.getSmartPreviewPayload()?.scenes || [];
+  }
+
+  private isSmartSceneAnalysisEligible(scene: SmartDisplayedScene | any): boolean {
+    return scene?.analysisEligible !== false &&
+      scene?.sceneRole !== 'marker' &&
+      scene?.sceneRole !== 'context';
+  }
+
+  private formatSmartVerificationStatus(
+    verification: SmartSceneVerificationPayload,
+  ): string {
+    switch (verification.status) {
+      case 'passed': return '复核通过';
+      case 'needs_review': return '需复核';
+      case 'failed': return '复核失败';
+      case 'skipped': return '已跳过复核';
+      default: return verification.status || '未复核';
+    }
+  }
+
+  private formatSmartSceneRange(scene: SmartDisplayedScene): string {
+    return `${this.formatSmartSceneNs(scene.startTs)} - ${this.formatSmartSceneNs(scene.endTs)}`;
+  }
+
+  private formatSmartSceneNs(value: string | undefined): string {
+    if (!value) return '-';
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return value;
+    return `${(parsed / 1_000_000_000).toFixed(3)}s`;
+  }
+
+  private formatSmartSceneDuration(value: number | undefined): string {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+    if (value >= 1000) return `${(value / 1000).toFixed(2)}s`;
+    return `${Math.round(value)}ms`;
+  }
+
+  private formatSmartSceneConfidence(scene: SmartDisplayedScene): string {
+    if (typeof scene.confidenceScore === 'number' && Number.isFinite(scene.confidenceScore)) {
+      return `${Math.round(scene.confidenceScore * 100)}%`;
+    }
+    return scene.confidenceLevel || '-';
+  }
+
+  private smartSceneRoleLabel(scene: SmartDisplayedScene): string {
+    if (scene.sceneRole === 'marker') return '标记';
+    if (scene.sceneRole === 'context') return '上下文';
+    return scene.analysisEligible === false ? '上下文' : '动作';
+  }
+
+  private countSceneTypes(scenes: any[]): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const scene of scenes) {
+      const type = typeof scene?.sceneType === 'string' ? scene.sceneType : '';
+      if (!type) continue;
+      counts[type] = (counts[type] || 0) + 1;
+    }
+    return counts;
+  }
+
+  private smartSelectionIcon(label: string): string {
+    switch (label) {
+      case '启动': return 'rocket_launch';
+      case '滑动': return 'swipe';
+      case '点击': return 'touch_app';
+      case '导航': return 'navigation';
+      case '设备': return 'power_settings_new';
+      case 'ANR': return 'warning';
+      default: return 'filter_alt';
+    }
   }
 
   /** Render the analysis mode selector inside the input bar.
@@ -4169,6 +4453,8 @@ Click ⚙️ to configure backend connection.`;
       this.applySnapshotCreatedEvent(data);
     } else if (eventType === 'analysis_completed') {
       this.applyAnalysisCompletedSnapshotFallback(data);
+    } else if (eventType === 'track_data' || eventType.startsWith('scene_story_')) {
+      this.applySmartStoryEvent(eventType, data);
     }
 
     const ctx = this.createSSEHandlerContext();
@@ -4189,6 +4475,133 @@ Click ⚙️ to configure backend connection.`;
 
     // Trigger redraw after handling each event
     m.redraw();
+  }
+
+  private applySmartStoryEvent(eventType: string, data?: any): void {
+    const payload =
+      data && typeof data === 'object' && data.data && typeof data.data === 'object'
+        ? data.data
+        : data;
+    if (!payload || typeof payload !== 'object') return;
+
+    if (eventType === 'scene_story_smart_eta_refined') {
+      const expectedDeepDives =
+        typeof payload.expectedDeepDives === 'number' ? payload.expectedDeepDives : 0;
+      const etaSec = typeof payload.etaSec === 'number' ? payload.etaSec : 0;
+      this.state.loadingPhase =
+        payload.selectionMode === 'selection_required'
+          ? `智能分析已识别 ${expectedDeepDives} 个可深钻场景`
+          : expectedDeepDives > 0
+          ? `智能分析预计深钻 ${expectedDeepDives} 个场景，约 ${etaSec}s`
+          : '智能分析正在生成报告';
+      this.state.storyState = {
+        ...this.state.storyState,
+        preview: {
+          traceDurationSec: this.state.storyState.preview?.traceDurationSec ?? 0,
+          cached: null,
+          estimate: {
+            expectedScenes: expectedDeepDives,
+            etaSec,
+            estimatedUsd: this.state.storyState.preview?.estimate.estimatedUsd ?? 0,
+            confidence: payload.etaConfidence === 'high' ? 'high' : 'medium',
+          },
+        },
+      };
+      return;
+    }
+
+    if (eventType === 'scene_story_detected') {
+      const scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
+      if (payload.previewOnly !== true) {
+        this.state.showStorySidebar = true;
+      }
+      this.state.storyState = {
+        ...this.state.storyState,
+        status: 'running',
+        analysisId: this.state.agentSessionId,
+        cachedReport: {
+          ...(this.state.storyState.cachedReport || {}),
+          displayedScenes: scenes,
+          sceneVerification: payload.sceneVerification,
+          jobs: [],
+          summary: null,
+        },
+      };
+      return;
+    }
+
+    if (eventType === 'scene_story_selection_ready') {
+      const sceneCount =
+        typeof payload.sceneCount === 'number'
+          ? payload.sceneCount
+          : this.getSmartPreviewScenes().length;
+      this.state.loadingPhase = `智能分析已识别 ${sceneCount} 个场景，等待选择范围`;
+      this.state.storyState = {
+        ...this.state.storyState,
+        status: 'selection_ready',
+        analysisId: this.state.agentSessionId,
+        cachedReport: {
+          ...(this.state.storyState.cachedReport || {}),
+          reportId: typeof payload.reportId === 'string' ? payload.reportId : undefined,
+          sceneVerification: payload.sceneVerification,
+          sceneTypeCounts: payload.sceneTypeCounts,
+        },
+      };
+      return;
+    }
+
+    if (eventType === 'scene_story_report_ready') {
+      const reportId =
+        typeof payload.reportId === 'string' ? payload.reportId : '';
+      this.state.showStorySidebar = true;
+      this.state.storyState = {
+        ...this.state.storyState,
+        status: 'completed',
+        analysisId: this.state.agentSessionId,
+      };
+      if (reportId) {
+        void this.getOrCreateStoryController()
+          .loadReport(reportId)
+          .then((report) => {
+            this.state.storyState = {
+              ...this.state.storyState,
+              status: 'completed',
+              cachedReport: report,
+            };
+            m.redraw();
+          })
+          .catch(() => {
+            this.state.storyState = {
+              ...this.state.storyState,
+              status: 'completed',
+              cachedReport: {
+                ...(this.state.storyState.cachedReport || {}),
+                reportId,
+                summary:
+                  typeof payload.summary === 'string' ? payload.summary : null,
+              },
+            };
+            m.redraw();
+          });
+      }
+      return;
+    }
+
+    if (eventType === 'scene_story_failed' || eventType === 'scene_story_dropped') {
+      this.state.storyState = {
+        ...this.state.storyState,
+        status: 'running',
+      };
+      return;
+    }
+
+    if (eventType === 'scene_story_cancelled') {
+      this.state.storyState = {
+        ...this.state.storyState,
+        status: payload.scope === 'session' ? 'failed' : this.state.storyState.status,
+        lastError: payload.scope === 'session' ? '智能分析已取消' : this.state.storyState.lastError,
+      };
+    }
   }
 
   private applySnapshotCreatedEvent(data?: any): void {
@@ -4326,6 +4739,9 @@ Click ⚙️ to configure backend connection.`;
         break;
       case '/scene':
         await this.handleSceneReconstructCommand();
+        break;
+      case '/smart':
+        await this.handleSmartAnalysisCommand();
         break;
       default:
         this.addMessage({
@@ -5910,6 +6326,147 @@ Click ⚙️ to configure backend connection.`;
     }
   }
 
+  private async handleSmartAnalysisCommand(selection?: SmartSceneSelectionRequest) {
+    if (!this.state.backendTraceId) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content:
+          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    if (this.state.referenceTraceId) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: '智能分析暂不支持对比模式。请先退出 Trace 对比后再运行。',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    const smartAction = selection ? 'analyze' : 'preview';
+    const previewPayload = selection ? this.getSmartPreviewPayload() : undefined;
+    const boundSelection = selection
+      ? {
+          ...selection,
+          ...(selection.reportId || !previewPayload?.reportId
+            ? {}
+            : {reportId: previewPayload.reportId}),
+        }
+      : undefined;
+    if (selection) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'user',
+        content: `智能分析：${boundSelection?.label || '所选场景'}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    this.setLoadingState(true);
+    this.state.completionHandled = false;
+    this.state.displayedSkillProgress.clear();
+    this.state.collectedErrors = [];
+    this.resetStreamingFlow();
+    this.resetStreamingAnswer();
+    const existingPreviewReport = this.state.storyState.cachedReport;
+    this.state.storyState = {
+      ...createStoryPanelState(),
+      status: 'running',
+      cachedReport: selection ? existingPreviewReport : null,
+    };
+    updateAISharedState({
+      status: 'analyzing',
+      findings: [],
+      currentPhase: boundSelection ? `智能分析：${boundSelection.label || '所选场景'}` : '智能分析场景盘点',
+      issueCount: 0,
+    });
+    if (this.trace) clearAIFindingNotes(this.trace);
+    m.redraw();
+
+    try {
+      const apiUrl = buildAssistantApiV1Url(
+        this.state.settings.backendUrl,
+        '/analyze',
+      );
+      const response = await this.fetchBackend(apiUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          query: '/smart',
+          traceId: this.state.backendTraceId,
+          ...(boundSelection && this.state.agentSessionId
+            ? {sessionId: this.state.agentSessionId}
+            : {}),
+          options: {
+            analysisMode: this.state.analysisMode,
+            preset: 'smart',
+            smartAction,
+            ...(boundSelection ? {smartSelection: boundSelection} : {}),
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const error = new Error(
+          `API error: ${response.status} ${errorData.error || response.statusText}`,
+        );
+        (error as any).code = errorData.code;
+        (error as any).terminalStatus = errorData.status;
+        throw error;
+      }
+
+      const data = await response.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Smart analysis failed');
+      }
+
+      const requestIdFromHeader = response.headers.get('x-request-id') || '';
+      this.applyAgentObservability({
+        ...data,
+        requestId: data.requestId || requestIdFromHeader,
+      });
+
+      const sessionId = data.sessionId;
+      if (sessionId) {
+        this.state.agentSessionId = sessionId;
+        this.state.storyState.analysisId = sessionId;
+        this.saveCurrentSession();
+        await this.listenToAgentSSE(sessionId);
+      }
+    } catch (e: any) {
+      const message = e?.message || 'Failed to start smart analysis';
+      updateAISharedState({
+        status:
+          e?.terminalStatus === 'quota_exceeded' ||
+          e?.code === 'QUOTA_EXCEEDED' ||
+          e?.code === 'BUDGET_EXCEEDED'
+            ? 'quota_exceeded'
+            : 'error',
+        currentPhase: '',
+      });
+      this.state.storyState = {
+        ...this.state.storyState,
+        status: 'failed',
+        lastError: message,
+      };
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `**Error:** ${message}`,
+        timestamp: Date.now(),
+      });
+    } finally {
+      this.setLoadingState(false);
+      m.redraw();
+    }
+  }
+
   /**
    * Calculate exponential backoff delay for SSE reconnection
    * Base: 1 second, Max: 30 seconds
@@ -6834,11 +7391,15 @@ Click ⚙️ to configure backend connection.`;
   private async handleStoryCancel() {
     const analysisId = this.state.storyState.analysisId;
     if (!analysisId) return;
+    const path =
+      analysisId === this.state.agentSessionId
+        ? `/${analysisId}/cancel`
+        : `/scene-reconstruct/${analysisId}/cancel`;
     try {
       await this.fetchBackend(
         buildAssistantApiV1Url(
           this.state.settings.backendUrl,
-          `/scene-reconstruct/${analysisId}/cancel`,
+          path,
         ),
         {method: 'POST'},
       );
@@ -6985,6 +7546,18 @@ Click ⚙️ to configure backend connection.`;
               },
               '取消分析',
             ),
+          ])
+        : null,
+
+      s.status === 'selection_ready'
+        ? m('div.ai-story-card.ai-story-card--cold-preview', [
+            m('div.ai-story-cold-preview-title', '选择智能分析范围'),
+            m(
+              'div',
+              {style: 'font-size: 13px; color: var(--chat-text-secondary); margin-bottom: 12px;'},
+              `已识别 ${this.getSmartPreviewScenes().length} 个场景。选择后才会开始深钻分析。`,
+            ),
+            this.renderSmartSelectionButtons('story'),
           ])
         : null,
 
