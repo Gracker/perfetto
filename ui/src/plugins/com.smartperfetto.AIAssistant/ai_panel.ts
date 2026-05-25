@@ -33,6 +33,7 @@ import {
 import type {Engine} from '../../trace_processor/engine';
 import {LONG, NUM_NULL, STR_NULL} from '../../trace_processor/query_result';
 import type {Trace} from '../../public/trace';
+import type {Track} from '../../public/track';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
 import {AppImpl} from '../../core/app_impl';
 import {getBackendUploader} from '../../core/backend_uploader';
@@ -162,6 +163,28 @@ import type {
 } from './types';
 
 const DEBUG_AI_PANEL = false;
+
+interface AreaQueryScope {
+  startNs: number;
+  endNs: number;
+  durationNs: number;
+  source: SelectionContext['source'];
+  utids: number[];
+  upids: number[];
+  cpus: number[];
+}
+
+const RANGE_REFERENCE_PATTERNS = [
+  /这[一]?段/,
+  /这个?区间/,
+  /当前(范围|区间|窗口|时间段|视图)/,
+  /可见(范围|区间|窗口)/,
+  /选中(范围|区间|时间段|这一段|这段)/,
+  /选区/,
+  /\b(current|visible)\s+(range|window|viewport)\b/i,
+  /\b(selected|marked)\s+(range|area|window)\b/i,
+  /\bthis\s+(range|window|selection)\b/i,
+] as const;
 
 // Metric card palette keyed by status. Extracted from a triple-ternary that
 // repeated the four intent mappings three times (bg / fg / icon name). The
@@ -1831,7 +1854,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (pending && !this.state.isLoading) {
       updateAISharedState({pendingSelectionAnalysis: null});
       const durMs = ((pending.endNs - pending.startNs) / 1e6).toFixed(1);
-      this.state.input = `分析用户选中区间的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
+      this.state.input = `分析当前时间/轨道选区的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
       // Defer to avoid triggering async work inside view()
       setTimeout(() => this.sendMessage(), 0);
     }
@@ -4320,7 +4343,7 @@ Click ⚙️ to configure backend connection.`;
       const durMs = timeSpan
         ? (Number(timeSpan.duration) / 1e6).toFixed(1)
         : '?';
-      return `分析用户选中区间的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
+      return `分析当前时间/轨道选区的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
     }
     if (sel.kind === 'track_event') {
       return '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常';
@@ -5068,11 +5091,240 @@ Click ⚙️ to configure backend connection.`;
   /**
    * Detect selection changes (called from view()) and trigger async slice/area info query.
    */
+  private uniqueFiniteNumbers(values: Array<number | undefined>): number[] {
+    return Array.from(
+      new Set(
+        values.filter(
+          (value): value is number =>
+            typeof value === 'number' && Number.isFinite(value),
+        ),
+      ),
+    ).sort((a, b) => a - b);
+  }
+
+  private sqlNumberList(values: number[]): string {
+    return values.join(',');
+  }
+
+  private buildTrackScopeFromPerfettoTracks(
+    tracks: ReadonlyArray<Track>,
+  ): Pick<AreaQueryScope, 'utids' | 'upids' | 'cpus'> {
+    return {
+      utids: this.uniqueFiniteNumbers(
+        tracks.map((track) => track.tags?.utid as number | undefined),
+      ),
+      upids: this.uniqueFiniteNumbers(
+        tracks.map((track) => track.tags?.upid as number | undefined),
+      ),
+      cpus: this.uniqueFiniteNumbers(
+        tracks.map((track) => track.tags?.cpu as number | undefined),
+      ),
+    };
+  }
+
+  private buildTrackScopeFromSelectionContext(
+    context: SelectionContext,
+  ): Pick<AreaQueryScope, 'utids' | 'upids' | 'cpus'> {
+    return {
+      utids: this.uniqueFiniteNumbers(
+        context.tracks?.map((track) => track.utid) ?? [],
+      ),
+      upids: this.uniqueFiniteNumbers(
+        context.tracks?.map((track) => track.upid) ?? [],
+      ),
+      cpus: this.uniqueFiniteNumbers(
+        context.tracks?.map((track) => track.cpu) ?? [],
+      ),
+    };
+  }
+
+  private getAreaQueryScope(
+    selectionContext?: SelectionContext,
+  ): AreaQueryScope | null {
+    if (!this.trace) return null;
+    const sel = this.trace.selection.selection;
+
+    if (sel.kind === 'area') {
+      const startNs = Number(sel.start);
+      const endNs = Number(sel.end);
+      const trackScope = this.buildTrackScopeFromPerfettoTracks(sel.tracks);
+      return {
+        startNs,
+        endNs,
+        durationNs: endNs - startNs,
+        source: 'area_selection',
+        ...trackScope,
+      };
+    }
+
+    if (
+      selectionContext?.kind === 'area' &&
+      selectionContext.startNs !== undefined &&
+      selectionContext.endNs !== undefined
+    ) {
+      const trackScope = this.buildTrackScopeFromSelectionContext(
+        selectionContext,
+      );
+      return {
+        startNs: selectionContext.startNs,
+        endNs: selectionContext.endNs,
+        durationNs:
+          selectionContext.durationNs ??
+          selectionContext.endNs - selectionContext.startNs,
+        source: selectionContext.source ?? 'area_selection',
+        ...trackScope,
+      };
+    }
+
+    return null;
+  }
+
+  private areaThreadPredicate(
+    scope: AreaQueryScope,
+    threadStateAlias = 'ts',
+    threadAlias = 't',
+  ): string {
+    const clauses: string[] = [];
+    if (scope.utids.length > 0) {
+      clauses.push(
+        `${threadStateAlias}.utid IN (${this.sqlNumberList(scope.utids)})`,
+      );
+    }
+    if (scope.upids.length > 0) {
+      clauses.push(
+        `${threadAlias}.upid IN (${this.sqlNumberList(scope.upids)})`,
+      );
+    }
+    if (scope.cpus.length > 0) {
+      clauses.push(
+        `${threadStateAlias}.cpu IN (${this.sqlNumberList(scope.cpus)})`,
+      );
+    }
+    return clauses.length > 0 ? `AND (${clauses.join(' OR ')})` : '';
+  }
+
+  private areaSlicePredicate(scope: AreaQueryScope): string {
+    const clauses: string[] = [];
+    if (scope.utids.length > 0) {
+      clauses.push(`tt.utid IN (${this.sqlNumberList(scope.utids)})`);
+    }
+    if (scope.upids.length > 0) {
+      clauses.push(`t.upid IN (${this.sqlNumberList(scope.upids)})`);
+    }
+    return clauses.length > 0 ? `AND (${clauses.join(' OR ')})` : '';
+  }
+
+  private areaCpuPredicate(scope: AreaQueryScope, cpuAlias: string): string {
+    return scope.cpus.length > 0
+      ? `AND ${cpuAlias} IN (${this.sqlNumberList(scope.cpus)})`
+      : '';
+  }
+
+  private cpuTopologyCte(): string {
+    return `
+      cpu_universe AS (
+        SELECT cpu AS cpu_id FROM sched_slice WHERE cpu IS NOT NULL
+        UNION
+        SELECT cpu AS cpu_id FROM thread_state WHERE cpu IS NOT NULL
+        UNION
+        SELECT id AS cpu_id FROM cpu
+      ),
+      cpu_scale AS (
+        SELECT
+          u.cpu_id,
+          COALESCE(NULLIF(cpu.capacity, 0), 0) AS scale_value
+        FROM cpu_universe u
+        LEFT JOIN cpu ON cpu.id = u.cpu_id
+      ),
+      scale_values AS (
+        SELECT
+          scale_value,
+          ROW_NUMBER() OVER (ORDER BY scale_value ASC) AS cluster_rank,
+          COUNT(*) OVER () AS cluster_count
+        FROM (
+          SELECT DISTINCT scale_value
+          FROM cpu_scale
+          WHERE scale_value > 0
+        )
+      ),
+      cpu_topology AS (
+        SELECT
+          cs.cpu_id,
+          CASE
+            WHEN cs.scale_value <= 0 OR sv.scale_value IS NULL THEN 'unknown'
+            WHEN sv.cluster_count = 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN 'little'
+            WHEN sv.cluster_count = 1 THEN 'unknown'
+            WHEN sv.cluster_rank = 1 THEN 'little'
+            WHEN sv.cluster_rank = sv.cluster_count THEN 'big'
+            ELSE 'medium'
+          END AS core_type
+        FROM cpu_scale cs
+        LEFT JOIN scale_values sv ON sv.scale_value = cs.scale_value
+      )
+    `;
+  }
+
+  private cpuFrequencySpansCte(
+    scope: AreaQueryScope,
+    startNs: number,
+    endNs: number,
+  ): string {
+    const freqCpuScope = this.areaCpuPredicate(scope, 't.cpu');
+    return `
+      ${this.cpuTopologyCte()},
+      cpu_tracks AS (
+        SELECT id, cpu
+        FROM cpu_counter_track t
+        WHERE t.name = 'cpufreq'
+          AND t.cpu IS NOT NULL
+          ${freqCpuScope}
+      ),
+      freq_points AS (
+        SELECT
+          t.cpu,
+          ${startNs} AS ts,
+          (
+            SELECT c2.value
+            FROM counter c2
+            WHERE c2.track_id = t.id AND c2.ts <= ${startNs}
+            ORDER BY c2.ts DESC
+            LIMIT 1
+          ) AS freq_khz,
+          0 AS source_order
+        FROM cpu_tracks t
+        UNION ALL
+        SELECT t.cpu, c.ts, c.value AS freq_khz, 1 AS source_order
+        FROM counter c
+        JOIN cpu_tracks t ON c.track_id = t.id
+        WHERE c.ts >= ${startNs} AND c.ts < ${endNs}
+      ),
+      freq_spans AS (
+        SELECT
+          cpu,
+          freq_khz,
+          ts,
+          LEAD(ts, 1, ${endNs}) OVER (PARTITION BY cpu ORDER BY ts, source_order) AS next_ts
+        FROM freq_points
+        WHERE freq_khz IS NOT NULL AND freq_khz > 0
+      ),
+      freq_clipped AS (
+        SELECT
+          cpu,
+          freq_khz,
+          MIN(next_ts, ${endNs}) - MAX(ts, ${startNs}) AS dur_ns
+        FROM freq_spans
+        WHERE ts < ${endNs} AND next_ts > ${startNs}
+      )
+    `;
+  }
+
   /**
    * Pre-query trace data for the current selection, mirroring smartperfetto's querySelectionData.
    * Results are sent with the request so the AI doesn't need to spend turns fetching basics.
    */
-  private async querySelectionData(): Promise<TraceDataset[]> {
+  private async querySelectionData(
+    selectionContext?: SelectionContext,
+  ): Promise<TraceDataset[]> {
     if (!this.engine || !this.trace) return [];
     const sel = this.trace.selection.selection;
     const datasets: TraceDataset[] = [];
@@ -5272,11 +5524,12 @@ Click ⚙️ to configure backend connection.`;
         await runQuery(
           `thread state during slice ${id}`,
           `
-          SELECT cpu, state, COUNT(*) AS cnt, CAST(SUM(dur)/1e6 AS REAL) as total_ms,
-            CAST(SUM(dur)*100.0/${durNs} AS REAL) as pct
+          SELECT cpu, state, COUNT(*) AS cnt,
+            CAST(SUM(MIN(ts + dur, ${endNs}) - MAX(ts, ${tsNs}))/1e6 AS REAL) as total_ms,
+            CAST(SUM(MIN(ts + dur, ${endNs}) - MAX(ts, ${tsNs}))*100.0/${durNs} AS REAL) as pct
           FROM thread_state
           WHERE utid = (SELECT tt.utid FROM slice s JOIN thread_track tt ON s.track_id=tt.id WHERE s.id=${id})
-            AND ts >= ${tsNs} AND ts <= ${endNs}
+            AND ts < ${endNs} AND ts + dur > ${tsNs} AND dur > 0
           GROUP BY cpu, state ORDER BY total_ms DESC
         `,
           {
@@ -5288,19 +5541,36 @@ Click ⚙️ to configure backend connection.`;
           },
         );
       }
-    } else if (sel.kind === 'area') {
-      const startNs = Number(sel.start);
-      const endNs = Number(sel.end);
+    } else {
+      const scope = this.getAreaQueryScope(selectionContext);
+      if (!scope) return datasets;
+      const {startNs, endNs} = scope;
+      const threadScope = this.areaThreadPredicate(scope);
+      const sliceScope = this.areaSlicePredicate(scope);
+      const freqBucketMhz = 100;
 
       // Top slices by total duration
       await runQuery(
         `top slices in range`,
         `
-        SELECT s.name, COUNT(*) as cnt, CAST(SUM(s.dur)/1e6 AS REAL) as total_ms,
-          CAST(AVG(s.dur)/1e6 AS REAL) as avg_ms
-        FROM slice s
-        WHERE s.ts >= ${startNs} AND s.ts + s.dur <= ${endNs} AND s.dur > 0
-        GROUP BY s.name ORDER BY total_ms DESC LIMIT 20
+        WITH clipped AS (
+          SELECT
+            s.name,
+            MIN(s.ts + s.dur, ${endNs}) - MAX(s.ts, ${startNs}) AS clipped_dur
+          FROM slice s
+          LEFT JOIN thread_track tt ON s.track_id = tt.id
+          LEFT JOIN thread t ON tt.utid = t.utid
+          WHERE s.ts < ${endNs}
+            AND s.ts + s.dur > ${startNs}
+            AND s.dur > 0
+            ${sliceScope}
+        )
+        SELECT name, COUNT(*) as cnt,
+          CAST(SUM(clipped_dur)/1e6 AS REAL) as total_ms,
+          CAST(AVG(clipped_dur)/1e6 AS REAL) as avg_ms
+        FROM clipped
+        WHERE clipped_dur > 0
+        GROUP BY name ORDER BY total_ms DESC LIMIT 20
       `,
         {name: STR_NULL, cnt: NUM_NULL, total_ms: NUM_NULL, avg_ms: NUM_NULL},
       );
@@ -5309,13 +5579,246 @@ Click ⚙️ to configure backend connection.`;
       await runQuery(
         `thread states in range`,
         `
-        SELECT t.name as thread_name, ts.state,
-          CAST(SUM(ts.dur)/1e6 AS REAL) as total_ms
-        FROM thread_state ts JOIN thread t ON ts.utid = t.utid
-        WHERE ts.ts >= ${startNs} AND ts.ts <= ${endNs}
-        GROUP BY t.name, ts.state ORDER BY total_ms DESC LIMIT 30
+        SELECT
+          COALESCE(t.name, '<unknown>') as thread_name,
+          COALESCE(p.name, '<unknown>') as process_name,
+          ts.state,
+          CAST(SUM(MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}))/1e6 AS REAL) as total_ms
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        LEFT JOIN process p ON t.upid = p.upid
+        WHERE ts.ts < ${endNs}
+          AND ts.ts + ts.dur > ${startNs}
+          AND ts.dur > 0
+          ${threadScope}
+        GROUP BY t.utid, ts.state ORDER BY total_ms DESC LIMIT 30
       `,
-        {thread_name: STR_NULL, state: STR_NULL, total_ms: NUM_NULL},
+        {
+          thread_name: STR_NULL,
+          process_name: STR_NULL,
+          state: STR_NULL,
+          total_ms: NUM_NULL,
+        },
+      );
+
+      await runQuery(
+        `running threads in range`,
+        `
+        WITH ${this.cpuTopologyCte()},
+        running AS (
+          SELECT
+            ts.utid,
+            COALESCE(t.name, '<unknown>') AS thread_name,
+            COALESCE(p.name, '<unknown>') AS process_name,
+            t.tid,
+            ts.cpu,
+            COALESCE(ct.core_type, 'unknown') AS core_type,
+            MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}) AS clipped_dur
+          FROM thread_state ts
+          JOIN thread t ON ts.utid = t.utid
+          LEFT JOIN process p ON t.upid = p.upid
+          LEFT JOIN cpu_topology ct ON ts.cpu = ct.cpu_id
+          WHERE ts.ts < ${endNs}
+            AND ts.ts + ts.dur > ${startNs}
+            AND ts.dur > 0
+            AND ts.state = 'Running'
+            ${threadScope}
+        )
+        SELECT
+          thread_name,
+          process_name,
+          tid,
+          CAST(SUM(clipped_dur)/1e6 AS REAL) as running_ms,
+          GROUP_CONCAT(DISTINCT cpu) as cpus,
+          GROUP_CONCAT(DISTINCT core_type) as core_types,
+          CAST(SUM(CASE WHEN core_type IN ('big', 'medium', 'prime') THEN clipped_dur ELSE 0 END) * 100.0 / NULLIF(SUM(clipped_dur), 0) AS REAL) as perf_core_pct
+        FROM running
+        WHERE clipped_dur > 0
+        GROUP BY utid
+        ORDER BY running_ms DESC
+        LIMIT 30
+      `,
+        {
+          thread_name: STR_NULL,
+          process_name: STR_NULL,
+          tid: NUM_NULL,
+          running_ms: NUM_NULL,
+          cpus: STR_NULL,
+          core_types: STR_NULL,
+          perf_core_pct: NUM_NULL,
+        },
+      );
+
+      await runQuery(
+        `running processes in range`,
+        `
+        SELECT
+          COALESCE(p.name, '<unknown>') AS process_name,
+          p.pid,
+          CAST(SUM(MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}))/1e6 AS REAL) as running_ms,
+          COUNT(DISTINCT ts.utid) as thread_count
+        FROM thread_state ts
+        JOIN thread t ON ts.utid = t.utid
+        LEFT JOIN process p ON t.upid = p.upid
+        WHERE ts.ts < ${endNs}
+          AND ts.ts + ts.dur > ${startNs}
+          AND ts.dur > 0
+          AND ts.state = 'Running'
+          ${threadScope}
+        GROUP BY p.upid
+        ORDER BY running_ms DESC
+        LIMIT 20
+      `,
+        {
+          process_name: STR_NULL,
+          pid: NUM_NULL,
+          running_ms: NUM_NULL,
+          thread_count: NUM_NULL,
+        },
+      );
+
+      await runQuery(
+        `thread quadrants and CPU placement in range`,
+        `
+        WITH ${this.cpuTopologyCte()},
+        states AS (
+          SELECT
+            ts.utid,
+            COALESCE(t.name, '<unknown>') AS thread_name,
+            COALESCE(p.name, '<unknown>') AS process_name,
+            t.tid,
+            ts.ts,
+            ts.state,
+            ts.cpu,
+            COALESCE(ct.core_type, 'unknown') AS core_type,
+            MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}) AS clipped_dur
+          FROM thread_state ts
+          JOIN thread t ON ts.utid = t.utid
+          LEFT JOIN process p ON t.upid = p.upid
+          LEFT JOIN cpu_topology ct ON ts.cpu = ct.cpu_id
+          WHERE ts.ts < ${endNs}
+            AND ts.ts + ts.dur > ${startNs}
+            AND ts.dur > 0
+            ${threadScope}
+        ),
+        running_events AS (
+          SELECT
+            utid,
+            ts,
+            cpu,
+            core_type,
+            LAG(cpu) OVER (PARTITION BY utid ORDER BY ts) AS prev_cpu,
+            LAG(core_type) OVER (PARTITION BY utid ORDER BY ts) AS prev_core_type
+          FROM states
+          WHERE state = 'Running' AND clipped_dur > 0
+        ),
+        migrations AS (
+          SELECT
+            utid,
+            SUM(CASE WHEN prev_cpu IS NOT NULL AND cpu != prev_cpu THEN 1 ELSE 0 END) AS migrations,
+            SUM(CASE WHEN prev_cpu IS NOT NULL AND cpu != prev_cpu AND core_type != prev_core_type THEN 1 ELSE 0 END) AS cross_cluster_migrations
+          FROM running_events
+          GROUP BY utid
+        )
+        SELECT
+          s.thread_name,
+          s.process_name,
+          s.tid,
+          CAST(SUM(CASE WHEN s.state = 'Running' THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS total_cpu_ms,
+          CAST(SUM(CASE WHEN s.state = 'Running' AND s.core_type IN ('big', 'medium', 'prime') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q1_big_running_ms,
+          CAST(SUM(CASE WHEN s.state = 'Running' AND s.core_type = 'little' THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q2_little_running_ms,
+          CAST(SUM(CASE WHEN s.state IN ('R', 'R+') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q3_runnable_ms,
+          CAST(SUM(CASE WHEN s.state IN ('D', 'DK') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q4a_io_blocked_ms,
+          CAST(SUM(CASE WHEN s.state IN ('S', 'I') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q4b_sleeping_ms,
+          CAST(SUM(s.clipped_dur)/1e6 AS REAL) AS total_state_ms,
+          GROUP_CONCAT(DISTINCT CASE WHEN s.state = 'Running' THEN s.cpu END) AS running_cpus,
+          GROUP_CONCAT(DISTINCT CASE WHEN s.state = 'Running' THEN s.core_type END) AS running_core_types,
+          COALESCE(m.migrations, 0) AS migrations,
+          COALESCE(m.cross_cluster_migrations, 0) AS cross_cluster_migrations
+        FROM states s
+        LEFT JOIN migrations m ON s.utid = m.utid
+        WHERE s.clipped_dur > 0
+        GROUP BY s.utid
+        HAVING total_cpu_ms > 0
+        ORDER BY total_cpu_ms DESC
+        LIMIT 20
+      `,
+        {
+          thread_name: STR_NULL,
+          process_name: STR_NULL,
+          tid: NUM_NULL,
+          total_cpu_ms: NUM_NULL,
+          q1_big_running_ms: NUM_NULL,
+          q2_little_running_ms: NUM_NULL,
+          q3_runnable_ms: NUM_NULL,
+          q4a_io_blocked_ms: NUM_NULL,
+          q4b_sleeping_ms: NUM_NULL,
+          total_state_ms: NUM_NULL,
+          running_cpus: STR_NULL,
+          running_core_types: STR_NULL,
+          migrations: NUM_NULL,
+          cross_cluster_migrations: NUM_NULL,
+        },
+      );
+
+      await runQuery(
+        `CPU frequency summary in range`,
+        `
+        WITH ${this.cpuFrequencySpansCte(scope, startNs, endNs)}
+        SELECT
+          c.cpu,
+          COALESCE(ct.core_type, 'unknown') AS core_type,
+          CAST(SUM(freq_khz * dur_ns) / NULLIF(SUM(dur_ns), 0) / 1000 AS REAL) AS avg_freq_mhz,
+          CAST(MIN(freq_khz) / 1000 AS REAL) AS min_freq_mhz,
+          CAST(MAX(freq_khz) / 1000 AS REAL) AS max_freq_mhz,
+          CAST(SUM(dur_ns)/1e6 AS REAL) AS covered_ms
+        FROM freq_clipped c
+        LEFT JOIN cpu_topology ct ON c.cpu = ct.cpu_id
+        WHERE dur_ns > 0
+        GROUP BY c.cpu
+        ORDER BY c.cpu
+      `,
+        {
+          cpu: NUM_NULL,
+          core_type: STR_NULL,
+          avg_freq_mhz: NUM_NULL,
+          min_freq_mhz: NUM_NULL,
+          max_freq_mhz: NUM_NULL,
+          covered_ms: NUM_NULL,
+        },
+      );
+
+      await runQuery(
+        `CPU frequency distribution in range`,
+        `
+        WITH ${this.cpuFrequencySpansCte(scope, startNs, endNs)},
+        buckets AS (
+          SELECT
+            cpu,
+            CAST(ROUND(freq_khz / (${freqBucketMhz} * 1000.0)) * ${freqBucketMhz} AS INTEGER) AS freq_mhz_bucket,
+            dur_ns
+          FROM freq_clipped
+        )
+        SELECT
+          c.cpu,
+          COALESCE(ct.core_type, 'unknown') AS core_type,
+          c.freq_mhz_bucket,
+          CAST(SUM(c.dur_ns)/1e6 AS REAL) AS duration_ms,
+          CAST(SUM(c.dur_ns) * 100.0 / NULLIF(${endNs} - ${startNs}, 0) AS REAL) AS pct_of_range
+        FROM buckets c
+        LEFT JOIN cpu_topology ct ON c.cpu = ct.cpu_id
+        WHERE c.dur_ns > 0
+        GROUP BY c.cpu, c.freq_mhz_bucket
+        ORDER BY c.cpu, duration_ms DESC
+        LIMIT 80
+      `,
+        {
+          cpu: NUM_NULL,
+          core_type: STR_NULL,
+          freq_mhz_bucket: NUM_NULL,
+          duration_ms: NUM_NULL,
+          pct_of_range: NUM_NULL,
+        },
       );
     }
 
@@ -5602,7 +6105,33 @@ Click ⚙️ to configure backend connection.`;
   /**
    * Called on every handleChatMessage() so the backend always gets the latest selection.
    */
-  private async captureSelectionContext(): Promise<SelectionContext | null> {
+  private messageReferencesCurrentRange(message?: string): boolean {
+    if (!message) return false;
+    return RANGE_REFERENCE_PATTERNS.some((pattern) => pattern.test(message));
+  }
+
+  private captureVisibleWindowContext(message?: string): SelectionContext | null {
+    if (!this.trace || !this.messageReferencesCurrentRange(message)) return null;
+    const visibleSpan = this.trace.timeline.visibleWindow.toTimeSpan();
+    const startNs = Number(visibleSpan.start);
+    const endNs = Number(visibleSpan.end);
+    if (!Number.isFinite(startNs) || !Number.isFinite(endNs) || endNs <= startNs) {
+      return null;
+    }
+    return {
+      kind: 'area',
+      source: 'visible_window',
+      startNs,
+      endNs,
+      durationNs: endNs - startNs,
+      tracks: [],
+      trackCount: 0,
+    };
+  }
+
+  private async captureSelectionContext(
+    message?: string,
+  ): Promise<SelectionContext | null> {
     if (!this.trace) return null;
     const sel = this.trace.selection.selection;
 
@@ -5617,6 +6146,7 @@ Click ⚙️ to configure backend connection.`;
 
       return {
         kind: 'area',
+        source: 'area_selection',
         startNs,
         endNs,
         durationNs,
@@ -5633,6 +6163,7 @@ Click ⚙️ to configure backend connection.`;
           : null;
       const ctx: SelectionContext = {
         kind: 'track_event',
+        source: 'track_event_selection',
         trackUri: sel.trackUri,
         eventId: sel.eventId,
         ts: Number(sel.ts),
@@ -5650,6 +6181,15 @@ Click ⚙️ to configure backend connection.`;
         ctx,
       );
       return ctx;
+    }
+
+    const visibleWindowContext = this.captureVisibleWindowContext(message);
+    if (visibleWindowContext) {
+      console.log(
+        '[AIPanel] captureSelectionContext: using visible window as range scope',
+        visibleWindowContext,
+      );
+      return visibleWindowContext;
     }
 
     console.log(
@@ -5675,8 +6215,14 @@ Click ⚙️ to configure backend connection.`;
       const info: SelectionTrackInfo = {uri: t.uri};
       if (t.tags?.cpu !== undefined) info.cpu = t.tags.cpu as number;
       if (t.tags?.type) info.kind = t.tags.type as string;
-      if (t.tags?.utid !== undefined) utids.add(t.tags.utid as number);
-      if (t.tags?.upid !== undefined) upids.add(t.tags.upid as number);
+      if (t.tags?.utid !== undefined) {
+        info.utid = t.tags.utid as number;
+        utids.add(info.utid);
+      }
+      if (t.tags?.upid !== undefined) {
+        info.upid = t.tags.upid as number;
+        upids.add(info.upid);
+      }
       result.push(info);
     }
 
@@ -5740,6 +6286,7 @@ Click ⚙️ to configure backend connection.`;
           info.tid = th.tid;
           // Resolve process via thread's upid
           if (th.upid !== undefined) {
+            info.upid = th.upid;
             const proc = processMap.get(th.upid);
             if (proc) {
               info.processName = proc.name;
@@ -6177,7 +6724,7 @@ Click ⚙️ to configure backend connection.`;
       }
 
       // Capture current Perfetto selection (area / slice) and include in request
-      const selectionContext = await this.captureSelectionContext();
+      const selectionContext = await this.captureSelectionContext(message);
       if (selectionContext) {
         requestBody.selectionContext = selectionContext;
         if (DEBUG_AI_PANEL)
@@ -6185,6 +6732,11 @@ Click ⚙️ to configure backend connection.`;
             '[AIPanel] Injecting selectionContext:',
             selectionContext,
           );
+        if (!this.state.referenceTraceId && !this.state.pendingTraceContext) {
+          const datasets = await this.querySelectionData(selectionContext);
+          this.state.pendingTraceContext =
+            datasets.length > 0 ? datasets : null;
+        }
       }
 
       // Attach pre-queried trace data (set by quick-action buttons) and consume it

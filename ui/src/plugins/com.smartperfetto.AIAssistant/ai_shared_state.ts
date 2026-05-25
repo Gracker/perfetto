@@ -48,7 +48,7 @@ export interface AISharedState {
   /** Extracted findings from the latest analysis (for notes + status popup). */
   findings: AIFinding[];
   /**
-   * Set by the Area Selection Tab's "Analyze" button.
+   * Set by the Area/Range Selection Tab's "Analyze" button.
    * AIPanel checks this on each render and auto-triggers analysis if non-null.
    * Uses number (not bigint) because the downstream SelectionContext and
    * JSON.stringify both require plain numbers.

@@ -6,8 +6,8 @@
  * Area Selection Analysis Tab — "AI Analyze"
  *
  * Registered via trace.selection.registerAreaSelectionTab(). When the user
- * selects a time range (M-key drag), this tab appears in the bottom details
- * panel alongside built-in Perfetto tabs (Slices, Thread States, etc.).
+ * selects a time or track range, this tab appears in the bottom details panel
+ * alongside built-in Perfetto tabs (Slices, Thread States, etc.).
  *
  * Two-tier interaction:
  *   1. **Quick stats** — instant SQL queries for the selected range (slice
@@ -281,12 +281,17 @@ async function fetchQuickStats(
 
   // Query 1: Slice statistics in the selected range
   const sliceResult = await engine.query(`
+    WITH clipped AS (
+      SELECT MIN(ts + dur, ${end}) - MAX(ts, ${start}) AS clipped_dur
+      FROM slice
+      WHERE ts < ${end} AND ts + dur > ${start} AND dur > 0
+    )
     SELECT
       COUNT(*) AS cnt,
-      CAST(IFNULL(AVG(dur), 0) AS INTEGER) AS avg_dur,
-      CAST(IFNULL(MAX(dur), 0) AS INTEGER) AS max_dur
-    FROM slice
-    WHERE ts >= ${start} AND ts + dur <= ${end} AND dur > 0
+      CAST(IFNULL(AVG(clipped_dur), 0) AS INTEGER) AS avg_dur,
+      CAST(IFNULL(MAX(clipped_dur), 0) AS INTEGER) AS max_dur
+    FROM clipped
+    WHERE clipped_dur > 0
   `);
 
   const sliceRow = sliceResult.iter({
@@ -313,7 +318,7 @@ async function fetchQuickStats(
       COUNT(*) AS frame_cnt,
       SUM(CASE WHEN jank_type != 'None' AND jank_type IS NOT NULL THEN 1 ELSE 0 END) AS jank_cnt
     FROM actual_frame_timeline_event
-    WHERE ts >= ${start} AND ts + dur <= ${end}
+    WHERE ts < ${end} AND ts + dur > ${start}
   `);
 
   if (frameResult.ok) {

@@ -1057,6 +1057,8 @@ export const COMPARISON_PRESET_QUESTIONS: PresetQuestion[] = [
  */
 export interface SelectionContext {
   kind: 'area' | 'track_event';
+  /** Where this scope came from: explicit Perfetto selection, selected slice, or current viewport fallback. */
+  source?: 'area_selection' | 'track_event_selection' | 'visible_window';
   // ── Area selection (M key) ──
   startNs?: number;
   endNs?: number;
@@ -1080,6 +1082,8 @@ export interface SelectionContext {
 /** Human-readable metadata for a track in an area selection. */
 export interface SelectionTrackInfo {
   uri: string;
+  utid?: number;
+  upid?: number;
   threadName?: string;
   processName?: string;
   tid?: number;
