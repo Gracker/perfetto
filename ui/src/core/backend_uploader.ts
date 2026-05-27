@@ -12,6 +12,7 @@ import {
   buildSmartPerfettoWorkspaceApiUrl,
 } from './smartperfetto_request_context';
 import type {HttpRpcTarget} from '../trace_processor/http_rpc_engine';
+import {getDefaultSmartPerfettoBackendUrl} from './smartperfetto_backend_url';
 
 const BACKEND_CHECK_TIMEOUT_MS = 1000; // Fast timeout for health check
 const BACKEND_UPLOAD_MIN_TIMEOUT_MS = 60000;
@@ -41,7 +42,7 @@ export interface BackendUploadResult {
 export class BackendUploader {
   private backendUrl: string;
 
-  constructor(backendUrl: string = 'http://localhost:3000') {
+  constructor(backendUrl: string = getDefaultSmartPerfettoBackendUrl()) {
     this.backendUrl = backendUrl;
   }
 
@@ -319,7 +320,7 @@ export function setDefaultBackendUrl(url: string) {
 }
 
 export function getBackendUploader(backendUrl?: string): BackendUploader {
-  const url = backendUrl ?? configuredBackendUrl ?? 'http://localhost:3000';
+  const url = backendUrl ?? configuredBackendUrl ?? getDefaultSmartPerfettoBackendUrl();
   if (!uploaderInstance || uploaderInstance['backendUrl'] !== url) {
     uploaderInstance = new BackendUploader(url);
   }

@@ -16,6 +16,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
+
 /**
  * Shared type definitions for the AI Assistant plugin.
  *
@@ -977,7 +979,7 @@ export const DEFAULT_SETTINGS: AISettings = {
   openaiApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekApiKey: '',
-  backendUrl: `${location.protocol}//${location.hostname}:3000`,
+  backendUrl: getDefaultSmartPerfettoBackendUrl(),
   backendApiKey: '',
 };
 

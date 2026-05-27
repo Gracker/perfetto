@@ -166,6 +166,48 @@ function loadDevServerEnvFile() {
   }
 }
 
+function smartPerfettoSafePort(value, fallback) {
+  const text = String(value || '').trim();
+  if (!/^\d+$/.test(text)) return fallback;
+  const parsed = Number(text);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535
+    ? String(parsed)
+    : fallback;
+}
+
+function smartPerfettoRuntimeConfigScript() {
+  const backendUrl = (
+    process.env.SMARTPERFETTO_BACKEND_PUBLIC_URL ||
+    process.env.SMARTPERFETTO_BACKEND_URL ||
+    ''
+  ).trim();
+  const config = {
+    backendPort: smartPerfettoSafePort(
+      process.env.SMARTPERFETTO_BACKEND_PUBLIC_PORT ||
+      process.env.SMARTPERFETTO_BACKEND_PORT,
+      '3000',
+    ),
+    frontendPort: smartPerfettoSafePort(
+      process.env.SMARTPERFETTO_FRONTEND_PORT ||
+      process.env.PERFETTO_UI_SERVE_PORT,
+      '10000',
+    ),
+    ...(backendUrl ? {backendUrl} : {}),
+  };
+  return `<script>window.__SMARTPERFETTO_CONFIG__=${JSON.stringify(config)};</script>`;
+}
+
+function injectSmartPerfettoRuntimeConfig(absPath, data) {
+  if (path.basename(absPath) !== 'index.html') return data;
+  const html = data.toString('utf8');
+  const script = smartPerfettoRuntimeConfigScript();
+  const marker = '</head>';
+  if (html.includes(marker)) {
+    return Buffer.from(html.replace(marker, `${script}\n${marker}`));
+  }
+  return Buffer.from(`${script}\n${html}`);
+}
+
 async function main() {
   const parser = new argparse.ArgumentParser({
     formatter_class: argparse.RawDescriptionHelpFormatter,
@@ -883,6 +925,7 @@ function startServer() {
         return;
       }
 
+      data = injectSmartPerfettoRuntimeConfig(absPath, data);
       const mimeMap = {
         html: 'text/html',
         css: 'text/css',

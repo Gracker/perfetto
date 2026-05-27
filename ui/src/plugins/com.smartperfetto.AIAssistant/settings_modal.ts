@@ -22,6 +22,7 @@ import {ProviderPanel} from './provider_panel';
 import {CodebasePanel} from './codebase_panel';
 import {providerRuntimeLabel} from './provider_types';
 import type {SmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 
 export interface SettingsModalAttrs {
   settings: AISettings;
@@ -740,7 +741,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                         e.target as HTMLInputElement
                       ).value;
                     },
-                    placeholder: 'http://localhost:3000',
+                    placeholder: getDefaultSmartPerfettoBackendUrl(),
                   }),
                 ]),
                 m('div', {style: MODAL_STYLES.field}, [

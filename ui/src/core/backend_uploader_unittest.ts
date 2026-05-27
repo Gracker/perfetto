@@ -31,9 +31,28 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  window.__SMARTPERFETTO_CONFIG__ = undefined;
 });
 
 describe('BackendUploader request context', () => {
+  it('uses runtime-configured backend port by default', async () => {
+    window.__SMARTPERFETTO_CONFIG__ = {backendPort: '3300'};
+    fetchMock.mockResolvedValueOnce(jsonResponse({available: true}));
+
+    await expect(new BackendUploader().checkAvailable()).resolves.toBe(true);
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('http://localhost:3300/');
+  });
+
+  it('uses runtime-configured backend URL before deriving a host URL', async () => {
+    window.__SMARTPERFETTO_CONFIG__ = {backendUrl: 'https://proxy.example/base'};
+    fetchMock.mockResolvedValueOnce(jsonResponse({available: true}));
+
+    await expect(new BackendUploader().checkAvailable()).resolves.toBe(true);
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('https://proxy.example/base/');
+  });
+
   it('sends X-Window-Id on health checks', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({available: true}));
 

@@ -9,7 +9,8 @@ import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoWorkspaceApiUrl,
 } from '../../core/smartperfetto_request_context';
-import {DEFAULT_SETTINGS, SETTINGS_KEY} from './types';
+import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
+import {SETTINGS_KEY} from './types';
 import {getSettingsStorageKey} from './session_manager';
 
 interface CriticalPathSegment {
@@ -96,7 +97,7 @@ function getBackendUrl(): string {
   } catch {
     // ignore
   }
-  return DEFAULT_SETTINGS.backendUrl.replace(/\/+$/, '');
+  return getDefaultSmartPerfettoBackendUrl().replace(/\/+$/, '');
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
