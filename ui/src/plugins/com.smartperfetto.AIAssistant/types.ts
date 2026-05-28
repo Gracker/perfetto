@@ -917,6 +917,7 @@ export interface ServerRuntimeDiagnostics {
 
 export interface ServerStatus {
   connected: boolean;
+  version?: string;
   runtime?: 'claude-agent-sdk' | 'openai-agents-sdk';
   model?: string;
   providerMode?: string;

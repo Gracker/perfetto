@@ -192,7 +192,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         error: result.error,
         modelVerified: result.modelVerified,
       };
-      this.healthMap.set(id, this.testResult.success ? 'passed' : 'failed');
+      this.healthMap.set(
+        id,
+        this.isVerifiedTestSuccess(this.testResult) ? 'passed' : 'failed',
+      );
     } catch (e: unknown) {
       this.testResult = {
         success: false,
@@ -239,6 +242,14 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       this.success = null;
       m.redraw();
     }, 3000);
+  }
+
+  private isVerifiedTestSuccess(result: {
+    success: boolean;
+    error?: string;
+    modelVerified?: boolean;
+  }): boolean {
+    return result.success && result.modelVerified === true && !result.error;
   }
 
   view(_vnode: m.Vnode<ProviderPanelAttrs>): m.Children {
@@ -871,7 +882,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
     const t = getTokens();
     const s = getStyles(t);
-    const isWarning = this.testResult.success && this.testResult.error;
+    const isWarning =
+      this.testResult.success && !this.isVerifiedTestSuccess(this.testResult);
     const colorKey = !this.testResult.success
       ? t.error
       : isWarning
@@ -889,7 +901,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     if (!this.testResult.success) {
       message = `❌ ${this.testResult.error || 'Connection failed'}`;
     } else if (isWarning) {
-      message = `⚠️ Connected (${this.testResult.latencyMs}ms) — ${this.testResult.error}`;
+      message = `⚠️ Connected (${this.testResult.latencyMs}ms) — ${this.testResult.error || 'Primary model was not verified'}`;
     } else {
       const verified = this.testResult.modelVerified ? ', model verified' : '';
       message = `✅ Connection successful (${this.testResult.latencyMs}ms${verified})`;

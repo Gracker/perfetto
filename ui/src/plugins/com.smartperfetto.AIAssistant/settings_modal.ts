@@ -560,6 +560,21 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
         m('span', {style: MODAL_STYLES.statusLabel}, 'Engine'),
         m('span', {style: MODAL_STYLES.statusValue}, runtimeLabel),
       ]),
+      status.version
+        ? m('div', {style: MODAL_STYLES.statusRow}, [
+            m('span', {style: MODAL_STYLES.statusLabel}, 'Version'),
+            m(
+              'span',
+              {
+                style: {
+                  ...MODAL_STYLES.statusValue,
+                  ...MODAL_STYLES.statusValueMono,
+                },
+              },
+              `v${status.version}`,
+            ),
+          ])
+        : null,
       status.model
         ? m('div', {style: MODAL_STYLES.statusRow}, [
             m('span', {style: MODAL_STYLES.statusLabel}, 'Model'),

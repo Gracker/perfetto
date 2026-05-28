@@ -1908,6 +1908,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           m('div.ai-header-left', [
             m('i.pf-icon.ai-header-icon', 'auto_awesome'),
             m('span.ai-header-title', 'AI Assistant'),
+            this.serverStatus.version
+              ? m(
+                  'span.ai-version-chip',
+                  {
+                    title: `SmartPerfetto backend version: ${this.serverStatus.version}`,
+                  },
+                  `v${this.serverStatus.version}`,
+                )
+              : null,
             m('span.ai-status-dot', {
               class: isConnected ? 'connected' : 'disconnected',
             }),
@@ -4007,6 +4016,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       const aiEngine = data.aiEngine || {};
       return {
         connected: true,
+        version: typeof data.version === 'string' ? data.version : undefined,
         runtime: aiEngine.runtime,
         model: aiEngine.model,
         providerMode: aiEngine.providerMode,
