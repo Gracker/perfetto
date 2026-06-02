@@ -302,7 +302,11 @@ export class ProviderQuickSwitcher
             ? m(
                 'span',
                 {style: {fontSize: '10px', opacity: 0.65, whiteSpace: 'nowrap'}},
-                resolveProviderRuntime(active) === 'openai-agents-sdk' ? 'OA' : 'CL',
+                resolveProviderRuntime(active) === 'openai-agents-sdk'
+                  ? 'OA'
+                  : resolveProviderRuntime(active) === 'pi-agent-core'
+                    ? 'PI'
+                    : 'CL',
               )
             : null,
           m(
@@ -461,19 +465,21 @@ export class ProviderQuickSwitcher
     provider: ProviderConfig,
     vnode: m.Vnode<ProviderQuickSwitcherAttrs>,
   ): m.Children {
-    if (
-      !providerSupportsRuntime(provider, 'claude-agent-sdk') ||
-      !providerSupportsRuntime(provider, 'openai-agents-sdk')
-    ) {
-      return null;
-    }
-
     const t = getTokens();
     const current = resolveProviderRuntime(provider);
-    const buttons: Array<{runtime: AgentRuntimeKind; label: string}> = [
+    const allButtons: Array<{runtime: AgentRuntimeKind; label: string}> = [
       {runtime: 'claude-agent-sdk', label: 'Claude'},
       {runtime: 'openai-agents-sdk', label: 'OpenAI'},
+      {runtime: 'pi-agent-core', label: 'Pi'},
+      {runtime: 'opencode', label: 'OpenCode'},
     ];
+    const buttons = allButtons.filter((button) =>
+      providerSupportsRuntime(provider, button.runtime),
+    );
+
+    if (buttons.length < 2) {
+      return null;
+    }
 
     return m(
       'div',
@@ -496,7 +502,8 @@ export class ProviderQuickSwitcher
             type: 'button',
             style: {
               border: 'none',
-              borderRight: index === 0 ? `1px solid ${t.border}` : 'none',
+              borderRight:
+                index < buttons.length - 1 ? `1px solid ${t.border}` : 'none',
               padding: '4px 6px',
               cursor: active && provider.isActive ? 'default' : 'pointer',
               fontSize: '10px',

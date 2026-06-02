@@ -29,7 +29,7 @@ export type ProviderType =
   | 'ollama'
   | 'custom';
 export type ProviderCategory = 'official' | 'proxy' | 'local' | 'custom';
-export type AgentRuntimeKind = 'claude-agent-sdk' | 'openai-agents-sdk';
+export type AgentRuntimeKind = 'claude-agent-sdk' | 'openai-agents-sdk' | 'pi-agent-core' | 'opencode';
 export type OpenAIProtocol = 'responses' | 'chat_completions';
 
 export type HealthStatus = 'passed' | 'failed' | 'untested';
@@ -48,6 +48,12 @@ export interface ProviderConnection {
   claudeAuthToken?: string;
   openaiBaseUrl?: string;
   openaiApiKey?: string;
+  piAgentCoreModulePath?: string;
+  piAgentCoreModelJson?: string;
+  piAgentCoreSystemPrompt?: string;
+  openCodeSdkModulePath?: string;
+  openCodeModelJson?: string;
+  openCodeSystemPrompt?: string;
   agentRuntime?: AgentRuntimeKind;
   openaiProtocol?: OpenAIProtocol;
   awsRegion?: string;
@@ -203,6 +209,36 @@ export const CONNECTION_FIELD_LABELS: Record<
     type: 'password',
     placeholder: 'sk-...',
   },
+  piAgentCoreModulePath: {
+    label: 'Pi Agent Core Module Path',
+    type: 'text',
+    placeholder: '/path/to/@earendil-works/pi-agent-core/dist/index.js',
+  },
+  piAgentCoreModelJson: {
+    label: 'Pi Agent Core Model JSON',
+    type: 'text',
+    placeholder: '{"id":"...","provider":"..."}',
+  },
+  piAgentCoreSystemPrompt: {
+    label: 'Pi Agent Core System Prompt',
+    type: 'text',
+    placeholder: 'Optional runtime-level system prompt',
+  },
+  openCodeSdkModulePath: {
+    label: 'OpenCode SDK Module Path',
+    type: 'text',
+    placeholder: '/path/to/@opencode-ai/sdk/dist/index.js',
+  },
+  openCodeModelJson: {
+    label: 'OpenCode Model JSON',
+    type: 'text',
+    placeholder: '{"providerID":"smartperfetto","modelID":"..."}',
+  },
+  openCodeSystemPrompt: {
+    label: 'OpenCode System Prompt',
+    type: 'text',
+    placeholder: 'Optional runtime-level system prompt',
+  },
   awsRegion: {label: 'AWS Region', type: 'text', placeholder: 'us-east-1'},
   awsBearerToken: {
     label: 'AWS Bearer Token',
@@ -257,7 +293,11 @@ export function providerHasClaudeSurface(provider: ProviderConfig): boolean {
     conn.claudeBaseUrl ||
     conn.claudeApiKey ||
     conn.claudeAuthToken ||
-    (provider.type === 'custom' && conn.agentRuntime !== 'openai-agents-sdk' && (conn.baseUrl || conn.apiKey))
+    (provider.type === 'custom' &&
+      conn.agentRuntime !== 'openai-agents-sdk' &&
+      conn.agentRuntime !== 'pi-agent-core' &&
+      conn.agentRuntime !== 'opencode' &&
+      (conn.baseUrl || conn.apiKey))
   );
 }
 
@@ -274,9 +314,34 @@ export function providerHasOpenAISurface(provider: ProviderConfig): boolean {
   );
 }
 
+export function providerHasPiAgentCoreSurface(provider: ProviderConfig): boolean {
+  const conn = provider.connection;
+  return provider.type === 'custom' && !!(
+    conn.agentRuntime === 'pi-agent-core' ||
+    conn.piAgentCoreModelJson ||
+    conn.piAgentCoreModulePath
+  );
+}
+
+export function providerHasOpenCodeSurface(provider: ProviderConfig): boolean {
+  const conn = provider.connection;
+  return provider.type === 'custom' && !!(
+    conn.agentRuntime === 'opencode' ||
+    conn.openCodeModelJson ||
+    conn.openCodeSdkModulePath ||
+    conn.openaiBaseUrl ||
+    conn.baseUrl
+  );
+}
+
 export function resolveProviderRuntime(provider?: ProviderConfig): AgentRuntimeKind {
   const runtime = provider?.connection.agentRuntime;
-  if (runtime === 'openai-agents-sdk' || runtime === 'claude-agent-sdk') {
+  if (
+    runtime === 'openai-agents-sdk' ||
+    runtime === 'claude-agent-sdk' ||
+    runtime === 'pi-agent-core' ||
+    runtime === 'opencode'
+  ) {
     return runtime;
   }
   if (!provider) return 'claude-agent-sdk';
@@ -293,13 +358,17 @@ export function providerSupportsRuntime(
   provider: ProviderConfig,
   runtime: AgentRuntimeKind,
 ): boolean {
-  return runtime === 'openai-agents-sdk'
-    ? providerHasOpenAISurface(provider)
-    : providerHasClaudeSurface(provider);
+  if (runtime === 'openai-agents-sdk') return providerHasOpenAISurface(provider);
+  if (runtime === 'pi-agent-core') return providerHasPiAgentCoreSurface(provider);
+  if (runtime === 'opencode') return providerHasOpenCodeSurface(provider);
+  return providerHasClaudeSurface(provider);
 }
 
 export function providerRuntimeLabel(runtime: AgentRuntimeKind): string {
-  return runtime === 'openai-agents-sdk' ? 'OpenAI SDK' : 'Claude SDK';
+  if (runtime === 'openai-agents-sdk') return 'OpenAI SDK';
+  if (runtime === 'pi-agent-core') return 'Pi Agent Core';
+  if (runtime === 'opencode') return 'OpenCode';
+  return 'Claude SDK';
 }
 
 export type BedrockAuthMethod = 'bearer' | 'accessKey' | 'profile';

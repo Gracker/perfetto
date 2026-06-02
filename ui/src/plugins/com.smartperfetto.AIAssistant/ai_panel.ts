@@ -126,6 +126,7 @@ import {
   handleSSEEvent as handleSSEEventExternal,
 } from './sse_event_handlers';
 import type {SSEHandlerContext} from './sse_event_handlers';
+import {orderMessagesForDisplay} from './message_order';
 import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
 import {
   subscribeClearChat,
@@ -2139,43 +2140,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     },
                     (() => {
                       let reportLinkSequence = 0;
-                      const hasConversationTimeline = this.state.messages.some(
-                        (msg) => msg.flowTag === 'streaming_flow',
-                      );
-                      const filteredMessages = this.state.messages.filter(
-                        (msg) => {
-                          // Hide progress_note bubbles when conversation timeline is active
-                          // (same info is already shown in the timeline)
-                          if (
-                            hasConversationTimeline &&
-                            msg.flowTag === 'progress_note'
-                          )
-                            return false;
-                          return true;
-                        },
-                      );
-                      // Assign each message a round index based on round_separator boundaries.
-                      // Within each round, streaming_flow sorts before answer_stream, but
-                      // this reordering never crosses round boundaries.
-                      const roundIndexMap = new Map<string, number>();
-                      let currentRound = 0;
-                      for (const msg of filteredMessages) {
-                        if (msg.flowTag === 'round_separator') currentRound++;
-                        roundIndexMap.set(msg.id, currentRound);
-                      }
-                      const sortedMessages = [...filteredMessages].sort(
-                        (a, b) => {
-                          const roundA = roundIndexMap.get(a.id) ?? 0;
-                          const roundB = roundIndexMap.get(b.id) ?? 0;
-                          if (roundA !== roundB) return roundA - roundB;
-                          const order = (msg: Message) => {
-                            if (msg.role === 'user') return 0;
-                            if (msg.flowTag === 'streaming_flow') return 1;
-                            if (msg.flowTag === 'answer_stream') return 3;
-                            return 2;
-                          };
-                          return order(a) - order(b);
-                        },
+                      const sortedMessages = orderMessagesForDisplay(
+                        this.state.messages,
                       );
                       // Build a map of msg.id → previous user message's model for change-badge
                       const prevUserModelMap = new Map<

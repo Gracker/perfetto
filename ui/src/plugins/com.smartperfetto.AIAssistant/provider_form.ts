@@ -67,6 +67,18 @@ const CONNECTION_FIELD_HINTS: Record<string, string> = {
     'Used only by the OpenAI SDK path. Leave empty when the shared provider key should be reused.',
   openaiBaseUrl:
     'Used only by OpenAI SDK. OpenAI-compatible gateways usually use a URL ending in /v1.',
+  piAgentCoreModulePath:
+    'Optional explicit module path. Leave empty to load @earendil-works/pi-agent-core from the backend package.',
+  piAgentCoreModelJson:
+    'Required for Pi Agent Core. Paste the model JSON object expected by the Pi runtime. This field is treated as sensitive.',
+  piAgentCoreSystemPrompt:
+    'Optional runtime-level system prompt for Pi Agent Core. SmartPerfetto analysis contracts still come from backend strategies.',
+  openCodeSdkModulePath:
+    'Optional explicit module path. Leave empty to load @opencode-ai/sdk from the backend package.',
+  openCodeModelJson:
+    'Optional OpenCode model/provider JSON. If omitted, OpenCode uses the OpenAI-compatible fields and primary model from this provider.',
+  openCodeSystemPrompt:
+    'Optional runtime-level system prompt for OpenCode. SmartPerfetto analysis contracts still come from backend strategies.',
 };
 
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
@@ -166,7 +178,14 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       conn.openaiProtocol ??= 'chat_completions';
       conn.agentRuntime ??= 'claude-agent-sdk';
     } else if (type === 'custom') {
-      if (conn.agentRuntime === 'openai-agents-sdk' || conn.openaiProtocol) {
+      if (conn.agentRuntime === 'pi-agent-core') {
+        // Pi Agent Core uses explicit Pi fields; do not infer Claude/OpenAI
+        // connection fields from the legacy shared key.
+      } else if (conn.agentRuntime === 'opencode') {
+        conn.openaiApiKey ??= conn.apiKey;
+        conn.openaiBaseUrl ??= conn.baseUrl;
+        conn.openaiProtocol ??= 'chat_completions';
+      } else if (conn.agentRuntime === 'openai-agents-sdk' || conn.openaiProtocol) {
         conn.openaiApiKey ??= conn.apiKey;
         conn.openaiBaseUrl ??= conn.baseUrl;
         conn.openaiProtocol ??= 'chat_completions';
@@ -210,9 +229,16 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           return !!(conn.openaiBaseUrl || conn.baseUrl);
         }
         if (this.form.type === 'custom') {
-          return this.currentRuntime() === 'openai-agents-sdk'
-            ? !!(conn.openaiBaseUrl || conn.baseUrl)
-            : !!(conn.claudeBaseUrl || conn.baseUrl);
+          if (this.currentRuntime() === 'openai-agents-sdk') {
+            return !!(conn.openaiBaseUrl || conn.baseUrl);
+          }
+          if (this.currentRuntime() === 'pi-agent-core') {
+            return !!conn.piAgentCoreModelJson;
+          }
+          if (this.currentRuntime() === 'opencode') {
+            return !!(conn.openCodeModelJson || conn.openaiBaseUrl || conn.baseUrl);
+          }
+          return !!(conn.claudeBaseUrl || conn.baseUrl);
         }
         const requiredFields = (template.requiredFields || []).map((f) =>
           f.replace(/^connection\./, ''),
@@ -564,6 +590,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       return this.renderBedrockConnection(s);
     }
 
+    if (this.form.type === 'custom') {
+      return this.renderCustomConnection(s);
+    }
+
     if (
       this.supportsClaudeSurface(this.form.type) &&
       this.supportsOpenAISurface(this.form.type)
@@ -640,13 +670,34 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
 
   private currentRuntime(): AgentRuntimeKind {
     const runtime = this.form.connection.agentRuntime;
-    if (runtime === 'openai-agents-sdk' || runtime === 'claude-agent-sdk') {
+    if (
+      runtime === 'openai-agents-sdk' ||
+      runtime === 'claude-agent-sdk' ||
+      runtime === 'pi-agent-core' ||
+      runtime === 'opencode'
+    ) {
       return runtime;
     }
     if (this.form.type === 'openai' || this.form.type === 'ollama') {
       return 'openai-agents-sdk';
     }
     return 'claude-agent-sdk';
+  }
+
+  private renderCustomConnection(
+    s: ReturnType<typeof getStyles>,
+  ): m.Children {
+    const runtime = this.currentRuntime();
+    return m('div', [
+      this.renderRuntimeSelector(s),
+      runtime === 'pi-agent-core'
+        ? this.renderPiAgentCoreConnectionFields(s)
+        : runtime === 'opencode'
+          ? this.renderOpenCodeConnectionFields(s)
+        : runtime === 'openai-agents-sdk'
+          ? this.renderOpenAIConnectionFields(s, {includeApiKey: true})
+          : this.renderClaudeConnectionFields(s, {includeApiKey: true}),
+    ]);
   }
 
   private renderDualSdkConnection(
@@ -704,10 +755,16 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     const options: Array<{value: AgentRuntimeKind; label: string}> = [
       {value: 'claude-agent-sdk', label: 'Claude SDK'},
       {value: 'openai-agents-sdk', label: 'OpenAI SDK'},
+      ...(this.form.type === 'custom'
+        ? [
+            {value: 'pi-agent-core' as const, label: 'Pi Agent Core'},
+            {value: 'opencode' as const, label: 'OpenCode'},
+          ]
+        : []),
     ];
 
     return m('div', {style: s.formField}, [
-      m('label', {style: s.formLabel}, 'SDK Runtime'),
+      m('label', {style: s.formLabel}, 'Runtime'),
       m(
         'div',
         {
@@ -719,7 +776,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             backgroundColor: t.surface,
           },
         },
-        options.map((option) => {
+        options.map((option, index) => {
           const active = current === option.value;
           return m(
             'button',
@@ -728,10 +785,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               type: 'button',
               style: {
                 border: 'none',
-                borderRight:
-                  option.value === 'claude-agent-sdk'
-                    ? `1px solid ${t.border}`
-                    : 'none',
+                borderRight: index < options.length - 1 ? `1px solid ${t.border}` : 'none',
                 padding: '7px 12px',
                 cursor: 'pointer',
                 fontSize: '12px',
@@ -741,6 +795,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               },
               onclick: () => {
                 this.form.connection.agentRuntime = option.value;
+                if (option.value === 'pi-agent-core') {
+                  this.form.connection.openaiProtocol = undefined;
+                } else if (option.value === 'opencode') {
+                  this.form.connection.openaiProtocol ??= 'chat_completions';
+                }
               },
             },
             option.label,
@@ -750,7 +809,42 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {style: s.formHint},
-        'Claude SDK uses the Claude-compatible fields. OpenAI SDK uses the OpenAI-compatible fields. Switching runtime changes which side is active.',
+        'Claude SDK uses Claude-compatible fields. OpenAI SDK and OpenCode use OpenAI-compatible fields. Pi Agent Core and OpenCode can also use runtime-specific model JSON.',
+      ),
+    ]);
+  }
+
+  private renderPiAgentCoreConnectionFields(
+    s: ReturnType<typeof getStyles>,
+  ): m.Children {
+    return m('div', [
+      this.renderConnectionInput(s, 'piAgentCoreModulePath'),
+      this.renderConnectionTextarea(s, 'piAgentCoreModelJson'),
+      this.renderConnectionTextarea(s, 'piAgentCoreSystemPrompt'),
+      m(
+        'div',
+        {key: 'piAgentCoreCapabilityHint', style: s.formHint},
+        'Pi Agent Core is capability-limited: it is optional, dynamically loaded, and does not enable shell/file tools or .pi project discovery.',
+      ),
+    ]);
+  }
+
+  private renderOpenCodeConnectionFields(
+    s: ReturnType<typeof getStyles>,
+  ): m.Children {
+    return m('div', [
+      m(
+        'div',
+        {key: 'openCodeOpenAIFields'},
+        this.renderOpenAIConnectionFields(s, {includeApiKey: true}),
+      ),
+      this.renderConnectionInput(s, 'openCodeSdkModulePath'),
+      this.renderConnectionTextarea(s, 'openCodeModelJson'),
+      this.renderConnectionTextarea(s, 'openCodeSystemPrompt'),
+      m(
+        'div',
+        {key: 'openCodeCapabilityHint', style: s.formHint},
+        'OpenCode runs through an isolated server with request-scoped SmartPerfetto MCP tools. Built-in shell/file/project discovery tools remain disabled.',
       ),
     ]);
   }
@@ -855,6 +949,36 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         value: conn[field] || '',
         oninput: (e: Event) => {
           conn[field] = (e.target as HTMLInputElement).value;
+        },
+        placeholder: meta.placeholder,
+      }),
+      CONNECTION_FIELD_HINTS[field]
+        ? m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS[field])
+        : null,
+    ]);
+  }
+
+  private renderConnectionTextarea(
+    s: ReturnType<typeof getStyles>,
+    field: string,
+  ): m.Children {
+    const meta = CONNECTION_FIELD_LABELS[field] || {
+      label: field,
+      placeholder: '',
+    };
+    const conn = this.form.connection as Record<string, string>;
+    return m('div', {key: field, style: s.formField}, [
+      m('label', {style: s.formLabel}, meta.label),
+      m('textarea', {
+        style: {
+          ...s.formInput,
+          minHeight: field === 'piAgentCoreModelJson' ? '96px' : '72px',
+          resize: 'vertical',
+          fontFamily: 'monospace',
+        },
+        value: conn[field] || '',
+        oninput: (e: Event) => {
+          conn[field] = (e.target as HTMLTextAreaElement).value;
         },
         placeholder: meta.placeholder,
       }),
