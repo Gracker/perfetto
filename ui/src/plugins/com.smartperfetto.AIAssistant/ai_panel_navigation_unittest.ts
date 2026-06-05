@@ -16,7 +16,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {describe, it, expect, jest} from '@jest/globals';
+import {describe, it, expect, vi} from 'vitest';
 
 import {AIPanel} from './ai_panel';
 
@@ -67,7 +67,7 @@ describe('AIPanel /goto navigation', () => {
 
   it('keeps rendered assistant content stable across unrelated redraws', () => {
     const panel = new AIPanel() as any;
-    panel.renderMermaidInElement = jest.fn();
+    panel.renderMermaidInElement = vi.fn();
     const dom = document.createElement('div');
     const msg = {
       id: 'msg-1',
@@ -88,9 +88,9 @@ describe('AIPanel /goto navigation', () => {
   });
 
   it('copies any normal conversation message content', async () => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     const panel = new AIPanel() as any;
-    panel.copyTextToClipboard = jest.fn(async () => true);
+    panel.copyTextToClipboard = vi.fn(async () => true);
     const msg = {
       id: 'user-msg-1',
       role: 'user',
@@ -105,14 +105,14 @@ describe('AIPanel /goto navigation', () => {
     );
     expect(panel.copiedMessageIds.has('user-msg-1')).toBe(true);
 
-    jest.runOnlyPendingTimers();
+    vi.runOnlyPendingTimers();
     expect(panel.copiedMessageIds.has('user-msg-1')).toBe(false);
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   it('returns an error when jumpToTimestamp is called without trace context', () => {
     const panel = new AIPanel() as any;
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const result = panel.jumpToTimestamp(123n);
 
@@ -126,7 +126,7 @@ describe('AIPanel /goto navigation', () => {
 
   it('scrolls timeline window when jumpToTimestamp succeeds', () => {
     const panel = new AIPanel() as any;
-    const scrollTo = jest.fn();
+    const scrollTo = vi.fn();
     panel.trace = {
       scrollTo,
       traceInfo: {
@@ -146,7 +146,7 @@ describe('AIPanel /goto navigation', () => {
 
   it('returns failure when timestamp is outside trace range', () => {
     const panel = new AIPanel() as any;
-    const scrollTo = jest.fn();
+    const scrollTo = vi.fn();
     panel.trace = {
       scrollTo,
       traceInfo: {
@@ -164,9 +164,9 @@ describe('AIPanel /goto navigation', () => {
 
   it('reports failure message when goto navigation fails', async () => {
     const panel = new AIPanel() as any;
-    panel.generateId = jest.fn(() => 'msg-id');
-    panel.addMessage = jest.fn();
-    panel.jumpToTimestamp = jest.fn(() => ({ok: false, error: 'boom'}));
+    panel.generateId = vi.fn(() => 'msg-id');
+    panel.addMessage = vi.fn();
+    panel.jumpToTimestamp = vi.fn(() => ({ok: false, error: 'boom'}));
 
     await panel.handleGotoCommand('123ns');
 
@@ -180,9 +180,9 @@ describe('AIPanel /goto navigation', () => {
 
   it('reports success message when goto navigation succeeds', async () => {
     const panel = new AIPanel() as any;
-    panel.generateId = jest.fn(() => 'msg-id');
-    panel.addMessage = jest.fn();
-    panel.jumpToTimestamp = jest.fn(() => ({ok: true}));
+    panel.generateId = vi.fn(() => 'msg-id');
+    panel.addMessage = vi.fn();
+    panel.jumpToTimestamp = vi.fn(() => ({ok: true}));
 
     await panel.handleGotoCommand('456');
 
@@ -195,9 +195,9 @@ describe('AIPanel /goto navigation', () => {
 
   it('rejects invalid goto timestamp input', async () => {
     const panel = new AIPanel() as any;
-    panel.generateId = jest.fn(() => 'msg-id');
-    panel.addMessage = jest.fn();
-    panel.jumpToTimestamp = jest.fn();
+    panel.generateId = vi.fn(() => 'msg-id');
+    panel.addMessage = vi.fn();
+    panel.jumpToTimestamp = vi.fn();
 
     await panel.handleGotoCommand('abc');
 

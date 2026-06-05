@@ -16,7 +16,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {describe, it, expect, jest} from '@jest/globals';
+import {describe, it, expect, vi} from 'vitest';
 
 import {SqlResultTable, UserInteraction} from './sql_result_table';
 
@@ -92,8 +92,8 @@ describe('SqlResultTable unit handling', () => {
 
   it('emits ns timeRange for timestamp range click', () => {
     const table = new SqlResultTable() as any;
-    const trace = {scrollTo: jest.fn()} as any;
-    const onInteraction = jest.fn();
+    const trace = {scrollTo: vi.fn()} as any;
+    const onInteraction = vi.fn();
 
     table.timestampColumns = [{
       columnIndex: 0,
@@ -121,7 +121,7 @@ describe('SqlResultTable unit handling', () => {
       }
     );
 
-    vnode.attrs.onclick({stopPropagation: jest.fn()} as any);
+    vnode.attrs.onclick({stopPropagation: vi.fn()} as any);
 
     expect(trace.scrollTo).toHaveBeenCalledTimes(1);
     expect(onInteraction).toHaveBeenCalledTimes(1);
@@ -134,8 +134,8 @@ describe('SqlResultTable unit handling', () => {
 
   it('emits ns point range for timestamp click without duration', () => {
     const table = new SqlResultTable() as any;
-    const trace = {scrollTo: jest.fn()} as any;
-    const onInteraction = jest.fn();
+    const trace = {scrollTo: vi.fn()} as any;
+    const onInteraction = vi.fn();
 
     table.timestampColumns = [{
       columnIndex: 0,
@@ -159,7 +159,7 @@ describe('SqlResultTable unit handling', () => {
       }
     );
 
-    vnode.attrs.onclick({stopPropagation: jest.fn()} as any);
+    vnode.attrs.onclick({stopPropagation: vi.fn()} as any);
 
     expect(trace.scrollTo).toHaveBeenCalledTimes(1);
     expect(onInteraction).toHaveBeenCalledTimes(1);

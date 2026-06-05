@@ -33,8 +33,8 @@ function emptyRowsResult() {
 describe('GpuPlugin', () => {
   it('does not require the newer gpu table when loading traces', async () => {
     const engine = {
-      query: jest.fn(async (_sql: string) => emptyRowsResult()),
-      tryQuery: jest.fn(async (sql: string) => {
+      query: vi.fn(async (_sql: string) => emptyRowsResult()),
+      tryQuery: vi.fn(async (sql: string) => {
         if (sql.includes('sqlite_master') || sql.includes('pragma_table_info')) {
           return okResult(scalarResult(0));
         }
@@ -49,8 +49,8 @@ describe('GpuPlugin', () => {
     };
     const trace = {
       engine,
-      tracks: {registerTrack: jest.fn()},
-      plugins: {getPlugin: jest.fn()},
+      tracks: {registerTrack: vi.fn()},
+      plugins: {getPlugin: vi.fn()},
       defaultWorkspace: {},
     };
 

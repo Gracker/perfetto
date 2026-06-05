@@ -2,7 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {describe, expect, it} from '@jest/globals';
+import {describe, expect, it} from 'vitest';
 
 import {orderMessagesForDisplay} from './message_order';
 import type {Message} from './types';

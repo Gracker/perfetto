@@ -14,7 +14,7 @@
  *   - localStorage persistence: save on update, restore mode=tab
  */
 
-import {describe, it, expect, beforeEach} from '@jest/globals';
+import {describe, it, expect, beforeEach, vi} from 'vitest';
 
 import {
   clamp,
@@ -44,7 +44,7 @@ function resetModuleState(): void {
 }
 
 beforeEach(() => {
-  // jest-localstorage-mock provides localStorage but we still clear per test
+  // jsdom provides localStorage but we still clear per test.
   if (typeof localStorage !== 'undefined') {
     localStorage.clear();
   }
@@ -313,7 +313,7 @@ describe('updateFloatingState() subscribers', () => {
     });
     const unsubB = subscribeFloatingState(() => bCalls++);
     // Silence console.warn for the expected error
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     updateFloatingState({mode: 'floating'});
     expect(aCalls).toBe(1);
     expect(bCalls).toBe(1);

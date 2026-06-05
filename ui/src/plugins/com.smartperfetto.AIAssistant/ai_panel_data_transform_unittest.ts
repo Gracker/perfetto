@@ -8,7 +8,7 @@
 // Tests for the data transformation logic in AI Panel that handles
 // StepResult format from backend skill_data events.
 
-import {describe, it, expect} from '@jest/globals';
+import {describe, it, expect} from 'vitest';
 
 // =============================================================================
 // Test Helpers - These mirror the logic in ai_panel.ts

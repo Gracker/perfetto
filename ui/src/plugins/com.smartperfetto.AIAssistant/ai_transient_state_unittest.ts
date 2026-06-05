@@ -15,7 +15,7 @@
  *   - Snapshot hand-off pattern: old instance captures, new instance consumes
  */
 
-import {describe, it, expect, beforeEach} from '@jest/globals';
+import {describe, it, expect, beforeEach, vi} from 'vitest';
 
 import {
   TransientState,
@@ -99,7 +99,7 @@ describe('registerTransientSaver / unregisterTransientSaver', () => {
   });
 
   it('swallows saver errors and stores null', () => {
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     registerTransientSaver(() => {
       throw new Error('saver boom');
     });

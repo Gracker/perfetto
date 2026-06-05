@@ -543,6 +543,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           return '';
       }
     };
+    const compactId = (value: string) =>
+      value.length > 36 ? `${value.slice(0, 33)}...` : value;
     const chips: string[] = [];
     const kind = kindLabel(context.kind);
     if (kind) chips.push(kind);
@@ -552,8 +554,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       .filter(Boolean)
       .join(' · ');
     if (planPhase) chips.push(`阶段 ${planPhase}`);
+    if (context.planPhaseAttribution) {
+      chips.push(`阶段归因 ${context.planPhaseAttribution}`);
+    }
     if (typeof context.rowCount === 'number') {
       chips.push(`${context.rowCount.toLocaleString()} 行`);
+    }
+    if (context.sourceToolCallId) {
+      chips.push(`工具 ${compactId(context.sourceToolCallId)}`);
+    }
+    if (context.evidenceRefId) {
+      chips.push(`证据 ${compactId(context.evidenceRefId)}`);
     }
     if (context.source) chips.push(context.source);
 

@@ -1,11 +1,12 @@
 // Copyright (C) 2024 SmartPerfetto
 
-import {afterEach, beforeEach, describe, expect, it, jest} from '@jest/globals';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import type {MockedFunction} from 'vitest';
 
 import {BackendUploader} from './backend_uploader';
 
 let originalFetch: typeof fetch;
-let fetchMock: jest.MockedFunction<typeof fetch>;
+let fetchMock: MockedFunction<typeof fetch>;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -25,7 +26,7 @@ beforeEach(() => {
   sessionStorage.clear();
   sessionStorage.setItem('smartperfetto-window-id', 'window-upload');
   originalFetch = globalThis.fetch;
-  fetchMock = jest.fn<typeof fetch>();
+  fetchMock = vi.fn<typeof fetch>();
   globalThis.fetch = fetchMock;
 });
 

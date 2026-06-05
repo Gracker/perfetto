@@ -1,6 +1,6 @@
 // Copyright (C) 2024 SmartPerfetto
 
-import {beforeEach, describe, expect, it} from '@jest/globals';
+import {beforeEach, describe, expect, it} from 'vitest';
 
 import {
   buildSmartPerfettoStorageKey,

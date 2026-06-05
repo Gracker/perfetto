@@ -13,9 +13,10 @@
 // limitations under the License.
 
 import {HttpRpcEngine} from './http_rpc_engine';
+import type {MockedFunction} from 'vitest';
 
 let originalFetch: typeof fetch;
-let fetchMock: jest.MockedFunction<typeof fetch>;
+let fetchMock: MockedFunction<typeof fetch>;
 
 function okResponse(): Response {
   return {
@@ -60,7 +61,7 @@ function heartbeatBody(callIndex: number): unknown {
 describe('HttpRpcEngine target selection', () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch;
-    fetchMock = jest.fn() as jest.MockedFunction<typeof fetch>;
+    fetchMock = vi.fn() as MockedFunction<typeof fetch>;
     fetchMock.mockResolvedValue(okResponse());
     globalThis.fetch = fetchMock;
     setDocumentVisibility('visible');
@@ -196,7 +197,7 @@ describe('HttpRpcEngine target selection', () => {
 
   it('requests a page reload when a visible stale lease cannot be recovered', async () => {
     const recoveryEvents: unknown[] = [];
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const listener = (event: Event) => {
       recoveryEvents.push((event as CustomEvent).detail);
       event.preventDefault();
@@ -231,7 +232,7 @@ describe('HttpRpcEngine target selection', () => {
 
   it('does not reload hidden or offline pages for stale lease heartbeat failures', async () => {
     const recoveryEvents: unknown[] = [];
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const listener = (event: Event) => {
       recoveryEvents.push((event as CustomEvent).detail);
       event.preventDefault();
