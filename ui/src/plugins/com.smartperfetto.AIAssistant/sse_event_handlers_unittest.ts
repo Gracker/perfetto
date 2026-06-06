@@ -23,7 +23,7 @@
  * - Event type handling (progress, hypothesis_generated, round_start, etc.)
  * - State updates (status, progress message, findings accumulation)
  * - Error handling (malformed data, unknown events, recovery)
- * - Intervention event handling
+ * - Circuit breaker status handling
  * - Strategy selection events
  * - Terminal events (analysis_completed, analysis_cancelled, error)
  */
@@ -46,9 +46,7 @@ import {
   handleDataEvent,
   handleSkillErrorEvent,
   handleErrorEvent,
-  handleInterventionRequiredEvent,
-  handleInterventionResolvedEvent,
-  handleInterventionTimeoutEvent,
+  handleCircuitBreakerEvent,
   handleStrategySelectedEvent,
   handleStrategyFallbackEvent,
   handleFocusUpdatedEvent,
@@ -57,7 +55,7 @@ import {
   handleConversationStepEvent,
 } from './sse_event_handlers';
 
-import {Message, InterventionState, createStreamingAnswerState, createStreamingFlowState} from './types';
+import {Message, createStreamingAnswerState, createStreamingFlowState} from './types';
 import {getAISharedState, resetAISharedState} from './ai_shared_state';
 
 // =============================================================================
@@ -70,29 +68,18 @@ import {getAISharedState, resetAISharedState} from './ai_shared_state';
 function createMockContext(overrides?: Partial<SSEHandlerContext>): SSEHandlerContext & {
   messages: Message[];
   flowMessages: Message[];
-  interventionState: InterventionState;
 } {
   const messages: Message[] = [];
   const flowMessages: Message[] = [];
   let idCounter = 0;
   let completionHandled = false;
-  let interventionState: InterventionState = {
-    isActive: false,
-    intervention: null,
-    selectedOptionId: null,
-    customInput: '',
-    isSending: false,
-    timeoutRemaining: null,
-  };
 
   const ctxRef: SSEHandlerContext & {
     messages: Message[];
     flowMessages: Message[];
-    interventionState: InterventionState;
   } = {
     messages,
     flowMessages,
-    interventionState,
     addMessage: (msg: Message) => {
       if (msg.flowTag === 'streaming_flow') {
         flowMessages.push(msg);
@@ -133,12 +120,6 @@ function createMockContext(overrides?: Partial<SSEHandlerContext>): SSEHandlerCo
     backendUrl: 'http://localhost:3000',
     streamingFlow: createStreamingFlowState(),
     streamingAnswer: createStreamingAnswerState(),
-    setInterventionState: (state: Partial<InterventionState>) => {
-      interventionState = {...interventionState, ...state};
-      // Keep exposed test field in sync with latest intervention state.
-      (ctxRef as any).interventionState = interventionState;
-    },
-    getInterventionState: () => interventionState,
     ...overrides,
   };
 
@@ -1220,232 +1201,31 @@ describe('handleSkillErrorEvent', () => {
 });
 
 // =============================================================================
-// Intervention Event Tests
+// Circuit Breaker Event Tests
 // =============================================================================
 
-describe('handleInterventionRequiredEvent', () => {
+describe('handleCircuitBreakerEvent', () => {
   let ctx: ReturnType<typeof createMockContext>;
 
   beforeEach(() => {
     ctx = createMockContext();
   });
 
-  it('should set intervention state when required', () => {
+  it('adds a non-blocking status message', () => {
     const data = {
       data: {
-        interventionId: 'int-123',
-        type: 'low_confidence',
-        options: [
-          {id: 'opt1', label: 'Continue', action: 'continue', recommended: true},
-          {id: 'opt2', label: 'Abort', action: 'abort'},
-        ],
-        context: {
-          confidence: 0.3,
-          elapsedTimeMs: 5000,
-          roundsCompleted: 2,
-          progressSummary: 'Found 3 potential issues',
-          triggerReason: 'Low confidence in findings',
-          findingsCount: 3,
-        },
-        timeout: 60000,
+        agentId: 'hypothesis_loop',
+        reason: 'Iteration budget reached',
       },
     };
 
-    handleInterventionRequiredEvent(data, ctx);
-
-    expect(ctx.interventionState.isActive).toBe(true);
-    expect(ctx.interventionState.intervention).not.toBe(null);
-    expect(ctx.interventionState.intervention!.interventionId).toBe('int-123');
-    expect(ctx.interventionState.intervention!.type).toBe('low_confidence');
-    expect(ctx.interventionState.intervention!.options).toHaveLength(2);
-    expect(ctx.interventionState.timeoutRemaining).toBe(60000);
-  });
-
-  it('should add system message for intervention', () => {
-    const data = {
-      data: {
-        interventionId: 'int-456',
-        type: 'ambiguity',
-        options: [],
-        context: {
-          triggerReason: 'Multiple possible causes detected',
-        },
-        timeout: 30000,
-      },
-    };
-
-    handleInterventionRequiredEvent(data, ctx);
+    handleCircuitBreakerEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].role).toBe('system');
-    expect(ctx.messages[0].content).toContain('需要您的决定');
-  });
-
-  it('should use correct emoji for different intervention types', () => {
-    const types = ['low_confidence', 'ambiguity', 'timeout', 'circuit_breaker', 'agent_request'];
-    const emojis = ['🤔', '🔀', '⏰', '⚠️', '❓'];
-
-    types.forEach((type, index) => {
-      const testCtx = createMockContext();
-      const data = {
-        data: {
-          interventionId: `int-${index}`,
-          type,
-          options: [],
-          context: {},
-          timeout: 30000,
-        },
-      };
-
-      handleInterventionRequiredEvent(data, testCtx);
-
-      expect(testCtx.messages[0].content).toContain(emojis[index]);
-    });
-  });
-
-  it('should handle missing setInterventionState gracefully', () => {
-    const ctxWithoutIntervention = createMockContext();
-    ctxWithoutIntervention.setInterventionState = undefined;
-
-    const data = {
-      data: {
-        interventionId: 'int-789',
-        type: 'low_confidence',
-        options: [],
-        context: {},
-        timeout: 30000,
-      },
-    };
-
-    // Should not throw
-    const result = handleInterventionRequiredEvent(data, ctxWithoutIntervention);
-    expect(result).toEqual({});
-  });
-
-  it('should sanitize malformed intervention type and options', () => {
-    const data = {
-      data: {
-        interventionId: 'int-sanitize',
-        type: 'unknown_type',
-        options: [
-          {id: 'opt-1', label: 'Keep going', action: 'not_valid'},
-          {label: 'Abort now', action: 'abort', recommended: true},
-          'invalid-option',
-        ],
-        context: {
-          triggerReason: 'Need user decision',
-        },
-        timeout: 15000,
-      },
-    };
-
-    expect(() => handleInterventionRequiredEvent(data, ctx)).not.toThrow();
-    expect(ctx.interventionState.intervention).not.toBe(null);
-    const intervention = ctx.interventionState.intervention!;
-    expect(intervention.type).toBe('agent_request');
-    expect(intervention.options).toHaveLength(3);
-    expect(intervention.options[0]).toEqual(
-      expect.objectContaining({id: 'opt-1', action: 'continue'})
-    );
-    expect(intervention.options[1]).toEqual(
-      expect.objectContaining({action: 'abort', recommended: true})
-    );
-    expect(intervention.options[2]).toEqual(
-      expect.objectContaining({id: 'option_3', label: '选项 3'})
-    );
-  });
-});
-
-describe('handleInterventionResolvedEvent', () => {
-  let ctx: ReturnType<typeof createMockContext>;
-
-  beforeEach(() => {
-    ctx = createMockContext();
-    // Set up active intervention
-    ctx.interventionState = {
-      isActive: true,
-      intervention: {
-        interventionId: 'int-123',
-        type: 'low_confidence',
-        options: [],
-        context: {
-          confidence: 0.3,
-          elapsedTimeMs: 5000,
-          roundsCompleted: 2,
-          progressSummary: '',
-          triggerReason: '',
-          findingsCount: 0,
-        },
-        timeout: 60000,
-      },
-      selectedOptionId: null,
-      customInput: '',
-      isSending: false,
-      timeoutRemaining: 50000,
-    };
-  });
-
-  it('should clear intervention state', () => {
-    const data = {
-      data: {
-        action: 'continue',
-      },
-    };
-
-    handleInterventionResolvedEvent(data, ctx);
-
-    expect(ctx.interventionState.isActive).toBe(false);
-    expect(ctx.interventionState.intervention).toBe(null);
-  });
-
-  it('should add confirmation message with correct emoji', () => {
-    const actions = ['continue', 'focus', 'abort', 'other'];
-    const emojis = ['▶️', '🎯', '🛑', '✅'];
-
-    actions.forEach((action, index) => {
-      const testCtx = createMockContext();
-      const data = {data: {action}};
-
-      handleInterventionResolvedEvent(data, testCtx);
-
-      expect(testCtx.messages[0].content).toContain(emojis[index]);
-      expect(testCtx.messages[0].content).toContain(action);
-    });
-  });
-});
-
-describe('handleInterventionTimeoutEvent', () => {
-  let ctx: ReturnType<typeof createMockContext>;
-
-  beforeEach(() => {
-    ctx = createMockContext();
-  });
-
-  it('should clear intervention state on timeout', () => {
-    ctx.interventionState.isActive = true;
-
-    const data = {
-      data: {
-        defaultAction: 'abort',
-      },
-    };
-
-    handleInterventionTimeoutEvent(data, ctx);
-
-    expect(ctx.interventionState.isActive).toBe(false);
-  });
-
-  it('should add timeout message', () => {
-    const data = {
-      data: {
-        defaultAction: 'continue',
-      },
-    };
-
-    handleInterventionTimeoutEvent(data, ctx);
-
-    expect(ctx.messages[0].content).toContain('响应超时');
-    expect(ctx.messages[0].content).toContain('continue');
+    expect(ctx.messages[0].content).toContain('分析保护机制触发');
+    expect(ctx.messages[0].content).toContain('Iteration budget reached');
+    expect(ctx.flowMessages[0].content).toContain('保护机制触发');
   });
 });
 
@@ -3679,18 +3459,15 @@ describe('handleSSEEvent', () => {
     expect(ctx.flowMessages[0].content).toContain('Starting stage 1');
   });
 
-  it('should route intervention events correctly', () => {
-    handleSSEEvent('intervention_required', {
+  it('should route circuit breaker events correctly', () => {
+    handleSSEEvent('circuit_breaker', {
       data: {
-        interventionId: 'test',
-        type: 'low_confidence',
-        options: [],
-        context: {},
-        timeout: 30000,
+        agentId: 'strategy_executor',
+        reason: 'Too many failures',
       },
     }, ctx);
 
-    expect(ctx.interventionState.isActive).toBe(true);
+    expect(ctx.messages[0].content).toContain('Too many failures');
   });
 
   it('should skip finding events', () => {

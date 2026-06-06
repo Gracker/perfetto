@@ -62,7 +62,6 @@ import type {
   AISettings,
   AISession,
   ServerStatus,
-  InterventionState,
   StreamingFlowState,
   SelectionContext,
   SelectionTrackInfo,
@@ -97,11 +96,6 @@ import {
   PRESET_QUESTIONS,
   COMPARISON_PRESET_QUESTIONS,
 } from './types';
-// Agent-Driven Architecture v2.0 - Intervention Panel
-import {
-  InterventionPanel,
-  DEFAULT_INTERVENTION_STATE,
-} from './intervention_panel';
 import {
   decodeBase64Unicode,
   encodeBase64Unicode,
@@ -371,8 +365,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     detectedScenes: [],
     scenesLoading: false,
     scenesError: null,
-    // Agent-Driven Architecture v2.0 - Intervention State
-    interventionState: {...DEFAULT_INTERVENTION_STATE},
     // Progressive streaming transcript state
     streamingFlow: createStreamingFlowState(),
     // Incremental final answer stream state
@@ -1553,7 +1545,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.activeResultWindowStates = [];
     this.resultVisibilityUpdatingIds.clear();
     this.clearAgentObservability();
-    this.resetInterventionState();
 
     // 如果有有效的 trace 指纹，创建新 session
     if (this.state.currentTraceFingerprint) {
@@ -1632,7 +1623,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.transientSaverRef = null;
     }
     this.cancelSSEConnection();
-    this.resetInterventionState();
     // Clear any pending conversation flush timer — otherwise its delayed
     // callback fires on the torn-down instance (Codex MEDIUM 2).
     if (this.state.streamingFlow.conversationFlushTimer !== undefined) {
@@ -2829,30 +2819,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         );
                       });
                     })(),
-
-                    // Intervention Panel (Agent-Driven Architecture v2.0)
-                    this.state.interventionState.isActive &&
-                      this.state.interventionState.intervention
-                      ? m(InterventionPanel, {
-                          state: this.state.interventionState,
-                          sessionId: this.state.agentSessionId,
-                          backendUrl: this.state.settings.backendUrl,
-                          backendApiKey: this.state.settings.backendApiKey,
-                          onStateChange: (
-                            newState: Partial<InterventionState>,
-                          ) => {
-                            this.state.interventionState = {
-                              ...this.state.interventionState,
-                              ...newState,
-                            };
-                            m.redraw();
-                          },
-                          onComplete: () => {
-                            m.redraw();
-                          },
-                        })
-                      : null,
-
                     // Loading Indicator with phase context
                     this.state.isLoading
                       ? m('div.ai-message.ai-message-assistant', [
@@ -3788,7 +3754,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (!session) return false;
 
     this.cancelSSEConnection();
-    this.resetInterventionState();
 
     this.state.currentSessionId = session.sessionId;
     this.state.currentTraceFingerprint = session.traceFingerprint;
@@ -4431,14 +4396,6 @@ Click ⚙️ to configure backend connection.`;
       backendUrl: this.state.settings.backendUrl,
       streamingFlow: this.state.streamingFlow,
       streamingAnswer: this.state.streamingAnswer,
-      // Agent-Driven Architecture v2.0 - Intervention support
-      setInterventionState: (state: Partial<InterventionState>) => {
-        this.state.interventionState = {
-          ...this.state.interventionState,
-          ...state,
-        };
-      },
-      getInterventionState: () => this.state.interventionState,
       // Track overlay — create timeline tracks when overlay-eligible data arrives
       onOverlayDataReceived: (overlayId, columns, rows) => {
         if (this.trace) {
@@ -7066,10 +7023,6 @@ Click ⚙️ to configure backend connection.`;
     m.redraw();
   }
 
-  private resetInterventionState(): void {
-    this.state.interventionState = {...DEFAULT_INTERVENTION_STATE};
-  }
-
   /**
    * Listen to Agent SSE events from MasterOrchestrator
    * With automatic reconnection and exponential backoff.
@@ -8893,7 +8846,6 @@ Click ⚙️ to configure backend connection.`;
         {
           onclick: () => {
             this.cancelSSEConnection();
-            this.resetInterventionState();
             // 保存当前 session 再创建新的
             this.saveCurrentSession();
             this.createNewSession();
@@ -8978,7 +8930,6 @@ Click ⚙️ to configure backend connection.`;
   private async clearChat() {
     this.cancelSSEConnection();
     this.setLoadingState(false);
-    this.resetInterventionState();
 
     // Persist current conversation before wiping
     this.flushSessionSave();

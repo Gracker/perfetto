@@ -35,8 +35,6 @@ import {
   DataSourceContext,
   Message,
   SmartScenePreviewPayload,
-  InterventionPoint,
-  InterventionState,
   StreamingAnswerState,
   StreamingFlowState,
 } from './types';
@@ -102,24 +100,6 @@ type DegradedPayload = {
 type RawSSEEvent = Record<string, unknown> | null | undefined;
 type SqlResultData = NonNullable<Message['sqlResult']>;
 type SqlColumnDefinition = NonNullable<SqlResultData['columnDefinitions']>[number];
-type InterventionOptionValue = InterventionPoint['options'][number];
-
-const INTERVENTION_TYPES: ReadonlyArray<InterventionPoint['type']> = [
-  'low_confidence',
-  'ambiguity',
-  'timeout',
-  'agent_request',
-  'circuit_breaker',
-  'validation_required',
-];
-
-const INTERVENTION_ACTIONS: ReadonlyArray<InterventionOptionValue['action']> = [
-  'continue',
-  'focus',
-  'abort',
-  'custom',
-  'select_option',
-];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -393,42 +373,6 @@ function readExpandableData(value: unknown): SqlResultData['expandableData'] | u
   return entries.length > 0 ? entries : undefined;
 }
 
-function readInterventionType(value: unknown): InterventionPoint['type'] {
-  if (typeof value === 'string') {
-    for (const candidate of INTERVENTION_TYPES) {
-      if (candidate === value) return candidate;
-    }
-  }
-  return 'agent_request';
-}
-
-function readInterventionAction(value: unknown): InterventionOptionValue['action'] {
-  if (typeof value === 'string') {
-    for (const candidate of INTERVENTION_ACTIONS) {
-      if (candidate === value) return candidate;
-    }
-  }
-  return 'continue';
-}
-
-function readInterventionOptions(value: unknown): InterventionPoint['options'] {
-  if (!Array.isArray(value)) return [];
-
-  return value
-    .map((entry, index) => {
-      const option = asRecord(entry);
-      const id = readStringField(option, 'id') || `option_${index + 1}`;
-      const label = readStringField(option, 'label') || `选项 ${index + 1}`;
-      return {
-        id,
-        label,
-        description: readStringField(option, 'description', label),
-        action: readInterventionAction(option.action),
-        recommended: readBooleanField(option, 'recommended', false) || undefined,
-      };
-    });
-}
-
 /**
  * Context object passed to SSE event handlers.
  * Contains references to state and methods needed for event processing.
@@ -469,12 +413,6 @@ export interface SSEHandlerContext {
   streamingFlow: StreamingFlowState;
   /** Incremental final answer stream state */
   streamingAnswer: StreamingAnswerState;
-
-  // Agent-Driven Architecture v2.0 - Intervention support
-  /** Set intervention state */
-  setInterventionState?: (state: Partial<InterventionState>) => void;
-  /** Get current intervention state */
-  getInterventionState?: () => InterventionState;
 
   // Track overlay - callback when overlay-eligible data arrives
   /** Called with columns+rows from skill steps that have timeline overlay configs */
@@ -4548,154 +4486,29 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
 }
 
 // =============================================================================
-// Agent-Driven Architecture v2.0 - Intervention Event Handlers
+// Agent-Driven Architecture v2.0 - Circuit Breaker Event Handler
 // =============================================================================
 
 /**
- * Process intervention_required event - user input needed.
- * Shows the intervention panel with options for the user.
+ * Process circuit_breaker event as a non-blocking status update.
  */
-export function handleInterventionRequiredEvent(
+export function handleCircuitBreakerEvent(
   data: RawSSEEvent,
   ctx: SSEHandlerContext
 ): SSEHandlerResult {
-  const interventionData = eventPayload(data);
-  if (DEBUG_SSE) console.log('[SSEHandlers] intervention_required received:', interventionData);
+  const breakerData = eventPayload(data);
+  if (DEBUG_SSE) console.log('[SSEHandlers] circuit_breaker received:', breakerData);
 
-  if (!ctx.setInterventionState) {
-    console.warn('[SSEHandlers] Intervention state handler not available');
-    return {};
-  }
+  const reason = readStringField(breakerData, 'reason', '分析保护机制已触发');
+  const agentId = readStringField(breakerData, 'agentId', 'agent');
 
-  if (!readStringField(interventionData, 'interventionId')) {
-    console.warn('[SSEHandlers] Invalid intervention_required event:', data);
-    return {};
-  }
-
-  const rawContext = asRecord(interventionData.context);
-
-  // Build intervention point
-  const intervention: InterventionPoint = {
-    interventionId: readStringField(interventionData, 'interventionId'),
-    type: readInterventionType(interventionData.type),
-    options: readInterventionOptions(interventionData.options),
-    context: {
-      confidence: readNumberField(rawContext, 'confidence', 0),
-      elapsedTimeMs: readNumberField(rawContext, 'elapsedTimeMs', 0),
-      roundsCompleted: readNumberField(rawContext, 'roundsCompleted', 0),
-      progressSummary: readStringField(rawContext, 'progressSummary', ''),
-      triggerReason: readStringField(rawContext, 'triggerReason', ''),
-      findingsCount: readNumberField(rawContext, 'findingsCount', 0),
-    },
-    timeout: readNumberField(interventionData, 'timeout', 60000),
-  };
-
-  // Update intervention state to show panel
-  ctx.setInterventionState({
-    isActive: true,
-    intervention,
-    selectedOptionId: null,
-    customInput: '',
-    isSending: false,
-    timeoutRemaining: intervention.timeout,
-  });
-
-  // Add a message to show intervention is required
-  pushStreamingPhase(ctx, '等待用户决策');
-
-  const typeEmoji = intervention.type === 'low_confidence' ? '🤔' :
-                    intervention.type === 'ambiguity' ? '🔀' :
-                    intervention.type === 'timeout' ? '⏰' :
-                    intervention.type === 'circuit_breaker' ? '⚠️' : '❓';
-
+  pushStreamingPhase(ctx, `保护机制触发: ${reason}`);
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'system',
-    content: `${typeEmoji} **需要您的决定**\n\n${intervention.context.triggerReason || '分析需要用户输入才能继续。'}\n\n_请在下方选择操作..._`,
-    timestamp: Date.now(),
-  });
-
-  return {};
-}
-
-/**
- * Process intervention_resolved event - user responded to intervention.
- */
-export function handleInterventionResolvedEvent(
-  data: RawSSEEvent,
-  ctx: SSEHandlerContext
-): SSEHandlerResult {
-  const resolvedData = eventPayload(data);
-  if (DEBUG_SSE) console.log('[SSEHandlers] intervention_resolved received:', resolvedData);
-
-  if (!ctx.setInterventionState) {
-    return {};
-  }
-
-  if (Object.keys(resolvedData).length === 0) return {};
-
-  const action = readStringField(resolvedData, 'action', 'continue');
-
-  // Clear intervention state
-  ctx.setInterventionState({
-    isActive: false,
-    intervention: null,
-    selectedOptionId: null,
-    customInput: '',
-    isSending: false,
-    timeoutRemaining: null,
-  });
-
-  // Add confirmation message
-  const actionEmoji = action === 'continue' ? '▶️' :
-                      action === 'focus' ? '🎯' :
-                      action === 'abort' ? '🛑' : '✅';
-  pushStreamingPhase(ctx, `用户决策: ${action}`);
-
-  ctx.addMessage({
-    id: ctx.generateId(),
-    role: 'assistant',
-    content: `${actionEmoji} 已收到您的决定: **${action}**\n\n_分析继续中..._`,
+    content: `⚠️ **分析保护机制触发**\n\n${reason}\n\n_来源: ${agentId}_`,
     timestamp: Date.now(),
     flowTag: 'progress_note',
-  });
-
-  return {};
-}
-
-/**
- * Process intervention_timeout event - user didn't respond in time.
- */
-export function handleInterventionTimeoutEvent(
-  data: RawSSEEvent,
-  ctx: SSEHandlerContext
-): SSEHandlerResult {
-  const timeoutData = eventPayload(data);
-  if (DEBUG_SSE) console.log('[SSEHandlers] intervention_timeout received:', timeoutData);
-
-  if (!ctx.setInterventionState) {
-    return {};
-  }
-
-  const defaultAction = readStringField(timeoutData, 'defaultAction', 'abort');
-
-  // Clear intervention state
-  ctx.setInterventionState({
-    isActive: false,
-    intervention: null,
-    selectedOptionId: null,
-    customInput: '',
-    isSending: false,
-    timeoutRemaining: null,
-  });
-
-  // Add timeout message
-  pushStreamingPhase(ctx, `用户响应超时，执行默认动作 ${defaultAction}`);
-  ctx.addMessage({
-    id: ctx.generateId(),
-    role: 'system',
-    content: `⏰ **响应超时**\n\n已自动执行默认操作: **${defaultAction}**`,
-    timestamp: Date.now(),
   });
 
   return {};
@@ -5355,15 +5168,8 @@ function handleSSEEventInner(
       return {};
     }
 
-    // Agent-Driven Architecture v2.0 - Intervention Events
-    case 'intervention_required':
-      return handleInterventionRequiredEvent(eventData, ctx);
-
-    case 'intervention_resolved':
-      return handleInterventionResolvedEvent(eventData, ctx);
-
-    case 'intervention_timeout':
-      return handleInterventionTimeoutEvent(eventData, ctx);
+    case 'circuit_breaker':
+      return handleCircuitBreakerEvent(eventData, ctx);
 
     // Agent-Driven Architecture v2.0 - Strategy Selection Events
     case 'strategy_selected':

@@ -779,8 +779,6 @@ export interface AIPanelState {
   detectedScenes: DetectedScene[]; // Detected scenes from quick detection
   scenesLoading: boolean; // Loading state for scene detection
   scenesError: string | null; // Error message from scene detection
-  // Intervention state (Agent-Driven Architecture v2.0)
-  interventionState: InterventionState;
   streamingFlow: StreamingFlowState;
   streamingAnswer: StreamingAnswerState;
   // Comparison mode state
@@ -1093,81 +1091,4 @@ export interface SelectionTrackInfo {
   pid?: number;
   cpu?: number;
   kind?: string;
-}
-
-// =============================================================================
-// Agent-Driven Architecture v2.0 - Intervention Types
-// =============================================================================
-
-/**
- * Types of intervention triggers from the backend.
- */
-export type InterventionType =
-  | 'low_confidence'
-  | 'ambiguity'
-  | 'timeout'
-  | 'agent_request'
-  | 'circuit_breaker'
-  | 'validation_required';
-
-/**
- * User actions for intervention responses.
- */
-export type InterventionAction =
-  | 'continue'
-  | 'focus'
-  | 'abort'
-  | 'custom'
-  | 'select_option';
-
-/**
- * An option presented to the user during intervention.
- */
-export interface InterventionOption {
-  id: string;
-  label: string;
-  description: string;
-  action: InterventionAction;
-  recommended?: boolean;
-}
-
-/**
- * Context provided with an intervention request.
- */
-export interface InterventionContext {
-  confidence: number;
-  elapsedTimeMs: number;
-  roundsCompleted: number;
-  progressSummary: string;
-  triggerReason: string;
-  findingsCount: number;
-}
-
-/**
- * An intervention point requiring user input.
- */
-export interface InterventionPoint {
-  interventionId: string;
-  type: InterventionType;
-  options: InterventionOption[];
-  context: InterventionContext;
-  timeout: number;
-}
-
-/**
- * State for intervention panel.
- */
-export interface InterventionState {
-  /** Whether an intervention is currently active */
-  isActive: boolean;
-  /** Current intervention data */
-  intervention: InterventionPoint | null;
-  /** Selected option ID (before confirmation) */
-  selectedOptionId: string | null;
-  /** Custom input text (for 'custom' action) */
-  customInput: string;
-  /** Whether a response is being sent */
-  isSending: boolean;
-  /** Timeout remaining (ms) */
-  timeoutRemaining: number | null;
 }
