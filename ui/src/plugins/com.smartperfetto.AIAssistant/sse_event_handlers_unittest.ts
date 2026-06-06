@@ -25,7 +25,7 @@
  * - Error handling (malformed data, unknown events, recovery)
  * - Intervention event handling
  * - Strategy selection events
- * - Terminal events (analysis_completed, error)
+ * - Terminal events (analysis_completed, analysis_cancelled, error)
  */
 
 import {describe, it, expect, beforeEach} from 'vitest';
@@ -3745,6 +3745,23 @@ describe('handleSSEEvent', () => {
 
     expect(getAISharedState().status).toBe('quota_exceeded');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
+  });
+
+  it('routes analysis_cancelled as a non-error terminal event', () => {
+    handleSSEEvent('answer_token', {data: {token: 'Partial answer'}}, ctx);
+
+    const result = handleSSEEvent('analysis_cancelled', {
+      data: {
+        reason: 'Analysis cancelled by user',
+        terminalRunStatus: 'cancelled',
+      },
+    }, ctx);
+
+    expect(result.isTerminal).toBe(true);
+    expect(result.stopLoading).toBe(true);
+    expect(getAISharedState().status).toBe('cancelled');
+    expect(getAISharedState().lastAnalysisTime).not.toBeNull();
+    expect(ctx.messages.some((message) => message.content.includes('Analysis cancelled by user'))).toBe(true);
   });
 
   it('preserves structured smart scene preview payload on analysis_completed messages', () => {

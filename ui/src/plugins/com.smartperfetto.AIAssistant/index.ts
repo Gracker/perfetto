@@ -158,6 +158,7 @@ export default class implements PerfettoPlugin {
             : 'AI: Done',
           partial: 'AI: Partial',
           quota_exceeded: 'AI: Quota',
+          cancelled: 'AI: Cancelled',
           error: 'AI: Error',
         };
         const intents: Record<string, Intent> = {
@@ -167,6 +168,7 @@ export default class implements PerfettoPlugin {
           completed: state.issueCount > 0 ? Intent.Warning : Intent.Success,
           partial: Intent.Warning,
           quota_exceeded: Intent.Warning,
+          cancelled: Intent.Warning,
           error: Intent.Danger,
         };
         return {
@@ -188,6 +190,11 @@ export default class implements PerfettoPlugin {
         if (state.status === 'partial') {
           return m('div', {style: 'padding: 8px; font-size: 12px; color: #b06000'},
             'Analysis completed with a partial result. Open the assistant for details.',
+          );
+        }
+        if (state.status === 'cancelled') {
+          return m('div', {style: 'padding: 8px; font-size: 12px; color: #5f6368'},
+            'Analysis cancelled. Open the assistant for details.',
           );
         }
         if (state.findings.length === 0) {

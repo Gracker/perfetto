@@ -27,7 +27,7 @@
  * - sql_generated/sql_executed: SQL query lifecycle
  * - skill_section/skill_layered_result: Skill execution results
  * - hypothesis_generated/round_start: Agent-driven analysis
- * - analysis_completed/degraded/error: Terminal events and degraded-result notices
+ * - analysis_completed/analysis_cancelled/degraded/error: Terminal events and degraded-result notices
  */
 
 import {
@@ -83,7 +83,7 @@ type AnalysisCompletedPayload = {
   confidence?: number;
   rounds?: number;
   reportError?: string;
-  terminalRunStatus?: 'completed' | 'quota_exceeded';
+  terminalRunStatus?: 'completed' | 'cancelled' | 'quota_exceeded';
   partial?: boolean;
   terminationReason?: string;
   terminationMessage?: string;
@@ -197,7 +197,7 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   if (terminationMessage) payload.terminationMessage = terminationMessage;
 
   const terminalRunStatus = readStringField(source, 'terminalRunStatus');
-  if (terminalRunStatus === 'completed' || terminalRunStatus === 'quota_exceeded') {
+  if (terminalRunStatus === 'completed' || terminalRunStatus === 'cancelled' || terminalRunStatus === 'quota_exceeded') {
     payload.terminalRunStatus = terminalRunStatus;
   }
 
@@ -3951,6 +3951,38 @@ export function handleAnalysisCompletedEvent(
   return { isTerminal: true, stopLoading: true };
 }
 
+export function handleAnalysisCancelledEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext,
+): SSEHandlerResult {
+  const eventRecord = asRecord(data);
+  const payload = asRecord(eventRecord.data ?? eventRecord);
+  const reason = readStringField(payload, 'reason') || readStringField(eventRecord, 'reason');
+
+  pushStreamingOutput(ctx, '分析已取消');
+  completeStreamingFlow(ctx);
+  if (ctx.streamingAnswer.status === 'streaming') {
+    completeStreamingAnswer(ctx);
+  }
+
+  const message = reason ? `分析已取消：${reason}` : '分析已取消。';
+  const lastMessage = ctx.getMessages()[ctx.getMessages().length - 1];
+  if (
+    !lastMessage ||
+    lastMessage.role !== 'assistant' ||
+    lastMessage.content !== message
+  ) {
+    ctx.addMessage({
+      id: ctx.generateId(),
+      role: 'assistant',
+      content: message,
+      timestamp: Date.now(),
+    });
+  }
+
+  return { isTerminal: true, stopLoading: true };
+}
+
 export function handleDegradedEvent(
   data: RawSSEEvent,
   ctx: SSEHandlerContext,
@@ -5071,6 +5103,12 @@ export function handleSSEEvent(
   }
   if (eventType === 'error' || eventType === 'skill_error') {
     updateAISharedState({status: 'error'});
+  } else if (eventType === 'analysis_cancelled') {
+    updateAISharedState({
+      status: 'cancelled',
+      currentPhase: '',
+      lastAnalysisTime: Date.now(),
+    });
   } else if (eventType === 'analysis_completed') {
     const payload = toAnalysisCompletedPayload(eventData.data);
     updateAISharedState({
@@ -5124,6 +5162,9 @@ function handleSSEEventInner(
 
     case 'analysis_completed':
       return handleAnalysisCompletedEvent(eventData, ctx);
+
+    case 'analysis_cancelled':
+      return handleAnalysisCancelledEvent(eventData, ctx);
 
     case 'degraded':
       return handleDegradedEvent(eventData, ctx);

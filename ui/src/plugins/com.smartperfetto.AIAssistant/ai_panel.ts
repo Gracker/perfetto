@@ -7239,9 +7239,10 @@ Click ⚙️ to configure backend connection.`;
                     // Check for terminal events (no need to reconnect after these)
                     // 'conclusion' from agentv3 is near-terminal (answer done) but
                     // 'analysis_completed' follows with reportUrl after HTML report
-                    // generation. Only close on analysis_completed/error/end.
+                    // generation. Only close on analysis_completed/analysis_cancelled/error/end.
                     if (
                       eventType === 'analysis_completed' ||
+                      eventType === 'analysis_cancelled' ||
                       eventType === 'error' ||
                       eventType === 'end'
                     ) {
@@ -7349,7 +7350,7 @@ Click ⚙️ to configure backend connection.`;
       if (!res.ok) return false;
       const body = await res.json();
       const status = body.status || body.state;
-      if (status === 'completed' || status === 'quota_exceeded' || status === 'failed') {
+      if (status === 'completed' || status === 'quota_exceeded' || status === 'cancelled' || status === 'failed') {
         if (DEBUG_AI_PANEL)
           console.log(
             '[AIPanel] Session already',
@@ -7362,6 +7363,8 @@ Click ⚙️ to configure backend connection.`;
           status:
             status === 'failed'
               ? 'error'
+              : status === 'cancelled'
+                ? 'cancelled'
               : status === 'quota_exceeded'
                 ? 'quota_exceeded'
                 : body.result?.partial === true
@@ -7383,6 +7386,15 @@ Click ⚙️ to configure backend connection.`;
             id: this.generateId(),
             role: 'assistant',
             content: `**Analysis failed** while reconnecting. Please try again.`,
+            timestamp: Date.now(),
+          });
+        } else if (status === 'cancelled') {
+          this.handleSSEEvent('analysis_cancelled', {
+            type: 'analysis_cancelled',
+            data: {
+              reason: body.error || 'Analysis cancelled while reconnecting',
+              terminalRunStatus: 'cancelled',
+            },
             timestamp: Date.now(),
           });
         } else if (body.result && typeof body.result === 'object') {
