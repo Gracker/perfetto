@@ -1075,11 +1075,13 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       label: string,
       key: keyof ProviderTuning,
       placeholder: string,
+      attrs: Record<string, unknown> = {},
     ) =>
       m('div', {style: s.formField}, [
         m('label', {style: s.formLabel}, label),
         m('input[type=number]', {
           style: s.formInput,
+          ...attrs,
           value: tuning[key] ?? '',
           oninput: (e: Event) => {
             const val = (e.target as HTMLInputElement).value;
@@ -1122,7 +1124,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       'div',
       {style: {paddingLeft: '12px', borderLeft: `2px solid ${t.border}`}},
       [
-        numField('Max Turns', 'maxTurns', '30'),
+        numField('Max Turns', 'maxTurns', '100', {min: 2, step: 1}),
         m('div', {style: s.formField}, [
           m('label', {style: s.formLabel}, 'Effort Level'),
           m(
