@@ -3690,6 +3690,47 @@ tr.detail-row {
   }
 }
 
+.ai-quick-run-receipt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-quick-run-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 999px;
+  background: var(--chat-bg-secondary);
+  color: var(--chat-text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+
+  &.ok {
+    border-color: var(--chat-success);
+    color: var(--chat-success);
+  }
+
+  &.warn {
+    border-color: var(--chat-warning);
+    color: var(--chat-warning);
+  }
+
+  &.bad {
+    border-color: var(--chat-error);
+    color: var(--chat-error);
+  }
+
+  &.muted {
+    opacity: 0.72;
+  }
+}
+
 // ----------------------------------------------------------------------------
 // Clickable Timestamp Styles
 // ----------------------------------------------------------------------------

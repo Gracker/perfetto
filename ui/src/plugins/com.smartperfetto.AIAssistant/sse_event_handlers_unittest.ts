@@ -716,6 +716,46 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
   });
 
+  it('attaches quick run receipt metadata to the final assistant message', () => {
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: 'Selected slice lasted 12 ms.',
+        quickRun: {
+          requestedMode: 'fast',
+          resolvedMode: 'quick',
+          profile: 'extended',
+          targetTurns: 5,
+          hardCapTurns: 50,
+          actualTurns: 7,
+          elapsedMs: 1234,
+          enforcement: 'turn_cap',
+          stopReason: 'extended_answered',
+          evidence: {
+            frontendPrequeryInjected: 2,
+            frontendPrequeryCited: 1,
+            currentRunDataEnvelopes: 2,
+            citedEvidenceRefs: 1,
+          },
+          contextInjected: {
+            conversationTurns: 1,
+            recentSqlResults: 1,
+            sqlPitfallPairs: 0,
+            patternHints: 0,
+            negativePatternHints: 0,
+            caseBackgroundCases: 0,
+          },
+          verifierStatus: 'passed',
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[0].quickRun).toEqual(expect.objectContaining({
+      profile: 'extended',
+      actualTurns: 7,
+      verifierStatus: 'passed',
+    }));
+  });
+
   it('should keep result snapshot reference out of the visible conclusion message', () => {
     const data = {
       data: {

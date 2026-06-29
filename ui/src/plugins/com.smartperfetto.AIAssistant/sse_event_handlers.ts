@@ -34,6 +34,7 @@ import {
   ConversationStepTimelineItem,
   DataSourceContext,
   Message,
+  QuickRunReceipt,
   SmartScenePreviewPayload,
   StreamingAnswerState,
   StreamingFlowState,
@@ -87,6 +88,7 @@ type AnalysisCompletedPayload = {
   terminationMessage?: string;
   hypotheses?: AnalysisHypothesisItem[];
   smartScenePreview?: SmartScenePreviewPayload;
+  quickRun?: QuickRunReceipt;
 };
 
 type DegradedPayload = {
@@ -169,6 +171,10 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   if (reportError) payload.reportError = reportError;
 
   if (source.partial === true) payload.partial = true;
+
+  if (isRecord(source.quickRun)) {
+    payload.quickRun = source.quickRun as unknown as QuickRunReceipt;
+  }
 
   const terminationReason = readStringField(source, 'terminationReason');
   if (terminationReason) payload.terminationReason = terminationReason;
@@ -3721,7 +3727,7 @@ export function handleAnalysisCompletedEvent(
           payload,
         )
       : undefined;
-    if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent || payload?.smartScenePreview) {
+    if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent || payload?.smartScenePreview || payload?.quickRun) {
       // Attach reportUrl to the existing answer/conclusion message. If the
       // final payload includes narrative text, treat it as canonical and
       // replace any earlier streamed placeholder tokens.
@@ -3731,6 +3737,7 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(answerMsgId, {
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
           ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
           ...(canonicalContent
             ? {content: canonicalContent}
             : existing
@@ -3758,6 +3765,7 @@ export function handleAnalysisCompletedEvent(
                 ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
                 : {}),
               ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+              ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
               content: canonicalContent ||
                 buildVisibleConclusionContentWithReportAppendix(
                   messages[i].content,
@@ -3778,6 +3786,7 @@ export function handleAnalysisCompletedEvent(
             timestamp: Date.now(),
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+            ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
           });
         }
       }
@@ -3834,6 +3843,7 @@ export function handleAnalysisCompletedEvent(
         reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
         flowTag: 'answer_stream',
         ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+        ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
       }, {persist: true});
     } else {
     // Check if conclusion was already shown
@@ -3850,6 +3860,7 @@ export function handleAnalysisCompletedEvent(
           timestamp: Date.now(),
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
           ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
         });
       }
     }
@@ -3860,14 +3871,15 @@ export function handleAnalysisCompletedEvent(
   if (!answerContent) {
     const reportUrl = payload?.reportUrl;
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
-    if (reportUrl && streamedAnswerMessageId) {
+    if ((reportUrl || payload?.quickRun) && streamedAnswerMessageId) {
       const streamedMsg = ctx.getMessages().find(
         (m) => m.id === streamedAnswerMessageId && String(m.content || '').trim().length > 0
       );
       if (streamedMsg) {
         completeStreamingAnswer(ctx);
         ctx.updateMessage(streamedAnswerMessageId, {
-          reportUrl: `${ctx.backendUrl}${reportUrl}`,
+          ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
         }, {persist: true});
       }
     }

@@ -2333,6 +2333,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
                                   this.renderSmartScenePreviewCard(msg),
                                   this.renderSmartSelectionInlineActions(msg),
+                                  this.renderQuickRunReceipt(msg.quickRun),
 
                                   // SQL Result
                                   (() => {
@@ -3258,6 +3259,72 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
   }
 
+  private renderQuickRunReceipt(quickRun?: Message['quickRun']): m.Children {
+    if (!quickRun) return null;
+    const modeLabel = quickRun.requestedMode === 'auto'
+      ? `智能→${quickRun.resolvedMode === 'quick' ? '快速' : '完整'}`
+      : quickRun.resolvedMode === 'quick'
+        ? '快速'
+        : '完整';
+    const profileLabel = quickRun.profile === 'extended'
+      ? '延展'
+      : quickRun.profile === 'triage'
+        ? 'Triage'
+        : '';
+    const contextCounts = quickRun.contextInjected;
+    const injectedContextTotal =
+      contextCounts.conversationTurns +
+      contextCounts.recentSqlResults +
+      contextCounts.sqlPitfallPairs +
+      contextCounts.patternHints +
+      contextCounts.negativePatternHints +
+      contextCounts.caseBackgroundCases;
+    const verifierLabel = {
+      passed: '已核对',
+      issues: '核对有问题',
+      failed: '核对失败',
+      not_checked: '未核对',
+    }[quickRun.verifierStatus];
+    const verifierClass = {
+      passed: 'ok',
+      issues: 'warn',
+      failed: 'bad',
+      not_checked: 'muted',
+    }[quickRun.verifierStatus];
+    const contextTitle = [
+      `对话 ${contextCounts.conversationTurns}`,
+      `最近 SQL ${contextCounts.recentSqlResults}`,
+      `SQL 踩坑 ${contextCounts.sqlPitfallPairs}`,
+      `历史模式 ${contextCounts.patternHints}`,
+      `反例模式 ${contextCounts.negativePatternHints}`,
+      `案例背景 ${contextCounts.caseBackgroundCases}`,
+    ].join(' · ');
+    const chips: m.Children[] = [
+      m('span.ai-quick-run-chip', modeLabel),
+      profileLabel ? m('span.ai-quick-run-chip', profileLabel) : null,
+      m('span.ai-quick-run-chip', `${quickRun.actualTurns}/${quickRun.hardCapTurns} turns`),
+      m('span.ai-quick-run-chip', `目标 ${quickRun.targetTurns}`),
+    ];
+    if (quickRun.evidence.frontendPrequeryInjected > 0) {
+      chips.push(m('span.ai-quick-run-chip', `已注入选区预查询 ${quickRun.evidence.frontendPrequeryInjected}`));
+    }
+    if (quickRun.evidence.frontendPrequeryCited > 0) {
+      chips.push(m('span.ai-quick-run-chip.ok', `已引用选区预查询 ${quickRun.evidence.frontendPrequeryCited}`));
+    }
+    if (quickRun.evidence.citedEvidenceRefs > 0) {
+      chips.push(m('span.ai-quick-run-chip', `已引用证据 ${quickRun.evidence.citedEvidenceRefs}`));
+    }
+    if (injectedContextTotal > 0) {
+      chips.push(m('span.ai-quick-run-chip', {title: contextTitle}, `已注入上下文 ${injectedContextTotal}`));
+    }
+    chips.push(m(`span.ai-quick-run-chip.${verifierClass}`, verifierLabel));
+    if (quickRun.enforcement !== 'turn_cap') {
+      chips.push(m('span.ai-quick-run-chip.muted', quickRun.enforcement === 'timeout_only' ? 'Timeout 保护' : '保护不可用'));
+    }
+
+    return m('div.ai-quick-run-receipt', chips);
+  }
+
   /** Render the analysis mode selector inside the input bar.
    *  Disables 'fast' when comparison mode is active because the lightweight
    *  MCP registration skips comparison tools. Selection context is supported
@@ -3270,7 +3337,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         id: 'fast',
         icon: '⚡',
         label: '快速',
-        title: '5 轮内精简答复，适合简单事实查询',
+        title: '目标 5 turns，最多 50 turns 保护；适合局部事实和选区问题',
       },
       {
         id: 'full',
@@ -3348,8 +3415,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   /** Switch analysis mode. Changing mode mid-session clears agentSessionId so the backend
-   *  starts a fresh SDK session — avoids context mix between the 5-turn quick path and
-   *  30-turn full pipeline (see plan §3, "SDK resume strategy"). */
+   *  starts a fresh SDK session and avoids context mix between quick and full paths. */
   private onAnalysisModeChange(newMode: 'fast' | 'full' | 'auto'): void {
     if (newMode === this.state.analysisMode) return;
     const hadSession = !!this.state.agentSessionId;

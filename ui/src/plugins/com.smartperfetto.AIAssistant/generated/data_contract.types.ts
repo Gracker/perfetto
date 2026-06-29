@@ -15,11 +15,42 @@
 // Conclusion Contract Types
 // =============================================================================
 
+export type CaseKnowledgeMatchStrength = 'strong' | 'partial' | 'background';
+export type CaseKnowledgeRecommendationPriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+export interface CaseKnowledgeRecommendation {
+  id: string;
+  priority: CaseKnowledgeRecommendationPriority;
+  action: string;
+  applies_when: string;
+  risks: string;
+}
+
+export interface CaseKnowledgeReportRecommendation {
+  caseId: string;
+  title: string;
+  scene?: string;
+  primaryRootCause?: string;
+  matchStrength: CaseKnowledgeMatchStrength;
+  evidenceGap?: string;
+  evidenceRefs?: string[];
+  matchedSignatures?: string[];
+  missingRequiredSignatures?: string[];
+  recommendations: {
+    app: CaseKnowledgeRecommendation[];
+    oem: CaseKnowledgeRecommendation[];
+  };
+  learnedProvenance?: {
+    candidateId: string;
+    supportingEvidence: number;
+    contradictingEvidence: number;
+    supported: boolean;
+  };
+}
+
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
-
-import type {CaseKnowledgeReportRecommendation} from '../../types/caseKnowledge';
 
 export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
 export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
@@ -936,6 +967,33 @@ export interface ConversationStepEvent {
 /**
  * Analysis Completed Event - SSE payload for final result
  */
+export interface QuickRunReceipt {
+  requestedMode: 'fast' | 'auto' | 'full';
+  resolvedMode: 'quick' | 'full';
+  profile: 'normal' | 'extended' | 'triage';
+  targetTurns: number;
+  hardCapTurns: number;
+  actualTurns: number;
+  elapsedMs: number;
+  enforcement: 'turn_cap' | 'timeout_only' | 'not_available';
+  stopReason: 'answered' | 'needs_full' | 'extended_answered' | 'hard_cap' | 'timeout' | 'partial';
+  evidence: {
+    frontendPrequeryInjected: number;
+    frontendPrequeryCited: number;
+    currentRunDataEnvelopes: number;
+    citedEvidenceRefs: number;
+  };
+  contextInjected: {
+    conversationTurns: number;
+    recentSqlResults: number;
+    sqlPitfallPairs: number;
+    patternHints: number;
+    negativePatternHints: number;
+    caseBackgroundCases: number;
+  };
+  verifierStatus: 'passed' | 'issues' | 'not_checked' | 'failed';
+}
+
 export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
   data: {
@@ -953,6 +1011,7 @@ export interface AnalysisCompletedEvent {
     partial?: boolean;
     terminationReason?: string;
     terminationMessage?: string;
+    quickRun?: QuickRunReceipt;
     terminalRunStatus?: 'completed' | 'quota_exceeded';
     findings: DiagnosticFinding[];
     suggestions: string[];

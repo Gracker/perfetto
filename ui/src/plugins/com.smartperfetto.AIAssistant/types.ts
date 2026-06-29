@@ -69,6 +69,34 @@ export interface Message {
   teachingPipeline?: TeachingPipelineResult;
   teachingPinExecution?: TeachingPinExecutionResult;
   smartScenePreview?: SmartScenePreviewPayload;
+  quickRun?: QuickRunReceipt;
+}
+
+export interface QuickRunReceipt {
+  requestedMode: 'fast' | 'auto' | 'full';
+  resolvedMode: 'quick' | 'full';
+  profile: 'normal' | 'extended' | 'triage';
+  targetTurns: number;
+  hardCapTurns: number;
+  actualTurns: number;
+  elapsedMs: number;
+  enforcement: 'turn_cap' | 'timeout_only' | 'not_available';
+  stopReason: 'answered' | 'needs_full' | 'extended_answered' | 'hard_cap' | 'timeout' | 'partial';
+  evidence: {
+    frontendPrequeryInjected: number;
+    frontendPrequeryCited: number;
+    currentRunDataEnvelopes: number;
+    citedEvidenceRefs: number;
+  };
+  contextInjected: {
+    conversationTurns: number;
+    recentSqlResults: number;
+    sqlPitfallPairs: number;
+    patternHints: number;
+    negativePatternHints: number;
+    caseBackgroundCases: number;
+  };
+  verifierStatus: 'passed' | 'issues' | 'not_checked' | 'failed';
 }
 
 export interface SmartDisplayedScene {

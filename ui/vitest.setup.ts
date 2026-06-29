@@ -25,3 +25,40 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
     disconnect() {}
   } as unknown as typeof ResizeObserver;
 }
+
+function installMemoryLocalStorage(target: typeof globalThis) {
+  const store = new Map<string, string>();
+  const memoryLocalStorage: Storage = {
+    get length() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    key(index: number) {
+      return Array.from(store.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    setItem(key: string, value: string) {
+      store.set(key, String(value));
+    },
+  };
+
+  Object.defineProperty(target, 'localStorage', {
+    configurable: true,
+    value: memoryLocalStorage,
+  });
+}
+
+if (typeof globalThis.localStorage?.getItem !== 'function') {
+  installMemoryLocalStorage(globalThis);
+}
+
+if (typeof window !== 'undefined' && typeof window.localStorage?.getItem !== 'function') {
+  installMemoryLocalStorage(window as unknown as typeof globalThis);
+}
