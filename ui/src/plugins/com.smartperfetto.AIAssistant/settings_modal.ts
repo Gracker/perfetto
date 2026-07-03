@@ -31,6 +31,7 @@ export interface SettingsModalAttrs {
   onSave: (settings: AISettings) => void;
   onWorkspaceChange: (workspaceId: string) => void;
   onCheckStatus: (backendUrl: string, apiKey: string) => Promise<ServerStatus>;
+  onProviderSelectionChange: () => void;
   initialStatus?: ServerStatus;
 }
 
@@ -708,6 +709,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                 backendUrl: this.settings.backendUrl,
                 apiKey: this.settings.backendApiKey || undefined,
                 onClose: () => vnode.attrs.onClose(),
+                onProviderSelectionChange: () =>
+                  vnode.attrs.onProviderSelectionChange(),
               }),
             ])
           : this.currentTab === 'codebases'

@@ -56,17 +56,17 @@ function isDualSurfaceProviderType(type: ProviderType): boolean {
 
 const CONNECTION_FIELD_HINTS: Record<string, string> = {
   apiKey:
-    'This is the model provider key stored in Provider Manager. Preset providers reuse it for both SDK runtimes unless an override below is set.',
+    'Usually this is the only credential you need. Preset providers reuse it for the selected SDK runtime unless an optional override below is set.',
   claudeApiKey:
-    'Used only by the Claude SDK path and sent as x-api-key. Leave empty when the shared provider key should be reused.',
+    'Used by the Claude SDK path and sent as x-api-key. Leave empty when the shared provider key should be reused.',
   claudeAuthToken:
-    'Used only by the Claude SDK path and sent as Authorization: Bearer <token>. Do not include the Bearer prefix.',
+    'Only needed for providers that require Authorization: Bearer <token> on the Claude SDK path. Do not include the Bearer prefix.',
   claudeBaseUrl:
-    'Used only by Claude SDK. Keep the preset unless your provider console shows a different Claude/Anthropic-compatible URL.',
+    'Prefilled by the provider template. Change only when your provider console shows a different Claude/Anthropic-compatible URL.',
   openaiApiKey:
-    'Used only by the OpenAI SDK path. Leave empty when the shared provider key should be reused.',
+    'Used by the OpenAI SDK path. Leave empty when the shared provider key should be reused.',
   openaiBaseUrl:
-    'Used only by OpenAI SDK. OpenAI-compatible gateways usually use a URL ending in /v1.',
+    'Prefilled by the provider template. OpenAI-compatible gateways usually use a URL ending in /v1.',
   piAgentCoreModulePath:
     'Optional explicit module path. Leave empty to load @earendil-works/pi-agent-core from the backend package.',
   piAgentCoreModelJson:
@@ -79,6 +79,22 @@ const CONNECTION_FIELD_HINTS: Record<string, string> = {
     'Optional OpenCode model/provider JSON. If omitted, OpenCode uses the OpenAI-compatible fields and primary model from this provider.',
   openCodeSystemPrompt:
     'Optional runtime-level system prompt for OpenCode. SmartPerfetto analysis contracts still come from backend strategies.',
+};
+
+const CONNECTION_FIELD_QUALIFIERS: Record<string, string> = {
+  baseUrl: 'Optional',
+  claudeAuthToken: 'Optional',
+  claudeBaseUrl: 'Preset',
+  openaiBaseUrl: 'Preset',
+  piAgentCoreModulePath: 'Optional',
+  piAgentCoreSystemPrompt: 'Optional',
+  openCodeSdkModulePath: 'Optional',
+  openCodeModelJson: 'Optional',
+  openCodeSystemPrompt: 'Optional',
+  awsRegion: 'Preset',
+  awsSessionToken: 'Optional',
+  awsProfile: 'Optional',
+  gcpRegion: 'Preset',
 };
 
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
@@ -356,7 +372,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               {style: s.subtitle},
               this.isEdit
                 ? 'Modify provider credentials, runtime, and models'
-                : 'Save the provider, then test and activate it from the list',
+                : 'Provider templates prefill runtime URLs and models. Usually only the API key is required.',
             ),
           ]),
           m(
@@ -557,7 +573,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     template?: ProviderTemplate,
   ): m.Children {
     return m('div', {style: s.formField}, [
-      m('label', {style: s.formLabel}, 'Display Name'),
+      this.renderFieldLabel(s, 'Display Name'),
       m('input[type=text]', {
         style: s.formInput,
         value: this.form.name,
@@ -569,8 +585,36 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {style: s.formHint},
-        'Saving creates a profile only. It affects analysis after you activate it or choose it from the provider switcher.',
+        'Use a name you can recognize in the switcher. It does not affect provider credentials or model IDs.',
       ),
+    ]);
+  }
+
+  private renderFieldLabel(
+    s: ReturnType<typeof getStyles>,
+    label: string,
+    qualifier?: string,
+  ): m.Children {
+    const t = getTokens();
+    return m('label', {style: s.formLabel}, [
+      label,
+      qualifier
+        ? m(
+            'span',
+            {
+              style: {
+                marginLeft: '6px',
+                padding: '1px 5px',
+                borderRadius: '4px',
+                border: `1px solid ${t.border}`,
+                color: t.textMuted,
+                fontSize: '10px',
+                fontWeight: 500,
+              },
+            },
+            qualifier,
+          )
+        : null,
     ]);
   }
 
@@ -631,7 +675,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           placeholder: '',
         };
         return m('div', {key: field, style: s.formField}, [
-          m('label', {style: s.formLabel}, meta.label),
+          this.renderFieldLabel(
+            s,
+            meta.label,
+            CONNECTION_FIELD_QUALIFIERS[field],
+          ),
           m(`input[type=${meta.type}]`, {
             style: s.formInput,
             value:
@@ -704,10 +752,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     s: ReturnType<typeof getStyles>,
   ): m.Children {
     const t = getTokens();
+    const runtime = this.currentRuntime();
     return m('div', [
       this.renderRuntimeSelector(s),
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, 'Provider API Key (shared)'),
+        this.renderFieldLabel(s, 'Provider API Key'),
         m('input[type=password]', {
           style: s.formInput,
           value: this.form.connection.apiKey || '',
@@ -718,6 +767,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         }),
         m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS.apiKey),
       ]),
+      this.renderPresetConnectionSummary(),
       m(
         'div',
         {
@@ -728,25 +778,52 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           },
         },
         [
-          this.renderConnectionGroupTitle('Claude Code SDK'),
-          this.renderClaudeConnectionFields(s, {includeApiKey: false}),
-        ],
-      ),
-      m(
-        'div',
-        {
-          style: {
-            marginTop: '14px',
-            paddingTop: '12px',
-            borderTop: `1px solid ${t.border}`,
-          },
-        },
-        [
-          this.renderConnectionGroupTitle('OpenAI SDK'),
-          this.renderOpenAIConnectionFields(s, {includeApiKey: false}),
+          this.renderConnectionGroupTitle(
+            runtime === 'openai-agents-sdk'
+              ? 'OpenAI SDK optional fields'
+              : 'Claude SDK optional fields',
+          ),
+          runtime === 'openai-agents-sdk'
+            ? this.renderOpenAIConnectionFields(s, {includeApiKey: false})
+            : this.renderClaudeConnectionFields(s, {includeApiKey: false}),
         ],
       ),
     ]);
+  }
+
+  private renderPresetConnectionSummary(): m.Children {
+    const t = getTokens();
+    const conn = this.form.connection;
+    const url =
+      this.currentRuntime() === 'openai-agents-sdk'
+        ? conn.openaiBaseUrl || conn.baseUrl
+        : conn.claudeBaseUrl || conn.baseUrl;
+    const protocol =
+      this.currentRuntime() === 'openai-agents-sdk'
+        ? conn.openaiProtocol || 'chat_completions'
+        : undefined;
+    const details = [url ? `URL: ${url}` : undefined, protocol]
+      .filter(Boolean)
+      .join(' · ');
+
+    return m(
+      'div',
+      {
+        style: {
+          margin: '10px 0 2px',
+          padding: '8px 10px',
+          borderRadius: '6px',
+          backgroundColor: t.surface,
+          border: `1px solid ${t.border}`,
+          color: t.textSecondary,
+          fontSize: '12px',
+          lineHeight: '1.45',
+        },
+      },
+      details
+        ? `Template already filled the runtime defaults (${details}).`
+        : 'Template already filled the runtime defaults.',
+    );
   }
 
   private renderRuntimeSelector(s: ReturnType<typeof getStyles>): m.Children {
@@ -809,7 +886,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {style: s.formHint},
-        'Claude SDK uses Claude-compatible fields. OpenAI SDK and OpenCode use OpenAI-compatible fields. Pi Agent Core and OpenCode can also use runtime-specific model JSON.',
+        'Most preset providers work without changing this. Switch runtime only when you intentionally want the provider to use another SDK surface.',
       ),
     ]);
   }
@@ -877,9 +954,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             s,
             'claudeApiKey',
             'Claude-compatible API Key Override',
+            'Optional',
           ),
-      this.renderConnectionInput(s, 'claudeAuthToken'),
-      this.renderConnectionInput(s, 'claudeBaseUrl'),
+      this.renderConnectionInput(s, 'claudeAuthToken', undefined, 'Optional'),
+      this.renderConnectionInput(s, 'claudeBaseUrl', undefined, 'Preset'),
     ]);
   }
 
@@ -894,8 +972,9 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             s,
             'openaiApiKey',
             'OpenAI-compatible API Key Override',
+            'Optional',
           ),
-      this.renderConnectionInput(s, 'openaiBaseUrl'),
+      this.renderConnectionInput(s, 'openaiBaseUrl', undefined, 'Preset'),
       this.renderOpenAIProtocolSelect(s),
     ]);
   }
@@ -907,7 +986,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.form.connection.openaiProtocol ||
       (this.form.type === 'openai' ? 'responses' : 'chat_completions');
     return m('div', {key: 'openaiProtocol', style: s.formField}, [
-      m('label', {style: s.formLabel}, 'OpenAI Protocol'),
+      this.renderFieldLabel(s, 'OpenAI Protocol', 'Preset'),
       m(
         'select',
         {
@@ -926,7 +1005,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {style: s.formHint},
-        'Use Responses for official OpenAI. Use Chat Completions for Ollama and most OpenAI-compatible gateways.',
+        'Use Responses for official OpenAI. Keep Chat Completions for Ollama and most OpenAI-compatible gateways.',
       ),
     ]);
   }
@@ -935,6 +1014,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     s: ReturnType<typeof getStyles>,
     field: string,
     labelOverride?: string,
+    qualifierOverride?: string,
   ): m.Children {
     const meta = CONNECTION_FIELD_LABELS[field] || {
       label: field,
@@ -943,7 +1023,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     };
     const conn = this.form.connection as Record<string, string>;
     return m('div', {key: field, style: s.formField}, [
-      m('label', {style: s.formLabel}, labelOverride || meta.label),
+      this.renderFieldLabel(
+        s,
+        labelOverride || meta.label,
+        qualifierOverride ?? CONNECTION_FIELD_QUALIFIERS[field],
+      ),
       m(`input[type=${meta.type}]`, {
         style: s.formInput,
         value: conn[field] || '',
@@ -968,7 +1052,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     };
     const conn = this.form.connection as Record<string, string>;
     return m('div', {key: field, style: s.formField}, [
-      m('label', {style: s.formLabel}, meta.label),
+      this.renderFieldLabel(
+        s,
+        meta.label,
+        CONNECTION_FIELD_QUALIFIERS[field],
+      ),
       m('textarea', {
         style: {
           ...s.formInput,
@@ -1199,7 +1287,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       defaultVal?: string,
     ) =>
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, label),
+        this.renderFieldLabel(s, label, defaultVal ? 'Preset' : undefined),
         hasAvailableModels
           ? m(
               'select',
@@ -1226,7 +1314,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               placeholder: defaultVal || 'Model ID',
             }),
         defaultVal
-          ? m('div', {style: s.formHint}, `Default: ${defaultVal}`)
+          ? m(
+              'div',
+              {style: s.formHint},
+              `Prefilled: ${defaultVal}. Change only if your provider plan uses another model ID.`,
+            )
           : null,
       ]);
 
@@ -1234,7 +1326,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       modelField('Primary Model', 'primary', template?.defaultModels.primary),
       modelField('Light Model', 'light', template?.defaultModels.light),
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, 'Sub-agent Model (optional)'),
+        this.renderFieldLabel(s, 'Sub-agent Model', 'Optional'),
         m('input[type=text]', {
           style: s.formInput,
           value: this.form.models.subAgent || '',
@@ -1305,6 +1397,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       'div',
       {style: {paddingLeft: '12px', borderLeft: `2px solid ${t.border}`}},
       [
+        m(
+          'div',
+          {style: {...s.formHint, margin: '0 0 12px'}},
+          'Optional. Leave these empty to inherit SmartPerfetto runtime defaults.',
+        ),
         numField('Max Turns', 'maxTurns', '30'),
         m('div', {style: s.formField}, [
           m('label', {style: s.formLabel}, 'Effort Level'),

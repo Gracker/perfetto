@@ -17,6 +17,12 @@ import {
 import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 import {ProviderForm} from './provider_form';
+import {
+  createProviderCatalogEventSource,
+  notifyProviderCatalogChanged,
+  subscribeProviderCatalogChanged,
+  type ProviderCatalogChangeReason,
+} from './provider_events';
 
 export type {ProviderPanelAttrs};
 
@@ -46,14 +52,26 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private cloneSource: ProviderConfig | null = null;
   private expandedId: string | null = null;
   private hoveredId: string | null = null;
+  private readonly providerChangeSource =
+    createProviderCatalogEventSource('provider-panel');
+  private unsubscribeProviderCatalogChanged: (() => void) | null = null;
+  private onProviderSelectionChange?: () => void;
 
   oninit(vnode: m.Vnode<ProviderPanelAttrs>) {
     this.backendUrl = vnode.attrs.backendUrl;
     this.apiKey = vnode.attrs.apiKey;
+    this.onProviderSelectionChange = vnode.attrs.onProviderSelectionChange;
+    this.unsubscribeProviderCatalogChanged = subscribeProviderCatalogChanged(
+      (change) => {
+        if (change.source === this.providerChangeSource) return;
+        void this.loadData();
+      },
+    );
     this.loadData();
   }
 
   onupdate(vnode: m.Vnode<ProviderPanelAttrs>) {
+    this.onProviderSelectionChange = vnode.attrs.onProviderSelectionChange;
     if (
       vnode.attrs.backendUrl !== this.backendUrl ||
       vnode.attrs.apiKey !== this.apiKey
@@ -62,6 +80,20 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       this.apiKey = vnode.attrs.apiKey;
       this.loadData();
     }
+  }
+
+  onremove() {
+    this.unsubscribeProviderCatalogChanged?.();
+    this.unsubscribeProviderCatalogChanged = null;
+  }
+
+  private publishProviderCatalogChanged(
+    reason: ProviderCatalogChangeReason,
+  ): void {
+    notifyProviderCatalogChanged({
+      reason,
+      source: this.providerChangeSource,
+    });
   }
 
   private async loadData() {
@@ -130,6 +162,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       if (!res.ok) throw new Error(`Activation failed: ${res.status}`);
       this.success = 'Provider activated successfully';
       await this.loadData();
+      this.publishProviderCatalogChanged('activated');
+      this.onProviderSelectionChange?.();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : 'Activation failed';
@@ -146,6 +180,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       if (!res.ok) throw new Error(`Deactivation failed: ${res.status}`);
       this.success = 'Switched to system default (.env)';
       await this.loadData();
+      this.publishProviderCatalogChanged('deactivated');
+      this.onProviderSelectionChange?.();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : 'Deactivation failed';
@@ -166,6 +202,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       this.success = 'Provider deleted';
       this.deleting = null;
       await this.loadData();
+      this.publishProviderCatalogChanged('deleted');
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : 'Delete failed';
@@ -265,14 +302,21 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         cloneSource: this.cloneSource || undefined,
         templates: this.templates,
         onSaved: () => {
+          const reason =
+            this.view_mode === 'edit' ? 'updated' : 'created';
+          const activeProviderWasEdited = editProvider?.isActive === true;
           this.success =
             this.view_mode === 'edit'
               ? 'Provider updated. Test it again if credentials changed.'
-              : 'Provider created. Test it, then activate it to use it.';
+              : 'Provider created. You can select it from the switcher now.';
           this.view_mode = 'list';
           this.editingId = null;
           this.cloneSource = null;
           this.loadData();
+          this.publishProviderCatalogChanged(reason);
+          if (activeProviderWasEdited) {
+            this.onProviderSelectionChange?.();
+          }
           this.clearSuccessAfterDelay();
         },
         onCancel: () => {

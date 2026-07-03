@@ -106,6 +106,7 @@ export interface ProviderPanelAttrs {
   backendUrl: string;
   apiKey?: string;
   onClose?: () => void;
+  onProviderSelectionChange?: () => void;
 }
 
 export interface ProviderQuickSwitcherAttrs {

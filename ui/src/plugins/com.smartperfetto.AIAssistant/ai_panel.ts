@@ -1899,6 +1899,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 this.onWorkspaceSelectionChange(workspaceId),
               onCheckStatus: (url: string, key: string) =>
                 this.checkServerStatus(url, key),
+              onProviderSelectionChange: () =>
+                this.onProviderSelectionChange(),
               initialStatus: this.serverStatus.connected
                 ? this.serverStatus
                 : undefined,

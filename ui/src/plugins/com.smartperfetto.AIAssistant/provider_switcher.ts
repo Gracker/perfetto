@@ -15,6 +15,12 @@ import {
 } from './provider_types';
 import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
+import {
+  createProviderCatalogEventSource,
+  notifyProviderCatalogChanged,
+  subscribeProviderCatalogChanged,
+  type ProviderCatalogChangeReason,
+} from './provider_events';
 
 export class ProviderQuickSwitcher
   implements m.ClassComponent<ProviderQuickSwitcherAttrs>
@@ -32,10 +38,19 @@ export class ProviderQuickSwitcher
   private outsideClickHandler: ((e: Event) => void) | null = null;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private lastLoadedAt = 0;
+  private readonly providerChangeSource =
+    createProviderCatalogEventSource('provider-switcher');
+  private unsubscribeProviderCatalogChanged: (() => void) | null = null;
 
   oninit(vnode: m.Vnode<ProviderQuickSwitcherAttrs>) {
     this.backendUrl = vnode.attrs.backendUrl;
     this.apiKey = vnode.attrs.apiKey;
+    this.unsubscribeProviderCatalogChanged = subscribeProviderCatalogChanged(
+      (change) => {
+        if (change.source === this.providerChangeSource) return;
+        void this.loadProviders();
+      },
+    );
     this.loadProviders();
   }
 
@@ -120,7 +135,18 @@ export class ProviderQuickSwitcher
       clearTimeout(this.toastTimeout);
       this.toastTimeout = null;
     }
+    this.unsubscribeProviderCatalogChanged?.();
+    this.unsubscribeProviderCatalogChanged = null;
     this.open = false;
+  }
+
+  private publishProviderCatalogChanged(
+    reason: ProviderCatalogChangeReason,
+  ): void {
+    notifyProviderCatalogChanged({
+      reason,
+      source: this.providerChangeSource,
+    });
   }
 
   private async loadProviders() {
@@ -158,6 +184,7 @@ export class ProviderQuickSwitcher
         const activated = this.providers.find((p) => p.id === id);
         if (activated) {
           this.showToast(`✶ Switched to ${activated.name}`);
+          this.publishProviderCatalogChanged('activated');
           vnode?.attrs.onActivate?.();
         }
       }
@@ -193,6 +220,7 @@ export class ProviderQuickSwitcher
       if (activateRes.ok) {
         await this.loadProviders();
         this.showToast(`✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`);
+        this.publishProviderCatalogChanged('runtime-switched');
         vnode?.attrs.onActivate?.();
       }
     } catch {
@@ -216,6 +244,7 @@ export class ProviderQuickSwitcher
       if (res.ok) {
         await this.loadProviders();
         this.showToast('✶ Switched to System Default');
+        this.publishProviderCatalogChanged('deactivated');
         vnode?.attrs.onActivate?.();
       }
     } catch {
