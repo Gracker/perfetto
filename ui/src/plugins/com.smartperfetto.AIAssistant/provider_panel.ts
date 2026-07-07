@@ -52,6 +52,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private cloneSource: ProviderConfig | null = null;
   private expandedId: string | null = null;
   private hoveredId: string | null = null;
+  private aiEnabled?: boolean;
+  private aiDisabledReason?: string;
   private readonly providerChangeSource =
     createProviderCatalogEventSource('provider-panel');
   private unsubscribeProviderCatalogChanged: (() => void) | null = null;
@@ -60,6 +62,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   oninit(vnode: m.Vnode<ProviderPanelAttrs>) {
     this.backendUrl = vnode.attrs.backendUrl;
     this.apiKey = vnode.attrs.apiKey;
+    this.aiEnabled = vnode.attrs.aiEnabled;
+    this.aiDisabledReason = vnode.attrs.aiDisabledReason;
     this.onProviderSelectionChange = vnode.attrs.onProviderSelectionChange;
     this.unsubscribeProviderCatalogChanged = subscribeProviderCatalogChanged(
       (change) => {
@@ -72,6 +76,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
   onupdate(vnode: m.Vnode<ProviderPanelAttrs>) {
     this.onProviderSelectionChange = vnode.attrs.onProviderSelectionChange;
+    this.aiEnabled = vnode.attrs.aiEnabled;
+    this.aiDisabledReason = vnode.attrs.aiDisabledReason;
     if (
       vnode.attrs.backendUrl !== this.backendUrl ||
       vnode.attrs.apiKey !== this.apiKey
@@ -212,6 +218,16 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 
   private async testConnection(id: string) {
+    if (this.isAiDisabled()) {
+      this.testResult = {
+        success: false,
+        error: this.aiDisabledReasonForDisplay(),
+      };
+      this.healthMap.set(id, 'failed');
+      m.redraw();
+      return;
+    }
+
     this.testingId = id;
     this.testResult = null;
     m.redraw();
@@ -287,6 +303,17 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     modelVerified?: boolean;
   }): boolean {
     return result.success && result.modelVerified === true && !result.error;
+  }
+
+  private isAiDisabled(): boolean {
+    return this.aiEnabled === false;
+  }
+
+  private aiDisabledReasonForDisplay(): string {
+    return (
+      this.aiDisabledReason ||
+      'AI model-backed features are disabled by backend policy.'
+    );
   }
 
   view(_vnode: m.Vnode<ProviderPanelAttrs>): m.Children {
@@ -381,6 +408,12 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         ]),
 
         this.renderProviderGuide(),
+        this.isAiDisabled()
+          ? m('div', {style: s.warningBanner}, [
+              m('span', 'AI disabled: '),
+              m('span', this.aiDisabledReasonForDisplay()),
+            ])
+          : null,
 
         m(
           'div',
@@ -781,10 +814,17 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                 m(
                   'button',
                   {
-                    style: this.listActionBtnStyle(t),
+                    style: {
+                      ...this.listActionBtnStyle(t),
+                      ...(this.isAiDisabled()
+                        ? {cursor: 'not-allowed', opacity: 0.55}
+                        : {}),
+                    },
                     onclick: () => this.testConnection(provider.id),
-                    disabled: this.testingId === provider.id,
-                    title: 'Test Connection',
+                    disabled: this.testingId === provider.id || this.isAiDisabled(),
+                    title: this.isAiDisabled()
+                      ? this.aiDisabledReasonForDisplay()
+                      : 'Test Connection',
                     'aria-label': 'Test Connection',
                   },
                   this.testingId === provider.id ? '⏳' : '\u{1F50C}',

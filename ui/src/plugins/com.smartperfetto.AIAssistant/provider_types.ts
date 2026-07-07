@@ -29,7 +29,15 @@ export type ProviderType =
   | 'ollama'
   | 'custom';
 export type ProviderCategory = 'official' | 'proxy' | 'local' | 'custom';
-export type AgentRuntimeKind = 'claude-agent-sdk' | 'openai-agents-sdk' | 'pi-agent-core' | 'opencode';
+export type AgentRuntimeKind =
+  | 'claude-agent-sdk'
+  | 'openai-agents-sdk'
+  | 'pi-agent-core'
+  | 'opencode';
+export type ServerRuntimeKind =
+  | AgentRuntimeKind
+  | 'experimental-pi-agent-core'
+  | 'experimental-opencode';
 export type OpenAIProtocol = 'responses' | 'chat_completions';
 
 export type HealthStatus = 'passed' | 'failed' | 'untested';
@@ -105,6 +113,8 @@ export interface ProviderTemplate {
 export interface ProviderPanelAttrs {
   backendUrl: string;
   apiKey?: string;
+  aiEnabled?: boolean;
+  aiDisabledReason?: string;
   onClose?: () => void;
   onProviderSelectionChange?: () => void;
 }
@@ -365,10 +375,14 @@ export function providerSupportsRuntime(
   return providerHasClaudeSurface(provider);
 }
 
-export function providerRuntimeLabel(runtime: AgentRuntimeKind): string {
+export function providerRuntimeLabel(runtime: ServerRuntimeKind): string {
   if (runtime === 'openai-agents-sdk') return 'OpenAI SDK';
   if (runtime === 'pi-agent-core') return 'Pi Agent Core';
+  if (runtime === 'experimental-pi-agent-core') {
+    return 'Experimental Pi Agent Core';
+  }
   if (runtime === 'opencode') return 'OpenCode';
+  if (runtime === 'experimental-opencode') return 'Experimental OpenCode';
   return 'Claude SDK';
 }
 

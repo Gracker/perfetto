@@ -746,6 +746,53 @@ describe('handleAnalysisCompletedEvent', () => {
           },
           verifierStatus: 'passed',
         },
+        analysisReceipt: {
+          schemaVersion: 1,
+          runId: 'run-1',
+          sessionId: 'session-1',
+          traceId: 'trace-1',
+          mode: 'fast',
+          resolvedMode: 'quick',
+          providerId: null,
+          generatedAt: 1,
+          traceEvidence: {
+            sqlCount: 1,
+            skillCount: 1,
+            dataEnvelopeCount: 2,
+            artifactCount: 1,
+            evidenceRefCount: 2,
+          },
+          nonEvidenceContext: {
+            frontendPrequeryCount: 1,
+            memoryHintCount: 0,
+            conversationContextCount: 2,
+            strategyHintCount: 0,
+          },
+          claimAudit: {
+            totalClaims: 1,
+            verifiedClaims: 1,
+            unsupportedClaims: 0,
+            uncertainClaims: 0,
+          },
+          qualityGates: {
+            finalReportContract: 'passed',
+            claimVerification: 'passed',
+            identityResolution: 'not_applicable',
+          },
+          outputs: {
+            reportId: 'report-1',
+          },
+        },
+        uiActionProposals: [{
+          schemaVersion: 1,
+          id: 'ui-navigate_timeline-test',
+          kind: 'navigate_timeline',
+          title: '跳到证据时间点',
+          reason: '来自证据表',
+          source: { evidenceRefId: 'ev-1' },
+          payload: { ts: '123456789', traceId: 'trace-1' },
+          requiresConfirmation: true,
+        }],
       },
     }, ctx);
 
@@ -754,6 +801,15 @@ describe('handleAnalysisCompletedEvent', () => {
       actualTurns: 7,
       verifierStatus: 'passed',
     }));
+    expect(ctx.messages[0].analysisReceipt).toEqual(expect.objectContaining({
+      schemaVersion: 1,
+      runId: 'run-1',
+      traceId: 'trace-1',
+    }));
+    expect(ctx.messages[0].uiActionProposals).toEqual([expect.objectContaining({
+      id: 'ui-navigate_timeline-test',
+      kind: 'navigate_timeline',
+    })]);
   });
 
   it('should keep result snapshot reference out of the visible conclusion message', () => {
@@ -1660,6 +1716,30 @@ describe('handleDataEvent', () => {
           traceSide: 'current',
           traceId: 'trace-a',
           queryHash: 'hash',
+          queryReview: {
+            schemaVersion: 1,
+            id: 'qr-1',
+            producer: {kind: 'execute_sql'},
+            title: 'Review launch query',
+            purpose: 'Explain why this query ran',
+            source: {
+              skillId: 'test_skill',
+              stepId: 'step1',
+              evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
+            },
+            reads: [{table: 'slice', columns: ['col1', 'col2'], confidence: 'observed'}],
+            filters: [{expression: "name LIKE '%launch%'", confidence: 'observed'}],
+            outputShape: [{name: 'col1'}, {name: 'col2'}],
+            guardrails: [{ruleId: 'process_identity', message: 'Process identity checked', severity: 'info'}],
+            limitations: ['Best-effort SQL read extraction'],
+            observedExecution: {
+              executed: true,
+              executableSql: 'select col1, col2 from slice',
+              rowCount: 1,
+              truncated: false,
+            },
+            allowedUse: 'review_metadata_only',
+          },
         },
         data: {
           columns: ['col1', 'col2'],
@@ -1685,6 +1765,12 @@ describe('handleDataEvent', () => {
       evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
       traceSide: 'current',
       traceId: 'trace-a',
+    });
+    expect(ctx.messages[0].sqlResult?.queryReview).toMatchObject({
+      id: 'qr-1',
+      allowedUse: 'review_metadata_only',
+      purpose: 'Explain why this query ran',
+      observedExecution: {executed: true, rowCount: 1},
     });
   });
 

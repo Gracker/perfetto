@@ -27,6 +27,7 @@ export function getTokens() {
       ? 'linear-gradient(135deg, #d4a574, #b8860b)'
       : 'linear-gradient(135deg, #b8860b, #7a5c2e)',
     success: dark ? '#34d399' : '#059669',
+    warning: dark ? '#fbbf24' : '#d97706',
     error: dark ? '#f87171' : '#dc2626',
     cardGradient: dark
       ? 'linear-gradient(145deg, #2c2c2e, #252527)'
@@ -227,6 +228,17 @@ export function STYLES(t: Tokens) {
       backgroundColor: `${t.success}15`,
       border: `1px solid ${t.success}40`,
       color: t.success,
+    },
+    warningBanner: {
+      display: 'flex' as const,
+      gap: '10px',
+      padding: '12px 14px',
+      borderRadius: '8px',
+      fontSize: '13px',
+      marginBottom: '16px',
+      backgroundColor: `${t.warning}15`,
+      border: `1px solid ${t.warning}40`,
+      color: t.warning,
     },
 
     // ── Form ──────────────────────────────────────────────────────────────────

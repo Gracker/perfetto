@@ -206,6 +206,7 @@ export interface EvidenceContextV1 {
   skillId?: string;
   stepId?: string;
   queryHash?: string;
+  queryReviewId?: string;
   sqlTextRef?: string;
   paramsHash?: string;
   /** Canonical artifact id used by Evidence Contract consumers. */
@@ -435,6 +436,81 @@ export interface IdentityResolutionV1 {
   recommendedParams?: Record<string, string | number | boolean>;
 }
 
+export const QUERY_REVIEW_SCHEMA_VERSION = 1 as const;
+
+export type QueryReviewProducerKind = 'execute_sql' | 'execute_sql_on' | 'invoke_skill';
+export type QueryReviewConfidence = 'declared' | 'observed' | 'partial';
+export type QueryReviewGuardrailSeverity = 'info' | 'warning';
+export type QueryReviewAllowedUse = 'review_metadata_only';
+
+export interface QueryReviewProducerV1 {
+  kind: QueryReviewProducerKind;
+  sourceToolCallId?: string;
+  paramsHash?: string;
+  planPhaseId?: string;
+  planPhaseTitle?: string;
+  traceSide?: 'current' | 'reference';
+  traceId?: string;
+}
+
+export interface QueryReviewSourceV1 {
+  skillId?: string;
+  stepId?: string;
+  artifactId?: string;
+  evidenceRefId?: string;
+  queryHash?: string;
+}
+
+export interface QueryReviewReadV1 {
+  table: string;
+  columns?: string[];
+  confidence: QueryReviewConfidence;
+}
+
+export interface QueryReviewFilterV1 {
+  expression: string;
+  confidence: QueryReviewConfidence;
+}
+
+export interface QueryReviewOutputShapeV1 {
+  name: string;
+  type?: string;
+  required?: boolean;
+}
+
+export interface QueryReviewGuardrailV1 {
+  ruleId: string;
+  message: string;
+  line?: number;
+  severity: QueryReviewGuardrailSeverity;
+}
+
+export interface QueryReviewObservedExecutionV1 {
+  executed: true;
+  executableSql?: string;
+  sqlRewrites?: string[];
+  stdlibInjectedModules?: string[];
+  durationMs?: number;
+  rowCount?: number;
+  truncated?: boolean;
+}
+
+export interface QueryReviewV1 {
+  schemaVersion: typeof QUERY_REVIEW_SCHEMA_VERSION;
+  id: string;
+  producer: QueryReviewProducerV1;
+  title: string;
+  purpose: string;
+  source: QueryReviewSourceV1;
+  reads: QueryReviewReadV1[];
+  filters: QueryReviewFilterV1[];
+  outputShape: QueryReviewOutputShapeV1[];
+  guardrails: QueryReviewGuardrailV1[];
+  limitations: string[];
+  observedExecution: QueryReviewObservedExecutionV1;
+  allowedUse: QueryReviewAllowedUse;
+}
+
 // =============================================================================
 // Column Definition System
 // =============================================================================
@@ -603,6 +679,8 @@ export interface DataEnvelopeMeta {
 
   /** Stable hash of the SQL or data-producing query */
   queryHash?: string;
+
+  queryReview?: QueryReviewV1;
 
   /** Tool-call identifier that produced this data, when available */
   sourceToolCallId?: string;
@@ -994,6 +1072,108 @@ export interface QuickRunReceipt {
   verifierStatus: 'passed' | 'issues' | 'not_checked' | 'failed';
 }
 
+export type AnalysisReceiptRuntime =
+  | 'claude-agent-sdk'
+  | 'openai-agents-sdk'
+  | 'pi-agent-core'
+  | 'opencode';
+
+export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
+
+export interface AnalysisReceiptV1 {
+  schemaVersion: 1;
+  runId: string;
+  sessionId: string;
+  traceId: string;
+  mode: 'fast' | 'full' | 'auto';
+  resolvedMode: 'quick' | 'full';
+  runtime?: AnalysisReceiptRuntime;
+  providerId: string | null;
+  generatedAt: number;
+  traceEvidence: {
+    sqlCount: number;
+    skillCount: number;
+    dataEnvelopeCount: number;
+    artifactCount: number;
+    evidenceRefCount: number;
+  };
+  nonEvidenceContext: {
+    frontendPrequeryCount: number;
+    memoryHintCount: number;
+    conversationContextCount: number;
+    strategyHintCount: number;
+  };
+  claimAudit: {
+    totalClaims: number;
+    verifiedClaims: number;
+    unsupportedClaims: number;
+    uncertainClaims: number;
+  };
+  qualityGates: {
+    finalReportContract: AnalysisReceiptGateStatus;
+    claimVerification: AnalysisReceiptGateStatus;
+    identityResolution: AnalysisReceiptGateStatus;
+  };
+  outputs: {
+    reportId?: string;
+    reportUrl?: string;
+    resultSnapshotId?: string;
+    cliTurnPath?: string;
+    reportError?: string;
+  };
+}
+
+export type UiActionKind =
+  | 'navigate_timeline'
+  | 'navigate_range'
+  | 'open_evidence_table'
+  | 'pin_evidence';
+
+export interface UiActionProposalSource {
+  evidenceRefId?: string;
+  artifactId?: string;
+  skillId?: string;
+  sourceToolCallId?: string;
+  reportSection?: string;
+}
+
+export interface UiNavigateTimelinePayload {
+  ts: string;
+  traceId?: string;
+}
+
+export interface UiNavigateRangePayload {
+  startNs: string;
+  endNs: string;
+  traceId?: string;
+}
+
+export interface UiOpenEvidenceTablePayload {
+  artifactId: string;
+  evidenceRefId?: string;
+}
+
+export interface UiPinEvidencePayload {
+  evidenceRefId: string;
+}
+
+interface UiActionProposalBase<K extends UiActionKind, P> {
+  schemaVersion: 1;
+  id: string;
+  kind: K;
+  title: string;
+  reason: string;
+  source: UiActionProposalSource;
+  payload: P;
+  requiresConfirmation: true;
+}
+
+export type UiActionProposalV1 =
+  | UiActionProposalBase<'navigate_timeline', UiNavigateTimelinePayload>
+  | UiActionProposalBase<'navigate_range', UiNavigateRangePayload>
+  | UiActionProposalBase<'open_evidence_table', UiOpenEvidenceTablePayload>
+  | UiActionProposalBase<'pin_evidence', UiPinEvidencePayload>;
+
 export interface AnalysisCompletedEvent {
   type: 'analysis_completed';
   data: {
@@ -1012,6 +1192,8 @@ export interface AnalysisCompletedEvent {
     terminationReason?: string;
     terminationMessage?: string;
     quickRun?: QuickRunReceipt;
+    analysisReceipt?: AnalysisReceiptV1;
+    uiActionProposals?: UiActionProposalV1[];
     terminalRunStatus?: 'completed' | 'quota_exceeded';
     findings: DiagnosticFinding[];
     suggestions: string[];
@@ -1055,6 +1237,7 @@ export interface SqlQueryResult {
   collapsible?: boolean;
   defaultCollapsed?: boolean;
   maxVisibleRows?: number;
+  queryReview?: QueryReviewV1;
   // Summary report data
   summaryReport?: {
     title: string;
@@ -1264,6 +1447,7 @@ export function envelopeToSqlQueryResult(envelope: DataEnvelope): SqlQueryResult
     stepId: envelope.meta.stepId,
     layer: envelope.display.layer,
     metadataFields: envelope.display.metadataFields,
+    queryReview: envelope.meta.queryReview,
     expandableData: data.expandableData,
   };
 }

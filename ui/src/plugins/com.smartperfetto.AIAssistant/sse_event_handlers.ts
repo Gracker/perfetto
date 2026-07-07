@@ -31,6 +31,7 @@
  */
 
 import {
+  AnalysisReceiptV1,
   ConversationStepTimelineItem,
   DataSourceContext,
   Message,
@@ -38,6 +39,7 @@ import {
   SmartScenePreviewPayload,
   StreamingAnswerState,
   StreamingFlowState,
+  UiActionProposalV1,
 } from './types';
 import {
   formatLayerName,
@@ -89,6 +91,8 @@ type AnalysisCompletedPayload = {
   hypotheses?: AnalysisHypothesisItem[];
   smartScenePreview?: SmartScenePreviewPayload;
   quickRun?: QuickRunReceipt;
+  analysisReceipt?: AnalysisReceiptV1;
+  uiActionProposals?: UiActionProposalV1[];
 };
 
 type DegradedPayload = {
@@ -175,6 +179,12 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   if (isRecord(source.quickRun)) {
     payload.quickRun = source.quickRun as unknown as QuickRunReceipt;
   }
+  if (isRecord(source.analysisReceipt)) {
+    payload.analysisReceipt = source.analysisReceipt as unknown as AnalysisReceiptV1;
+  }
+  if (Array.isArray(source.uiActionProposals)) {
+    payload.uiActionProposals = source.uiActionProposals as unknown as UiActionProposalV1[];
+  }
 
   const terminationReason = readStringField(source, 'terminationReason');
   if (terminationReason) payload.terminationReason = terminationReason;
@@ -203,6 +213,13 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   }
 
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function uiActionProposalMessageUpdate(
+  payload: AnalysisCompletedPayload | undefined,
+): Pick<Message, 'uiActionProposals'> {
+  const proposals = payload?.uiActionProposals;
+  return proposals && proposals.length > 0 ? {uiActionProposals: proposals} : {};
 }
 
 function toDegradedPayload(value: unknown): DegradedPayload {
@@ -3727,7 +3744,16 @@ export function handleAnalysisCompletedEvent(
           payload,
         )
       : undefined;
-    if (reportUrl || resultSnapshotId || conclusionContract || canonicalContent || payload?.smartScenePreview || payload?.quickRun) {
+    if (
+      reportUrl ||
+      resultSnapshotId ||
+      conclusionContract ||
+      canonicalContent ||
+      payload?.smartScenePreview ||
+      payload?.quickRun ||
+      payload?.analysisReceipt ||
+      payload?.uiActionProposals?.length
+    ) {
       // Attach reportUrl to the existing answer/conclusion message. If the
       // final payload includes narrative text, treat it as canonical and
       // replace any earlier streamed placeholder tokens.
@@ -3738,6 +3764,8 @@ export function handleAnalysisCompletedEvent(
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
           ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
           ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+          ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+          ...uiActionProposalMessageUpdate(payload),
           ...(canonicalContent
             ? {content: canonicalContent}
             : existing
@@ -3766,6 +3794,8 @@ export function handleAnalysisCompletedEvent(
                 : {}),
               ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
               ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+              ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+              ...uiActionProposalMessageUpdate(payload),
               content: canonicalContent ||
                 buildVisibleConclusionContentWithReportAppendix(
                   messages[i].content,
@@ -3787,6 +3817,8 @@ export function handleAnalysisCompletedEvent(
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
             ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+            ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+            ...uiActionProposalMessageUpdate(payload),
           });
         }
       }
@@ -3844,6 +3876,8 @@ export function handleAnalysisCompletedEvent(
         flowTag: 'answer_stream',
         ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
         ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+        ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+        ...uiActionProposalMessageUpdate(payload),
       }, {persist: true});
     } else {
     // Check if conclusion was already shown
@@ -3861,6 +3895,8 @@ export function handleAnalysisCompletedEvent(
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
           ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
           ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+          ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+          ...uiActionProposalMessageUpdate(payload),
         });
       }
     }
@@ -3871,7 +3907,7 @@ export function handleAnalysisCompletedEvent(
   if (!answerContent) {
     const reportUrl = payload?.reportUrl;
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
-    if ((reportUrl || payload?.quickRun) && streamedAnswerMessageId) {
+    if ((reportUrl || payload?.quickRun || payload?.analysisReceipt || payload?.uiActionProposals?.length) && streamedAnswerMessageId) {
       const streamedMsg = ctx.getMessages().find(
         (m) => m.id === streamedAnswerMessageId && String(m.content || '').trim().length > 0
       );
@@ -3880,6 +3916,8 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(streamedAnswerMessageId, {
           ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
           ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+          ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+          ...uiActionProposalMessageUpdate(payload),
         }, {persist: true});
       }
     }
@@ -4391,6 +4429,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             collapsible: envelope.display.collapsible,
             defaultCollapsed: envelope.display.defaultCollapsed,
             maxVisibleRows: envelope.display.maxVisibleRows,
+            queryReview: rawResult.queryReview,
             expandableData: rawResult.expandableData,  // 【修复】传递 expandableData 用于行展开功能
             sourceContext,
           },

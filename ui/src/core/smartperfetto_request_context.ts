@@ -206,7 +206,8 @@ export function buildSmartPerfettoWorkspaceApiUrl(
     | 'providers'
     | 'analysis-results'
     | 'windows'
-    | 'comparisons',
+    | 'comparisons'
+    | 'trace-config',
   path = '',
 ): string {
   const {workspaceId} = getSmartPerfettoRequestContext();

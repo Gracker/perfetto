@@ -27,6 +27,14 @@ import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backen
 
 import {NavigationBookmark} from './navigation_bookmark_bar';
 import {DetectedScene} from './scene_navigation_bar';
+import type {
+  AnalysisReceiptV1,
+  QueryReviewV1,
+  UiActionProposalV1,
+} from './generated/data_contract.types';
+import type {ServerRuntimeKind} from './provider_types';
+
+export type {AnalysisReceiptV1, QueryReviewV1, UiActionProposalV1};
 
 /**
  * A chat message in the AI conversation.
@@ -70,6 +78,8 @@ export interface Message {
   teachingPinExecution?: TeachingPinExecutionResult;
   smartScenePreview?: SmartScenePreviewPayload;
   quickRun?: QuickRunReceipt;
+  analysisReceipt?: AnalysisReceiptV1;
+  uiActionProposals?: UiActionProposalV1[];
 }
 
 export interface QuickRunReceipt {
@@ -534,6 +544,7 @@ export interface SqlQueryResult {
   collapsible?: boolean; // Whether this table can be collapsed
   defaultCollapsed?: boolean; // Whether this table starts collapsed
   maxVisibleRows?: number; // Max rows to show before "show more"
+  queryReview?: QueryReviewV1;
   // Column definitions for schema-driven rendering (v2.0)
   columnDefinitions?: Array<{
     name: string;
@@ -758,6 +769,103 @@ export interface AnalysisResultComparisonRun {
   error?: string;
 }
 
+export type SimilarityHintSource = 'analysis_result_snapshot' | 'case_library';
+export type SimilarityHintBand = 'strong' | 'partial' | 'background';
+
+export interface SimilarityMatchReason {
+  feature: string;
+  currentValue?: string | number | boolean;
+  matchedValue?: string | number | boolean;
+  weight: number;
+}
+
+export interface SimilarityHintV1 {
+  schemaVersion: 1;
+  id: string;
+  source: SimilarityHintSource;
+  sourceId: string;
+  score: number;
+  band: SimilarityHintBand;
+  matchReasons: SimilarityMatchReason[];
+  limitations: string[];
+  allowedUse: 'navigation_hint_only';
+}
+
+export interface AnalysisResultSimilarityResponse {
+  success: boolean;
+  allowedUse?: 'navigation_hint_only';
+  schemaVersion?: 1;
+  snapshotId?: string;
+  snapshotHints?: SimilarityHintV1[];
+  caseHints?: SimilarityHintV1[];
+  hints?: SimilarityHintV1[];
+  count?: number;
+  error?: string;
+}
+
+export interface AnalysisResultSimilarityState {
+  loadingSnapshotId: string | null;
+  error: string | null;
+  result: AnalysisResultSimilarityResponse | null;
+}
+
+export type TraceConfigProposalConfidence = 'high' | 'medium' | 'low';
+
+export interface TraceConfigProposalCommand {
+  config: string[];
+  capture: string[];
+}
+
+export interface TraceConfigProposalV1 {
+  schemaVersion: 1;
+  proposalId: string;
+  createdAt: string;
+  source: 'deterministic';
+  target: 'android';
+  request: string;
+  app: string;
+  preset: string;
+  presetLabel: string;
+  intent: string;
+  confidence: TraceConfigProposalConfidence;
+  rationale: string[];
+  warnings: string[];
+  blockedDangerousOptions: string[];
+  command: TraceConfigProposalCommand;
+  config: {
+    textproto: string;
+    dataSources: string[];
+    ftraceEvents: string[];
+    atraceCategories: string[];
+    durationSeconds: number;
+    bufferSizeKb: number;
+  };
+}
+
+export interface TraceConfigProposalRequestPayload {
+  request: string;
+  app?: string;
+  durationSeconds?: number;
+  categories?: string[];
+}
+
+export interface TraceConfigProposalApiResponse {
+  success: boolean;
+  proposal?: TraceConfigProposalV1;
+  error?: string;
+}
+
+export interface CaptureConfigSuggestionState {
+  visible: boolean;
+  request: string;
+  app: string;
+  durationSeconds: string;
+  categories: string;
+  loading: boolean;
+  error: string | null;
+  proposal: TraceConfigProposalV1 | null;
+}
+
 /**
  * AI panel internal state.
  */
@@ -822,6 +930,7 @@ export interface AIPanelState {
   resultPickerError: string | null; // Error message for analysis result picker
   resultComparisonLoading: boolean; // Loading state for result comparison creation
   resultComparisonError: string | null; // Error message for result comparison creation
+  resultSimilarity: AnalysisResultSimilarityState;
   selectedResultBaselineId: string | null; // Baseline snapshot selected by result picker
   selectedResultCandidateIds: Set<string>; // Candidate snapshots selected by result picker
   // Story Panel state
@@ -842,6 +951,7 @@ export interface AIPanelState {
   sliceCardDismissed: boolean; // Whether user dismissed the card
   // Pre-queried trace context to attach to next request (set by quick-action buttons)
   pendingTraceContext: TraceDataset[] | null;
+  captureConfigSuggestion: CaptureConfigSuggestionState;
 }
 
 /** A pre-queried trace dataset sent to the backend alongside the query. */
@@ -915,8 +1025,46 @@ export interface ServerStatusActiveProvider {
   type: string;
 }
 
+export type AiCapabilityFeature =
+  | 'trace_upload'
+  | 'execute_sql'
+  | 'invoke_deterministic_skill'
+  | 'capture_config'
+  | 'capture_android'
+  | 'report_read'
+  | 'provider_config_read'
+  | 'provider_config_write'
+  | 'provider_switch'
+  | 'agent_analyze'
+  | 'agent_resume'
+  | 'scene_reconstruct_start'
+  | 'provider_test'
+  | 'cli_provider_test'
+  | 'capture_analyze'
+  | 'llm_skill_step'
+  | 'background_review_agent';
+
+export interface AiCapabilityPolicy {
+  schemaVersion: 1;
+  aiEnabled: boolean;
+  source: 'env' | 'system_default';
+  disabledReason?: string;
+  env?: {
+    key: 'SMARTPERFETTO_AI_ENABLED';
+    rawValue?: string;
+    valid: boolean;
+  };
+  allowedDeterministicFeatures: AiCapabilityFeature[];
+  blockedFeatures: AiCapabilityFeature[];
+  blockingError?: {
+    code: 'AI_DISABLED';
+    message: string;
+    retryable: false;
+  };
+}
+
 export interface ServerRuntimeDiagnostics {
-  runtime?: 'claude-agent-sdk' | 'openai-agents-sdk';
+  runtime?: ServerRuntimeKind;
   providerMode?: string;
   model?: string;
   lightModel?: string;
@@ -944,7 +1092,7 @@ export interface ServerRuntimeDiagnostics {
 export interface ServerStatus {
   connected: boolean;
   version?: string;
-  runtime?: 'claude-agent-sdk' | 'openai-agents-sdk';
+  runtime?: ServerRuntimeKind;
   model?: string;
   providerMode?: string;
   configured?: boolean;
@@ -955,6 +1103,9 @@ export interface ServerStatus {
   providerOverridesEnv?: boolean;
   activeProvider?: ServerStatusActiveProvider;
   authRequired?: boolean;
+  aiEnabled?: boolean;
+  disabledReason?: string;
+  aiPolicy?: AiCapabilityPolicy;
   diagnostics?: ServerRuntimeDiagnostics;
 }
 

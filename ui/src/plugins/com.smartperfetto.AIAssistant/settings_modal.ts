@@ -472,6 +472,19 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
           'Provider Overrides Env',
           formatBoolean(status.providerOverridesEnv),
         ),
+        status.aiPolicy
+          ? this.renderStatusRow(
+              'AI Policy',
+              `${status.aiPolicy.aiEnabled ? 'enabled' : 'disabled'} (${status.aiPolicy.source})`,
+            )
+          : null,
+        status.aiPolicy?.env
+          ? this.renderStatusRow(
+              status.aiPolicy.env.key,
+              `${status.aiPolicy.env.valid ? 'valid' : 'invalid'} value`,
+              true,
+            )
+          : null,
         outputLanguage
           ? this.renderStatusRow('Output Language', outputLanguage)
           : null,
@@ -605,6 +618,40 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
           status.configured ? 'Yes' : 'No (API key missing)',
         ),
       ]),
+      m('div', {style: MODAL_STYLES.statusRow}, [
+        m('span', {style: MODAL_STYLES.statusLabel}, 'AI Enabled'),
+        m(
+          'span',
+          {
+            style: {
+              ...MODAL_STYLES.statusValue,
+              color: status.aiEnabled === false ? COLORS.warning : COLORS.success,
+            },
+          },
+          status.aiEnabled === false ? 'No' : 'Yes',
+        ),
+      ]),
+      status.aiEnabled === false
+        ? m(
+            'div',
+            {
+              style: {
+                ...MODAL_STYLES.alertBox,
+                ...MODAL_STYLES.alertWarning,
+                marginTop: '12px',
+              },
+            },
+            [
+              m('span', {style: MODAL_STYLES.alertIcon}, '!'),
+              m(
+                'div',
+                status.disabledReason ||
+                  status.aiPolicy?.disabledReason ||
+                  'AI model-backed features are disabled by backend policy.',
+              ),
+            ],
+          )
+        : null,
       status.environment
         ? m('div', {style: MODAL_STYLES.statusRow}, [
             m('span', {style: MODAL_STYLES.statusLabel}, 'Environment'),
@@ -708,6 +755,10 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               m(ProviderPanel, {
                 backendUrl: this.settings.backendUrl,
                 apiKey: this.settings.backendApiKey || undefined,
+                aiEnabled: this.serverStatus?.aiEnabled,
+                aiDisabledReason:
+                  this.serverStatus?.disabledReason ||
+                  this.serverStatus?.aiPolicy?.disabledReason,
                 onClose: () => vnode.attrs.onClose(),
                 onProviderSelectionChange: () =>
                   vnode.attrs.onProviderSelectionChange(),

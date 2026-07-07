@@ -62,6 +62,7 @@ import type {
   AISettings,
   AISession,
   ServerStatus,
+  AiCapabilityPolicy,
   StreamingFlowState,
   SelectionContext,
   SelectionTrackInfo,
@@ -76,6 +77,11 @@ import type {
   AnalysisResultComparisonDelta,
   AnalysisResultComparisonMatrixRow,
   AnalysisResultComparisonRun,
+  AnalysisResultSimilarityResponse,
+  SimilarityHintV1,
+  SimilarityMatchReason,
+  TraceConfigProposalApiResponse,
+  TraceConfigProposalV1,
   TeachingActiveRenderingProcess,
   TeachingContent,
   TeachingObservedCriticalTask,
@@ -126,6 +132,17 @@ import {
   subscribeClearChat,
   subscribeOpenSettings,
 } from './assistant_command_bus';
+import {
+  buildPinnedResultForUiAction,
+  executeUiNavigationProposal,
+  findUiActionEvidenceMessage,
+  uiActionProposalIcon,
+} from './ui_action_proposals';
+import {
+  buildTraceConfigProposalPayload,
+  createCaptureConfigSuggestionState,
+  formatTraceConfigCommand,
+} from './capture_config_proposal_ui';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
 import {SCENE_DISPLAY_NAMES} from './scene_constants';
 import {StoryController} from './story_controller';
@@ -155,9 +172,34 @@ import type {
   SmartDisplayedScene,
   SmartScenePreviewPayload,
   SmartSceneVerificationPayload,
+  UiActionProposalV1,
 } from './types';
 
 const DEBUG_AI_PANEL = false;
+const MODEL_BACKED_COMMANDS = new Set([
+  '/analyze',
+  '/slow',
+  '/memory',
+  '/smart',
+]);
+
+function parseAiCapabilityPolicy(
+  value: unknown,
+): AiCapabilityPolicy | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const policy = value as Partial<AiCapabilityPolicy>;
+  if (policy.schemaVersion !== 1) return undefined;
+  if (typeof policy.aiEnabled !== 'boolean') return undefined;
+  if (
+    policy.source !== 'env' &&
+    policy.source !== 'system_default'
+  ) {
+    return undefined;
+  }
+  if (!Array.isArray(policy.allowedDeterministicFeatures)) return undefined;
+  if (!Array.isArray(policy.blockedFeatures)) return undefined;
+  return policy as AiCapabilityPolicy;
+}
 
 interface AreaQueryScope {
   startNs: number;
@@ -381,6 +423,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     resultPickerError: null,
     resultComparisonLoading: false,
     resultComparisonError: null,
+    resultSimilarity: {
+      loadingSnapshotId: null,
+      error: null,
+      result: null,
+    },
     selectedResultBaselineId: null,
     selectedResultCandidateIds: new Set(),
     // Story Panel
@@ -397,6 +444,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     sliceCardPrevSelId: '',
     sliceCardDismissed: false,
     pendingTraceContext: null,
+    captureConfigSuggestion: createCaptureConfigSuggestionState(),
   };
 
   private unsubscribeClearChat?: () => void;
@@ -1539,6 +1587,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.resultPickerError = null;
     this.state.resultComparisonLoading = false;
     this.state.resultComparisonError = null;
+    this.state.resultSimilarity = {
+      loadingSnapshotId: null,
+      error: null,
+      result: null,
+    };
     this.state.selectedResultBaselineId = null;
     this.state.selectedResultCandidateIds = new Set();
     this.availableAnalysisResults = [];
@@ -1676,6 +1729,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private renderHeaderActions(
     isInRpcMode: boolean,
     hasBackendTrace: boolean,
+    isBackendConnected: boolean,
   ): m.Children {
     const floatingState = getFloatingState();
     const isDockedSidebar = floatingState.mode === 'sidebar';
@@ -1719,6 +1773,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               },
             })
           : null,
+        this.renderHeaderIconButton({
+          icon: 'tune',
+          title: isBackendConnected
+            ? 'Suggest capture config'
+            : 'Connect backend before suggesting capture config',
+          active: this.state.captureConfigSuggestion.visible,
+          disabled: !isBackendConnected,
+          onclick: () => this.toggleCaptureConfigSuggestion(),
+        }),
         // Connection status indicator (read-only, no upload button in auto-RPC mode).
         m(
           'span.ai-header-icon-btn.ai-header-icon-btn--readonly',
@@ -1790,14 +1853,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     title: string;
     onclick: () => void;
     active?: boolean;
+    disabled?: boolean;
     label?: string;
   }): m.Children {
     return m(
       'button.ai-header-icon-btn',
       {
         title: attrs.title,
-        onclick: attrs.onclick,
-        class: attrs.active ? 'active' : '',
+        onclick: attrs.disabled ? undefined : attrs.onclick,
+        disabled: attrs.disabled,
+        class: [
+          attrs.active ? 'active' : '',
+          attrs.disabled ? 'disabled' : '',
+        ].filter(Boolean).join(' '),
       },
       [
         m('i.pf-icon', attrs.icon),
@@ -1846,6 +1914,257 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
+  private toggleCaptureConfigSuggestion(): void {
+    const suggestion = this.state.captureConfigSuggestion;
+    suggestion.visible = !suggestion.visible;
+    if (suggestion.visible) {
+      if (!suggestion.request.trim()) suggestion.request = this.state.input.trim();
+      this.state.showTracePicker = false;
+      this.state.showResultPicker = false;
+      this.state.showSessionSidebar = false;
+      this.state.showStorySidebar = false;
+    }
+    m.redraw();
+  }
+
+  private renderCaptureConfigSuggestionPanel(): m.Children {
+    const suggestion = this.state.captureConfigSuggestion;
+    return m('section.ai-capture-config-panel', [
+      m('div.ai-capture-config-header', [
+        m('div.ai-capture-config-title', [
+          m('i.pf-icon', 'tune'),
+          m('span', 'Suggest capture config'),
+        ]),
+        m(
+          'button.ai-capture-config-close',
+          {
+            title: 'Close',
+            onclick: () => {
+              suggestion.visible = false;
+              m.redraw();
+            },
+          },
+          m('i.pf-icon', 'close'),
+        ),
+      ]),
+      m(
+        'form.ai-capture-config-form',
+        {
+          onsubmit: (event: Event) => {
+            event.preventDefault();
+            void this.requestCaptureConfigProposal();
+          },
+        },
+        [
+          m('label.ai-capture-config-field.ai-capture-config-field--wide', [
+            m('span', 'Intent'),
+            m('textarea', {
+              value: suggestion.request,
+              rows: 2,
+              placeholder: 'debug startup jank',
+              oninput: (event: Event) => {
+                suggestion.request = (event.target as HTMLTextAreaElement).value;
+              },
+            }),
+          ]),
+          m('label.ai-capture-config-field', [
+            m('span', 'App package'),
+            m('input', {
+              type: 'text',
+              value: suggestion.app,
+              placeholder: 'com.example.app',
+              oninput: (event: Event) => {
+                suggestion.app = (event.target as HTMLInputElement).value;
+              },
+            }),
+          ]),
+          m('label.ai-capture-config-field', [
+            m('span', 'Duration'),
+            m('input', {
+              type: 'number',
+              min: '1',
+              step: '1',
+              value: suggestion.durationSeconds,
+              placeholder: '15',
+              oninput: (event: Event) => {
+                suggestion.durationSeconds =
+                  (event.target as HTMLInputElement).value;
+              },
+            }),
+          ]),
+          m('label.ai-capture-config-field.ai-capture-config-field--wide', [
+            m('span', 'Extra atrace categories'),
+            m('input', {
+              type: 'text',
+              value: suggestion.categories,
+              placeholder: 'gfx, view',
+              oninput: (event: Event) => {
+                suggestion.categories = (event.target as HTMLInputElement).value;
+              },
+            }),
+          ]),
+          m('div.ai-capture-config-actions', [
+            m(
+              'button.ai-capture-config-submit',
+              {
+                type: 'submit',
+                disabled: suggestion.loading,
+              },
+              [
+                m('i.pf-icon', suggestion.loading ? 'hourglass_empty' : 'preview'),
+                suggestion.loading ? 'Previewing...' : 'Preview',
+              ],
+            ),
+          ]),
+        ],
+      ),
+      suggestion.error
+        ? m('div.ai-capture-config-error', [
+            m('i.pf-icon', 'error'),
+            m('span', suggestion.error),
+          ])
+        : null,
+      suggestion.proposal
+        ? this.renderCaptureConfigProposal(suggestion.proposal)
+        : null,
+    ]);
+  }
+
+  private renderCaptureConfigProposal(proposal: TraceConfigProposalV1): m.Children {
+    const configCommand = formatTraceConfigCommand(proposal.command.config);
+    const captureCommand = formatTraceConfigCommand(proposal.command.capture);
+    return m('div.ai-capture-config-result', [
+      m('div.ai-capture-config-summary', [
+        m('span.ai-capture-config-chip.primary', proposal.presetLabel),
+        m('span.ai-capture-config-chip', proposal.confidence),
+        m('span.ai-capture-config-chip', `${proposal.config.durationSeconds}s`),
+        m('span.ai-capture-config-chip', `${proposal.config.bufferSizeKb} KB`),
+      ]),
+      this.renderCaptureConfigList('Rationale', proposal.rationale),
+      this.renderCaptureConfigList('Warnings', proposal.warnings, 'warning'),
+      proposal.blockedDangerousOptions.length > 0
+        ? m('div.ai-capture-config-danger', [
+            m('div.ai-capture-config-section-title', [
+              m('i.pf-icon', 'gpp_bad'),
+              m('span', 'Blocked dangerous options'),
+            ]),
+            m(
+              'div.ai-capture-config-danger-chips',
+              proposal.blockedDangerousOptions.map((option) =>
+                m('span.ai-capture-config-danger-chip', option),
+              ),
+            ),
+          ])
+        : null,
+      this.renderCaptureConfigCommand('Config command', configCommand),
+      this.renderCaptureConfigCommand('Capture command', captureCommand),
+      m('details.ai-capture-config-textproto', {open: true}, [
+        m('summary', [
+          m('span', 'Textproto preview'),
+          m(
+            'button.ai-capture-config-copy',
+            {
+              type: 'button',
+              title: 'Copy textproto',
+              onclick: (event: Event) => {
+                event.preventDefault();
+                void this.copyTextToClipboard(proposal.config.textproto);
+              },
+            },
+            [m('i.pf-icon', 'content_copy'), m('span', 'Copy')],
+          ),
+        ]),
+        m('pre', proposal.config.textproto),
+      ]),
+      m('div.ai-capture-config-preview-only', [
+        m('i.pf-icon', 'verified_user'),
+        m('span', 'Preview only. No capture has been started.'),
+      ]),
+    ]);
+  }
+
+  private renderCaptureConfigList(
+    title: string,
+    items: string[],
+    tone?: 'warning',
+  ): m.Children {
+    if (items.length === 0) return null;
+    return m(`div.ai-capture-config-section${tone ? `.${tone}` : ''}`, [
+      m('div.ai-capture-config-section-title', title),
+      m('ul', items.map((item) => m('li', item))),
+    ]);
+  }
+
+  private renderCaptureConfigCommand(label: string, command: string): m.Children {
+    return m('div.ai-capture-config-command', [
+      m('div.ai-capture-config-command-label', label),
+      m('code', command),
+      m(
+        'button.ai-capture-config-copy',
+        {
+          type: 'button',
+          title: `Copy ${label.toLowerCase()}`,
+          onclick: () => {
+            void this.copyTextToClipboard(command);
+          },
+        },
+        [m('i.pf-icon', 'content_copy'), m('span', 'Copy')],
+      ),
+    ]);
+  }
+
+  private async requestCaptureConfigProposal(): Promise<void> {
+    const suggestion = this.state.captureConfigSuggestion;
+    const payloadResult = buildTraceConfigProposalPayload(suggestion);
+    if (!payloadResult.ok) {
+      suggestion.error = payloadResult.error;
+      suggestion.proposal = null;
+      m.redraw();
+      return;
+    }
+
+    const backendUrl = this.state.settings.backendUrl.trim();
+    if (!backendUrl) {
+      suggestion.error = 'Backend URL is required';
+      suggestion.proposal = null;
+      m.redraw();
+      return;
+    }
+
+    suggestion.loading = true;
+    suggestion.error = null;
+    suggestion.proposal = null;
+    m.redraw();
+
+    try {
+      const response = await this.fetchBackend(
+        buildSmartPerfettoWorkspaceApiUrl(
+          backendUrl,
+          'trace-config',
+          '/proposals',
+        ),
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payloadResult.payload),
+        },
+      );
+      const data = await response.json().catch(() => null) as
+        | TraceConfigProposalApiResponse
+        | null;
+      if (!response.ok || !data?.success || !data.proposal) {
+        suggestion.error = data?.error || `Request failed: HTTP ${response.status}`;
+        return;
+      }
+      suggestion.proposal = data.proposal;
+    } catch (error) {
+      suggestion.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      suggestion.loading = false;
+      m.redraw();
+    }
+  }
+
   view(vnode: m.Vnode<AIPanelAttrs>) {
     // Detect selection changes and update slice card state.
     this.updateSliceCard();
@@ -1868,6 +2187,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       : 'Backend';
     const workspaceContext = getSmartPerfettoRequestContext();
     const isConnected = this.serverStatus.connected;
+    const aiDisabled = this.isAiDisabled();
     // Check backend availability: engine in HTTP_RPC mode, OR backend upload completed/in-progress
     // With non-blocking upload, WASM engine is used for UI while backend runs separately
     const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
@@ -1925,6 +2245,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               class: isConnected ? 'connected' : 'disconnected',
             }),
             m('span.ai-status-text', providerLabel),
+            aiDisabled
+              ? m(
+                  'span.ai-status-text.ai-disabled',
+                  {title: this.aiDisabledReason()},
+                  [m('i.pf-icon', 'block'), 'AI off'],
+                )
+              : null,
             m(
               'button.ai-workspace-chip',
               {
@@ -1976,7 +2303,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 )
               : null,
           ]),
-          this.renderHeaderActions(isInRpcMode, hasBackendTrace),
+          this.renderHeaderActions(isInRpcMode, hasBackendTrace, isConnected),
         ]),
 
         // Comparison mode indicator bar
@@ -2029,6 +2356,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           [
             // Left: Main content area
             m('div.ai-main-content', [
+              this.renderAiDisabledBanner(),
+
+              this.state.captureConfigSuggestion.visible
+                ? this.renderCaptureConfigSuggestionPanel()
+                : null,
+
               // Scene Navigation Bar (场景导航 - 自动检测 Trace 中的操作场景)
               isInRpcMode && this.trace
                 ? m(SceneNavigationBar, {
@@ -2201,6 +2534,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           {
                             key: msg.id,
                             class: messageClass,
+                            'data-ai-message-id': msg.id,
                           },
                           [
                             // Avatar
@@ -2336,6 +2670,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   this.renderSmartScenePreviewCard(msg),
                                   this.renderSmartSelectionInlineActions(msg),
                                   this.renderQuickRunReceipt(msg.quickRun),
+                                  this.renderAnalysisReceipt(msg.analysisReceipt),
+                                  this.renderUiActionProposals(msg.uiActionProposals),
 
                                   // SQL Result
                                   (() => {
@@ -2377,6 +2713,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         return m('div', [
                                           this.renderTableSourceContext(
                                             sqlResult.sourceContext,
+                                          ),
+                                          this.renderQueryReview(
+                                            sqlResult.queryReview,
                                           ),
                                           m(
                                             'div.ai-collapsed-table',
@@ -2426,6 +2765,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                       return m('div', [
                                         this.renderTableSourceContext(
                                           sqlResult.sourceContext,
+                                        ),
+                                        this.renderQueryReview(
+                                          sqlResult.queryReview,
                                         ),
                                         sqlResult.collapsible
                                           ? m(
@@ -2490,6 +2832,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     return m('div', [
                                       this.renderTableSourceContext(
                                         sqlResult.sourceContext,
+                                      ),
+                                      this.renderQueryReview(
+                                        sqlResult.queryReview,
                                       ),
                                       m('div.ai-sql-card', [
                                         m('div.ai-sql-header', [
@@ -2895,6 +3240,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         'aria-label': '\u8F93\u5165\u5206\u6790\u95EE\u9898',
                         'placeholder': !isInRpcMode
                           ? 'AI 后端未连接...'
+                          : aiDisabled
+                            ? 'AI 已禁用；可继续输入 /sql、/goto、/anr、/jank 等确定性命令'
                           : 'Ask anything about your trace...',
                         'value': this.state.input,
                         'oninput': (e: Event) => {
@@ -2944,7 +3291,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     ]),
                     m(
                       'div.ai-input-hint',
-                      'Press Enter to send, Shift+Enter for new line',
+                      aiDisabled
+                        ? 'AI disabled by backend policy. Deterministic commands still run locally or through non-AI backend APIs.'
+                        : 'Press Enter to send, Shift+Enter for new line',
                     ),
                   ])
                 : null,
@@ -2975,25 +3324,29 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return null;
     }
 
+    const aiDisabled = this.isAiDisabled();
     return m('div.ai-preset-questions', [
       ...(this.state.referenceTraceId
         ? COMPARISON_PRESET_QUESTIONS
         : PRESET_QUESTIONS
-      ).map((preset) =>
-        m(
+      ).map((preset) => {
+        const blocked = this.shouldBlockModelBackedRequest(preset.question);
+        return m(
           `button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}${preset.isSmart ? '.ai-smart-btn' : ''}`,
           {
             onclick: () => this.sendPresetQuestion(preset.question),
-            title: preset.isTeaching
-              ? '检测当前 Trace 的渲染管线类型，自动 Pin 关键泳道'
-              : preset.isSmart
-                ? '自动识别混合 Trace 中的启动、滑动、点击、导航、ANR 和设备状态'
-                : preset.question,
-            disabled: this.state.isLoading,
+            title: blocked
+              ? this.aiDisabledReason()
+              : preset.isTeaching
+                ? '检测当前 Trace 的渲染管线类型，自动 Pin 关键泳道'
+                : preset.isSmart
+                  ? '自动识别混合 Trace 中的启动、滑动、点击、导航、ANR 和设备状态'
+                  : preset.question,
+            disabled: this.state.isLoading || blocked,
           },
           [m('i.pf-icon', preset.icon), preset.label],
-        ),
-      ),
+        );
+      }),
       this.renderSmartSelectionButtons('preset'),
       this.hasActiveSelection()
         ? m(
@@ -3001,7 +3354,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             {
               onclick: () => this.analyzeCurrentSelection(),
               title: this.getSelectionButtonTitle(),
-              disabled: this.state.isLoading,
+              disabled: this.state.isLoading || aiDisabled,
             },
             [m('i.pf-icon', 'my_location'), '选区分析'],
           )
@@ -3012,7 +3365,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private renderSmartSelectionButtons(
     surface: 'preset' | 'story' | 'inline',
   ): m.Children {
-    if (!this.hasSmartSceneSelectionReady() || this.state.isLoading) {
+    if (
+      !this.hasSmartSceneSelectionReady() ||
+      this.state.isLoading ||
+      this.isAiDisabled()
+    ) {
       return null;
     }
 
@@ -3325,6 +3682,191 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
 
     return m('div.ai-quick-run-receipt', chips);
+  }
+
+  private renderAnalysisReceipt(receipt?: Message['analysisReceipt']): m.Children {
+    if (!receipt) return null;
+    const gateLabel = {
+      passed: '已通过',
+      partial: '部分通过',
+      not_applicable: '不适用',
+    } as const;
+    const gateClass = {
+      passed: 'ok',
+      partial: 'warn',
+      not_applicable: 'muted',
+    } as const;
+    const traceEvidenceTotal =
+      receipt.traceEvidence.sqlCount +
+      receipt.traceEvidence.skillCount +
+      receipt.traceEvidence.dataEnvelopeCount;
+    const contextTotal =
+      receipt.nonEvidenceContext.frontendPrequeryCount +
+      receipt.nonEvidenceContext.memoryHintCount +
+      receipt.nonEvidenceContext.conversationContextCount +
+      receipt.nonEvidenceContext.strategyHintCount;
+    const title = [
+      `run=${receipt.runId}`,
+      `trace=${receipt.traceId}`,
+      `evidence_refs=${receipt.traceEvidence.evidenceRefCount}`,
+      `unsupported_claims=${receipt.claimAudit.unsupportedClaims}`,
+    ].join(' · ');
+    return m('div.ai-quick-run-receipt', {title}, [
+      m('span.ai-quick-run-chip', `回执 v${receipt.schemaVersion}`),
+      m('span.ai-quick-run-chip', `${receipt.mode}→${receipt.resolvedMode}`),
+      m('span.ai-quick-run-chip', `证据 ${traceEvidenceTotal}`),
+      contextTotal > 0 ? m('span.ai-quick-run-chip', `非证据上下文 ${contextTotal}`) : null,
+      m(
+        `span.ai-quick-run-chip.${gateClass[receipt.qualityGates.claimVerification]}`,
+        `声明核验 ${gateLabel[receipt.qualityGates.claimVerification]}`,
+      ),
+      m(
+        `span.ai-quick-run-chip.${gateClass[receipt.qualityGates.finalReportContract]}`,
+        `报告 ${gateLabel[receipt.qualityGates.finalReportContract]}`,
+      ),
+    ]);
+  }
+
+  private renderQueryReview(review?: SqlQueryResult['queryReview']): m.Children {
+    if (!review) return null;
+    const observed = review.observedExecution ?? {};
+    const producer = review.producer ?? {};
+    const source = review.source ?? {};
+    const reads = (review.reads ?? []).map((read) => {
+      const columns = read.columns && read.columns.length > 0
+        ? ` (${read.columns.slice(0, 6).join(', ')}${read.columns.length > 6 ? ', ...' : ''})`
+        : '';
+      return `${read.table}${columns} · ${read.confidence}`;
+    });
+    const filters = (review.filters ?? []).map((filter) =>
+      `${this.truncateQueryReviewText(filter.expression, 180)} · ${filter.confidence}`,
+    );
+    const outputs = (review.outputShape ?? []).map((output) =>
+      `${output.name}${output.type ? `:${output.type}` : ''}${output.required ? ' required' : ''}`,
+    );
+    const guardrails = (review.guardrails ?? []).map((guardrail) =>
+      `${guardrail.severity}: ${this.truncateQueryReviewText(guardrail.message || guardrail.ruleId, 180)}`,
+    );
+    const chips = [
+      producer.kind || 'unknown_producer',
+      source.skillId ? `skill=${source.skillId}` : '',
+      source.stepId ? `step=${source.stepId}` : '',
+      source.evidenceRefId ? `evidence=${this.compactQueryReviewId(source.evidenceRefId)}` : '',
+      typeof observed.rowCount === 'number' ? `rows=${observed.rowCount}` : '',
+      typeof observed.durationMs === 'number' ? `${observed.durationMs}ms` : '',
+      observed.truncated ? 'truncated' : '',
+    ].filter(Boolean);
+
+    return m('details.ai-query-review', [
+      m('summary.ai-query-review-summary', [
+        m('i.pf-icon', 'fact_check'),
+        m('span.ai-query-review-title', 'Query review'),
+        m('span.ai-query-review-badge', review.allowedUse),
+      ]),
+      m('div.ai-query-review-body', [
+        m('div.ai-query-review-purpose', review.purpose),
+        chips.length > 0
+          ? m('div.ai-query-review-chips', chips.map((chip) =>
+              m('span.ai-query-review-chip', chip),
+            ))
+          : null,
+        this.renderQueryReviewList('Reads', reads),
+        this.renderQueryReviewList('Filters', filters),
+        this.renderQueryReviewList('Output fields', outputs),
+        this.renderQueryReviewList('Guardrails', guardrails),
+        this.renderQueryReviewList('Limitations', review.limitations ?? []),
+        observed.executableSql
+          ? m('details.ai-query-review-sql', [
+              m('summary', 'Executable SQL'),
+              m('pre', observed.executableSql),
+            ])
+          : null,
+      ]),
+    ]);
+  }
+
+  private renderQueryReviewList(label: string, items: string[]): m.Children {
+    if (items.length === 0) return null;
+    return m('div.ai-query-review-section', [
+      m('div.ai-query-review-section-title', label),
+      m('ul', items.slice(0, 8).map((item) =>
+        m('li', this.truncateQueryReviewText(item, 220)),
+      )),
+      items.length > 8
+        ? m('div.ai-query-review-more', `+${items.length - 8} more`)
+        : null,
+    ]);
+  }
+
+  private truncateQueryReviewText(text: string, maxLength: number): string {
+    return text.length <= maxLength ? text : `${text.slice(0, maxLength - 3)}...`;
+  }
+
+  private compactQueryReviewId(value: string): string {
+    return value.length <= 28 ? value : `${value.slice(0, 25)}...`;
+  }
+
+  private renderUiActionProposals(proposals?: Message['uiActionProposals']): m.Children {
+    if (!proposals || proposals.length === 0) return null;
+    return m('div.ai-ui-action-proposals', proposals.map((proposal) =>
+      m('button.ai-ui-action-btn', {
+        key: proposal.id,
+        title: proposal.reason,
+        onclick: () => this.handleUiActionProposal(proposal),
+      }, [
+        m('i.pf-icon', uiActionProposalIcon(proposal.kind)),
+        m('span', proposal.title),
+      ]),
+    ));
+  }
+
+  private handleUiActionProposal(proposal: UiActionProposalV1): void {
+    if (proposal.kind === 'navigate_timeline' || proposal.kind === 'navigate_range') {
+      const navigation = executeUiNavigationProposal(
+        proposal,
+        this.trace,
+        this.state.backendTraceId ?? undefined,
+      );
+      if (!navigation.ok) this.showUiActionError(proposal, navigation.error);
+      return;
+    }
+
+    const target = findUiActionEvidenceMessage(proposal, this.state.messages);
+    if (!target) {
+      this.showUiActionError(proposal, 'matching evidence table is not available in this conversation');
+      return;
+    }
+
+    if (proposal.kind === 'open_evidence_table') {
+      this.state.collapsedTables.delete(target.id);
+      this.scrollToUiActionMessage(target.id);
+      m.redraw();
+      return;
+    }
+
+    const pinned = buildPinnedResultForUiAction(proposal, target, this.generateId());
+    if (!pinned) {
+      this.showUiActionError(proposal, 'matching evidence message has no table payload');
+      return;
+    }
+    this.storePinnedResult(pinned);
+  }
+
+  private scrollToUiActionMessage(messageId: string): void {
+    setTimeout(() => {
+      const selector = `[data-ai-message-id="${messageId.replace(/"/g, '\\"')}"]`;
+      const target = document.querySelector(selector);
+      target?.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+    }, 0);
+  }
+
+  private showUiActionError(proposal: UiActionProposalV1, error: string): void {
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: `UI action failed: ${proposal.title} (${error})`,
+      timestamp: Date.now(),
+    });
   }
 
   /** Render the analysis mode selector inside the input bar.
@@ -3914,15 +4456,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     rows: any[][];
     timestamp: number;
   }) {
-    const pinnedResult: PinnedResult = {
+    this.storePinnedResult({
       id: this.generateId(),
       query: data.query,
       columns: data.columns,
       rows: data.rows,
       timestamp: data.timestamp,
-    };
+    });
+  }
 
-    // Add to pinned results (keep max 20)
+  private storePinnedResult(pinnedResult: PinnedResult): void {
     this.state.pinnedResults = [
       pinnedResult,
       ...this.state.pinnedResults,
@@ -4002,6 +4545,52 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   /** Server status cache — shared by header, settings modal, and welcome message. */
   private serverStatus: ServerStatus = {connected: false};
 
+  private isAiDisabled(): boolean {
+    return this.serverStatus.connected && this.serverStatus.aiEnabled === false;
+  }
+
+  private aiDisabledReason(): string {
+    return (
+      this.serverStatus.disabledReason ||
+      this.serverStatus.aiPolicy?.disabledReason ||
+      'AI model-backed features are disabled by backend policy.'
+    );
+  }
+
+  private isModelBackedCommand(input: string): boolean {
+    const command = input.split(/\s+/)[0]?.toLowerCase();
+    return command !== undefined && MODEL_BACKED_COMMANDS.has(command);
+  }
+
+  private shouldBlockModelBackedRequest(input: string): boolean {
+    if (!this.isAiDisabled()) return false;
+    if (!input.startsWith('/')) return true;
+    return this.isModelBackedCommand(input);
+  }
+
+  private addAiDisabledMessage(surface = 'analysis'): void {
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: [
+        '**AI 已禁用**',
+        '',
+        `${surface} 当前被后端 policy 阻断：${this.aiDisabledReason()}`,
+        '',
+        '仍可继续使用 SQL 查询、时间跳转、ANR/Jank 检测、Pin、Provider 配置/切换，以及已有报告读取。',
+      ].join('\n'),
+      timestamp: Date.now(),
+    });
+  }
+
+  private renderAiDisabledBanner(): m.Children {
+    if (!this.isAiDisabled()) return null;
+    return m('div.ai-disabled-banner', [
+      m('i.pf-icon', 'block'),
+      m('span', this.aiDisabledReason()),
+    ]);
+  }
+
   /**
    * Check backend server status by calling /health with optional auth headers.
    * Used by SettingsModal to test with potentially unsaved URL/key values.
@@ -4024,6 +4613,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       if (!response.ok) return {connected: false};
       const data = await response.json();
       const aiEngine = data.aiEngine || {};
+      const aiPolicy = parseAiCapabilityPolicy(data.aiPolicy);
+      const aiEnabled =
+        typeof aiEngine.aiEnabled === 'boolean'
+          ? aiEngine.aiEnabled
+          : aiPolicy?.aiEnabled;
+      const disabledReason =
+        typeof aiEngine.disabledReason === 'string'
+          ? aiEngine.disabledReason
+          : aiPolicy?.disabledReason;
       return {
         connected: true,
         version: typeof data.version === 'string' ? data.version : undefined,
@@ -4040,6 +4638,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         providerOverridesEnv: aiEngine.providerOverridesEnv,
         activeProvider: aiEngine.activeProvider,
         authRequired: aiEngine.authRequired,
+        aiEnabled,
+        disabledReason,
+        aiPolicy,
         diagnostics: aiEngine.diagnostics,
       };
     } catch {
@@ -4130,6 +4731,11 @@ Click ⚙️ to configure backend connection.`;
       );
 
     if (!input || this.state.isLoading) return;
+    if (this.shouldBlockModelBackedRequest(input)) {
+      this.addAiDisabledMessage(input.startsWith('/') ? input.split(/\s+/)[0] : 'analysis');
+      m.redraw();
+      return;
+    }
 
     // Clear skill progress tracking and errors for new analysis session
     this.state.displayedSkillProgress.clear();
@@ -6891,6 +7497,12 @@ Click ⚙️ to configure backend connection.`;
   }
 
   private async handleSmartAnalysisCommand(selection?: SmartSceneSelectionRequest) {
+    if (this.isAiDisabled()) {
+      this.addAiDisabledMessage('智能分析');
+      m.redraw();
+      return;
+    }
+
     if (!this.state.backendTraceId) {
       this.addMessage({
         id: this.generateId(),
@@ -7941,6 +8553,14 @@ Click ⚙️ to configure backend connection.`;
    * Pass forceRefresh=true to bypass the backend cache (used by "重新分析").
    */
   private async handleStoryConfirm(opts?: {forceRefresh?: boolean}) {
+    if (this.isAiDisabled()) {
+      this.state.storyState.status = 'failed';
+      this.state.storyState.lastError = this.aiDisabledReason();
+      this.addAiDisabledMessage('场景还原');
+      m.redraw();
+      return;
+    }
+
     this.state.storyState.status = 'running';
     this.state.storyState.lastError = null;
     m.redraw();
@@ -10008,6 +10628,241 @@ Click ⚙️ to configure backend connection.`;
     ].join('\n');
   }
 
+  private isSimilarityRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object';
+  }
+
+  private normalizeSimilarityReason(value: unknown): SimilarityMatchReason | null {
+    if (!this.isSimilarityRecord(value) || typeof value.feature !== 'string') {
+      return null;
+    }
+    const currentValue = this.normalizeSimilarityReasonValue(value.currentValue);
+    const matchedValue = this.normalizeSimilarityReasonValue(value.matchedValue);
+    return {
+      feature: value.feature,
+      ...(currentValue !== undefined ? {currentValue} : {}),
+      ...(matchedValue !== undefined ? {matchedValue} : {}),
+      weight: typeof value.weight === 'number' && Number.isFinite(value.weight)
+        ? value.weight
+        : 0,
+    };
+  }
+
+  private normalizeSimilarityReasonValue(
+    value: unknown,
+  ): string | number | boolean | undefined {
+    if (
+      typeof value === 'string' ||
+      typeof value === 'number' ||
+      typeof value === 'boolean'
+    ) {
+      return value;
+    }
+    return undefined;
+  }
+
+  private normalizeSimilarityHint(value: unknown): SimilarityHintV1 | null {
+    if (!this.isSimilarityRecord(value)) return null;
+    const source = value.source;
+    if (source !== 'analysis_result_snapshot' && source !== 'case_library') {
+      return null;
+    }
+    const band = value.band;
+    if (band !== 'strong' && band !== 'partial' && band !== 'background') {
+      return null;
+    }
+    if (
+      typeof value.id !== 'string' ||
+      typeof value.sourceId !== 'string' ||
+      value.allowedUse !== 'navigation_hint_only'
+    ) {
+      return null;
+    }
+    return {
+      schemaVersion: 1,
+      id: value.id,
+      source,
+      sourceId: value.sourceId,
+      score: typeof value.score === 'number' && Number.isFinite(value.score)
+        ? value.score
+        : 0,
+      band,
+      matchReasons: Array.isArray(value.matchReasons)
+        ? value.matchReasons
+            .map((item) => this.normalizeSimilarityReason(item))
+            .filter((item): item is SimilarityMatchReason => item !== null)
+        : [],
+      limitations: Array.isArray(value.limitations)
+        ? value.limitations.filter((item): item is string => typeof item === 'string')
+        : [],
+      allowedUse: 'navigation_hint_only',
+    };
+  }
+
+  private normalizeSimilarityResponse(value: unknown): AnalysisResultSimilarityResponse {
+    if (!this.isSimilarityRecord(value)) {
+      return {success: false, error: 'Invalid similarity response'};
+    }
+    const hints = Array.isArray(value.hints)
+      ? value.hints
+          .map((item) => this.normalizeSimilarityHint(item))
+          .filter((item): item is SimilarityHintV1 => item !== null)
+      : [];
+    const snapshotHints = Array.isArray(value.snapshotHints)
+      ? value.snapshotHints
+          .map((item) => this.normalizeSimilarityHint(item))
+          .filter((item): item is SimilarityHintV1 => item !== null)
+      : hints.filter((item) => item.source === 'analysis_result_snapshot');
+    const caseHints = Array.isArray(value.caseHints)
+      ? value.caseHints
+          .map((item) => this.normalizeSimilarityHint(item))
+          .filter((item): item is SimilarityHintV1 => item !== null)
+      : hints.filter((item) => item.source === 'case_library');
+    const normalizedHints = hints.length > 0 ? hints : [...snapshotHints, ...caseHints];
+    const response: AnalysisResultSimilarityResponse = {
+      success: value.success === true,
+      snapshotHints,
+      caseHints,
+      hints: normalizedHints,
+      count: typeof value.count === 'number' && Number.isFinite(value.count)
+        ? value.count
+        : normalizedHints.length,
+    };
+    if (value.allowedUse === 'navigation_hint_only') {
+      response.allowedUse = 'navigation_hint_only';
+    }
+    if (value.schemaVersion === 1) {
+      response.schemaVersion = 1;
+    }
+    if (typeof value.snapshotId === 'string') {
+      response.snapshotId = value.snapshotId;
+    }
+    if (typeof value.error === 'string') {
+      response.error = value.error;
+    }
+    return response;
+  }
+
+  private async fetchSimilarAnalysisResult(snapshotId: string): Promise<void> {
+    if (this.state.resultSimilarity.loadingSnapshotId) return;
+    this.state.resultSimilarity = {
+      loadingSnapshotId: snapshotId,
+      error: null,
+      result: this.state.resultSimilarity.result,
+    };
+    m.redraw();
+
+    try {
+      const url = buildSmartPerfettoWorkspaceApiUrl(
+        this.state.settings.backendUrl,
+        'analysis-results',
+        `/${encodeURIComponent(snapshotId)}/similarity`,
+      );
+      const response = await this.fetchBackend(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({limit: 5, includeCases: true}),
+      });
+      const data = this.normalizeSimilarityResponse(
+        await response.json().catch(() => ({})),
+      );
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      this.state.resultSimilarity = {
+        loadingSnapshotId: null,
+        error: null,
+        result: data,
+      };
+    } catch (error) {
+      this.state.resultSimilarity = {
+        loadingSnapshotId: null,
+        error: error instanceof Error ? error.message : 'Failed to load similarity hints',
+        result: null,
+      };
+    } finally {
+      m.redraw();
+    }
+  }
+
+  private formatSimilaritySource(source: SimilarityHintV1['source']): string {
+    return source === 'analysis_result_snapshot' ? 'Snapshot' : 'Case';
+  }
+
+  private formatSimilarityReason(reason: SimilarityMatchReason): string {
+    const current = reason.currentValue === undefined
+      ? ''
+      : `: ${String(reason.currentValue)}`;
+    const matched = reason.matchedValue === undefined
+      ? ''
+      : ` -> ${String(reason.matchedValue)}`;
+    return `${reason.feature}${current}${matched}`;
+  }
+
+  private renderSimilarityHint(hint: SimilarityHintV1): m.Vnode {
+    return m('div.ai-result-similarity-hint', {key: hint.id}, [
+      m('div.ai-result-similarity-hint-header', [
+        m('span.ai-result-similarity-source', this.formatSimilaritySource(hint.source)),
+        m('span.ai-result-similarity-id', hint.sourceId),
+        m(`span.ai-result-similarity-band.${hint.band}`, hint.band),
+        m('span.ai-result-similarity-score', `${Math.round(hint.score * 100)}%`),
+      ]),
+      hint.matchReasons.length > 0
+        ? m('div.ai-result-similarity-reasons',
+            hint.matchReasons.slice(0, 4).map((reason) =>
+              m('span.ai-result-similarity-reason', this.formatSimilarityReason(reason)),
+            ),
+          )
+        : null,
+      hint.limitations.length > 0
+        ? m('div.ai-result-similarity-limitations',
+            hint.limitations.slice(0, 2).join(' '),
+          )
+        : null,
+    ]);
+  }
+
+  private renderResultSimilaritySummary(): m.Children {
+    const state = this.state.resultSimilarity;
+    if (state.loadingSnapshotId) {
+      return m('section.ai-result-similarity-summary.loading', [
+        m('div.ai-result-similarity-header', [
+          m('i.pf-icon', 'travel_explore'),
+          m('span', '查找相似结果中...'),
+        ]),
+      ]);
+    }
+    if (state.error) {
+      return m('section.ai-result-similarity-summary.error', [
+        m('div.ai-result-similarity-header', [
+          m('i.pf-icon', 'error'),
+          m('span', `相似结果加载失败: ${state.error}`),
+        ]),
+      ]);
+    }
+    const result = state.result;
+    if (!result) return null;
+    const hints = result.hints ?? [];
+    return m('section.ai-result-similarity-summary', [
+      m('div.ai-result-similarity-header', [
+        m('i.pf-icon', 'travel_explore'),
+        m('span', '相似结果提示'),
+        m('span.ai-result-similarity-policy', 'navigation_hint_only'),
+        result.snapshotId
+          ? m('span.ai-result-similarity-id', formatAnalysisResultRef(
+              result.snapshotId,
+              this.availableAnalysisResults.map((item) => item.id),
+            ))
+          : null,
+      ]),
+      hints.length > 0
+        ? m('div.ai-result-similarity-list',
+            hints.slice(0, 5).map((hint) => this.renderSimilarityHint(hint)),
+          )
+        : m('div.ai-result-similarity-empty', '没有找到足够相似的历史结果或案例。'),
+    ]);
+  }
+
   private async createAnalysisResultComparison(input: {
     baseline: AnalysisResultPickerItem;
     candidates: AnalysisResultPickerItem[];
@@ -10158,6 +11013,7 @@ Click ⚙️ to configure backend connection.`;
                       ),
                 ]),
         ]),
+        this.renderResultSimilaritySummary(),
         this.availableAnalysisResults.length > 0
           ? m('div.ai-trace-picker-sidebar-actions.ai-result-picker-actions', [
               this.state.resultComparisonError
@@ -10212,6 +11068,8 @@ Click ⚙️ to configure backend connection.`;
       (state) => state.latestSnapshotId === item.id,
     );
     const isVisibilityUpdating = this.resultVisibilityUpdatingIds.has(item.id);
+    const isSimilarityLoading =
+      this.state.resultSimilarity.loadingSnapshotId === item.id;
     const metricCount = item.metrics?.length ?? 0;
     const evidenceCount = item.evidenceRefs?.length ?? 0;
 
@@ -10291,6 +11149,17 @@ Click ⚙️ to configure backend connection.`;
               title: isBaseline ? 'baseline 不能同时作为 candidate' : '加入候选',
             },
             '候选',
+          ),
+          m(
+            'button.ai-result-picker-role-btn.ai-result-picker-icon-btn',
+            {
+              disabled: !!this.state.resultSimilarity.loadingSnapshotId,
+              onclick: () => {
+                void this.fetchSimilarAnalysisResult(item.id);
+              },
+              title: '查找相似结果',
+            },
+            m('i.pf-icon', isSimilarityLoading ? 'hourglass_empty' : 'travel_explore'),
           ),
           item.visibility === 'private'
             ? m(
