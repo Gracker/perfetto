@@ -1714,6 +1714,7 @@ describe('handleDataEvent', () => {
           source: 'test_skill:step1',
           evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
           traceSide: 'current',
+          paneSide: 'left',
           traceId: 'trace-a',
           queryHash: 'hash',
           queryReview: {
@@ -1764,6 +1765,7 @@ describe('handleDataEvent', () => {
       rowCount: 1,
       evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
       traceSide: 'current',
+      paneSide: 'left',
       traceId: 'trace-a',
     });
     expect(ctx.messages[0].sqlResult?.queryReview).toMatchObject({
@@ -3278,6 +3280,7 @@ describe('handleDataEvent', () => {
             stepId: 'jank_frames',
             evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
             traceSide: 'current',
+            paneSide: 'left',
             traceId: 'trace-a',
           },
           data: {
@@ -3299,6 +3302,7 @@ describe('handleDataEvent', () => {
             stepId: 'jank_frames',
             evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
             traceSide: 'reference',
+            paneSide: 'right',
             traceId: 'trace-b',
           },
           data: {
@@ -3318,11 +3322,13 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       traceSide: 'current',
+      paneSide: 'left',
       evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
     });
     expect(ctx.messages[1].sqlResult?.sourceContext).toMatchObject({
       ref: '表 2',
       traceSide: 'reference',
+      paneSide: 'right',
       evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
     });
 

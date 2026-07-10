@@ -486,6 +486,13 @@ export class SessionManager {
       agentRunSequence?: number;
       latestAnalysisSnapshot?: LatestAnalysisSnapshot;
       summary?: string;
+      type?: AISession['type'];
+      referenceTraceFingerprint?: string;
+      referenceBackendTraceId?: string;
+      referenceTraceName?: string;
+      tracePairLayout?: AISession['tracePairLayout'];
+      tracePairSplitPercent?: number;
+      tracePairActiveTraceSide?: AISession['tracePairActiveTraceSide'];
     }
   ): boolean {
     const storage = this.loadSessionsStorage();

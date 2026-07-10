@@ -82,6 +82,9 @@ import type {
   SimilarityMatchReason,
   TraceConfigProposalApiResponse,
   TraceConfigProposalV1,
+  TracePairContext,
+  TracePairLayout,
+  TracePairTraceSide,
   TeachingActiveRenderingProcess,
   TeachingContent,
   TeachingObservedCriticalTask,
@@ -128,6 +131,7 @@ import {
 import type {SSEHandlerContext} from './sse_event_handlers';
 import {orderMessagesForDisplay} from './message_order';
 import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
+import {traceLocationLabel} from './trace_location_label';
 import {
   subscribeClearChat,
   subscribeOpenSettings,
@@ -138,6 +142,7 @@ import {
   findUiActionEvidenceMessage,
   uiActionProposalIcon,
 } from './ui_action_proposals';
+import {buildTracePairContext as buildTracePairContextPayload} from './trace_pair_context';
 import {
   buildTraceConfigProposalPayload,
   createCaptureConfigSuggestionState,
@@ -415,6 +420,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     referenceTraceId: null,
     referenceTraceName: null,
     isReferenceActive: false,
+    tracePairWorkspaceOpen: false,
+    tracePairLayout: 'horizontal',
+    tracePairSplitPercent: 50,
+    tracePairMaximizedTraceSide: null,
+    tracePairMinimizedTraceSides: new Set(),
     showTracePicker: false,
     comparisonTraceLoading: false,
     latestAnalysisSnapshot: null,
@@ -479,6 +489,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   // Captures input draft, collapsed tables, and active SSE analysis when the
   // user switches between tab and floating window mode.
   private transientSaverRef: (() => TransientState) | null = null;
+  private tracePairResizeCleanup: (() => void) | null = null;
+  private tracePairResizeActive = false;
+  private analysisModeMenuClickHandler: ((event: MouseEvent) => void) | null =
+    null;
+  private analysisModeMenuKeydownHandler:
+    | ((event: KeyboardEvent) => void)
+    | null = null;
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
@@ -560,11 +577,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     context: DataSourceContext | undefined,
   ): m.Children {
     if (!context) return null;
-    const traceLabel = context.traceSide === 'current'
-      ? '当前 Trace'
-      : context.traceSide === 'reference'
-        ? '参考 Trace'
-        : '';
+    const traceLocation = traceLocationLabel(context.traceSide, context.paneSide);
     const kindLabel = (kind: DataSourceContext['kind']) => {
       switch (kind) {
         case 'summary':
@@ -588,7 +601,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const chips: string[] = [];
     const kind = kindLabel(context.kind);
     if (kind) chips.push(kind);
-    if (traceLabel) chips.push(traceLabel);
+    if (traceLocation) chips.push(traceLocation);
     if (context.phase) chips.push(context.phase);
     const planPhase = [context.planPhaseId, context.planPhaseTitle]
       .filter(Boolean)
@@ -1110,6 +1123,105 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return `${info.start}_${info.end}_${info.traceTitle || 'untitled'}`;
   }
 
+  private getCurrentTraceDisplayName(): string {
+    return this.trace?.traceInfo?.traceTitle || '当前 Trace';
+  }
+
+  private buildTracePairContext(): TracePairContext | undefined {
+    return buildTracePairContextPayload({
+      currentTraceId: this.state.backendTraceId,
+      currentTraceName: this.getCurrentTraceDisplayName(),
+      currentTraceFingerprint: this.state.currentTraceFingerprint || this.getTraceFingerprint(),
+      referenceTraceId: this.state.referenceTraceId,
+      referenceTraceName: this.state.referenceTraceName,
+      activeTraceSide: this.state.isReferenceActive ? 'reference' : 'current',
+      layout: this.state.tracePairLayout,
+      workspaceOpen: this.state.tracePairWorkspaceOpen,
+      splitPercent: this.state.tracePairSplitPercent,
+      maximizedTraceSide: this.state.tracePairMaximizedTraceSide,
+      minimizedTraceSides: this.state.tracePairMinimizedTraceSides,
+    });
+  }
+
+  private buildTracePairSessionFields(): Partial<AISession> {
+    const referenceTraceId = this.state.referenceTraceId?.trim();
+    if (!referenceTraceId) {
+      return {
+        type: 'single',
+        referenceTraceFingerprint: undefined,
+        referenceBackendTraceId: undefined,
+        referenceTraceName: undefined,
+        tracePairLayout: undefined,
+        tracePairSplitPercent: undefined,
+        tracePairActiveTraceSide: undefined,
+      };
+    }
+
+    return {
+      type: 'comparison',
+      referenceBackendTraceId: referenceTraceId,
+      referenceTraceName: this.state.referenceTraceName || undefined,
+      tracePairLayout: this.state.tracePairLayout,
+      tracePairSplitPercent: this.normalizeTracePairSplitPercent(
+        this.state.tracePairSplitPercent,
+      ),
+      tracePairActiveTraceSide: this.state.isReferenceActive
+        ? 'reference'
+        : 'current',
+    };
+  }
+
+  private clearTracePairSessionState(): void {
+    this.state.referenceTraceId = null;
+    this.state.referenceTraceName = null;
+    this.state.isReferenceActive = false;
+    this.state.tracePairWorkspaceOpen = false;
+    this.state.tracePairLayout = 'horizontal';
+    this.state.tracePairSplitPercent = 50;
+    this.state.tracePairMaximizedTraceSide = null;
+    this.state.tracePairMinimizedTraceSides = new Set();
+    this.state.showTracePicker = false;
+    this.state.comparisonTraceLoading = false;
+    this.stopTracePairResize();
+    clearComparisonState();
+  }
+
+  private restoreTracePairStateFromSession(session: AISession): boolean {
+    const referenceTraceId = typeof session.referenceBackendTraceId === 'string'
+      ? session.referenceBackendTraceId.trim()
+      : '';
+    if (
+      session.type !== 'comparison' ||
+      !referenceTraceId ||
+      !this.state.backendTraceId
+    ) {
+      this.clearTracePairSessionState();
+      return false;
+    }
+
+    this.state.referenceTraceId = referenceTraceId;
+    this.state.referenceTraceName = session.referenceTraceName || null;
+    this.state.isReferenceActive =
+      session.tracePairActiveTraceSide === 'reference';
+    this.state.tracePairWorkspaceOpen = false;
+    this.state.tracePairLayout =
+      session.tracePairLayout === 'vertical' ? 'vertical' : 'horizontal';
+    this.state.tracePairSplitPercent = this.normalizeTracePairSplitPercent(
+      session.tracePairSplitPercent,
+    );
+    this.state.tracePairMaximizedTraceSide = null;
+    this.state.tracePairMinimizedTraceSides = new Set();
+    this.state.comparisonTraceLoading = false;
+    clearComparisonState();
+    return true;
+  }
+
+  private normalizeTracePairSplitPercent(value: unknown): number {
+    const numeric = typeof value === 'number' ? value : 50;
+    if (!Number.isFinite(numeric)) return 50;
+    return Math.min(82, Math.max(18, Math.round(numeric)));
+  }
+
   /**
    * 检测 Trace 变化，如果变化则重置状态
    */
@@ -1598,6 +1710,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.activeResultWindowStates = [];
     this.resultVisibilityUpdatingIds.clear();
     this.clearAgentObservability();
+    this.clearTracePairSessionState();
 
     // 如果有有效的 trace 指纹，创建新 session
     if (this.state.currentTraceFingerprint) {
@@ -1632,6 +1745,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // Flush pending session save on page unload
     this.beforeUnloadHandler = () => this.flushSessionSave();
     window.addEventListener('beforeunload', this.beforeUnloadHandler);
+
+    this.analysisModeMenuClickHandler = (event: MouseEvent) => {
+      this.handleAnalysisModeMenuDocumentClick(event);
+    };
+    this.analysisModeMenuKeydownHandler = (event: KeyboardEvent) => {
+      this.handleAnalysisModeMenuDocumentKeydown(event);
+    };
+    document.addEventListener('click', this.analysisModeMenuClickHandler);
+    document.addEventListener('keydown', this.analysisModeMenuKeydownHandler);
 
     // Register transient state saver. The saver encapsulates the full
     // handoff protocol so both Pop Out and Dock Back get identical treatment
@@ -1669,6 +1791,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
+    this.stopTracePairResize();
     // Unregister transient saver first so any in-flight switchFloatingMode()
     // that hasn't captured yet won't try to call into a torn-down instance.
     if (this.transientSaverRef) {
@@ -1724,6 +1847,44 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       window.removeEventListener('beforeunload', this.beforeUnloadHandler);
       this.beforeUnloadHandler = null;
     }
+    if (this.analysisModeMenuClickHandler) {
+      document.removeEventListener('click', this.analysisModeMenuClickHandler);
+      this.analysisModeMenuClickHandler = null;
+    }
+    if (this.analysisModeMenuKeydownHandler) {
+      document.removeEventListener(
+        'keydown',
+        this.analysisModeMenuKeydownHandler,
+      );
+      this.analysisModeMenuKeydownHandler = null;
+    }
+  }
+
+  private closeAnalysisModeMenu(): boolean {
+    if (!this.state.showAnalysisModeMenu) return false;
+    this.state.showAnalysisModeMenu = false;
+    m.redraw();
+    return true;
+  }
+
+  private handleAnalysisModeMenuDocumentClick(event: MouseEvent): void {
+    if (!this.state.showAnalysisModeMenu) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest('.ai-mode-selector')) {
+      return;
+    }
+    if (
+      target instanceof Node &&
+      target.parentElement?.closest('.ai-mode-selector')
+    ) {
+      return;
+    }
+    this.closeAnalysisModeMenu();
+  }
+
+  private handleAnalysisModeMenuDocumentKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    this.closeAnalysisModeMenu();
   }
 
   private renderHeaderActions(
@@ -1749,6 +1910,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 this.state.showResultPicker = false;
                 this.state.showSessionSidebar = false;
                 this.state.showStorySidebar = false;
+                this.state.captureConfigSuggestion.visible = false;
                 this.fetchAvailableTraces();
                 m.redraw();
               },
@@ -1765,6 +1927,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 this.state.showTracePicker = false;
                 this.state.showSessionSidebar = false;
                 this.state.showStorySidebar = false;
+                this.state.captureConfigSuggestion.visible = false;
                 void (async () => {
                   await this.postWindowHeartbeat();
                   await this.fetchAnalysisResults();
@@ -1798,13 +1961,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           active: this.state.showStorySidebar,
           onclick: () => {
             this.state.showStorySidebar = !this.state.showStorySidebar;
-            if (this.state.showStorySidebar) {
-              this.state.showSessionSidebar = false;
-              this.state.showTracePicker = false;
-              this.state.showResultPicker = false;
-            }
-            m.redraw();
-          },
+              if (this.state.showStorySidebar) {
+                this.state.showSessionSidebar = false;
+                this.state.showTracePicker = false;
+                this.state.showResultPicker = false;
+                this.state.captureConfigSuggestion.visible = false;
+              }
+              m.redraw();
+            },
         }),
       ]),
       m('div.ai-header-action-group.ai-header-action-group--session', [
@@ -1819,14 +1983,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           title: this.state.showSessionSidebar ? '隐藏历史对话' : '历史对话',
           active: this.state.showSessionSidebar,
           onclick: () => {
-            this.state.showSessionSidebar = !this.state.showSessionSidebar;
-            if (this.state.showSessionSidebar) {
-              this.state.showStorySidebar = false;
-              this.state.showTracePicker = false;
-              this.state.showResultPicker = false;
-            }
-            m.redraw();
-          },
+              this.state.showSessionSidebar = !this.state.showSessionSidebar;
+              if (this.state.showSessionSidebar) {
+                this.state.showStorySidebar = false;
+                this.state.showTracePicker = false;
+                this.state.showResultPicker = false;
+                this.state.captureConfigSuggestion.visible = false;
+              }
+              m.redraw();
+            },
         }),
       ]),
       m('div.ai-header-action-group.ai-header-action-group--window', [
@@ -2310,23 +2475,58 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.state.referenceTraceId
           ? m('div.ai-comparison-bar', [
               m('div.ai-comparison-info', [
-                m('span.ai-comparison-label', [
+                m('div.ai-comparison-title', [
                   m(
                     'i.pf-icon',
                     {style: 'font-size: 14px; margin-right: 4px;'},
                     'compare_arrows',
                   ),
-                  `对比: ${this.state.referenceTraceName || '参考 Trace'}`,
+                  'Trace 对比',
+                ]),
+                m('div.ai-comparison-panes', [
+                  m('span.ai-comparison-pane.primary', [
+                    m(
+                      'span.ai-comparison-pane-side',
+                      this.getTracePairPaneTitle('current'),
+                    ),
+                    m(
+                      'span.ai-comparison-pane-name',
+                      this.getCurrentTraceDisplayName(),
+                    ),
+                  ]),
+                  m('span.ai-comparison-divider', 'vs'),
+                  m('span.ai-comparison-pane.reference', [
+                    m(
+                      'span.ai-comparison-pane-side',
+                      this.getTracePairPaneTitle('reference'),
+                    ),
+                    m(
+                      'span.ai-comparison-pane-name',
+                      this.state.referenceTraceName || '参考 Trace',
+                    ),
+                  ]),
                 ]),
               ]),
               m('div.ai-comparison-actions', [
                 m(
                   'button.ai-comparison-switch',
                   {
-                    onclick: () => this.switchComparisonTrace(),
-                    title: '在新标签页中打开参考 Trace 进行视觉验证',
+                    onclick: () => this.openTracePairWorkspace(),
+                    title: this.state.tracePairWorkspaceOpen
+                      ? '双 Trace 工作区已打开'
+                      : '同页打开两个完整 Perfetto timeline',
                   },
-                  '验证',
+                  [
+                    m(
+                      'i.pf-icon',
+                      this.state.tracePairWorkspaceOpen
+                        ? 'visibility'
+                        : 'splitscreen',
+                    ),
+                    this.state.tracePairWorkspaceOpen
+                      ? '双窗已开'
+                      : '打开双窗',
+                  ],
                 ),
                 m(
                   'button.ai-comparison-close',
@@ -2334,7 +2534,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     onclick: () => this.exitComparisonMode(),
                     title: '退出对比模式',
                   },
-                  '\u00D7',
+                  [
+                    m('i.pf-icon', 'close'),
+                    '退出',
+                  ],
                 ),
               ]),
             ])
@@ -3314,8 +3517,351 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               : null,
           ],
         ), // End of ai-content-wrapper
+        this.renderTracePairWorkspace(),
       ],
     );
+  }
+
+  private renderTracePairWorkspace(): m.Children {
+    if (
+      !this.state.tracePairWorkspaceOpen ||
+      !this.state.backendTraceId ||
+      !this.state.referenceTraceId
+    ) {
+      return null;
+    }
+
+    const maximized = this.state.tracePairMaximizedTraceSide;
+    const bodyChildren = maximized
+      ? [this.renderTracePairPane(maximized)]
+      : [
+          this.renderTracePairPane('current'),
+          this.renderTracePairSplitter(),
+          this.renderTracePairPane('reference'),
+        ];
+    const workspaceClass = [
+      this.tracePairResizeActive ? 'is-resizing' : '',
+      maximized ? 'is-maximized' : '',
+    ].filter(Boolean).join(' ');
+
+    return m(
+      'div.ai-trace-pair-workspace',
+      {
+        class: workspaceClass,
+        'data-theme': this.isDarkMode ? 'dark' : 'light',
+      },
+      [
+        m('div.ai-trace-pair-header', [
+          m('div.ai-trace-pair-title', [
+            m('i.pf-icon', 'view_column'),
+            m('span', '双 Trace 工作区'),
+          ]),
+          m('div.ai-trace-pair-summary', [
+            m('span', this.getCurrentTraceDisplayName()),
+            m('span.ai-trace-pair-summary-separator', 'vs'),
+            m('span', this.state.referenceTraceName || '参考 Trace'),
+          ]),
+          m('div.ai-trace-pair-toolbar', [
+            this.renderTracePairLayoutButton('horizontal', 'view_column', '左右'),
+            this.renderTracePairLayoutButton('vertical', 'view_stream', '上下'),
+            m(
+              'button.ai-trace-pair-tool-btn',
+              {
+                onclick: () => this.resetTracePairWorkspaceLayout(),
+                title: '恢复 50/50 布局',
+              },
+              [m('i.pf-icon', 'fit_screen'), '重置'],
+            ),
+            m(
+              'button.ai-trace-pair-tool-btn.ai-trace-pair-tool-btn--primary',
+              {
+                onclick: () => this.closeTracePairWorkspace(),
+                title: '收起双 Trace 工作区',
+              },
+              [m('i.pf-icon', 'close_fullscreen'), '收起'],
+            ),
+          ]),
+        ]),
+        m(
+          'div.ai-trace-pair-body',
+          {
+            class: [
+              `layout-${this.state.tracePairLayout}`,
+              this.state.tracePairMinimizedTraceSides.has('current')
+                ? 'current-minimized'
+                : '',
+              this.state.tracePairMinimizedTraceSides.has('reference')
+                ? 'reference-minimized'
+                : '',
+            ].filter(Boolean).join(' '),
+            style: `--ai-trace-pair-split: ${this.state.tracePairSplitPercent}%;`,
+          },
+          bodyChildren,
+        ),
+      ],
+    );
+  }
+
+  private renderTracePairLayoutButton(
+    layout: TracePairLayout,
+    icon: string,
+    label: string,
+  ): m.Children {
+    return m(
+      'button.ai-trace-pair-tool-btn',
+      {
+        class: this.state.tracePairLayout === layout ? 'active' : '',
+        onclick: () => this.setTracePairLayout(layout),
+        title: `${label}排列`,
+      },
+      [m('i.pf-icon', icon), label],
+    );
+  }
+
+  private renderTracePairPane(traceSide: TracePairTraceSide): m.Children {
+    const frameUrl = this.buildTracePairFrameUrl(traceSide);
+    if (!frameUrl) return null;
+
+    const minimized = this.state.tracePairMinimizedTraceSides.has(traceSide);
+    const maximized = this.state.tracePairMaximizedTraceSide === traceSide;
+    const active = this.state.isReferenceActive === (traceSide === 'reference');
+    const paneClass = [
+      `trace-side-${traceSide}`,
+      minimized ? 'is-minimized' : '',
+      maximized ? 'is-maximized' : '',
+      active ? 'is-active' : '',
+    ].filter(Boolean).join(' ');
+    const title = this.getTracePairPaneTitle(traceSide);
+    const traceName = this.getTracePairPaneTraceName(traceSide);
+
+    return m(
+      'section.ai-trace-pair-pane',
+      {
+        class: paneClass,
+        onmouseenter: () => this.setTracePairActive(traceSide),
+        onfocusin: () => this.setTracePairActive(traceSide),
+      },
+      [
+        m('div.ai-trace-pair-pane-toolbar', [
+          m('div.ai-trace-pair-pane-title', [
+            m('span.ai-trace-pair-pane-side', title),
+            m('span.ai-trace-pair-pane-name', traceName),
+          ]),
+          m('div.ai-trace-pair-pane-actions', [
+            m(
+              'button.ai-trace-pair-icon-btn',
+              {
+                onclick: () => this.openTracePairPaneExternal(traceSide),
+                title: '在新标签页打开此 Trace',
+              },
+              m('i.pf-icon', 'open_in_new'),
+            ),
+            m(
+              'button.ai-trace-pair-icon-btn',
+              {
+                onclick: () => this.toggleTracePairMinimized(traceSide),
+                title: minimized ? '还原窗口' : '最小化窗口',
+              },
+              m('i.pf-icon', minimized ? 'open_in_full' : 'minimize'),
+            ),
+            m(
+              'button.ai-trace-pair-icon-btn',
+              {
+                onclick: () => this.toggleTracePairMaximized(traceSide),
+                title: maximized ? '恢复分屏' : '最大化窗口',
+              },
+              m('i.pf-icon', maximized ? 'close_fullscreen' : 'open_in_full'),
+            ),
+          ]),
+        ]),
+        minimized
+          ? m(
+              'button.ai-trace-pair-minimized-rail',
+              {
+                onclick: () => this.restoreTracePairPane(traceSide),
+                title: '还原窗口',
+              },
+              [
+                m('i.pf-icon', 'open_in_full'),
+                m('span', title),
+              ],
+            )
+          : m('iframe.ai-trace-pair-frame', {
+              src: frameUrl,
+              title: `${title} ${traceName}`,
+              loading: 'eager',
+            }),
+      ],
+    );
+  }
+
+  private renderTracePairSplitter(): m.Children {
+    return m('div.ai-trace-pair-splitter', {
+      role: 'separator',
+      title: '拖动调整两侧窗口大小',
+      onpointerdown: (event: PointerEvent) => this.startTracePairResize(event),
+    }, m('span.ai-trace-pair-splitter-handle'));
+  }
+
+  private buildTracePairFrameUrl(traceSide: TracePairTraceSide): string | null {
+    const traceId = this.getTracePairPaneTraceId(traceSide);
+    if (!traceId) return null;
+
+    const traceFileUrl = buildSmartPerfettoWorkspaceApiUrl(
+      this.state.settings.backendUrl,
+      'traces',
+      `/${traceId}/file`,
+    );
+    const params = new URLSearchParams({
+      url: traceFileUrl,
+      hideSidebar: 'true',
+      mode: 'embedded',
+      smartperfettoDualTrace: 'true',
+      smartperfettoPane: traceSide,
+    });
+    return `${window.location.origin}${window.location.pathname}#!/?${params.toString()}`;
+  }
+
+  private getTracePairPaneTraceId(traceSide: TracePairTraceSide): string | null {
+    return traceSide === 'current'
+      ? this.state.backendTraceId
+      : this.state.referenceTraceId;
+  }
+
+  private getTracePairPaneTraceName(traceSide: TracePairTraceSide): string {
+    return traceSide === 'current'
+      ? this.getCurrentTraceDisplayName()
+      : this.state.referenceTraceName || '参考 Trace';
+  }
+
+  private getTracePairPaneTitle(traceSide: TracePairTraceSide): string {
+    if (traceSide === 'current') {
+      return this.state.tracePairLayout === 'vertical' ? '上/主' : '左/主';
+    }
+    return this.state.tracePairLayout === 'vertical' ? '下/参考' : '右/参考';
+  }
+
+  private openTracePairWorkspace(): void {
+    if (!this.state.backendTraceId || !this.state.referenceTraceId) return;
+    this.state.tracePairWorkspaceOpen = true;
+    this.state.tracePairMaximizedTraceSide = null;
+    this.state.tracePairMinimizedTraceSides = new Set();
+    this.state.showTracePicker = false;
+    m.redraw();
+  }
+
+  private closeTracePairWorkspace(): void {
+    this.state.tracePairWorkspaceOpen = false;
+    this.state.tracePairMaximizedTraceSide = null;
+    this.state.tracePairMinimizedTraceSides = new Set();
+    this.stopTracePairResize();
+    m.redraw();
+  }
+
+  private resetTracePairWorkspaceLayout(): void {
+    this.state.tracePairSplitPercent = 50;
+    this.state.tracePairMaximizedTraceSide = null;
+    this.state.tracePairMinimizedTraceSides = new Set();
+    m.redraw();
+  }
+
+  private setTracePairLayout(layout: TracePairLayout): void {
+    this.state.tracePairLayout = layout;
+    this.state.tracePairMaximizedTraceSide = null;
+    m.redraw();
+  }
+
+  private setTracePairActive(traceSide: TracePairTraceSide): void {
+    const nextIsReference = traceSide === 'reference';
+    if (this.state.isReferenceActive === nextIsReference) return;
+    this.state.isReferenceActive = nextIsReference;
+    m.redraw();
+  }
+
+  private toggleTracePairMaximized(traceSide: TracePairTraceSide): void {
+    this.state.tracePairMaximizedTraceSide =
+      this.state.tracePairMaximizedTraceSide === traceSide ? null : traceSide;
+    this.state.tracePairMinimizedTraceSides = new Set();
+    this.setTracePairActive(traceSide);
+    m.redraw();
+  }
+
+  private toggleTracePairMinimized(traceSide: TracePairTraceSide): void {
+    this.state.tracePairMaximizedTraceSide = null;
+    const minimized = new Set<TracePairTraceSide>();
+    if (!this.state.tracePairMinimizedTraceSides.has(traceSide)) {
+      minimized.add(traceSide);
+    }
+    this.state.tracePairMinimizedTraceSides = minimized;
+    this.setTracePairActive(traceSide === 'current' ? 'reference' : 'current');
+    m.redraw();
+  }
+
+  private restoreTracePairPane(traceSide: TracePairTraceSide): void {
+    const minimized = new Set(this.state.tracePairMinimizedTraceSides);
+    minimized.delete(traceSide);
+    this.state.tracePairMinimizedTraceSides = minimized;
+    this.state.tracePairMaximizedTraceSide = null;
+    this.setTracePairActive(traceSide);
+    m.redraw();
+  }
+
+  private openTracePairPaneExternal(traceSide: TracePairTraceSide): void {
+    const frameUrl = this.buildTracePairFrameUrl(traceSide);
+    if (!frameUrl) return;
+    window.open(frameUrl, '_blank', 'noopener');
+  }
+
+  private startTracePairResize(event: PointerEvent): void {
+    if (this.state.tracePairMaximizedTraceSide) return;
+    const splitter = event.currentTarget as HTMLElement | null;
+    const body = splitter?.parentElement;
+    if (!body) return;
+
+    event.preventDefault();
+    this.stopTracePairResize();
+    this.tracePairResizeActive = true;
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      this.updateTracePairSplit(moveEvent, body);
+    };
+    const handleStop = () => {
+      this.stopTracePairResize();
+      m.redraw();
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleStop, {once: true});
+    window.addEventListener('pointercancel', handleStop, {once: true});
+    this.tracePairResizeCleanup = () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleStop);
+      window.removeEventListener('pointercancel', handleStop);
+      this.tracePairResizeCleanup = null;
+      this.tracePairResizeActive = false;
+    };
+    this.updateTracePairSplit(event, body);
+  }
+
+  private updateTracePairSplit(event: PointerEvent, body: HTMLElement): void {
+    const rect = body.getBoundingClientRect();
+    const rawPercent = this.state.tracePairLayout === 'vertical'
+      ? ((event.clientY - rect.top) / rect.height) * 100
+      : ((event.clientX - rect.left) / rect.width) * 100;
+    if (!Number.isFinite(rawPercent)) return;
+    this.state.tracePairSplitPercent = Math.min(
+      82,
+      Math.max(18, Math.round(rawPercent)),
+    );
+    m.redraw();
+  }
+
+  private stopTracePairResize(): void {
+    if (this.tracePairResizeCleanup) {
+      this.tracePairResizeCleanup();
+      return;
+    }
+    this.tracePairResizeActive = false;
   }
 
   /** Render the preset question buttons inside the input bar controls. */
@@ -4008,11 +4554,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.cancelSSEConnection();
     this.availableTraces = [];
     this.state.showTracePicker = false;
-    this.state.referenceTraceId = null;
-    this.state.referenceTraceName = null;
-    this.state.isReferenceActive = false;
-    this.state.comparisonTraceLoading = false;
-    clearComparisonState();
+    this.clearTracePairSessionState();
     this.state.analysisMode = sessionManager.loadAnalysisMode();
 
     this.resetStateForNewTrace();
@@ -4327,6 +4869,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         agentRequestId: this.state.agentRequestId || undefined,
         agentRunSequence: this.state.agentRunSequence || undefined,
         latestAnalysisSnapshot: this.state.latestAnalysisSnapshot || undefined,
+        ...this.buildTracePairSessionFields(),
       },
     );
   }
@@ -4398,6 +4941,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.backendTraceId !== session.backendTraceId
     ) {
       this.state.agentSessionId = null;
+    }
+
+    const tracePairRestored = this.restoreTracePairStateFromSession(session);
+    if (session.type === 'comparison' && !tracePairRestored) {
+      this.state.agentSessionId = null;
+      this.state.agentRunId = null;
+      this.state.agentRequestId = null;
+      this.state.agentRunSequence = 0;
+      this.clearAgentObservability();
     }
 
     // 恢复命令历史
@@ -7339,6 +7891,10 @@ Click ⚙️ to configure backend connection.`;
       // Comparison mode: include reference trace ID
       if (this.state.referenceTraceId) {
         requestBody.referenceTraceId = this.state.referenceTraceId;
+        const tracePairContext = this.buildTracePairContext();
+        if (tracePairContext) {
+          requestBody.options.tracePairContext = tracePairContext;
+        }
       }
 
       // Capture current Perfetto selection (area / slice) and include in request
@@ -7359,7 +7915,12 @@ Click ⚙️ to configure backend connection.`;
 
       // Attach pre-queried trace data (set by quick-action buttons) and consume it
       if (this.state.pendingTraceContext) {
-        requestBody.traceContext = this.state.pendingTraceContext;
+        requestBody.traceContext = this.state.pendingTraceContext.map(dataset => ({
+          ...dataset,
+          traceSide: dataset.traceSide || 'current',
+          paneSide: dataset.paneSide || 'left',
+          traceId: dataset.traceId || this.state.backendTraceId || undefined,
+        }));
         this.state.pendingTraceContext = null;
       }
 
@@ -11267,25 +11828,31 @@ Click ⚙️ to configure backend connection.`;
     refTraceId: string,
     refTraceName: string,
   ): Promise<void> {
-    if (this.state.agentSessionId) {
-      this.state.agentSessionId = null;
-      this.state.agentRunId = null;
+    const hadAgentSession = !!this.state.agentSessionId;
+    this.state.agentSessionId = null;
+    this.state.agentRunId = null;
+    this.state.agentRequestId = null;
+    this.state.agentRunSequence = 0;
+    if (hadAgentSession) {
       this.clearAgentObservability();
     }
     this.state.referenceTraceId = refTraceId;
     this.state.referenceTraceName = refTraceName;
     this.state.showTracePicker = false;
     this.state.isReferenceActive = false;
+    this.state.tracePairWorkspaceOpen = false;
+    this.state.tracePairSplitPercent = 50;
+    this.state.tracePairMaximizedTraceSide = null;
+    this.state.tracePairMinimizedTraceSides = new Set();
 
     this.addMessage({
       id: this.generateId(),
       role: 'system',
       content:
         `**对比模式已激活**\n\n` +
-        `- 主 Trace: ${this.trace?.traceInfo?.traceTitle || '当前 Trace'}\n` +
-        `- 参考 Trace: ${refTraceName}\n\n` +
-        `你可以直接提问，AI 会同时分析两个 Trace 并输出对比结论。\n` +
-        `点击 **[切换]** 可在 Perfetto 中查看参考 Trace。`,
+        `- ${this.getTracePairPaneTitle('current')} Trace: ${this.getCurrentTraceDisplayName()}\n` +
+        `- ${this.getTracePairPaneTitle('reference')} Trace: ${refTraceName}\n\n` +
+        `同页双 Trace 工作区保持收起。`,
       timestamp: Date.now(),
     });
     this.saveCurrentSession();
@@ -11295,17 +11862,14 @@ Click ⚙️ to configure backend connection.`;
   /** Exit comparison mode. */
   private exitComparisonMode(): void {
     const hadComparisonSession = !!this.state.agentSessionId;
-    this.state.referenceTraceId = null;
-    this.state.referenceTraceName = null;
-    this.state.isReferenceActive = false;
-    this.state.showTracePicker = false;
-    this.state.comparisonTraceLoading = false;
+    this.clearTracePairSessionState();
     this.state.agentSessionId = null;
     this.state.agentRunId = null;
+    this.state.agentRequestId = null;
+    this.state.agentRunSequence = 0;
     if (hadComparisonSession) {
       this.clearAgentObservability();
     }
-    clearComparisonState();
 
     this.addMessage({
       id: this.generateId(),
@@ -11316,39 +11880,6 @@ Click ⚙️ to configure backend connection.`;
       timestamp: Date.now(),
     });
     this.saveCurrentSession();
-    m.redraw();
-  }
-
-  /** Open the reference trace in a new browser tab for visual verification.
-   *  In-tab trace switching is deferred — openTraceFromUrl would re-import
-   *  the trace into trace_processor (duplicate data risk) and requires
-   *  downloading the full file (slow for large traces). New-tab approach
-   *  is zero-risk and keeps the current AI analysis session undisturbed. */
-  private switchComparisonTrace(): void {
-    if (!this.state.referenceTraceId) return;
-
-    const targetTraceId = this.state.isReferenceActive
-      ? this.state.backendTraceId // Switch back to primary → open primary in new tab
-      : this.state.referenceTraceId; // Switch to reference → open reference in new tab
-
-    if (!targetTraceId) return;
-
-    // Open the trace file download URL — browser/Perfetto will handle it in a new tab
-    const fileUrl = buildSmartPerfettoWorkspaceApiUrl(
-      this.state.settings.backendUrl,
-      'traces',
-      `/${targetTraceId}/file`,
-    );
-    window.open(fileUrl, '_blank');
-
-    this.addMessage({
-      id: this.generateId(),
-      role: 'system',
-      content: this.state.isReferenceActive
-        ? `已在新标签页中打开主 Trace，可在那里视觉验证 AI 的分析结论。`
-        : `已在新标签页中打开参考 Trace: **${this.state.referenceTraceName}**，可在那里视觉验证 AI 的对比结论。\n\n当前标签页的 AI 对话和分析不受影响。`,
-      timestamp: Date.now(),
-    });
     m.redraw();
   }
 }

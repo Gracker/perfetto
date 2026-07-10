@@ -4795,28 +4795,23 @@ tr.detail-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
-  // Subtle accent→danger gradient hints at "comparing two things" without
-  // being a loud google-blue + red bar.
-  background: linear-gradient(
-    90deg,
-    tint(var(--pf-color-accent), 8%),
-    tint(var(--pf-color-danger), 8%)
-  );
+  padding: 8px 12px;
+  background: var(--chat-bg-secondary);
+  border-top: 1px solid var(--chat-border);
   border-bottom: 1px solid var(--chat-border);
   font-size: 12px;
-  gap: 8px;
+  gap: 10px;
 }
 
 .ai-comparison-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 5px;
   min-width: 0;
   flex: 1;
 }
 
-.ai-comparison-label {
+.ai-comparison-title {
   display: flex;
   align-items: center;
   font-weight: 500;
@@ -4826,12 +4821,54 @@ tr.detail-row {
   white-space: nowrap;
 }
 
-.ai-comparison-hint {
+.ai-comparison-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ai-comparison-pane {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  padding: 4px 7px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-bg);
+}
+
+.ai-comparison-pane.primary {
+  border-color: tint(var(--pf-color-accent), 35%);
+}
+
+.ai-comparison-pane.reference {
+  border-color: tint(var(--pf-color-danger), 35%);
+}
+
+.ai-comparison-pane-side {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
   color: var(--chat-text-muted);
-  font-size: 11px;
+}
+
+.ai-comparison-pane-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--chat-text);
+}
+
+.ai-comparison-divider {
+  color: var(--chat-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
 }
 
 .ai-comparison-actions {
@@ -4841,16 +4878,25 @@ tr.detail-row {
 }
 
 .ai-comparison-switch {
-  padding: 2px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 10px;
   border: 1px solid var(--pf-color-accent);
   border-radius: 4px;
-  background: transparent;
-  color: var(--pf-color-accent);
+  background: var(--pf-color-accent);
+  color: #fff;
+  font-weight: 500;
   font-size: 11px;
   cursor: pointer;
 
+  i {
+    font-size: 14px;
+  }
+
   &:hover {
-    background: tint(var(--pf-color-accent), 10%);
+    background: shade(var(--pf-color-accent), 88%);
   }
 
   &:disabled {
@@ -4860,20 +4906,332 @@ tr.detail-row {
 }
 
 .ai-comparison-close {
-  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 9px;
   border: 1px solid var(--chat-border);
   border-radius: 4px;
-  background: transparent;
+  background: var(--chat-bg);
   color: var(--chat-text-muted);
-  font-size: 14px;
+  font-size: 11px;
   cursor: pointer;
   line-height: 1;
+
+  i {
+    font-size: 14px;
+  }
 
   &:hover {
     background: tint(var(--pf-color-danger), 10%);
     color: var(--pf-color-danger);
     border-color: var(--pf-color-danger);
   }
+}
+
+.ai-comparison-hint {
+  color: var(--pf-color-accent);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-trace-pair-workspace {
+  position: fixed;
+  top: 0;
+  right: var(--pf-right-rail-width, 0px);
+  bottom: calc(
+    var(--pf-bottom-rail-height, 0px) +
+      var(--pf-statusbar-height, 0px)
+  );
+  left: 0;
+  // Above the Perfetto timeline, below AI modal overlays such as Settings.
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  background: var(--chat-bg);
+  color: var(--chat-text);
+}
+
+.ai-trace-pair-header {
+  height: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--chat-border);
+  background: var(--chat-bg-secondary);
+}
+
+.ai-trace-pair-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+
+  .pf-icon {
+    color: var(--pf-color-accent);
+    font-size: 17px;
+  }
+}
+
+.ai-trace-pair-summary {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--chat-text-secondary);
+  font-size: 12px;
+
+  span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.ai-trace-pair-summary-separator {
+  flex: 0 0 auto;
+  color: var(--chat-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ai-trace-pair-toolbar,
+.ai-trace-pair-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.ai-trace-pair-tool-btn,
+.ai-trace-pair-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--chat-border);
+  border-radius: 4px;
+  background: var(--chat-bg);
+  color: var(--chat-text);
+  cursor: pointer;
+
+  &:hover,
+  &.active {
+    border-color: var(--pf-color-accent);
+    background: tint(var(--pf-color-accent), 10%);
+    color: var(--pf-color-accent);
+  }
+
+  .pf-icon {
+    font-size: 15px;
+  }
+}
+
+.ai-trace-pair-tool-btn {
+  gap: 4px;
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ai-trace-pair-tool-btn--primary {
+  border-color: var(--pf-color-accent);
+  background: var(--pf-color-accent);
+  color: var(--pf-color-text-on-accent);
+
+  &:hover {
+    background: shade(var(--pf-color-accent), 88%);
+    color: var(--pf-color-text-on-accent);
+  }
+}
+
+.ai-trace-pair-body {
+  --ai-trace-pair-split: 50%;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  background: var(--chat-bg-tertiary);
+}
+
+.ai-trace-pair-body.layout-horizontal {
+  grid-template-columns: minmax(44px, var(--ai-trace-pair-split)) 10px minmax(44px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.ai-trace-pair-body.layout-vertical {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(44px, var(--ai-trace-pair-split)) 10px minmax(44px, 1fr);
+}
+
+.ai-trace-pair-body.layout-horizontal.current-minimized {
+  grid-template-columns: 44px 10px minmax(0, 1fr);
+}
+
+.ai-trace-pair-body.layout-horizontal.reference-minimized {
+  grid-template-columns: minmax(0, 1fr) 10px 44px;
+}
+
+.ai-trace-pair-body.layout-vertical.current-minimized {
+  grid-template-rows: 44px 10px minmax(0, 1fr);
+}
+
+.ai-trace-pair-body.layout-vertical.reference-minimized {
+  grid-template-rows: minmax(0, 1fr) 10px 44px;
+}
+
+.ai-trace-pair-workspace.is-maximized .ai-trace-pair-body {
+  display: block;
+}
+
+.ai-trace-pair-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--chat-border);
+  background: var(--chat-bg);
+  overflow: hidden;
+}
+
+.ai-trace-pair-pane.is-active {
+  border-color: var(--pf-color-accent);
+}
+
+.ai-trace-pair-pane.is-maximized {
+  width: 100%;
+  height: 100%;
+}
+
+.ai-trace-pair-pane.is-minimized {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.ai-trace-pair-pane-toolbar {
+  height: 34px;
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--chat-border);
+  background: var(--chat-bg-secondary);
+}
+
+.ai-trace-pair-pane-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-trace-pair-pane-side {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: tint(var(--pf-color-accent), 10%);
+  color: var(--pf-color-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ai-trace-pair-pane-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-trace-pair-icon-btn {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+}
+
+.ai-trace-pair-frame {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--chat-bg);
+}
+
+.ai-trace-pair-workspace.is-resizing .ai-trace-pair-frame {
+  pointer-events: none;
+}
+
+.ai-trace-pair-minimized-rail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  background: var(--chat-bg);
+  color: var(--chat-text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.layout-horizontal .ai-trace-pair-minimized-rail {
+  writing-mode: vertical-rl;
+}
+
+.ai-trace-pair-splitter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--chat-bg-tertiary);
+  touch-action: none;
+  user-select: none;
+}
+
+.layout-horizontal .ai-trace-pair-splitter {
+  cursor: col-resize;
+}
+
+.layout-vertical .ai-trace-pair-splitter {
+  cursor: row-resize;
+}
+
+.ai-trace-pair-splitter-handle {
+  display: block;
+  width: 3px;
+  height: 42px;
+  border-radius: 999px;
+  background: var(--chat-text-muted);
+  opacity: 0.55;
+}
+
+.layout-vertical .ai-trace-pair-splitter-handle {
+  width: 42px;
+  height: 3px;
+}
+
+.ai-trace-pair-splitter:hover .ai-trace-pair-splitter-handle,
+.ai-trace-pair-workspace.is-resizing .ai-trace-pair-splitter-handle {
+  background: var(--pf-color-accent);
+  opacity: 1;
 }
 
 // Trace Picker Drawer

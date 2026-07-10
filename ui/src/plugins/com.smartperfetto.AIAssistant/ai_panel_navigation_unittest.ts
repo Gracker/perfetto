@@ -16,9 +16,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {describe, it, expect, vi} from 'vitest';
+import {afterEach, beforeEach, describe, it, expect, vi} from 'vitest';
 
 import {AIPanel} from './ai_panel';
+import {sessionManager} from './session_manager';
+import type {AIPanelState, TracePairTraceSide} from './types';
+
+type TestAIPanel = {
+  state: AIPanelState;
+  trace: {
+    traceInfo: {
+      traceTitle: string;
+      start: bigint;
+      end: bigint;
+    };
+    notes: {
+      removeNote: () => void;
+    };
+  };
+  ensureAgentSessionReady: () => Promise<void>;
+  captureSelectionContext: (message?: string) => Promise<null>;
+  listenToAgentSSE: (sessionId: string) => Promise<void>;
+  saveCurrentSession: () => void;
+  fetchBackend: (url: string, init?: RequestInit) => Promise<Response>;
+  handleChatMessage: (message: string) => Promise<void>;
+  renderTableSourceContext: (source: Parameters<AIPanel['renderTableSourceContext']>[0]) => unknown;
+};
 
 function collectVNodeText(node: any): string {
   if (node === null || node === undefined || node === false) return '';
@@ -31,9 +54,93 @@ function collectVNodeText(node: any): string {
   return parts.map(collectVNodeText).join(' ');
 }
 
+function findVNodeByTitle(node: any, title: string): any {
+  if (node === null || node === undefined || node === false) return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findVNodeByTitle(child, title);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (node.attrs?.title === title) return node;
+  return findVNodeByTitle(node.children, title);
+}
+
+describe('AIPanel analysis mode menu', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('closes on Escape without changing other keys', () => {
+    const panel = new AIPanel() as any;
+
+    panel.state.showAnalysisModeMenu = true;
+    panel.handleAnalysisModeMenuDocumentKeydown(
+      new KeyboardEvent('keydown', {key: 'Enter'}),
+    );
+    expect(panel.state.showAnalysisModeMenu).toBe(true);
+
+    panel.handleAnalysisModeMenuDocumentKeydown(
+      new KeyboardEvent('keydown', {key: 'Escape'}),
+    );
+
+    expect(panel.state.showAnalysisModeMenu).toBe(false);
+  });
+
+  it('keeps inside clicks and closes on outside clicks', () => {
+    const panel = new AIPanel() as any;
+    const selector = document.createElement('div');
+    selector.className = 'ai-mode-selector';
+    const menuItem = document.createElement('button');
+    selector.appendChild(menuItem);
+    document.body.appendChild(selector);
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+
+    panel.state.showAnalysisModeMenu = true;
+    menuItem.addEventListener('click', (event) => {
+      panel.handleAnalysisModeMenuDocumentClick(event);
+    });
+    menuItem.click();
+    expect(panel.state.showAnalysisModeMenu).toBe(true);
+
+    outside.addEventListener('click', (event) => {
+      panel.handleAnalysisModeMenuDocumentClick(event);
+    });
+    outside.click();
+
+    expect(panel.state.showAnalysisModeMenu).toBe(false);
+  });
+});
+
+describe('AIPanel header tool panels', () => {
+  it('keeps capture config mutually exclusive with Story and history panels', () => {
+    const panel = new AIPanel() as any;
+    panel.fetchAvailableTraces = vi.fn();
+
+    panel.state.captureConfigSuggestion.visible = true;
+    const header = panel.renderHeaderActions(true, true, true);
+    findVNodeByTitle(header, 'Story').attrs.onclick();
+
+    expect(panel.state.showStorySidebar).toBe(true);
+    expect(panel.state.captureConfigSuggestion.visible).toBe(false);
+
+    panel.toggleCaptureConfigSuggestion();
+    expect(panel.state.captureConfigSuggestion.visible).toBe(true);
+    expect(panel.state.showStorySidebar).toBe(false);
+
+    const headerWithCapture = panel.renderHeaderActions(true, true, true);
+    findVNodeByTitle(headerWithCapture, '历史对话').attrs.onclick();
+
+    expect(panel.state.showSessionSidebar).toBe(true);
+    expect(panel.state.captureConfigSuggestion.visible).toBe(false);
+  });
+});
+
 describe('AIPanel /goto navigation', () => {
   it('renders all table source metadata chips', () => {
-    const panel = new AIPanel() as any;
+    const panel = new AIPanel() as unknown as TestAIPanel;
 
     const view = panel.renderTableSourceContext({
       ref: '表 9',
@@ -428,5 +535,171 @@ describe('AIPanel teaching pipeline compatibility view', () => {
         }),
       ]),
     );
+  });
+});
+
+describe('AIPanel trace-pair session restore', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('restores explicit raw trace comparison identity from local session metadata', () => {
+    const session = sessionManager.createSession(
+      'trace-a',
+      'current.trace',
+      'backend-current',
+    );
+    sessionManager.updateSession('trace-a', session.sessionId, {
+      agentSessionId: 'agent-compare',
+      type: 'comparison',
+      referenceBackendTraceId: 'backend-reference',
+      referenceTraceName: 'reference.trace',
+      tracePairLayout: 'vertical',
+      tracePairSplitPercent: 64,
+      tracePairActiveTraceSide: 'reference',
+    });
+
+    const panel = new AIPanel() as any;
+    panel.engine = {mode: 'HTTP_RPC'};
+    panel.verifyBackendTrace = vi.fn();
+
+    expect(panel.loadSession(session.sessionId)).toBe(true);
+
+    expect(panel.state.referenceTraceId).toBe('backend-reference');
+    expect(panel.state.referenceTraceName).toBe('reference.trace');
+    expect(panel.state.tracePairWorkspaceOpen).toBe(false);
+    expect(panel.state.tracePairLayout).toBe('vertical');
+    expect(panel.state.tracePairSplitPercent).toBe(64);
+    expect(panel.state.isReferenceActive).toBe(true);
+    expect(panel.state.agentSessionId).toBe('agent-compare');
+    expect(panel.buildTracePairContext()).toMatchObject({
+      layout: 'vertical',
+      activeSide: 'bottom',
+      workspaceOpen: false,
+      panes: [
+        expect.objectContaining({
+          traceSide: 'current',
+          traceId: 'backend-current',
+        }),
+        expect.objectContaining({
+          traceSide: 'reference',
+          traceId: 'backend-reference',
+        }),
+      ],
+    });
+  });
+
+  it('drops agent continuation when comparison identity cannot be restored', () => {
+    const session = sessionManager.createSession(
+      'trace-a',
+      'current.trace',
+      'backend-current',
+    );
+    sessionManager.updateSession('trace-a', session.sessionId, {
+      agentSessionId: 'agent-stale-compare',
+      type: 'comparison',
+      referenceBackendTraceId: undefined,
+    });
+
+    const panel = new AIPanel() as any;
+    panel.engine = {mode: 'HTTP_RPC'};
+    panel.verifyBackendTrace = vi.fn();
+
+    expect(panel.loadSession(session.sessionId)).toBe(true);
+
+    expect(panel.state.referenceTraceId).toBeNull();
+    expect(panel.state.tracePairWorkspaceOpen).toBe(false);
+    expect(panel.state.agentSessionId).toBeNull();
+  });
+
+  it('sends live dual-trace workspace context with analysis requests', async () => {
+    const panel = new AIPanel() as any;
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.currentTraceFingerprint = 'fingerprint-current';
+    panel.state.referenceTraceId = 'backend-reference';
+    panel.state.referenceTraceName = 'reference.trace';
+    panel.state.tracePairWorkspaceOpen = true;
+    panel.state.tracePairLayout = 'vertical';
+    panel.state.tracePairSplitPercent = 66;
+    panel.state.tracePairMaximizedTraceSide = 'reference';
+    panel.state.tracePairMinimizedTraceSides =
+      new Set<TracePairTraceSide>(['current']);
+    panel.state.isReferenceActive = true;
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+      notes: {
+        removeNote: vi.fn(),
+      },
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.listenToAgentSSE = vi.fn(async () => {});
+    panel.saveCurrentSession = vi.fn();
+    const fetchBackend = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
+      success: true,
+      sessionId: 'agent-session',
+      isNewSession: true,
+    }), {
+      status: 200,
+      headers: {'x-request-id': 'request-1'},
+    }));
+    panel.fetchBackend = fetchBackend;
+
+    await panel.handleChatMessage('对比上方和下方 Trace 的启动速度差异');
+
+    expect(fetchBackend).toHaveBeenCalledTimes(1);
+    const init = fetchBackend.mock.calls[0][1];
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody).toMatchObject({
+      query: '对比上方和下方 Trace 的启动速度差异',
+      traceId: 'backend-current',
+      referenceTraceId: 'backend-reference',
+      options: {
+        tracePairContext: {
+          schemaVersion: 1,
+          layout: 'vertical',
+          primarySide: 'top',
+          referenceSide: 'bottom',
+          activeSide: 'bottom',
+          workspaceOpen: true,
+          splitPercent: 66,
+          maximizedTraceSide: 'reference',
+          minimizedTraceSides: ['current'],
+          panes: [
+            {
+              side: 'top',
+              traceSide: 'current',
+              traceId: 'backend-current',
+              traceName: 'current.trace',
+              traceFingerprint: 'fingerprint-current',
+              active: false,
+              visualState: 'context_only',
+            },
+            {
+              side: 'bottom',
+              traceSide: 'reference',
+              traceId: 'backend-reference',
+              traceName: 'reference.trace',
+              active: true,
+              visualState: 'live',
+            },
+          ],
+        },
+      },
+    });
+    expect(requestBody.options.tracePairContext.aliases).toMatchObject({
+      '上方': 'current',
+      '上边': 'current',
+      '下方': 'reference',
+      '下边': 'reference',
+      top: 'current',
+      bottom: 'reference',
+    });
+    expect(panel.listenToAgentSSE).toHaveBeenCalledWith('agent-session');
   });
 });

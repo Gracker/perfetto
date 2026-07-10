@@ -200,6 +200,11 @@ export function backendUploadSourceKey(traceSource: TraceSource): string {
   }
 }
 
+function isSmartPerfettoDualTracePane(app: AppImpl): boolean {
+  const value = app.initialRouteArgs.smartperfettoDualTrace;
+  return value === true || value === 'true';
+}
+
 export async function loadTrace(
   app: AppImpl,
   traceSource: TraceSource,
@@ -221,7 +226,15 @@ async function createEngine(
   // This creates two independent trace_processor instances:
   // - WASM in-browser for UI queries (immediate)
   // - trace_processor_shell for AI analysis (deferred)
-  if (traceSource.type !== 'HTTP_RPC') {
+  const isDualTracePane = isSmartPerfettoDualTracePane(app);
+  if (traceSource.type === 'HTTP_RPC' || isDualTracePane) {
+    if (isDualTracePane) {
+      console.log('[AutoRPC] Skipping backend upload for embedded dual-trace pane');
+    }
+    setBackendUploadState({
+      state: 'idle',
+    });
+  } else {
     // Guard: skip if an upload is already in progress to prevent duplicate uploads
     // (Perfetto lifecycle can call createEngine multiple times for the same trace)
     const currentUploadState = getBackendUploadState();
@@ -304,10 +317,6 @@ async function createEngine(
         }
       })();
     }
-  } else {
-    setBackendUploadState({
-      state: 'idle',
-    });
   }
 
   // === Create engine immediately (no blocking on upload) ===

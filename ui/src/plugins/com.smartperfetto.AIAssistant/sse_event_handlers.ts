@@ -39,6 +39,7 @@ import {
   SmartScenePreviewPayload,
   StreamingAnswerState,
   StreamingFlowState,
+  TracePaneSide,
   UiActionProposalV1,
 } from './types';
 import {
@@ -60,6 +61,11 @@ import {CONTRACT_ALIASES} from './conclusion_contract_aliases';
 import {STEP_TO_OVERLAY} from './track_overlay';
 import {updateAISharedState} from './ai_shared_state';
 import {formatAnalysisResultRef} from './analysis_result_references';
+import {
+  normalizePaneSide,
+  normalizeTraceSide,
+  traceLocationLabel,
+} from './trace_location_label';
 
 /** Set to true for verbose SSE event logging during development. */
 const DEBUG_SSE = false;
@@ -1148,13 +1154,15 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
   });
   const payload = envelope.data;
   const rowCount = Array.isArray(payload?.rows) ? payload.rows.length : undefined;
-  const traceLabel = traceSideLabel(readEnvelopeTraceSide(envelope))
-    ? `${traceSideLabel(readEnvelopeTraceSide(envelope))} · `
-    : '';
+  const traceLabel = traceLocationLabel(
+    readEnvelopeTraceSide(envelope),
+    readEnvelopePaneSide(envelope),
+  );
+  const tracePrefix = traceLabel ? `${traceLabel} · ` : '';
   if (typeof rowCount === 'number') {
-    return `${traceLabel}${title} (${rowCount} 行)`;
+    return `${tracePrefix}${title} (${rowCount} 行)`;
   }
-  return `${traceLabel}${title} (${envelope.display?.format || 'table'})`;
+  return `${tracePrefix}${title} (${envelope.display?.format || 'table'})`;
 }
 
 function inferDataSourceReason(input: {
@@ -1447,10 +1455,6 @@ function isLowSignalReason(reason: string): boolean {
   ].some((pattern) => pattern.test(text));
 }
 
-function normalizeTraceSide(value: unknown): 'current' | 'reference' | undefined {
-  return value === 'current' || value === 'reference' ? value : undefined;
-}
-
 function readPlanPhaseAttribution(
   source: Record<string, unknown>
 ): DataSourceContext['planPhaseAttribution'] | undefined {
@@ -1468,12 +1472,6 @@ function readPlanPhaseAttribution(
   }
 }
 
-function traceSideLabel(traceSide: 'current' | 'reference' | undefined): string {
-  if (traceSide === 'current') return '当前 Trace';
-  if (traceSide === 'reference') return '参考 Trace';
-  return '';
-}
-
 function compactEvidenceRef(value: string | undefined): string {
   if (!value) return '';
   if (value.length <= 56) return value;
@@ -1488,6 +1486,15 @@ function readEnvelopeTraceSide(envelope: DataEnvelope): 'current' | 'reference' 
   return normalizeTraceSide(envelope.meta?.traceSide)
     || normalizeTraceSide(envelopeRecord.traceSide)
     || normalizeTraceSide(provenance.traceSide);
+}
+
+function readEnvelopePaneSide(envelope: DataEnvelope): TracePaneSide | undefined {
+  const envelopeRecord = asRecord(envelope);
+  const metaRecord = asRecord(envelope.meta as unknown);
+  const provenance = asRecord(envelopeRecord.traceProvenance);
+  return normalizePaneSide(metaRecord.paneSide)
+    || normalizePaneSide(envelopeRecord.paneSide)
+    || normalizePaneSide(provenance.paneSide);
 }
 
 function readEnvelopeTraceId(envelope: DataEnvelope): string | undefined {
@@ -1604,6 +1611,7 @@ function registerEnvelopeSourceContext(
     query: sql,
     evidenceRefId: readStringField(metaRecord, 'evidenceRefId') || undefined,
     traceSide: readEnvelopeTraceSide(envelope),
+    paneSide: readEnvelopePaneSide(envelope),
     traceId: readEnvelopeTraceId(envelope),
     queryHash: readStringField(metaRecord, 'queryHash') || undefined,
     sourceToolCallId: readStringField(metaRecord, 'sourceToolCallId') || undefined,
@@ -1630,6 +1638,7 @@ function registerDataSourceContext(
     query?: string;
     evidenceRefId?: string;
     traceSide?: 'current' | 'reference';
+    paneSide?: TracePaneSide;
     traceId?: string;
     queryHash?: string;
     sourceToolCallId?: string;
@@ -1686,6 +1695,7 @@ function registerDataSourceContext(
     phase: input.layer ? `DataEnvelope.${input.layer}` : undefined,
     evidenceRefId: input.evidenceRefId,
     traceSide: input.traceSide,
+    paneSide: input.paneSide,
     traceId: input.traceId,
     queryHash: input.queryHash,
     sourceToolCallId: input.sourceToolCallId,
@@ -1708,7 +1718,7 @@ function dataSourceLine(ref: DataSourceContext): string {
   const planPhase = ref.planPhaseTitle || ref.planPhaseId
     ? `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`
     : '';
-  const trace = traceSideLabel(ref.traceSide);
+  const trace = traceLocationLabel(ref.traceSide, ref.paneSide);
   const tracePrefix = trace ? `${trace} · ` : '';
   const reason = ref.reason ? `，用途: ${ref.reason}` : '';
   return `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${reason}）`;
@@ -3340,7 +3350,10 @@ function appendClaimVerificationSummary(
         readStringField(context, 'sourceToolCallId'),
       ].filter(Boolean).join(' / ');
       const loc = [
-        readStringField(context, 'traceSide'),
+        traceLocationLabel(
+          normalizeTraceSide(readStringField(context, 'traceSide')),
+          normalizePaneSide(readStringField(context, 'paneSide')),
+        ),
         cell.column ? `col=${String(cell.column)}` : '',
         cell.rowIndex !== undefined ? `row=${String(cell.rowIndex)}` : '',
         cell.actualValue !== undefined ? `actual=${String(cell.actualValue)}` : '',

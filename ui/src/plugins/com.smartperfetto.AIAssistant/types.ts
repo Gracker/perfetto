@@ -417,6 +417,7 @@ export interface DataSourceContext {
   phase?: string;
   evidenceRefId?: string;
   traceSide?: 'current' | 'reference';
+  paneSide?: TracePaneSide;
   traceId?: string;
   queryHash?: string;
   sourceToolCallId?: string;
@@ -920,7 +921,12 @@ export interface AIPanelState {
   // Comparison mode state
   referenceTraceId: string | null; // Backend trace ID of the reference trace
   referenceTraceName: string | null; // Display name of the reference trace
-  isReferenceActive: boolean; // Whether Perfetto is currently showing the reference trace
+  isReferenceActive: boolean;
+  tracePairWorkspaceOpen: boolean;
+  tracePairLayout: TracePairLayout;
+  tracePairSplitPercent: number;
+  tracePairMaximizedTraceSide: TracePairTraceSide | null;
+  tracePairMinimizedTraceSides: Set<TracePairTraceSide>;
   showTracePicker: boolean; // Whether trace picker modal is visible
   comparisonTraceLoading: boolean; // Loading state for reference trace processor
   // Latest analysis-result snapshot for result comparison flow
@@ -959,6 +965,42 @@ export interface TraceDataset {
   label: string; // Human-readable description of the SQL
   columns: string[];
   rows: unknown[][];
+  evidenceRefId?: string;
+  sourceToolCallId?: string;
+  queryHash?: string;
+  traceSide?: 'current' | 'reference';
+  paneSide?: TracePaneSide;
+  traceId?: string;
+}
+
+export type TracePairLayout = 'horizontal' | 'vertical';
+
+export type TracePairTraceSide = 'current' | 'reference';
+
+export type TracePaneSide = 'left' | 'right' | 'top' | 'bottom';
+
+export interface TracePairPaneContext {
+  side: TracePaneSide;
+  traceSide: TracePairTraceSide;
+  traceId: string;
+  traceName?: string;
+  traceFingerprint?: string;
+  active?: boolean;
+  visualState?: 'live' | 'context_only';
+}
+
+export interface TracePairContext {
+  schemaVersion: 1;
+  layout: TracePairLayout;
+  primarySide: TracePaneSide;
+  referenceSide: TracePaneSide;
+  activeSide?: TracePaneSide;
+  workspaceOpen?: boolean;
+  splitPercent?: number;
+  maximizedTraceSide?: TracePairTraceSide;
+  minimizedTraceSides?: TracePairTraceSide[];
+  aliases?: Record<string, TracePairTraceSide>;
+  panes: TracePairPaneContext[];
 }
 
 export interface SliceCardInfo {
@@ -1136,6 +1178,9 @@ export interface AISession {
   referenceBackendTraceId?: string;
   /** Reference trace display name (comparison mode only) */
   referenceTraceName?: string;
+  tracePairLayout?: TracePairLayout;
+  tracePairSplitPercent?: number;
+  tracePairActiveTraceSide?: TracePairTraceSide;
 }
 
 /**

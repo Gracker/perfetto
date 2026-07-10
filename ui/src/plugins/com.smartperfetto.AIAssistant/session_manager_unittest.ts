@@ -126,4 +126,39 @@ describe('SessionManager session storage CAS', () => {
       'trace-b': [expect.objectContaining({sessionId: 'session-b'})],
     });
   });
+
+  it('clears stale raw trace comparison identity when a session returns to single trace', () => {
+    const manager = new SessionManager();
+    const session = manager.createSession('trace-a', 'current.trace', 'backend-a');
+
+    manager.updateSession('trace-a', session.sessionId, {
+      type: 'comparison',
+      referenceBackendTraceId: 'backend-b',
+      referenceTraceName: 'reference.trace',
+      tracePairLayout: 'vertical',
+      tracePairSplitPercent: 67,
+      tracePairActiveTraceSide: 'reference',
+    });
+    expect(manager.loadSession(session.sessionId)).toEqual(
+      expect.objectContaining({
+        type: 'comparison',
+        referenceBackendTraceId: 'backend-b',
+        tracePairLayout: 'vertical',
+      }),
+    );
+
+    manager.updateSession('trace-a', session.sessionId, {
+      type: 'single',
+      referenceBackendTraceId: undefined,
+      referenceTraceName: undefined,
+      tracePairLayout: undefined,
+      tracePairSplitPercent: undefined,
+      tracePairActiveTraceSide: undefined,
+    });
+
+    const restored = manager.loadSession(session.sessionId);
+    expect(restored).toEqual(expect.objectContaining({type: 'single'}));
+    expect(restored).not.toHaveProperty('referenceBackendTraceId');
+    expect(restored).not.toHaveProperty('tracePairLayout');
+  });
 });

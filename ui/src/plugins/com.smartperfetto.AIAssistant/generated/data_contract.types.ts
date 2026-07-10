@@ -175,6 +175,7 @@ export type EvidenceProducerKind =
   | 'manual';
 
 export type EvidenceTraceSide = 'current' | 'reference' | 'unknown';
+export type EvidencePaneSide = 'left' | 'right' | 'top' | 'bottom';
 
 export type EvidenceIdentityRole =
   | 'app_main'
@@ -200,6 +201,7 @@ export type ClaimKindV1 =
 export interface EvidenceContextV1 {
   traceId: string;
   traceSide?: EvidenceTraceSide;
+  paneSide?: EvidencePaneSide;
   toolCallId?: string;
   sourceToolCallId?: string;
   producerKind: EvidenceProducerKind;
@@ -442,6 +444,7 @@ export type QueryReviewProducerKind = 'execute_sql' | 'execute_sql_on' | 'invoke
 export type QueryReviewConfidence = 'declared' | 'observed' | 'partial';
 export type QueryReviewGuardrailSeverity = 'info' | 'warning';
 export type QueryReviewAllowedUse = 'review_metadata_only';
+export type QueryReviewPaneSide = 'left' | 'right' | 'top' | 'bottom';
 
 export interface QueryReviewProducerV1 {
   kind: QueryReviewProducerKind;
@@ -450,6 +453,7 @@ export interface QueryReviewProducerV1 {
   planPhaseId?: string;
   planPhaseTitle?: string;
   traceSide?: 'current' | 'reference';
+  paneSide?: QueryReviewPaneSide;
   traceId?: string;
 }
 
@@ -673,6 +677,8 @@ export interface DataEnvelopeMeta {
 
   /** Trace side for comparison-mode outputs */
   traceSide?: 'current' | 'reference';
+
+  paneSide?: 'left' | 'right' | 'top' | 'bottom';
 
   /** Backend trace identifier used to produce this data */
   traceId?: string;
