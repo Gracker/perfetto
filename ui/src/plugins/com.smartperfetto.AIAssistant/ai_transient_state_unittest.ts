@@ -24,6 +24,7 @@ import {
   registerTransientSaver,
   resetTransientState,
   switchFloatingMode,
+  toggleSidebarCollapsedWithTransientState,
   unregisterTransientSaver,
 } from './ai_transient_state';
 import {
@@ -33,6 +34,7 @@ import {
 } from './ai_floating_state';
 import {createStreamingAnswerState, createStreamingFlowState} from './types';
 import {setViewport} from './test_helpers';
+import {resetAISharedState, updateAISharedState} from './ai_shared_state';
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -50,6 +52,7 @@ function makeSnapshot(overrides: Partial<TransientState> = {}): TransientState {
 beforeEach(() => {
   // Start each test from a clean slate: no pending snapshot, no active saver.
   resetTransientState();
+  resetAISharedState();
   // Register a no-op unregister to drop any active saver via exact-ref trick:
   // we just clear by registering then unregistering our own throwaway.
   const dummy = () => makeSnapshot();
@@ -57,7 +60,11 @@ beforeEach(() => {
   unregisterTransientSaver(dummy);
   // Reset floating state
   setViewport(1920, 1080);
-  updateFloatingState({mode: 'tab', position: {x: 100, y: 100}, size: {width: 640, height: 540}});
+  updateFloatingState({
+    mode: 'tab',
+    position: {x: 100, y: 100},
+    size: {width: 640, height: 540},
+  });
 });
 
 // ── Saver registration ─────────────────────────────────────────────────
@@ -96,6 +103,16 @@ describe('registerTransientSaver / unregisterTransientSaver', () => {
     unregisterTransientSaver(saver);
     captureTransientState();
     expect(consumeTransientState()).toBeNull();
+  });
+
+  it('preserves a pending handoff when the next capture has no saver', () => {
+    const saver = () => makeSnapshot({inputDraft: 'pending handoff'});
+    registerTransientSaver(saver);
+    captureTransientState();
+    unregisterTransientSaver(saver);
+    captureTransientState();
+
+    expect(consumeTransientState()?.inputDraft).toBe('pending handoff');
   });
 
   it('swallows saver errors and stores null', () => {
@@ -178,7 +195,10 @@ describe('switchFloatingMode()', () => {
   it('entering floating mode clamps geometry to viewport', () => {
     setViewport(800, 600);
     // Saved position is far off-screen, simulating a multi-monitor handoff
-    updateFloatingState({position: {x: 10000, y: 10000}, size: {width: 3000, height: 2000}});
+    updateFloatingState({
+      position: {x: 10000, y: 10000},
+      size: {width: 3000, height: 2000},
+    });
     switchFloatingMode('floating');
     const s = getFloatingState();
     // After clamp: width=776, height=576, position constrained
@@ -191,7 +211,11 @@ describe('switchFloatingMode()', () => {
   it('leaving floating mode does NOT trigger clamp', () => {
     setViewport(1920, 1080);
     // Position intentionally off-screen
-    updateFloatingState({mode: 'floating', position: {x: 5000, y: 5000}, size: {width: 400, height: 320}});
+    updateFloatingState({
+      mode: 'floating',
+      position: {x: 5000, y: 5000},
+      size: {width: 400, height: 320},
+    });
     switchFloatingMode('tab');
     // x/y remain un-clamped because tab mode doesn't need clamping
     const s = getFloatingState();
@@ -225,8 +249,58 @@ describe('switchFloatingMode()', () => {
     expect(s).not.toBeNull();
     expect(s?.activeAnalysis?.agentSessionId).toBe('sess-123');
     expect(s?.activeAnalysis?.lastEventId).toBe(42);
-    expect(s?.activeAnalysis?.displayedSkillProgress).toEqual(['skill-a:step1', 'skill-b:step2']);
+    expect(s?.activeAnalysis?.displayedSkillProgress).toEqual([
+      'skill-a:step1',
+      'skill-b:step2',
+    ]);
     expect(s?.collapsedTables).toEqual(['msg-1', 'msg-5']);
+  });
+});
+
+describe('toggleSidebarCollapsedWithTransientState()', () => {
+  it('keeps collapse and expand visual without snapshot handoff', () => {
+    updateFloatingState({
+      mode: 'sidebar',
+      sidebar: {collapsed: false},
+    });
+    const saver = vi.fn(() => makeSnapshot({inputDraft: 'still running'}));
+    registerTransientSaver(saver);
+
+    toggleSidebarCollapsedWithTransientState();
+    toggleSidebarCollapsedWithTransientState();
+
+    expect(getFloatingState().sidebar.collapsed).toBe(false);
+    expect(saver).not.toHaveBeenCalled();
+    expect(consumeTransientState()).toBeNull();
+    unregisterTransientSaver(saver);
+  });
+
+  it('defers mount-changing transitions while analysis owns the panel', () => {
+    updateFloatingState({
+      mode: 'sidebar',
+      sidebar: {collapsed: false},
+    });
+    updateAISharedState({status: 'analyzing'});
+    const saver = vi.fn(() => makeSnapshot());
+    registerTransientSaver(saver);
+
+    switchFloatingMode('tab');
+    expect(getFloatingState().mode).toBe('sidebar');
+    expect(getFloatingState().sidebar.collapsed).toBe(true);
+
+    switchFloatingMode('floating');
+    expect(getFloatingState().mode).toBe('sidebar');
+    expect(saver).not.toHaveBeenCalled();
+    unregisterTransientSaver(saver);
+  });
+
+  it('keeps a running floating owner mounted when Dock is requested', () => {
+    updateFloatingState({mode: 'floating'});
+    updateAISharedState({status: 'analyzing'});
+
+    switchFloatingMode('sidebar');
+
+    expect(getFloatingState().mode).toBe('floating');
   });
 });
 

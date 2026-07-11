@@ -15,6 +15,7 @@ import {
 } from './provider_types';
 import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
+import {isAIAnalysisIdentityLocked} from './ai_shared_state';
 import {
   createProviderCatalogEventSource,
   notifyProviderCatalogChanged,
@@ -29,6 +30,7 @@ export class ProviderQuickSwitcher
   private open = false;
   private loading = false;
   private activating = false;
+  private disabled = false;
   private backendUrl = '';
   private apiKey?: string;
   private toastMessage: string | null = null;
@@ -42,9 +44,14 @@ export class ProviderQuickSwitcher
     createProviderCatalogEventSource('provider-switcher');
   private unsubscribeProviderCatalogChanged: (() => void) | null = null;
 
+  private isMutationLocked(): boolean {
+    return this.disabled || isAIAnalysisIdentityLocked();
+  }
+
   oninit(vnode: m.Vnode<ProviderQuickSwitcherAttrs>) {
     this.backendUrl = vnode.attrs.backendUrl;
     this.apiKey = vnode.attrs.apiKey;
+    this.disabled = vnode.attrs.disabled === true;
     this.unsubscribeProviderCatalogChanged = subscribeProviderCatalogChanged(
       (change) => {
         if (change.source === this.providerChangeSource) return;
@@ -68,6 +75,11 @@ export class ProviderQuickSwitcher
     document.addEventListener('click', this.outsideClickHandler, true);
 
     this.keydownHandler = (e: KeyboardEvent) => {
+      if (this.isMutationLocked()) {
+        this.open = false;
+        this.focusIndex = -1;
+        return;
+      }
       if (!this.open) return;
       if (e.key === 'Escape') {
         this.open = false;
@@ -109,6 +121,15 @@ export class ProviderQuickSwitcher
       }
     };
     document.addEventListener('keydown', this.keydownHandler);
+  }
+
+  onbeforeupdate(vnode: m.Vnode<ProviderQuickSwitcherAttrs>): boolean {
+    this.disabled = vnode.attrs.disabled === true;
+    if (this.disabled) {
+      this.open = false;
+      this.focusIndex = -1;
+    }
+    return true;
   }
 
   onupdate(vnode: m.Vnode<ProviderQuickSwitcherAttrs>) {
@@ -172,9 +193,11 @@ export class ProviderQuickSwitcher
     id: string,
     vnode?: m.Vnode<ProviderQuickSwitcherAttrs>,
   ) {
+    if (this.isMutationLocked()) return;
     this.activating = true;
     m.redraw();
     try {
+      if (this.isMutationLocked()) return;
       const res = await fetch(apiUrl(this.backendUrl, `/${id}/activate`), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
@@ -203,23 +226,34 @@ export class ProviderQuickSwitcher
     runtime: AgentRuntimeKind,
     vnode?: m.Vnode<ProviderQuickSwitcherAttrs>,
   ) {
+    if (this.isMutationLocked()) return;
     this.activating = true;
     m.redraw();
     try {
-      const runtimeRes = await fetch(apiUrl(this.backendUrl, `/${provider.id}/runtime`), {
-        method: 'POST',
-        headers: buildHeaders(this.apiKey),
-        body: JSON.stringify({agentRuntime: runtime}),
-      });
+      if (this.isMutationLocked()) return;
+      const runtimeRes = await fetch(
+        apiUrl(this.backendUrl, `/${provider.id}/runtime`),
+        {
+          method: 'POST',
+          headers: buildHeaders(this.apiKey),
+          body: JSON.stringify({agentRuntime: runtime}),
+        },
+      );
       if (!runtimeRes.ok) return;
+      if (this.isMutationLocked()) return;
 
-      const activateRes = await fetch(apiUrl(this.backendUrl, `/${provider.id}/activate`), {
-        method: 'POST',
-        headers: buildHeaders(this.apiKey),
-      });
+      const activateRes = await fetch(
+        apiUrl(this.backendUrl, `/${provider.id}/activate`),
+        {
+          method: 'POST',
+          headers: buildHeaders(this.apiKey),
+        },
+      );
       if (activateRes.ok) {
         await this.loadProviders();
-        this.showToast(`✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`);
+        this.showToast(
+          `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
+        );
         this.publishProviderCatalogChanged('runtime-switched');
         vnode?.attrs.onActivate?.();
       }
@@ -234,9 +268,11 @@ export class ProviderQuickSwitcher
   }
 
   private async deactivateAll(vnode?: m.Vnode<ProviderQuickSwitcherAttrs>) {
+    if (this.isMutationLocked()) return;
     this.activating = true;
     m.redraw();
     try {
+      if (this.isMutationLocked()) return;
       const res = await fetch(apiUrl(this.backendUrl, '/deactivate'), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
@@ -286,6 +322,8 @@ export class ProviderQuickSwitcher
     const t = getTokens();
     const s = getStyles(t);
     const active = this.providers.find((p) => p.isActive);
+    const identityLocked = this.isMutationLocked();
+    const mutationDisabled = identityLocked || this.activating;
 
     if (this.loading && this.providers.length === 0) {
       return m('div', {'data-switcher': true, 'style': s.switcherContainer}, [
@@ -302,15 +340,17 @@ export class ProviderQuickSwitcher
           style: s.switcherBtn,
           onclick: (e: Event) => {
             e.stopPropagation();
-            if (!this.activating) {
+            if (!mutationDisabled) {
               this.open = !this.open;
               if (this.open) this.focusIndex = -1;
             }
           },
-          title: active
-            ? `${active.name} · ${providerRuntimeLabel(resolveProviderRuntime(active))}`
-            : 'System Default · .env',
-          disabled: this.activating,
+          title: identityLocked
+            ? '分析运行中，Provider 保持锁定'
+            : active
+              ? `${active.name} · ${providerRuntimeLabel(resolveProviderRuntime(active))}`
+              : 'System Default · .env',
+          disabled: mutationDisabled,
         },
         [
           this.activating
@@ -330,7 +370,13 @@ export class ProviderQuickSwitcher
           active
             ? m(
                 'span',
-                {style: {fontSize: '10px', opacity: 0.65, whiteSpace: 'nowrap'}},
+                {
+                  style: {
+                    fontSize: '10px',
+                    opacity: 0.65,
+                    whiteSpace: 'nowrap',
+                  },
+                },
                 resolveProviderRuntime(active) === 'openai-agents-sdk'
                   ? 'OA'
                   : resolveProviderRuntime(active) === 'pi-agent-core'
@@ -402,6 +448,7 @@ export class ProviderQuickSwitcher
             : {}),
         },
         onclick: () => {
+          if (this.isMutationLocked()) return;
           if (!noActiveProvider) void this.deactivateAll(vnode);
           else {
             this.open = false;
@@ -454,6 +501,7 @@ export class ProviderQuickSwitcher
               },
               key: p.id,
               onclick: () => {
+                if (this.isMutationLocked()) return;
                 if (!p.isActive) void this.activate(p.id, vnode);
                 else {
                   this.open = false;
@@ -496,6 +544,7 @@ export class ProviderQuickSwitcher
   ): m.Children {
     const t = getTokens();
     const current = resolveProviderRuntime(provider);
+    const identityLocked = this.isMutationLocked();
     const allButtons: Array<{runtime: AgentRuntimeKind; label: string}> = [
       {runtime: 'claude-agent-sdk', label: 'Claude'},
       {runtime: 'openai-agents-sdk', label: 'OpenAI'},
@@ -541,9 +590,11 @@ export class ProviderQuickSwitcher
               background: active ? t.accentGradient : t.surface,
             },
             onclick: () => {
+              if (this.isMutationLocked()) return;
               if (active && provider.isActive) return;
               void this.switchRuntime(provider, button.runtime, vnode);
             },
+            disabled: identityLocked,
           },
           button.label,
         );

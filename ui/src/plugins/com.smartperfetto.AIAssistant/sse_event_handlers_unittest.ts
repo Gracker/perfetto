@@ -55,7 +55,11 @@ import {
   handleConversationStepEvent,
 } from './sse_event_handlers';
 
-import {Message, createStreamingAnswerState, createStreamingFlowState} from './types';
+import {
+  Message,
+  createStreamingAnswerState,
+  createStreamingFlowState,
+} from './types';
 import {getAISharedState, resetAISharedState} from './ai_shared_state';
 
 // =============================================================================
@@ -65,7 +69,9 @@ import {getAISharedState, resetAISharedState} from './ai_shared_state';
 /**
  * Creates a mock SSEHandlerContext for testing.
  */
-function createMockContext(overrides?: Partial<SSEHandlerContext>): SSEHandlerContext & {
+function createMockContext(
+  overrides?: Partial<SSEHandlerContext>,
+): SSEHandlerContext & {
   messages: Message[];
   flowMessages: Message[];
 } {
@@ -314,7 +320,9 @@ describe('handleSkillSectionEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].sqlResult).toBeDefined();
-    expect(ctx.messages[0].sqlResult!.sectionTitle).toBe('Frame Analysis (1/3)');
+    expect(ctx.messages[0].sqlResult!.sectionTitle).toBe(
+      'Frame Analysis (1/3)',
+    );
   });
 
   it('should handle empty rows', () => {
@@ -713,110 +721,124 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
+    expect(ctx.messages[0].reportUrl).toBe(
+      'http://localhost:3000/reports/123.html',
+    );
   });
 
   it('attaches quick run receipt metadata to the final assistant message', () => {
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: 'Selected slice lasted 12 ms.',
-        quickRun: {
-          requestedMode: 'fast',
-          resolvedMode: 'quick',
-          profile: 'extended',
-          targetTurns: 5,
-          hardCapTurns: 50,
-          actualTurns: 7,
-          elapsedMs: 1234,
-          enforcement: 'turn_cap',
-          stopReason: 'extended_answered',
-          evidence: {
-            frontendPrequeryInjected: 2,
-            frontendPrequeryCited: 1,
-            currentRunDataEnvelopes: 2,
-            citedEvidenceRefs: 1,
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: 'Selected slice lasted 12 ms.',
+          quickRun: {
+            requestedMode: 'fast',
+            resolvedMode: 'quick',
+            profile: 'extended',
+            targetTurns: 5,
+            hardCapTurns: 50,
+            actualTurns: 7,
+            elapsedMs: 1234,
+            enforcement: 'turn_cap',
+            stopReason: 'extended_answered',
+            evidence: {
+              frontendPrequeryInjected: 2,
+              frontendPrequeryCited: 1,
+              currentRunDataEnvelopes: 2,
+              citedEvidenceRefs: 1,
+            },
+            contextInjected: {
+              conversationTurns: 1,
+              recentSqlResults: 1,
+              sqlPitfallPairs: 0,
+              patternHints: 0,
+              negativePatternHints: 0,
+              caseBackgroundCases: 0,
+            },
+            verifierStatus: 'passed',
           },
-          contextInjected: {
-            conversationTurns: 1,
-            recentSqlResults: 1,
-            sqlPitfallPairs: 0,
-            patternHints: 0,
-            negativePatternHints: 0,
-            caseBackgroundCases: 0,
+          analysisReceipt: {
+            schemaVersion: 1,
+            runId: 'run-1',
+            sessionId: 'session-1',
+            traceId: 'trace-1',
+            mode: 'fast',
+            resolvedMode: 'quick',
+            providerId: null,
+            generatedAt: 1,
+            traceEvidence: {
+              sqlCount: 1,
+              skillCount: 1,
+              dataEnvelopeCount: 2,
+              artifactCount: 1,
+              evidenceRefCount: 2,
+            },
+            nonEvidenceContext: {
+              frontendPrequeryCount: 1,
+              memoryHintCount: 0,
+              conversationContextCount: 2,
+              strategyHintCount: 0,
+            },
+            claimAudit: {
+              totalClaims: 1,
+              verifiedClaims: 1,
+              unsupportedClaims: 0,
+              uncertainClaims: 0,
+            },
+            qualityGates: {
+              finalReportContract: 'passed',
+              claimVerification: 'passed',
+              identityResolution: 'not_applicable',
+            },
+            outputs: {
+              reportId: 'report-1',
+            },
           },
-          verifierStatus: 'passed',
+          uiActionProposals: [
+            {
+              schemaVersion: 1,
+              id: 'ui-navigate_timeline-test',
+              kind: 'navigate_timeline',
+              title: '跳到证据时间点',
+              reason: '来自证据表',
+              source: {evidenceRefId: 'ev-1'},
+              payload: {ts: '123456789', traceId: 'trace-1'},
+              requiresConfirmation: true,
+            },
+          ],
         },
-        analysisReceipt: {
-          schemaVersion: 1,
-          runId: 'run-1',
-          sessionId: 'session-1',
-          traceId: 'trace-1',
-          mode: 'fast',
-          resolvedMode: 'quick',
-          providerId: null,
-          generatedAt: 1,
-          traceEvidence: {
-            sqlCount: 1,
-            skillCount: 1,
-            dataEnvelopeCount: 2,
-            artifactCount: 1,
-            evidenceRefCount: 2,
-          },
-          nonEvidenceContext: {
-            frontendPrequeryCount: 1,
-            memoryHintCount: 0,
-            conversationContextCount: 2,
-            strategyHintCount: 0,
-          },
-          claimAudit: {
-            totalClaims: 1,
-            verifiedClaims: 1,
-            unsupportedClaims: 0,
-            uncertainClaims: 0,
-          },
-          qualityGates: {
-            finalReportContract: 'passed',
-            claimVerification: 'passed',
-            identityResolution: 'not_applicable',
-          },
-          outputs: {
-            reportId: 'report-1',
-          },
-        },
-        uiActionProposals: [{
-          schemaVersion: 1,
-          id: 'ui-navigate_timeline-test',
-          kind: 'navigate_timeline',
-          title: '跳到证据时间点',
-          reason: '来自证据表',
-          source: { evidenceRefId: 'ev-1' },
-          payload: { ts: '123456789', traceId: 'trace-1' },
-          requiresConfirmation: true,
-        }],
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[0].quickRun).toEqual(expect.objectContaining({
-      profile: 'extended',
-      actualTurns: 7,
-      verifierStatus: 'passed',
-    }));
-    expect(ctx.messages[0].analysisReceipt).toEqual(expect.objectContaining({
-      schemaVersion: 1,
-      runId: 'run-1',
-      traceId: 'trace-1',
-    }));
-    expect(ctx.messages[0].uiActionProposals).toEqual([expect.objectContaining({
-      id: 'ui-navigate_timeline-test',
-      kind: 'navigate_timeline',
-    })]);
+    expect(ctx.messages[0].quickRun).toEqual(
+      expect.objectContaining({
+        profile: 'extended',
+        actualTurns: 7,
+        verifierStatus: 'passed',
+      }),
+    );
+    expect(ctx.messages[0].analysisReceipt).toEqual(
+      expect.objectContaining({
+        schemaVersion: 1,
+        runId: 'run-1',
+        traceId: 'trace-1',
+      }),
+    );
+    expect(ctx.messages[0].uiActionProposals).toEqual([
+      expect.objectContaining({
+        id: 'ui-navigate_timeline-test',
+        kind: 'navigate_timeline',
+      }),
+    ]);
   });
 
   it('should keep result snapshot reference out of the visible conclusion message', () => {
     const data = {
       data: {
         conclusion: 'Analysis complete.',
-        resultSnapshotId: 'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+        resultSnapshotId:
+          'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
       },
     };
 
@@ -831,13 +853,16 @@ describe('handleAnalysisCompletedEvent', () => {
     const data = {
       data: {
         conclusion: 'Analysis complete. Mentioned AR-12345678 in narrative.',
-        resultSnapshotId: 'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+        resultSnapshotId:
+          'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
       },
     };
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('Mentioned AR-12345678 in narrative.');
+    expect(ctx.messages[0].content).toContain(
+      'Mentioned AR-12345678 in narrative.',
+    );
     expect(ctx.messages[0].content).not.toContain('Snapshot:');
   });
 
@@ -871,10 +896,14 @@ describe('handleAnalysisCompletedEvent', () => {
 
     expect(ctx.messages[0].content).toContain('## Code references');
     expect(ctx.messages[0].content).toContain('`chunk-main`');
-    expect(ctx.messages[0].content).toContain('app/src/main/MainActivity.kt:L10-18');
+    expect(ctx.messages[0].content).toContain(
+      'app/src/main/MainActivity.kt:L10-18',
+    );
     expect(ctx.messages[0].content).toContain('## Patch proposals');
     expect(ctx.messages[0].content).toContain('sketch only; no copyable diff');
-    expect(ctx.messages[0].content).not.toContain('SECRET_RAW_DIFF_SHOULD_NOT_RENDER');
+    expect(ctx.messages[0].content).not.toContain(
+      'SECRET_RAW_DIFF_SHOULD_NOT_RENDER',
+    );
   });
 
   it('should attach report URL without appending snapshot reference when conclusion arrived earlier', () => {
@@ -888,7 +917,8 @@ describe('handleAnalysisCompletedEvent', () => {
 
     const data = {
       data: {
-        resultSnapshotId: 'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+        resultSnapshotId:
+          'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
         reportUrl: '/reports/123.html',
       },
     };
@@ -897,7 +927,9 @@ describe('handleAnalysisCompletedEvent', () => {
 
     expect(ctx.messages[0].content).toBe('Earlier conclusion.');
     expect(ctx.messages[0].content).not.toContain('Result ID');
-    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
+    expect(ctx.messages[0].reportUrl).toBe(
+      'http://localhost:3000/reports/123.html',
+    );
   });
 
   it('should backfill conversation timeline from analysis_completed payload', () => {
@@ -942,9 +974,7 @@ describe('handleAnalysisCompletedEvent', () => {
         conclusion: 'Analysis complete.',
         confidence: 0.9,
         rounds: 3,
-        hypotheses: [
-          {description: 'Main thread blocked', status: 'confirmed'},
-        ],
+        hypotheses: [{description: 'Main thread blocked', status: 'confirmed'}],
       },
     };
 
@@ -970,7 +1000,10 @@ describe('handleAnalysisCompletedEvent', () => {
             },
           ],
           evidence_chain: [
-            {conclusion_id: 'C1', evidence: ['逐帧根因显示主线程耗时占比65%（ev_111111111111）']},
+            {
+              conclusion_id: 'C1',
+              evidence: ['逐帧根因显示主线程耗时占比65%（ev_111111111111）'],
+            },
           ],
           next_steps: ['对K1聚类下钻'],
         },
@@ -993,7 +1026,9 @@ describe('handleAnalysisCompletedEvent', () => {
       data: {
         conclusionContract: {
           conclusion: [{rank: 1, statement: '存在掉帧'}],
-          clusters: [{cluster: 'K1', description: '掉帧簇', frames: 5, percentage: 50}],
+          clusters: [
+            {cluster: 'K1', description: '掉帧簇', frames: 5, percentage: 50},
+          ],
           metadata: {scene_id: 'jank'},
         },
       },
@@ -1029,7 +1064,9 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('帧: 1435500 / 1435508 / 1435517');
+    expect(ctx.messages[0].content).toContain(
+      '帧: 1435500 / 1435508 / 1435517',
+    );
     expect(ctx.messages[0].content).toContain('其余 9 帧省略');
   });
 
@@ -1063,9 +1100,7 @@ describe('handleAnalysisCompletedEvent', () => {
       architecture: 'agent-driven',
       data: {
         conclusionContract: {
-          conclusions: [
-            {rank: 1, statement: '主结论', confidence: 0.9},
-          ],
+          conclusions: [{rank: 1, statement: '主结论', confidence: 0.9}],
           clusters: [
             {
               cluster: 'K1',
@@ -1138,9 +1173,7 @@ describe('handleAnalysisCompletedEvent', () => {
         conclusion: `## 结论（按可能性排序）\n1. 示例\n\n## 分析元数据\n- 置信度: 90%\n- 分析轮次: 3`,
         confidence: 0.9,
         rounds: 3,
-        hypotheses: [
-          {description: 'Main thread blocked', status: 'confirmed'},
-        ],
+        hypotheses: [{description: 'Main thread blocked', status: 'confirmed'}],
       },
     };
 
@@ -1198,10 +1231,13 @@ describe('handleAnalysisCompletedEvent', () => {
   });
 
   it('should handle malformed analysis_completed payload gracefully', () => {
-    const result = handleAnalysisCompletedEvent({
-      architecture: 123,
-      data: 'invalid-payload',
-    }, ctx);
+    const result = handleAnalysisCompletedEvent(
+      {
+        architecture: 123,
+        data: 'invalid-payload',
+      },
+      ctx,
+    );
 
     expect(result).toEqual({isTerminal: true, stopLoading: true});
     expect(ctx.messages).toHaveLength(0);
@@ -1471,11 +1507,14 @@ describe('handleSkillLayeredResultEvent', () => {
       rowCount: 1,
     });
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '摘要已生成。',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: '摘要已生成。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages[1].content).toBe('摘要已生成。');
     expect(ctx.messages[1].content).not.toContain('数据来源索引');
@@ -1501,7 +1540,9 @@ describe('handleSkillLayeredResultEvent', () => {
     handleSkillLayeredResultEvent(data, ctx);
 
     // Second call should be skipped due to deduplication
-    expect(ctx.displayedSkillProgress.has('skill_layered_result:test_skill')).toBe(true);
+    expect(
+      ctx.displayedSkillProgress.has('skill_layered_result:test_skill'),
+    ).toBe(true);
   });
 
   it('should handle missing layers gracefully', () => {
@@ -1519,12 +1560,14 @@ describe('handleSkillLayeredResultEvent', () => {
         layers: {
           overview: {
             frame_metrics: {
-              data: [{
-                start_ts: '123',
-                dur_ns: 16666667,
-                dur_ms: 16.67,
-                frame_count: 10,
-              }],
+              data: [
+                {
+                  start_ts: '123',
+                  dur_ns: 16666667,
+                  dur_ms: 16.67,
+                  frame_count: 10,
+                },
+              ],
               display: {title: 'Frame Metrics'},
             },
           },
@@ -1536,7 +1579,12 @@ describe('handleSkillLayeredResultEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     const sqlResult = ctx.messages[0].sqlResult!;
-    expect(sqlResult.columns).toEqual(['start_ts', 'dur_ns', 'dur_ms', 'frame_count']);
+    expect(sqlResult.columns).toEqual([
+      'start_ts',
+      'dur_ns',
+      'dur_ms',
+      'frame_count',
+    ]);
     expect(sqlResult.rows[0]).toEqual(['123', 16666667, 16.67, 10]);
   });
 
@@ -1576,17 +1624,36 @@ describe('handleSkillLayeredResultEvent', () => {
         layers: {
           overview: {
             startups: {
-              data: [{
-                start_ts: '1000',
-                dur_ns: '2000',
-                dur_ms: 2.0,
-              }],
+              data: [
+                {
+                  start_ts: '1000',
+                  dur_ns: '2000',
+                  dur_ms: 2.0,
+                },
+              ],
               display: {
                 title: '启动事件',
                 columns: [
-                  {name: 'start_ts', type: 'timestamp', unit: 'ns', clickAction: 'navigate_range', durationColumn: 'dur_ns'},
-                  {name: 'dur_ns', type: 'duration', format: 'duration_ms', unit: 'ns'},
-                  {name: 'dur_ms', type: 'duration', format: 'duration_ms', unit: 'ms', hidden: true},
+                  {
+                    name: 'start_ts',
+                    type: 'timestamp',
+                    unit: 'ns',
+                    clickAction: 'navigate_range',
+                    durationColumn: 'dur_ns',
+                  },
+                  {
+                    name: 'dur_ns',
+                    type: 'duration',
+                    format: 'duration_ms',
+                    unit: 'ns',
+                  },
+                  {
+                    name: 'dur_ms',
+                    type: 'duration',
+                    format: 'duration_ms',
+                    unit: 'ms',
+                    hidden: true,
+                  },
                 ],
               },
             },
@@ -1608,7 +1675,7 @@ describe('handleSkillLayeredResultEvent', () => {
           durationColumn: 'dur_ns',
           unit: 'ns',
         }),
-      ])
+      ]),
     );
   });
 
@@ -1626,8 +1693,20 @@ describe('handleSkillLayeredResultEvent', () => {
               display: {
                 title: '会话列表',
                 columns: [
-                  {name: 'start_ts', type: 'timestamp', unit: 'ns', clickAction: 'navigate_range', durationColumn: 'dur_ns'},
-                  {name: 'dur_ns', type: 'duration', format: 'duration_ms', unit: 'ns', hidden: true},
+                  {
+                    name: 'start_ts',
+                    type: 'timestamp',
+                    unit: 'ns',
+                    clickAction: 'navigate_range',
+                    durationColumn: 'dur_ns',
+                  },
+                  {
+                    name: 'dur_ns',
+                    type: 'duration',
+                    format: 'duration_ms',
+                    unit: 'ns',
+                    hidden: true,
+                  },
                   {name: 'session_id', type: 'number'},
                 ],
               },
@@ -1646,7 +1725,7 @@ describe('handleSkillLayeredResultEvent', () => {
     expect(sqlResult.columnDefinitions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({name: 'dur_ns', unit: 'ns'}),
-      ])
+      ]),
     );
   });
 
@@ -1688,7 +1767,7 @@ describe('handleSkillLayeredResultEvent', () => {
     const sqlResult = ctx.messages[0].sqlResult!;
     expect(sqlResult.expandableData).toHaveLength(1);
     expect(sqlResult.expandableData?.[0].item).toEqual(
-      expect.objectContaining({frame_id: '42'})
+      expect.objectContaining({frame_id: '42'}),
     );
   });
 });
@@ -1728,10 +1807,24 @@ describe('handleDataEvent', () => {
               stepId: 'step1',
               evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
             },
-            reads: [{table: 'slice', columns: ['col1', 'col2'], confidence: 'observed'}],
-            filters: [{expression: "name LIKE '%launch%'", confidence: 'observed'}],
+            reads: [
+              {
+                table: 'slice',
+                columns: ['col1', 'col2'],
+                confidence: 'observed',
+              },
+            ],
+            filters: [
+              {expression: "name LIKE '%launch%'", confidence: 'observed'},
+            ],
             outputShape: [{name: 'col1'}, {name: 'col2'}],
-            guardrails: [{ruleId: 'process_identity', message: 'Process identity checked', severity: 'info'}],
+            guardrails: [
+              {
+                ruleId: 'process_identity',
+                message: 'Process identity checked',
+                severity: 'info',
+              },
+            ],
             limitations: ['Best-effort SQL read extraction'],
             observedExecution: {
               executed: true,
@@ -1787,9 +1880,7 @@ describe('handleDataEvent', () => {
           evidenceRefId: 'data:skill:object_rows',
         },
         data: {
-          rows: [
-            {frame_id: 1435508, dur_ms: 45.6},
-          ],
+          rows: [{frame_id: 1435508, dur_ms: 45.6}],
         },
         display: {
           layer: 'list',
@@ -1858,7 +1949,8 @@ describe('handleDataEvent', () => {
   });
 
   it('should keep executable SQL from execute_sql envelopes', () => {
-    const sql = 'INCLUDE PERFETTO MODULE slices.self_dur; SELECT * FROM _slice_self_dur;';
+    const sql =
+      'INCLUDE PERFETTO MODULE slices.self_dur; SELECT * FROM _slice_self_dur;';
     const data = {
       id: 'sql-data-1',
       envelope: {
@@ -1921,31 +2013,34 @@ describe('handleDataEvent', () => {
   });
 
   it('renders diagnostic text envelopes as non-evidence diagnostics', () => {
-    handleDataEvent({
-      id: 'sql-diagnostic',
-      envelope: {
-        meta: {
-          type: 'diagnostic',
-          version: '2.0',
-          source: 'execute_sql',
-          sourceToolCallId: 'execute_sql:7:params',
-          evidenceRefId: 'data:sql_diagnostic:current:trace:query:tool',
-        },
-        sql: 'SELECT name FROM slice s JOIN thread t ON 1=1',
-        data: {
-          text: [
-            'SQL 执行未产出可用表格。',
-            '这是一条失败诊断，不是可引用的性能证据；需要修正 SQL 后重试。',
-            'Error: ambiguous column name: name',
-          ].join('\n'),
-        },
-        display: {
-          layer: 'diagnosis',
-          format: 'text',
-          title: 'SQL 执行诊断',
+    handleDataEvent(
+      {
+        id: 'sql-diagnostic',
+        envelope: {
+          meta: {
+            type: 'diagnostic',
+            version: '2.0',
+            source: 'execute_sql',
+            sourceToolCallId: 'execute_sql:7:params',
+            evidenceRefId: 'data:sql_diagnostic:current:trace:query:tool',
+          },
+          sql: 'SELECT name FROM slice s JOIN thread t ON 1=1',
+          data: {
+            text: [
+              'SQL 执行未产出可用表格。',
+              '这是一条失败诊断，不是可引用的性能证据；需要修正 SQL 后重试。',
+              'Error: ambiguous column name: name',
+            ].join('\n'),
+          },
+          display: {
+            layer: 'diagnosis',
+            format: 'text',
+            title: 'SQL 执行诊断',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('失败诊断');
@@ -2003,7 +2098,12 @@ describe('handleDataEvent', () => {
             content: '\n\n（无显式洞见，见指标）\n \n \n',
             metrics: [
               {label: '总帧数', value: 642, severity: 'normal'},
-              {label: '掉帧数', value: 39, severity: 'normal', unit: ' (6.07%)'},
+              {
+                label: '掉帧数',
+                value: 39,
+                severity: 'normal',
+                unit: ' (6.07%)',
+              },
             ],
           },
         },
@@ -2019,7 +2119,9 @@ describe('handleDataEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('## 📊 洞见摘要');
-    expect(ctx.messages[0].content).toContain('（无显式洞见，见指标）\n\n### 关键指标');
+    expect(ctx.messages[0].content).toContain(
+      '（无显式洞见，见指标）\n\n### 关键指标',
+    );
     expect(ctx.messages[0].content).not.toMatch(/\n{3,}/);
     expect(ctx.messages[0].sourceContext).toMatchObject({
       ref: '摘要 1',
@@ -2033,38 +2135,45 @@ describe('handleDataEvent', () => {
       planPhaseId: 'p1',
       planPhaseTitle: '概览采集',
       planPhaseGoal: '获取帧统计',
-      reason: '压缩本轮启动的关键指标、异常提示和候选方向，用来决定后续优先下钻哪些问题。',
+      reason:
+        '压缩本轮启动的关键指标、异常提示和候选方向，用来决定后续优先下钻哪些问题。',
     });
   });
 
   it('should keep table-level data source index out of visible conclusions', () => {
-    handleDataEvent({
-      id: 'data-1',
-      envelope: {
-        meta: {
-          type: 'skill_result',
-          version: '2.0',
-          source: 'scrolling_analysis',
-          skillId: 'scrolling_analysis',
-          stepId: 'jank_frames',
-        },
-        data: {
-          columns: ['frame_id', 'dur_ms'],
-          rows: [[123, 45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '掉帧帧列表',
+    handleDataEvent(
+      {
+        id: 'data-1',
+        envelope: {
+          meta: {
+            type: 'skill_result',
+            version: '2.0',
+            source: 'scrolling_analysis',
+            skillId: 'scrolling_analysis',
+            stepId: 'jank_frames',
+          },
+          data: {
+            columns: ['frame_id', 'dur_ms'],
+            rows: [[123, 45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '掉帧帧列表',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '最终结论引用了 45.6ms 的帧耗时。',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: '最终结论引用了 45.6ms 的帧耗时。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).toBe('最终结论引用了 45.6ms 的帧耗时。');
@@ -2073,54 +2182,63 @@ describe('handleDataEvent', () => {
   });
 
   it('numbers data source refs per kind so summaries do not shift table refs', () => {
-    handleDataEvent({
-      id: 'summary-first',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_summary:current:trace-a:query-a:summary',
-        },
-        data: {
-          summary: {
+    handleDataEvent(
+      {
+        id: 'summary-first',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_summary:current:trace-a:query-a:summary',
+          },
+          data: {
+            summary: {
+              title: '概览摘要',
+              metrics: [{label: 'total_rows', value: 1}],
+            },
+          },
+          display: {
+            layer: 'overview',
+            format: 'summary',
             title: '概览摘要',
-            metrics: [{label: 'total_rows', value: 1}],
           },
         },
-        display: {
-          layer: 'overview',
-          format: 'summary',
-          title: '概览摘要',
+      },
+      ctx,
+    );
+    handleDataEvent(
+      {
+        id: 'table-after-summary',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:table',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
       },
-    }, ctx);
-    handleDataEvent({
-      id: 'table-after-summary',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:table',
-        },
-        data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
+      ctx,
+    );
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '最终结论引用帧耗时表。',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: '最终结论引用帧耗时表。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages[0].sourceContext?.ref).toBe('摘要 1');
     expect(ctx.messages[1].sqlResult?.sourceContext?.ref).toBe('表 1');
@@ -2132,33 +2250,39 @@ describe('handleDataEvent', () => {
 
   it('keeps all registered data source appendix details out of the visible conclusion', () => {
     for (let i = 1; i <= 85; i++) {
-      handleDataEvent({
-        id: `data-${i}`,
-        envelope: {
-          meta: {
-            type: 'skill_result',
-            version: '2.0',
-            source: `skill:step_${i}`,
-            evidenceRefId: `data:skill:test:step_${i}:current:trace-a:hash_${i}`,
-          },
-          data: {
-            columns: ['value'],
-            rows: [[i]],
-          },
-          display: {
-            layer: 'list',
-            format: 'table',
-            title: `证据表 ${i}`,
+      handleDataEvent(
+        {
+          id: `data-${i}`,
+          envelope: {
+            meta: {
+              type: 'skill_result',
+              version: '2.0',
+              source: `skill:step_${i}`,
+              evidenceRefId: `data:skill:test:step_${i}:current:trace-a:hash_${i}`,
+            },
+            data: {
+              columns: ['value'],
+              rows: [[i]],
+            },
+            display: {
+              layer: 'list',
+              format: 'table',
+              title: `证据表 ${i}`,
+            },
           },
         },
-      }, ctx);
+        ctx,
+      );
     }
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '最终结论需要核对全部证据表。',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: '最终结论需要核对全部证据表。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     const conclusion = ctx.messages[85].content;
     expect(conclusion).toBe('最终结论需要核对全部证据表。');
@@ -2169,33 +2293,39 @@ describe('handleDataEvent', () => {
 
   it('keeps bounded data source appendix details out of the visible conclusion', () => {
     for (let i = 1; i <= 125; i++) {
-      handleDataEvent({
-        id: `data-${i}`,
-        envelope: {
-          meta: {
-            type: 'skill_result',
-            version: '2.0',
-            source: `skill:step_${i}`,
-            evidenceRefId: `data:skill:test:step_${i}:current:trace-a:hash_${i}`,
-          },
-          data: {
-            columns: ['value'],
-            rows: [[i]],
-          },
-          display: {
-            layer: 'list',
-            format: 'table',
-            title: `证据表 ${i}`,
+      handleDataEvent(
+        {
+          id: `data-${i}`,
+          envelope: {
+            meta: {
+              type: 'skill_result',
+              version: '2.0',
+              source: `skill:step_${i}`,
+              evidenceRefId: `data:skill:test:step_${i}:current:trace-a:hash_${i}`,
+            },
+            data: {
+              columns: ['value'],
+              rows: [[i]],
+            },
+            display: {
+              layer: 'list',
+              format: 'table',
+              title: `证据表 ${i}`,
+            },
           },
         },
-      }, ctx);
+        ctx,
+      );
     }
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '最终结论需要核对大量证据表。',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: '最终结论需要核对大量证据表。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     const conclusion = ctx.messages[125].content;
     expect(conclusion).toBe('最终结论需要核对大量证据表。');
@@ -2207,27 +2337,30 @@ describe('handleDataEvent', () => {
   });
 
   it('renders zero-row table envelopes as auditable sources', () => {
-    handleDataEvent({
-      id: 'empty-table',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:empty',
-          planPhaseAttribution: 'active',
-        },
-        data: {
-          columns: ['id', 'name'],
-          rows: [],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '空结果 SQL',
+    handleDataEvent(
+      {
+        id: 'empty-table',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:empty',
+            planPhaseAttribution: 'active',
+          },
+          data: {
+            columns: ['id', 'name'],
+            rows: [],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '空结果 SQL',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].sqlResult).toMatchObject({
@@ -2244,28 +2377,31 @@ describe('handleDataEvent', () => {
   });
 
   it('renders non-tabular chart data instead of registering an orphan source', () => {
-    handleDataEvent({
-      id: 'chart-primitive',
-      envelope: {
-        meta: {
-          type: 'chart',
-          version: '2.0',
-          source: 'chart_skill',
-          evidenceRefId: 'data:chart:current:trace-a:primitive',
-        },
-        data: {
-          chart: {
-            type: 'bar',
-            data: [1, 2, 3],
+    handleDataEvent(
+      {
+        id: 'chart-primitive',
+        envelope: {
+          meta: {
+            type: 'chart',
+            version: '2.0',
+            source: 'chart_skill',
+            evidenceRefId: 'data:chart:current:trace-a:primitive',
+          },
+          data: {
+            chart: {
+              type: 'bar',
+              data: [1, 2, 3],
+            },
+          },
+          display: {
+            layer: 'overview',
+            format: 'chart',
+            title: 'Primitive Chart',
           },
         },
-        display: {
-          layer: 'overview',
-          format: 'chart',
-          title: 'Primitive Chart',
-        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('Primitive Chart');
@@ -2295,287 +2431,377 @@ describe('handleDataEvent', () => {
       },
     });
 
-    handleDataEvent({id: 'same-1', envelope: envelope('execute_sql_on:1:params-a')}, ctx);
-    handleDataEvent({id: 'same-2', envelope: envelope('execute_sql_on:2:params-a')}, ctx);
+    handleDataEvent(
+      {id: 'same-1', envelope: envelope('execute_sql_on:1:params-a')},
+      ctx,
+    );
+    handleDataEvent(
+      {id: 'same-2', envelope: envelope('execute_sql_on:2:params-a')},
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[0].sqlResult?.sourceContext?.sourceToolCallId).toBe('execute_sql_on:1:params-a');
-    expect(ctx.messages[1].sqlResult?.sourceContext?.sourceToolCallId).toBe('execute_sql_on:2:params-a');
+    expect(ctx.messages[0].sqlResult?.sourceContext?.sourceToolCallId).toBe(
+      'execute_sql_on:1:params-a',
+    );
+    expect(ctx.messages[1].sqlResult?.sourceContext?.sourceToolCallId).toBe(
+      'execute_sql_on:2:params-a',
+    );
   });
 
   it('renders claim-level row and column references from conclusion contracts', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
-        },
-        data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          schemaVersion: 'conclusion_contract_v1',
-          mode: 'initial_report',
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          clusters: [],
-          evidence_chain: [{conclusion_id: 'C1', text: '帧耗时 45.6ms'}],
-          claims: [{
-            id: 'Q1',
-            conclusion_id: 'C1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
-          uncertainties: [],
-          next_steps: [],
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            schemaVersion: 'conclusion_contract_v1',
+            mode: 'initial_report',
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            clusters: [],
+            evidence_chain: [{conclusion_id: 'C1', text: '帧耗时 45.6ms'}],
+            claims: [
+              {
+                id: 'Q1',
+                conclusion_id: 'C1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+            uncertainties: [],
+            next_steps: [],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).not.toContain('## 逐句数据引用');
     expect(ctx.messages[1].content).not.toContain('Q1 / C1: 帧耗时 45.6ms');
-    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 dur_ms，已核对');
+    expect(ctx.messages[1].content).not.toContain(
+      '表 1，row 0，列 dur_ms，已核对',
+    );
   });
 
   it('accepts common source_ref formatting variants without losing source binding', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表1: 帧耗时表',
-            }],
-          }],
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表1: 帧耗时表',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('表1: 帧耗时表，row 0，列 dur_ms，已核对');
+    expect(ctx.messages[1].content).not.toContain(
+      '表1: 帧耗时表，row 0，列 dur_ms，已核对',
+    );
   });
 
   it('resolves claim columns by displayed column label when available', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+            columns: [{name: 'dur_ms', label: '帧耗时(ms)', type: 'number'}],
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-          columns: [{name: 'dur_ms', label: '帧耗时(ms)', type: 'number'}],
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: '帧耗时(ms)',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: '帧耗时(ms)',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 帧耗时(ms)，已核对');
+    expect(ctx.messages[1].content).not.toContain(
+      '表 1，row 0，列 帧耗时(ms)，已核对',
+    );
   });
 
   it('verifies claim values with units and explicit approximate status for rounded numbers', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.64]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.64]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时约 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: '45.6ms',
-              source_ref: '表 1',
-            }],
-          }],
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时约 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: '45.6ms',
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 dur_ms，已核对（含近似匹配）');
+    expect(ctx.messages[1].content).not.toContain(
+      '表 1，row 0，列 dur_ms，已核对（含近似匹配）',
+    );
   });
 
   it('marks claim references that do not match the sourced table value', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 99ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 99,
-              source_ref: '表 1',
-            }],
-          }],
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 99ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 99,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('未通过: 值不匹配，实际 45.6');
+    expect(ctx.messages[1].content).not.toContain(
+      '未通过: 值不匹配，实际 45.6',
+    );
   });
 
   it('does not mark column-only claim references as value-verified', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时异常',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              source_ref: '表 1',
-            }],
-          }],
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时异常',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 dur_ms，未核验: 未提供期望值');
-    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 dur_ms，已核对');
+    expect(ctx.messages[1].content).not.toContain(
+      '表 1，row 0，列 dur_ms，未核验: 未提供期望值',
+    );
+    expect(ctx.messages[1].content).not.toContain(
+      '表 1，row 0，列 dur_ms，已核对',
+    );
   });
 
   it('uses exact evidence_ref over stale source_ref labels and reports the mismatch', () => {
@@ -2597,75 +2823,122 @@ describe('handleDataEvent', () => {
       },
     });
 
-    handleDataEvent({id: 'table-a', envelope: envelope('表A', 'data:sql_table:current:trace-a:query-a:params-a', 45.6)}, ctx);
-    handleDataEvent({id: 'table-b', envelope: envelope('表B', 'data:sql_table:current:trace-a:query-b:params-b', 99)}, ctx);
+    handleDataEvent(
+      {
+        id: 'table-a',
+        envelope: envelope(
+          '表A',
+          'data:sql_table:current:trace-a:query-a:params-a',
+          45.6,
+        ),
+      },
+      ctx,
+    );
+    handleDataEvent(
+      {
+        id: 'table-b',
+        envelope: envelope(
+          '表B',
+          'data:sql_table:current:trace-a:query-b:params-b',
+          99,
+        ),
+      },
+      ctx,
+    );
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              source_ref: '表 2',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-            }],
-          }],
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    source_ref: '表 2',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[2].content).not.toContain('表 1，row 0，列 dur_ms，已核对');
-    expect(ctx.messages[2].content).not.toContain('source_ref 已按系统来源校正');
-    expect(ctx.messages[2].content).not.toContain('表 2，row 0，列 dur_ms，已核对');
+    expect(ctx.messages[2].content).not.toContain(
+      '表 1，row 0，列 dur_ms，已核对',
+    );
+    expect(ctx.messages[2].content).not.toContain(
+      'source_ref 已按系统来源校正',
+    );
+    expect(ctx.messages[2].content).not.toContain(
+      '表 2，row 0，列 dur_ms，已核对',
+    );
   });
 
   it('rejects fractional or negative claim row indexes instead of rounding them', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: -0.4,
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: -0.4,
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('row -0.4，列 dur_ms，未通过: 行号无效');
+    expect(ctx.messages[1].content).not.toContain(
+      'row -0.4，列 dur_ms，未通过: 行号无效',
+    );
   });
 
   it('marks duplicate evidence refs as ambiguous unless tool call id disambiguates them', () => {
@@ -2688,44 +2961,61 @@ describe('handleDataEvent', () => {
       },
     });
 
-    handleDataEvent({id: 'same-1', envelope: envelope('execute_sql:1:params-a', 45.6)}, ctx);
-    handleDataEvent({id: 'same-2', envelope: envelope('execute_sql:2:params-a', 99)}, ctx);
+    handleDataEvent(
+      {id: 'same-1', envelope: envelope('execute_sql:1:params-a', 45.6)},
+      ctx,
+    );
+    handleDataEvent(
+      {id: 'same-2', envelope: envelope('execute_sql:2:params-a', 99)},
+      ctx,
+    );
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [
-            {
-              id: 'Q1',
-              text: '帧耗时 45.6ms',
-              references: [{
-                evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-                row_index: 0,
-                column: 'dur_ms',
-                value: 45.6,
-              }],
-            },
-            {
-              id: 'Q2',
-              text: '第二次帧耗时 99ms',
-              references: [{
-                evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-                source_tool_call_id: 'execute_sql:2:params-a',
-                row_index: 0,
-                column: 'dur_ms',
-                value: 99,
-              }],
-            },
-          ],
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                  },
+                ],
+              },
+              {
+                id: 'Q2',
+                text: '第二次帧耗时 99ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    source_tool_call_id: 'execute_sql:2:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 99,
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages[2].content).not.toContain('Q1: 帧耗时 45.6ms');
     expect(ctx.messages[2].content).not.toContain('未核验: 来源不唯一');
     expect(ctx.messages[2].content).not.toContain('Q2: 第二次帧耗时 99ms');
-    expect(ctx.messages[2].content).not.toContain('表 2，row 0，列 dur_ms，已核对');
+    expect(ctx.messages[2].content).not.toContain(
+      '表 2，row 0，列 dur_ms，已核对',
+    );
   });
 
   it('keeps duplicate evidence refs without tool call ids visible so claims become ambiguous', () => {
@@ -2752,164 +3042,219 @@ describe('handleDataEvent', () => {
 
     expect(ctx.messages).toHaveLength(2);
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-            }],
-          }],
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages[2].content).not.toContain('未核验: 来源不唯一');
     expect(ctx.messages[2].content).not.toContain('值 45.6，已核对');
   });
 
   it('verifies claim rows by rowSelector when no row_index is provided', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
-        },
-        data: {
-          columns: ['frame_id', 'dur_ms'],
-          rows: [[123, 45.6], [456, 16.7]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧 123 耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_selector: {frame_id: 123},
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
-        },
-      },
-    }, ctx);
-
-    expect(ctx.messages[1].content).not.toContain('rowSelector frame_id=123 -> row 0，列 dur_ms，已核对');
-  });
-
-  it('parses prompt-style row_selector strings for claim verification', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
-        },
-        data: {
-          columns: ['frame_id', 'thread', 'dur_ms'],
-          rows: [[123, 'main', 45.6], [456, 'render', 16.7]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧 123 耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_selector: 'frame_id=123, thread=main',
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
-        },
-      },
-    }, ctx);
-
-    expect(ctx.messages[1].content).not.toContain('rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，已核对');
-  });
-
-  it('keeps claim-referenced middle data sources visible when the source index is truncated', () => {
-    for (let i = 1; i <= 125; i++) {
-      handleDataEvent({
-        id: `source-${i}`,
+    handleDataEvent(
+      {
+        id: 'claim-source',
         envelope: {
           meta: {
             type: 'sql_result',
             version: '2.0',
             source: 'execute_sql',
-            evidenceRefId: `data:sql_table:current:trace-a:query-${i}:params-a`,
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
           },
           data: {
-            columns: ['value'],
-            rows: [[i]],
+            columns: ['frame_id', 'dur_ms'],
+            rows: [
+              [123, 45.6],
+              [456, 16.7],
+            ],
           },
           display: {
             layer: 'list',
             format: 'table',
-            title: i === 105 ? 'Middle pinned table' : `Table ${i}`,
+            title: '帧耗时表',
           },
         },
-      }, ctx);
-    }
-
-    handleSSEEvent('conclusion', {
-      data: {
-        conclusion: '已有结论',
       },
-    }, ctx);
+      ctx,
+    );
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '中间表数据被引用'}],
-          claims: [{
-            id: 'Q1',
-            text: '第 105 张表的值是 105',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-105:params-a',
-              source_ref: '表 105',
-              row_index: 0,
-              column: 'value',
-              value: 105,
-            }],
-          }],
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧 123 耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_selector: {frame_id: 123},
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
+
+    expect(ctx.messages[1].content).not.toContain(
+      'rowSelector frame_id=123 -> row 0，列 dur_ms，已核对',
+    );
+  });
+
+  it('parses prompt-style row_selector strings for claim verification', () => {
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['frame_id', 'thread', 'dur_ms'],
+            rows: [
+              [123, 'main', 45.6],
+              [456, 'render', 16.7],
+            ],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
+        },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧 123 耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_selector: 'frame_id=123, thread=main',
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      ctx,
+    );
+
+    expect(ctx.messages[1].content).not.toContain(
+      'rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，已核对',
+    );
+  });
+
+  it('keeps claim-referenced middle data sources visible when the source index is truncated', () => {
+    for (let i = 1; i <= 125; i++) {
+      handleDataEvent(
+        {
+          id: `source-${i}`,
+          envelope: {
+            meta: {
+              type: 'sql_result',
+              version: '2.0',
+              source: 'execute_sql',
+              evidenceRefId: `data:sql_table:current:trace-a:query-${i}:params-a`,
+            },
+            data: {
+              columns: ['value'],
+              rows: [[i]],
+            },
+            display: {
+              layer: 'list',
+              format: 'table',
+              title: i === 105 ? 'Middle pinned table' : `Table ${i}`,
+            },
+          },
+        },
+        ctx,
+      );
+    }
+
+    handleSSEEvent(
+      'conclusion',
+      {
+        data: {
+          conclusion: '已有结论',
+        },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '中间表数据被引用'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '第 105 张表的值是 105',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-105:params-a',
+                    source_ref: '表 105',
+                    row_index: 0,
+                    column: 'value',
+                    value: 105,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      ctx,
+    );
 
     const conclusion = ctx.messages[125].content;
     expect(conclusion).toContain('已有结论');
@@ -2919,26 +3264,29 @@ describe('handleDataEvent', () => {
   });
 
   it('discloses claim and per-claim reference truncation instead of silently dropping them', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
-        },
-        data: {
-          columns: ['value'],
-          rows: [[1]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '裁剪测试表',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['value'],
+            rows: [[1]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '裁剪测试表',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     const reference = {
       evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
@@ -2948,86 +3296,116 @@ describe('handleDataEvent', () => {
       source_ref: '表 1',
     };
 
-    handleAnalysisCompletedEvent({
-      data: {
-        resultSnapshotId: 'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '多 claim 结论'}],
-          claims: Array.from({length: 21}, (_, index) => ({
-            id: `Q${index + 1}`,
-            text: `claim ${index + 1}`,
-            references: Array.from({length: index === 0 ? 6 : 1}, () => reference),
-          })),
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          resultSnapshotId:
+            'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '多 claim 结论'}],
+            claims: Array.from({length: 21}, (_, index) => ({
+              id: `Q${index + 1}`,
+              text: `claim ${index + 1}`,
+              references: Array.from(
+                {length: index === 0 ? 6 : 1},
+                () => reference,
+              ),
+            })),
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('Q1: claim 1（表 1，row 0，列 value，已核对）');
-    expect(ctx.messages[1].content).not.toContain('其余 1 条 claim 未展开；完整结构化引用仍保留在结果快照中。');
+    expect(ctx.messages[1].content).not.toContain(
+      'Q1: claim 1（表 1，row 0，列 value，已核对）',
+    );
+    expect(ctx.messages[1].content).not.toContain(
+      '其余 1 条 claim 未展开；完整结构化引用仍保留在结果快照中。',
+    );
   });
 
   it('keeps system-generated evidence sections out of the visible conclusion', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleAnalysisCompletedEvent(
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '已有结论\n\n## 数据来源索引\n模型写的来源\n\n## 逐句数据引用\n模型写的引用',
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
+          conclusion:
+            '已有结论\n\n## 数据来源索引\n模型写的来源\n\n## 逐句数据引用\n模型写的引用',
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('## 数据来源索引（系统生成）');
-    expect(ctx.messages[1].content).not.toContain('## 逐句数据引用（系统核对结果）');
+    expect(ctx.messages[1].content).not.toContain(
+      '## 数据来源索引（系统生成）',
+    );
+    expect(ctx.messages[1].content).not.toContain(
+      '## 逐句数据引用（系统核对结果）',
+    );
     expect(ctx.messages[1].content).not.toContain('已核对');
   });
 
   it('does not fall back to showing appendix content when no visible conclusion remains', () => {
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: [
-          '## 证据索引（系统生成）',
-          '关键数据来源：SQL Query (1 rows)',
-          '',
-          '## 断言验证结果',
-          'Verifier: passed',
-          '',
-          'Result ID: AR-hidden',
-          'Snapshot: analysis-result-hidden',
-        ].join('\n'),
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: [
+            '## 证据索引（系统生成）',
+            '关键数据来源：SQL Query (1 rows)',
+            '',
+            '## 断言验证结果',
+            'Verifier: passed',
+            '',
+            'Result ID: AR-hidden',
+            'Snapshot: analysis-result-hidden',
+          ].join('\n'),
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toBe('');
@@ -3037,24 +3415,27 @@ describe('handleDataEvent', () => {
   });
 
   it('does not let appendix subheadings or bold lines leak hidden details', () => {
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: [
-          '## 综合结论',
-          '真实结论正文。',
-          '',
-          '---',
-          '## 证据来源索引（系统生成）',
-          '**关键数据来源**',
-          '关键数据来源：SQL Query (1 rows)',
-          '### 逐句明细',
-          'Q1 / C1: 隐藏引用',
-          '',
-          '## 后续行动',
-          '这段仍然应该展示。',
-        ].join('\n'),
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: [
+            '## 综合结论',
+            '真实结论正文。',
+            '',
+            '---',
+            '## 证据来源索引（系统生成）',
+            '**关键数据来源**',
+            '关键数据来源：SQL Query (1 rows)',
+            '### 逐句明细',
+            'Q1 / C1: 隐藏引用',
+            '',
+            '## 后续行动',
+            '这段仍然应该展示。',
+          ].join('\n'),
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('真实结论正文。');
@@ -3066,19 +3447,22 @@ describe('handleDataEvent', () => {
   });
 
   it('removes snapshot reference lines with full-width colons and localized labels', () => {
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: [
-          '最终结论正文。',
-          '',
-          '---',
-          'Result ID：AR-hidden',
-          'Snapshot：analysis-result-hidden',
-          '- 结果 ID：AR-hidden-cn',
-          '- 快照：analysis-result-hidden-cn',
-        ].join('\n'),
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: [
+            '最终结论正文。',
+            '',
+            '---',
+            'Result ID：AR-hidden',
+            'Snapshot：analysis-result-hidden',
+            '- 结果 ID：AR-hidden-cn',
+            '- 快照：analysis-result-hidden-cn',
+          ].join('\n'),
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toBe('最终结论正文。');
@@ -3088,51 +3472,66 @@ describe('handleDataEvent', () => {
   });
 
   it('keeps late conclusionContract claim refs when conclusion arrived first', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
-        },
-        data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    handleSSEEvent('conclusion', {
-      data: {
-        conclusion: '已有结论',
-      },
-    }, ctx);
-    expect(ctx.completionHandled).toBe(true);
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
+    handleSSEEvent(
+      'conclusion',
+      {
+        data: {
+          conclusion: '已有结论',
         },
       },
-    }, ctx);
+      ctx,
+    );
+    expect(ctx.completionHandled).toBe(true);
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[1].content).toContain('已有结论');
@@ -3141,202 +3540,248 @@ describe('handleDataEvent', () => {
   });
 
   it('keeps verifier metadata out of the visible analysis_completed message', () => {
-    handleAnalysisCompletedEvent({
-      architecture: 'agent-driven',
-      data: {
-        conclusion: '最终结论',
-        claimSupport: [{
-          claimId: 'Q1',
-          kind: 'numeric',
-          text: 'blocked_ms 为 120',
-          anchors: [{
-            evidenceRefId: 'evidence:blocked',
-            context: {
-              traceSide: 'current',
-              artifactId: 'artifact:blocked',
-              sourceToolCallId: 'tool:sql-1',
+    handleAnalysisCompletedEvent(
+      {
+        architecture: 'agent-driven',
+        data: {
+          conclusion: '最终结论',
+          claimSupport: [
+            {
+              claimId: 'Q1',
+              kind: 'numeric',
+              text: 'blocked_ms 为 120',
+              anchors: [
+                {
+                  evidenceRefId: 'evidence:blocked',
+                  context: {
+                    traceSide: 'current',
+                    artifactId: 'artifact:blocked',
+                    sourceToolCallId: 'tool:sql-1',
+                  },
+                  cells: [
+                    {
+                      rowIndex: 2,
+                      column: 'blocked_ms',
+                      value: 120,
+                      actualValue: 90,
+                    },
+                  ],
+                  identity: {
+                    identityRefId: 'identity:test',
+                    status: 'weak',
+                  },
+                },
+              ],
+              supportLevel: 'unsupported',
             },
-            cells: [{
-              rowIndex: 2,
-              column: 'blocked_ms',
-              value: 120,
-              actualValue: 90,
-            }],
-            identity: {
+          ],
+          claimVerificationResult: {
+            schemaVersion: 'claim_verifier@1',
+            status: 'failed',
+            policy: 'record_only',
+            passed: false,
+            checkedClaimCount: 1,
+            unsupportedClaimCount: 1,
+            claimResults: [],
+            issues: [
+              {
+                claimId: 'Q1',
+                severity: 'error',
+                code: 'claim_reference_value_mismatch',
+                message: 'value mismatch for blocked_ms',
+              },
+            ],
+          },
+          identityResolutions: [
+            {
+              version: 'identity_contract@1',
               identityRefId: 'identity:test',
               status: 'weak',
+              target: {traceId: 'trace-a', source: 'derived'},
+              processes: [],
+              threads: [],
+              warnings: [],
             },
-          }],
-          supportLevel: 'unsupported',
-        }],
-        claimVerificationResult: {
-          schemaVersion: 'claim_verifier@1',
-          status: 'failed',
-          policy: 'record_only',
-          passed: false,
-          checkedClaimCount: 1,
-          unsupportedClaimCount: 1,
-          claimResults: [],
-          issues: [{
-            claimId: 'Q1',
-            severity: 'error',
-            code: 'claim_reference_value_mismatch',
-            message: 'value mismatch for blocked_ms',
-          }],
+          ],
         },
-        identityResolutions: [{
-          version: 'identity_contract@1',
-          identityRefId: 'identity:test',
-          status: 'weak',
-          target: {traceId: 'trace-a', source: 'derived'},
-          processes: [],
-          threads: [],
-          warnings: [],
-        }],
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toBe('最终结论');
     expect(ctx.messages[0].content).not.toContain('## 断言验证结果');
     expect(ctx.messages[0].content).not.toContain('Verifier: failed');
-    expect(ctx.messages[0].content).not.toContain('claim_reference_value_mismatch');
+    expect(ctx.messages[0].content).not.toContain(
+      'claim_reference_value_mismatch',
+    );
     expect(ctx.messages[0].content).not.toContain('Q1: unsupported (numeric)');
   });
 
   it('removes structured claim refs from the visible conclusion while preserving later sections', () => {
-    handleDataEvent({
-      id: 'claim-source',
-      envelope: {
-        meta: {
-          type: 'sql_result',
-          version: '2.0',
-          source: 'execute_sql',
-          evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+    handleDataEvent(
+      {
+        id: 'claim-source',
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            evidenceRefId: 'data:sql_table:current:trace-a:query-a:params-a',
+          },
+          data: {
+            columns: ['dur_ms'],
+            rows: [[45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '帧耗时表',
+          },
         },
+      },
+      ctx,
+    );
+
+    handleSSEEvent(
+      'conclusion',
+      {
         data: {
-          columns: ['dur_ms'],
-          rows: [[45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '帧耗时表',
-        },
-      },
-    }, ctx);
-
-    handleSSEEvent('conclusion', {
-      data: {
-        conclusion: [
-          '已有结论',
-          '',
-          '## 逐句数据引用（结构化来源）',
-          '- Q1 / C1: 帧耗时 45.6ms',
-          '  - evidence_ref_id=data:sql_table:current:trace-a:query-a:params-a; source_ref=表 1; row_index=0; column=dur_ms; value=45.6',
-          '',
-          '## 不确定性与反例',
-          '- 暂无',
-        ].join('\n'),
-      },
-    }, ctx);
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusionContract: {
-          conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
-          claims: [{
-            id: 'Q1',
-            conclusion_id: 'C1',
-            text: '帧耗时 45.6ms',
-            references: [{
-              evidence_ref_id: 'data:sql_table:current:trace-a:query-a:params-a',
-              row_index: 0,
-              column: 'dur_ms',
-              value: 45.6,
-              source_ref: '表 1',
-            }],
-          }],
+          conclusion: [
+            '已有结论',
+            '',
+            '## 逐句数据引用（结构化来源）',
+            '- Q1 / C1: 帧耗时 45.6ms',
+            '  - evidence_ref_id=data:sql_table:current:trace-a:query-a:params-a; source_ref=表 1; row_index=0; column=dur_ms; value=45.6',
+            '',
+            '## 不确定性与反例',
+            '- 暂无',
+          ].join('\n'),
         },
       },
-    }, ctx);
+      ctx,
+    );
 
-    expect(ctx.messages[1].content).not.toContain('## 逐句数据引用（结构化来源）');
-    expect(ctx.messages[1].content).not.toContain('## 逐句数据引用（系统核对结果）');
-    expect(ctx.messages[1].content).not.toContain('表 1，row 0，列 dur_ms，已核对');
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusionContract: {
+            conclusion: [{rank: 1, statement: '主线程帧耗时异常'}],
+            claims: [
+              {
+                id: 'Q1',
+                conclusion_id: 'C1',
+                text: '帧耗时 45.6ms',
+                references: [
+                  {
+                    evidence_ref_id:
+                      'data:sql_table:current:trace-a:query-a:params-a',
+                    row_index: 0,
+                    column: 'dur_ms',
+                    value: 45.6,
+                    source_ref: '表 1',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      ctx,
+    );
+
+    expect(ctx.messages[1].content).not.toContain(
+      '## 逐句数据引用（结构化来源）',
+    );
+    expect(ctx.messages[1].content).not.toContain(
+      '## 逐句数据引用（系统核对结果）',
+    );
+    expect(ctx.messages[1].content).not.toContain(
+      '表 1，row 0，列 dur_ms，已核对',
+    );
     expect(ctx.messages[1].content).toContain('## 不确定性与反例');
   });
 
   it('keeps current/reference DataEnvelope tables separate by evidence ref and trace side', () => {
-    handleDataEvent({
-      id: 'data-compare',
-      envelope: [
-        {
-          meta: {
-            type: 'skill_result',
-            version: '2.0',
-            source: 'scrolling_analysis:jank_frames',
-            skillId: 'scrolling_analysis',
-            stepId: 'jank_frames',
-            evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
-            traceSide: 'current',
-            paneSide: 'left',
-            traceId: 'trace-a',
+    handleDataEvent(
+      {
+        id: 'data-compare',
+        envelope: [
+          {
+            meta: {
+              type: 'skill_result',
+              version: '2.0',
+              source: 'scrolling_analysis:jank_frames',
+              skillId: 'scrolling_analysis',
+              stepId: 'jank_frames',
+              evidenceRefId:
+                'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
+              traceSide: 'current',
+              paneSide: 'left',
+              traceId: 'trace-a',
+            },
+            data: {
+              columns: ['frame_id', 'dur_ms'],
+              rows: [[123, 45.6]],
+            },
+            display: {
+              layer: 'list',
+              format: 'table',
+              title: '掉帧帧列表',
+            },
           },
-          data: {
-            columns: ['frame_id', 'dur_ms'],
-            rows: [[123, 45.6]],
+          {
+            meta: {
+              type: 'skill_result',
+              version: '2.0',
+              source: 'scrolling_analysis:jank_frames',
+              skillId: 'scrolling_analysis',
+              stepId: 'jank_frames',
+              evidenceRefId:
+                'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
+              traceSide: 'reference',
+              paneSide: 'right',
+              traceId: 'trace-b',
+            },
+            data: {
+              columns: ['frame_id', 'dur_ms'],
+              rows: [[456, 22.1]],
+            },
+            display: {
+              layer: 'list',
+              format: 'table',
+              title: '掉帧帧列表',
+            },
           },
-          display: {
-            layer: 'list',
-            format: 'table',
-            title: '掉帧帧列表',
-          },
-        },
-        {
-          meta: {
-            type: 'skill_result',
-            version: '2.0',
-            source: 'scrolling_analysis:jank_frames',
-            skillId: 'scrolling_analysis',
-            stepId: 'jank_frames',
-            evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
-            traceSide: 'reference',
-            paneSide: 'right',
-            traceId: 'trace-b',
-          },
-          data: {
-            columns: ['frame_id', 'dur_ms'],
-            rows: [[456, 22.1]],
-          },
-          display: {
-            layer: 'list',
-            format: 'table',
-            title: '掉帧帧列表',
-          },
-        },
-      ],
-    }, ctx);
+        ],
+      },
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(2);
     expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       traceSide: 'current',
       paneSide: 'left',
-      evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
+      evidenceRefId:
+        'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
     });
     expect(ctx.messages[1].sqlResult?.sourceContext).toMatchObject({
       ref: '表 2',
       traceSide: 'reference',
       paneSide: 'right',
-      evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
+      evidenceRefId:
+        'data:skill:scrolling_analysis:jank_frames:reference:trace-b:hash',
     });
 
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: '当前 Trace 掉帧更重。',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          conclusion: '当前 Trace 掉帧更重。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     const conclusion = ctx.messages[2].content;
     expect(conclusion).toBe('当前 Trace 掉帧更重。');
@@ -3348,36 +3793,44 @@ describe('handleDataEvent', () => {
   });
 
   it('does not mutate the latest table when an empty conclusion precedes report metadata', () => {
-    handleDataEvent({
-      id: 'data-1',
-      envelope: {
-        meta: {
-          type: 'skill_result',
-          version: '2.0',
-          source: 'scrolling_analysis',
-          skillId: 'scrolling_analysis',
-          stepId: 'jank_frames',
-          evidenceRefId: 'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
-        },
-        data: {
-          columns: ['frame_id', 'dur_ms'],
-          rows: [[123, 45.6]],
-        },
-        display: {
-          layer: 'list',
-          format: 'table',
-          title: '掉帧帧列表',
+    handleDataEvent(
+      {
+        id: 'data-1',
+        envelope: {
+          meta: {
+            type: 'skill_result',
+            version: '2.0',
+            source: 'scrolling_analysis',
+            skillId: 'scrolling_analysis',
+            stepId: 'jank_frames',
+            evidenceRefId:
+              'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
+          },
+          data: {
+            columns: ['frame_id', 'dur_ms'],
+            rows: [[123, 45.6]],
+          },
+          display: {
+            layer: 'list',
+            format: 'table',
+            title: '掉帧帧列表',
+          },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     handleSSEEvent('conclusion', {data: {conclusion: ''}}, ctx);
-    handleAnalysisCompletedEvent({
-      data: {
-        reportUrl: '/reports/123.html',
-        resultSnapshotId: 'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+    handleAnalysisCompletedEvent(
+      {
+        data: {
+          reportUrl: '/reports/123.html',
+          resultSnapshotId:
+            'analysis-result-abcdef12-aaaa-bbbb-cccc-123456789abc',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].sqlResult).toBeDefined();
@@ -3409,16 +3862,23 @@ describe('handleAnswerTokenEvent', () => {
   });
 
   it('should mirror streamed answer checkpoints into the conversation timeline', () => {
-    handleAnswerTokenEvent({
-      data: {
-        token: 'Phase 1 发现冷启动 dur=1338ms，TTID=1912ms，需要进入 Phase 2。',
+    handleAnswerTokenEvent(
+      {
+        data: {
+          token:
+            'Phase 1 发现冷启动 dur=1338ms，TTID=1912ms，需要进入 Phase 2。',
+        },
       },
-    }, ctx);
-    handleAnswerTokenEvent({
-      data: {
-        token: '\n主线程 Running=63%，Q4b Sleeping=35.1%，需要深挖阻塞原因。',
+      ctx,
+    );
+    handleAnswerTokenEvent(
+      {
+        data: {
+          token: '\n主线程 Running=63%，Q4b Sleeping=35.1%，需要深挖阻塞原因。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
     handleAnswerTokenEvent({data: {done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
@@ -3435,21 +3895,28 @@ describe('handleAnswerTokenEvent', () => {
   });
 
   it('should keep answer checkpoints separate from backend conversation ordinals', () => {
-    handleConversationStepEvent({
-      id: 'evt-1',
-      data: {
-        ordinal: 1,
-        phase: 'progress',
-        role: 'system',
-        content: {text: '开始分析'},
+    handleConversationStepEvent(
+      {
+        id: 'evt-1',
+        data: {
+          ordinal: 1,
+          phase: 'progress',
+          role: 'system',
+          content: {text: '开始分析'},
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
-    handleAnswerTokenEvent({
-      data: {
-        token: '关键发现：主线程 Running=63%，Q4b Sleeping=35.1%，需要继续定位。',
+    handleAnswerTokenEvent(
+      {
+        data: {
+          token:
+            '关键发现：主线程 Running=63%，Q4b Sleeping=35.1%，需要继续定位。',
+        },
       },
-    }, ctx);
+      ctx,
+    );
     handleAnswerTokenEvent({data: {done: true}}, ctx);
 
     const timeline = ctx.flowMessages[0].content;
@@ -3471,28 +3938,34 @@ describe('handleConversationStepEvent', () => {
   });
 
   it('should flush conversation steps strictly by ordinal', () => {
-    handleConversationStepEvent({
-      id: 'evt-2',
-      data: {
-        ordinal: 2,
-        phase: 'tool',
-        role: 'agent',
-        content: {text: '第二步'},
+    handleConversationStepEvent(
+      {
+        id: 'evt-2',
+        data: {
+          ordinal: 2,
+          phase: 'tool',
+          role: 'agent',
+          content: {text: '第二步'},
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.flowMessages).toHaveLength(1);
     expect(ctx.flowMessages[0].content).not.toContain('#2');
 
-    handleConversationStepEvent({
-      id: 'evt-1',
-      data: {
-        ordinal: 1,
-        phase: 'progress',
-        role: 'system',
-        content: {text: '第一步'},
+    handleConversationStepEvent(
+      {
+        id: 'evt-1',
+        data: {
+          ordinal: 1,
+          phase: 'progress',
+          role: 'system',
+          content: {text: '第一步'},
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.flowMessages).toHaveLength(1);
     expect(ctx.flowMessages[0].content).toContain('#1');
@@ -3578,7 +4051,11 @@ describe('handleSSEEvent', () => {
 
   it('should skip thought events', () => {
     handleSSEEvent('thought', {data: {content: 'AI thinking...'}}, ctx);
-    handleSSEEvent('worker_thought', {data: {content: 'Worker thinking...'}}, ctx);
+    handleSSEEvent(
+      'worker_thought',
+      {data: {content: 'Worker thinking...'}},
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(0);
   });
@@ -3592,12 +4069,16 @@ describe('handleSSEEvent', () => {
   });
 
   it('should route circuit breaker events correctly', () => {
-    handleSSEEvent('circuit_breaker', {
-      data: {
-        agentId: 'strategy_executor',
-        reason: 'Too many failures',
+    handleSSEEvent(
+      'circuit_breaker',
+      {
+        data: {
+          agentId: 'strategy_executor',
+          reason: 'Too many failures',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages[0].content).toContain('Too many failures');
   });
@@ -3616,96 +4097,170 @@ describe('handleSSEEvent', () => {
   });
 
   it('should replace early streamed answer tokens with canonical conclusion text', () => {
-    handleSSEEvent('answer_token', {data: {token: 'Interim pre-plan text'}}, ctx);
+    handleSSEEvent(
+      'answer_token',
+      {data: {token: 'Interim pre-plan text'}},
+      ctx,
+    );
 
-    handleSSEEvent('conclusion', {
-      data: {
-        conclusion: '## 综合结论\n\nFinal report body.',
+    handleSSEEvent(
+      'conclusion',
+      {
+        data: {
+          conclusion: '## 综合结论\n\nFinal report body.',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
     expect(ctx.messages[0].content).toContain('## 综合结论');
     expect(ctx.messages[0].content).not.toContain('Interim pre-plan text');
 
-    handleSSEEvent('analysis_completed', {
-      data: {
-        conclusion: '## 综合结论\n\nFinal report body with snapshot.',
-        reportUrl: '/reports/123.html',
-        resultSnapshotId: 'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+    handleSSEEvent(
+      'analysis_completed',
+      {
+        data: {
+          conclusion: '## 综合结论\n\nFinal report body with snapshot.',
+          reportUrl: '/reports/123.html',
+          resultSnapshotId:
+            'analysis-result-12345678-aaaa-bbbb-cccc-123456789abc',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Final report body with snapshot.');
+    expect(ctx.messages[0].content).toContain(
+      'Final report body with snapshot.',
+    );
     expect(ctx.messages[0].content).not.toContain('Result ID');
     expect(ctx.messages[0].content).not.toContain('Snapshot:');
-    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/123.html');
+    expect(ctx.messages[0].reportUrl).toBe(
+      'http://localhost:3000/reports/123.html',
+    );
   });
 
   it('preserves quota_exceeded terminal status from analysis_completed payload', () => {
-    handleSSEEvent('analysis_completed', {
-      data: {
-        conclusion: 'Partial conclusion',
-        terminalRunStatus: 'quota_exceeded',
+    handleSSEEvent(
+      'analysis_completed',
+      {
+        data: {
+          conclusion: 'Partial conclusion',
+          terminalRunStatus: 'quota_exceeded',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(getAISharedState().status).toBe('quota_exceeded');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
   });
 
   it('routes analysis_cancelled as a non-error terminal event', () => {
+    ctx.addMessage({
+      id: 'prior-run-progress',
+      role: 'assistant',
+      content: '上一轮有效进度证据',
+      timestamp: 1,
+      flowTag: 'streaming_flow',
+    });
     handleSSEEvent('answer_token', {data: {token: 'Partial answer'}}, ctx);
 
-    const result = handleSSEEvent('analysis_cancelled', {
-      data: {
-        reason: 'Analysis cancelled by user',
-        terminalRunStatus: 'cancelled',
+    const result = handleSSEEvent(
+      'analysis_cancelled',
+      {
+        data: {
+          reason: 'Analysis cancelled by user',
+          terminalRunStatus: 'cancelled',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(result.isTerminal).toBe(true);
     expect(result.stopLoading).toBe(true);
     expect(getAISharedState().status).toBe('cancelled');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
-    expect(ctx.messages.some((message) => message.content.includes('Analysis cancelled by user'))).toBe(true);
+    expect(ctx.streamingFlow.status).toBe('cancelled');
+    expect(
+      ctx.flowMessages.find((message) => message.id === 'prior-run-progress')
+        ?.content,
+    ).toBe('上一轮有效进度证据');
+    expect(
+      ctx.flowMessages.some((message) =>
+        message.content.includes('分析已取消'),
+      ),
+    ).toBe(false);
+    expect(
+      ctx.messages.filter((message) => message.content === '分析已取消。'),
+    ).toHaveLength(1);
+  });
+
+  it('renders cancellation as an incomplete terminal flow instead of success', () => {
+    handleSSEEvent('progress', {data: {message: '正在收集证据'}}, ctx);
+
+    handleSSEEvent(
+      'analysis_cancelled',
+      {
+        data: {
+          reason: 'Analysis cancelled by user',
+          terminalRunStatus: 'cancelled',
+        },
+      },
+      ctx,
+    );
+
+    const flowContent = ctx.flowMessages
+      .map((message) => message.content)
+      .join('\n');
+    expect(ctx.streamingFlow.status).toBe('cancelled');
+    expect(flowContent).toContain('流程已取消，未生成完整结论。');
+    expect(flowContent).not.toContain('流程完成，结论已生成。');
+    expect(flowContent).not.toContain('### 📤 中间产出');
+    expect(
+      ctx.messages.filter((message) => message.content === '分析已取消。'),
+    ).toHaveLength(1);
   });
 
   it('preserves structured smart scene preview payload on analysis_completed messages', () => {
-    handleSSEEvent('analysis_completed', {
-      data: {
-        conclusion: '# 智能分析报告：场景盘点\n\n## 下一步',
-        smartScenePreview: {
-          reportId: 'report-smart-1',
-          eligibleSceneCount: 1,
-          scenes: [
-            {
-              id: 'scroll-1',
-              sceneType: 'scroll',
-              startTs: '1000000000',
-              endTs: '2000000000',
-              durationMs: 1000,
-              sceneRole: 'action',
+    handleSSEEvent(
+      'analysis_completed',
+      {
+        data: {
+          conclusion: '# 智能分析报告：场景盘点\n\n## 下一步',
+          smartScenePreview: {
+            reportId: 'report-smart-1',
+            eligibleSceneCount: 1,
+            scenes: [
+              {
+                id: 'scroll-1',
+                sceneType: 'scroll',
+                startTs: '1000000000',
+                endTs: '2000000000',
+                durationMs: 1000,
+                sceneRole: 'action',
+              },
+              {
+                id: 'scroll-start-1',
+                sceneType: 'scroll_start',
+                startTs: '1000000000',
+                endTs: '1000000000',
+                durationMs: 0,
+                sceneRole: 'marker',
+                analysisEligible: false,
+              },
+            ],
+            sceneVerification: {
+              status: 'passed',
+              summary: '场景还原复核通过。',
             },
-            {
-              id: 'scroll-start-1',
-              sceneType: 'scroll_start',
-              startTs: '1000000000',
-              endTs: '1000000000',
-              durationMs: 0,
-              sceneRole: 'marker',
-              analysisEligible: false,
-            },
-          ],
-          sceneVerification: {
-            status: 'passed',
-            summary: '场景还原复核通过。',
           },
         },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].smartScenePreview?.reportId).toBe('report-smart-1');
@@ -3714,13 +4269,18 @@ describe('handleSSEEvent', () => {
   });
 
   it('surfaces partial analysis_completed warning and shared partial status', () => {
-    handleSSEEvent('analysis_completed', {
-      data: {
-        conclusion: '## 综合结论\n\n降级结论',
-        partial: true,
-        terminationMessage: '最终结果质量闸门发现 provider 没有产出可独立交付的完整结论',
+    handleSSEEvent(
+      'analysis_completed',
+      {
+        data: {
+          conclusion: '## 综合结论\n\n降级结论',
+          partial: true,
+          terminationMessage:
+            '最终结果质量闸门发现 provider 没有产出可独立交付的完整结论',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toContain('结果完整性提示');
@@ -3730,13 +4290,17 @@ describe('handleSSEEvent', () => {
   });
 
   it('does not silently ignore degraded events', () => {
-    const result = handleSSEEvent('degraded', {
-      content: {
-        message: '结果已标记 partial',
-        partial: true,
-        code: 'plan_summary_fallback',
+    const result = handleSSEEvent(
+      'degraded',
+      {
+        content: {
+          message: '结果已标记 partial',
+          partial: true,
+          code: 'plan_summary_fallback',
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(result.loadingPhase).toBe('结果已标记为部分完成');
     expect(ctx.flowMessages).toHaveLength(1);
@@ -3755,15 +4319,19 @@ describe('handleSSEEvent', () => {
   });
 
   it('should route conversation_step events to ordered timeline flow', () => {
-    handleSSEEvent('conversation_step', {
-      id: 'evt-1',
-      data: {
-        ordinal: 1,
-        phase: 'progress',
-        role: 'system',
-        content: {text: '开始分析'},
+    handleSSEEvent(
+      'conversation_step',
+      {
+        id: 'evt-1',
+        data: {
+          ordinal: 1,
+          phase: 'progress',
+          role: 'system',
+          content: {text: '开始分析'},
+        },
       },
-    }, ctx);
+      ctx,
+    );
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
@@ -3787,19 +4355,24 @@ describe('Error Handling', () => {
     // These should not throw
     expect(() => handleProgressEvent({}, ctx)).not.toThrow();
     expect(() => handleProgressEvent({data: null}, ctx)).not.toThrow();
-    expect(() => handleProgressEvent({data: {message: null}}, ctx)).not.toThrow();
+    expect(() =>
+      handleProgressEvent({data: {message: null}}, ctx),
+    ).not.toThrow();
   });
 
   it('should handle undefined ctx properties gracefully', () => {
     const minimalCtx = createMockContext();
 
     // Should not throw when displayedSkillProgress operations occur
-    handleSkillLayeredResultEvent({
-      data: {
-        skillId: 'test',
-        layers: {overview: {}},
+    handleSkillLayeredResultEvent(
+      {
+        data: {
+          skillId: 'test',
+          layers: {overview: {}},
+        },
       },
-    }, minimalCtx);
+      minimalCtx,
+    );
   });
 
   it('should recover from errors in individual handlers', () => {
@@ -3830,22 +4403,36 @@ describe('State Accumulation', () => {
     handleSkillErrorEvent({skillId: 'skill3', data: {error: 'Error 3'}}, ctx);
 
     expect(ctx.collectedErrors).toHaveLength(3);
-    expect(ctx.collectedErrors.map(e => e.skillId)).toEqual(['skill1', 'skill2', 'skill3']);
+    expect(ctx.collectedErrors.map((e) => e.skillId)).toEqual([
+      'skill1',
+      'skill2',
+      'skill3',
+    ]);
   });
 
   it('should track displayed skill progress for deduplication', () => {
     const data1 = {
-      data: {skillId: 'skill_A', layers: {overview: {summary: {data: [], display: {}}}}},
+      data: {
+        skillId: 'skill_A',
+        layers: {overview: {summary: {data: [], display: {}}}},
+      },
     };
     const data2 = {
-      data: {skillId: 'skill_B', layers: {overview: {summary: {data: [], display: {}}}}},
+      data: {
+        skillId: 'skill_B',
+        layers: {overview: {summary: {data: [], display: {}}}},
+      },
     };
 
     handleSkillLayeredResultEvent(data1, ctx);
     handleSkillLayeredResultEvent(data2, ctx);
 
-    expect(ctx.displayedSkillProgress.has('skill_layered_result:skill_A')).toBe(true);
-    expect(ctx.displayedSkillProgress.has('skill_layered_result:skill_B')).toBe(true);
+    expect(ctx.displayedSkillProgress.has('skill_layered_result:skill_A')).toBe(
+      true,
+    );
+    expect(ctx.displayedSkillProgress.has('skill_layered_result:skill_B')).toBe(
+      true,
+    );
   });
 
   it('should clear collected errors after showing summary', () => {

@@ -4,6 +4,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {MockedFunction} from 'vitest';
 
 import {BackendUploader} from './backend_uploader';
+import {getSmartPerfettoBackendCspSources} from './smartperfetto_backend_url';
 
 let originalFetch: typeof fetch;
 let fetchMock: MockedFunction<typeof fetch>;
@@ -36,44 +37,65 @@ afterEach(() => {
 });
 
 describe('BackendUploader request context', () => {
+  it('exposes the runtime backend origin for the page CSP', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {
+      backendUrl: 'http://127.0.0.1:43123/private/base/',
+    };
+
+    expect(getSmartPerfettoBackendCspSources()).toEqual([
+      'http://127.0.0.1:43123',
+      'ws://127.0.0.1:43123',
+    ]);
+  });
+
   it('uses runtime-configured backend port by default', async () => {
     window.__SMARTPERFETTO_CONFIG__ = {backendPort: '3300'};
     fetchMock.mockResolvedValueOnce(jsonResponse({available: true}));
 
     await expect(new BackendUploader().checkAvailable()).resolves.toBe(true);
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain('http://localhost:3300/');
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      'http://localhost:3300/',
+    );
   });
 
   it('uses runtime-configured backend URL before deriving a host URL', async () => {
-    window.__SMARTPERFETTO_CONFIG__ = {backendUrl: 'https://proxy.example/base'};
+    window.__SMARTPERFETTO_CONFIG__ = {
+      backendUrl: 'https://proxy.example/base',
+    };
     fetchMock.mockResolvedValueOnce(jsonResponse({available: true}));
 
     await expect(new BackendUploader().checkAvailable()).resolves.toBe(true);
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain('https://proxy.example/base/');
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      'https://proxy.example/base/',
+    );
   });
 
   it('sends X-Window-Id on health checks', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({available: true}));
 
-    await expect(new BackendUploader('http://backend').checkAvailable()).resolves.toBe(true);
+    await expect(
+      new BackendUploader('http://backend').checkAvailable(),
+    ).resolves.toBe(true);
 
     expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
   });
 
   it('sends X-Window-Id on file uploads', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({
-      success: true,
-      trace: {
-        id: 'trace-a',
-        port: 9817,
-        leaseId: 'lease-a',
-        leaseMode: 'shared',
-        leaseModeReason: 'frontend_interactive',
-        leaseQueueLength: 2,
-      },
-    }));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        trace: {
+          id: 'trace-a',
+          port: 9817,
+          leaseId: 'lease-a',
+          leaseMode: 'shared',
+          leaseModeReason: 'frontend_interactive',
+          leaseQueueLength: 2,
+        },
+      }),
+    );
 
     const result = await new BackendUploader('http://backend').upload({
       type: 'ARRAY_BUFFER',
@@ -104,10 +126,12 @@ describe('BackendUploader request context', () => {
   });
 
   it('sends X-Window-Id on URL uploads without dropping JSON content type', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({
-      success: true,
-      trace: {id: 'trace-url', port: 9818},
-    }));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        trace: {id: 'trace-url', port: 9818},
+      }),
+    );
 
     const result = await new BackendUploader('http://backend').upload({
       type: 'URL',
@@ -133,18 +157,22 @@ describe('BackendUploader request context', () => {
   });
 
   it('accepts lease-only upload responses for backend proxy mode', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({
-      success: true,
-      trace: {
-        id: 'trace-lease-only',
-        leaseId: 'lease-only',
-        leaseMode: 'isolated',
-        leaseModeReason: 'full_analysis',
-        leaseQueueLength: 0,
-      },
-    }));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        trace: {
+          id: 'trace-lease-only',
+          leaseId: 'lease-only',
+          leaseMode: 'isolated',
+          leaseModeReason: 'full_analysis',
+          leaseQueueLength: 0,
+        },
+      }),
+    );
 
-    const result = await new BackendUploader('https://backend.example/base').upload({
+    const result = await new BackendUploader(
+      'https://backend.example/base',
+    ).upload({
       type: 'ARRAY_BUFFER',
       buffer: new Uint8Array([1]).buffer,
       fileName: 'trace.perfetto',
@@ -157,9 +185,15 @@ describe('BackendUploader request context', () => {
       leaseMode: 'isolated',
       rpcTarget: {
         displayName: 'backend isolated lease lease-on',
-        statusUrl: expect.stringContaining('https://backend.example/base/api/tp/lease-only/status?'),
-        websocketUrl: expect.stringContaining('wss://backend.example/base/api/tp/lease-only/websocket?'),
-        heartbeatUrl: expect.stringContaining('https://backend.example/base/api/tp/lease-only/heartbeat?'),
+        statusUrl: expect.stringContaining(
+          'https://backend.example/base/api/tp/lease-only/status?',
+        ),
+        websocketUrl: expect.stringContaining(
+          'wss://backend.example/base/api/tp/lease-only/websocket?',
+        ),
+        heartbeatUrl: expect.stringContaining(
+          'https://backend.example/base/api/tp/lease-only/heartbeat?',
+        ),
       },
     });
   });

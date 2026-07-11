@@ -91,7 +91,13 @@ export interface QuickRunReceipt {
   actualTurns: number;
   elapsedMs: number;
   enforcement: 'turn_cap' | 'timeout_only' | 'not_available';
-  stopReason: 'answered' | 'needs_full' | 'extended_answered' | 'hard_cap' | 'timeout' | 'partial';
+  stopReason:
+    | 'answered'
+    | 'needs_full'
+    | 'extended_answered'
+    | 'hard_cap'
+    | 'timeout'
+    | 'partial';
   evidence: {
     frontendPrequeryInjected: number;
     frontendPrequeryCited: number;
@@ -412,7 +418,14 @@ export interface DataSourceContext {
   source: string;
   reason: string;
   meaning: string;
-  kind?: 'table' | 'summary' | 'metric' | 'chart' | 'text' | 'timeline' | 'diagnostic';
+  kind?:
+    | 'table'
+    | 'summary'
+    | 'metric'
+    | 'chart'
+    | 'text'
+    | 'timeline'
+    | 'diagnostic';
   rowCount?: number;
   phase?: string;
   evidenceRefId?: string;
@@ -425,7 +438,13 @@ export interface DataSourceContext {
   planPhaseId?: string;
   planPhaseTitle?: string;
   planPhaseGoal?: string;
-  planPhaseAttribution?: 'active' | 'inferred' | 'missing' | 'ambiguous' | 'unexpected_tool' | 'none';
+  planPhaseAttribution?:
+    | 'active'
+    | 'inferred'
+    | 'missing'
+    | 'ambiguous'
+    | 'unexpected_tool'
+    | 'none';
   planPhaseWarning?: string;
   producerReason?: string;
   toolNarration?: string;
@@ -451,7 +470,7 @@ export interface StreamingFlowState {
   answerTimelineLastSnapshotCharCount: number;
   answerTimelineLastSnapshotAt: number | null;
   answerTimelineCompleted: boolean;
-  status: 'idle' | 'running' | 'completed' | 'failed';
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
   phases: string[];
   thoughts: string[];
   tools: string[];
@@ -765,7 +784,13 @@ export interface AnalysisResultComparisonRun {
   inputSnapshotIds: string[];
   baselineSnapshotId?: string;
   query: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'needs_selection' | string;
+  status:
+    | 'pending'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'needs_selection'
+    | string;
   result?: AnalysisResultComparisonResult;
   error?: string;
 }
@@ -1181,6 +1206,7 @@ export interface AISession {
   tracePairLayout?: TracePairLayout;
   tracePairSplitPercent?: number;
   tracePairActiveTraceSide?: TracePairTraceSide;
+  tracePairCurrentPane?: 'first' | 'second';
 }
 
 /**

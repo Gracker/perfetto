@@ -138,12 +138,14 @@ describe('SessionManager session storage CAS', () => {
       tracePairLayout: 'vertical',
       tracePairSplitPercent: 67,
       tracePairActiveTraceSide: 'reference',
+      tracePairCurrentPane: 'second',
     });
     expect(manager.loadSession(session.sessionId)).toEqual(
       expect.objectContaining({
         type: 'comparison',
         referenceBackendTraceId: 'backend-b',
         tracePairLayout: 'vertical',
+        tracePairCurrentPane: 'second',
       }),
     );
 
@@ -154,11 +156,13 @@ describe('SessionManager session storage CAS', () => {
       tracePairLayout: undefined,
       tracePairSplitPercent: undefined,
       tracePairActiveTraceSide: undefined,
+      tracePairCurrentPane: undefined,
     });
 
     const restored = manager.loadSession(session.sessionId);
     expect(restored).toEqual(expect.objectContaining({type: 'single'}));
     expect(restored).not.toHaveProperty('referenceBackendTraceId');
     expect(restored).not.toHaveProperty('tracePairLayout');
+    expect(restored).not.toHaveProperty('tracePairCurrentPane');
   });
 });

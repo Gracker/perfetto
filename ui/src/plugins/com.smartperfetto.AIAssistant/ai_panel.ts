@@ -50,6 +50,7 @@ import {
 } from '../../core/backend_upload_state';
 import type {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
+import {getCanonicalTraceName} from './trace_name';
 // Note: generated types are used by SSE event handlers module
 // import {FullAnalysis, ExpandableSections, isFrameDetailData} from './generated';
 
@@ -83,7 +84,6 @@ import type {
   TraceConfigProposalApiResponse,
   TraceConfigProposalV1,
   TracePairContext,
-  TracePairLayout,
   TracePairTraceSide,
   TeachingActiveRenderingProcess,
   TeachingContent,
@@ -125,9 +125,7 @@ import {
 } from './agent_sse_transport';
 import {formatPerfettoSql} from './sql_formatter';
 import {clearComparisonState} from './comparison_state_manager';
-import {
-  handleSSEEvent as handleSSEEventExternal,
-} from './sse_event_handlers';
+import {handleSSEEvent as handleSSEEventExternal} from './sse_event_handlers';
 import type {SSEHandlerContext} from './sse_event_handlers';
 import {orderMessagesForDisplay} from './message_order';
 import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
@@ -143,11 +141,20 @@ import {
   uiActionProposalIcon,
 } from './ui_action_proposals';
 import {buildTracePairContext as buildTracePairContextPayload} from './trace_pair_context';
+import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import {
+  parseWorkspaceTraceCatalogResponse,
+  type WorkspaceTraceCatalogItem,
+} from './workspace_trace_catalog';
 import {
   buildTraceConfigProposalPayload,
   createCaptureConfigSuggestionState,
   formatTraceConfigCommand,
 } from './capture_config_proposal_ui';
+import {
+  AnalysisRequestCoordinator,
+  type AnalysisRequestToken,
+} from './analysis_request_coordinator';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
 import {SCENE_DISPLAY_NAMES} from './scene_constants';
 import {StoryController} from './story_controller';
@@ -162,6 +169,7 @@ import {addBookmarkNotes, clearAIFindingNotes} from './ai_timeline_notes';
 import {
   consumeTransientState,
   registerTransientSaver,
+  resetTransientState,
   switchFloatingMode,
   unregisterTransientSaver,
 } from './ai_transient_state';
@@ -195,10 +203,7 @@ function parseAiCapabilityPolicy(
   const policy = value as Partial<AiCapabilityPolicy>;
   if (policy.schemaVersion !== 1) return undefined;
   if (typeof policy.aiEnabled !== 'boolean') return undefined;
-  if (
-    policy.source !== 'env' &&
-    policy.source !== 'system_default'
-  ) {
+  if (policy.source !== 'env' && policy.source !== 'system_default') {
     return undefined;
   }
   if (!Array.isArray(policy.allowedDeterministicFeatures)) return undefined;
@@ -269,7 +274,8 @@ function metricStatusStyle(status: string | undefined): {
 }
 
 function formatTeachingConfidence(confidence: number | undefined): string {
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence)) return '-';
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence))
+    return '-';
   return `${Math.round(confidence * 100)}%`;
 }
 
@@ -293,14 +299,18 @@ function teachingPrimaryPipelineId(result: TeachingPipelineResult): string {
   );
 }
 
-function teachingPrimaryConfidence(result: TeachingPipelineResult): number | undefined {
+function teachingPrimaryConfidence(
+  result: TeachingPipelineResult,
+): number | undefined {
   return (
     result.detection?.primary_pipeline?.confidence ??
     result.detection?.primaryConfidence
   );
 }
 
-function teachingContent(result: TeachingPipelineResult): TeachingContent | null {
+function teachingContent(
+  result: TeachingPipelineResult,
+): TeachingContent | null {
   return result.teaching || result.teachingContent || null;
 }
 
@@ -319,6 +329,7 @@ function escapeTeachingRegex(value: string): string {
 export interface AIPanelAttrs {
   engine: Engine;
   trace: Trace;
+  tracePairWorkspaceController: TracePairWorkspaceController;
 }
 
 // Re-export types for backward compatibility with external consumers
@@ -365,14 +376,29 @@ const SMART_SCENE_SELECTION_GROUPS: Array<{
   {label: '启动', sceneTypes: ['cold_start', 'warm_start', 'hot_start']},
   {label: '滑动', sceneTypes: ['scroll', 'inertial_scroll']},
   {label: '点击', sceneTypes: ['tap', 'long_press', 'screen_unlock']},
-  {label: '导航', sceneTypes: ['back_key', 'home_key', 'recents_key', 'navigation', 'window_transition', 'app_switch']},
-  {label: '设备', sceneTypes: ['screen_on', 'screen_off', 'screen_sleep', 'idle']},
+  {
+    label: '导航',
+    sceneTypes: [
+      'back_key',
+      'home_key',
+      'recents_key',
+      'navigation',
+      'window_transition',
+      'app_switch',
+    ],
+  },
+  {
+    label: '设备',
+    sceneTypes: ['screen_on', 'screen_off', 'screen_sleep', 'idle'],
+  },
   {label: 'ANR', sceneTypes: ['anr', 'jank_region']},
 ];
 
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
+  private tracePairWorkspaceController = new TracePairWorkspaceController();
+  private unsubscribeTracePairWorkspace?: () => void;
   private isDarkMode = detectDarkMode();
   private darkModeListener?: () => void;
   private state: AIPanelState = {
@@ -465,12 +491,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private messagesContainer: HTMLElement | null = null;
   private lastMessageCount = 0;
   private scrollThrottleTimer: ReturnType<typeof setTimeout> | null = null;
-  private availableTraces: Array<{
-    id: string;
-    originalName?: string;
-    uploadedAt?: string;
-    size?: number;
-  }> = [];
+  private availableTraces: WorkspaceTraceCatalogItem[] = [];
   private availableAnalysisResults: AnalysisResultPickerItem[] = [];
   private activeResultWindowStates: AnalysisResultWindowState[] = [];
   private resultVisibilityUpdatingIds = new Set<string>();
@@ -480,6 +501,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private beforeUnloadHandler: (() => void) | null = null;
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
+  private analysisRequestCoordinator = new AnalysisRequestCoordinator();
+  private analysisCancellationPending = false;
+  private analysisCancellationRequest: Promise<void> | null = null;
   // Paragraph-level progressive reveal: tracks how many children have been animated per message
   private revealedBlockCounts = new Map<string, number>();
   private renderedMessageContent = new WeakMap<HTMLElement, string>();
@@ -489,8 +513,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   // Captures input draft, collapsed tables, and active SSE analysis when the
   // user switches between tab and floating window mode.
   private transientSaverRef: (() => TransientState) | null = null;
-  private tracePairResizeCleanup: (() => void) | null = null;
-  private tracePairResizeActive = false;
   private analysisModeMenuClickHandler: ((event: MouseEvent) => void) | null =
     null;
   private analysisModeMenuKeydownHandler:
@@ -577,7 +599,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     context: DataSourceContext | undefined,
   ): m.Children {
     if (!context) return null;
-    const traceLocation = traceLocationLabel(context.traceSide, context.paneSide);
+    const traceLocation = traceLocationLabel(
+      context.traceSide,
+      context.paneSide,
+    );
     const kindLabel = (kind: DataSourceContext['kind']) => {
       switch (kind) {
         case 'summary':
@@ -630,9 +655,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       chips.length > 0
         ? m(
             'div.ai-table-context-meta',
-            chips.map((chip) =>
-              m('span.ai-table-context-chip', chip),
-            ),
+            chips.map((chip) => m('span.ai-table-context-chip', chip)),
           )
         : null,
     ]);
@@ -712,7 +735,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     );
   }
 
-  private renderTeachingPipelineSummary(result: TeachingPipelineResult): m.Children {
+  private renderTeachingPipelineSummary(
+    result: TeachingPipelineResult,
+  ): m.Children {
     const detection = result.detection;
     const subvariants = detection.subvariants || {};
     const chips: Array<{label: string; value: string | undefined}> = [
@@ -743,12 +768,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       detection.candidates && detection.candidates.length > 1
         ? m('div.sp-teaching-inline-list', [
             m('span', '候选类型'),
-            ...detection.candidates.slice(0, 5).map((candidate) =>
-              m(
-                'code',
-                `${candidate.id} ${formatTeachingConfidence(candidate.confidence)}`,
+            ...detection.candidates
+              .slice(0, 5)
+              .map((candidate) =>
+                m(
+                  'code',
+                  `${candidate.id} ${formatTeachingConfidence(candidate.confidence)}`,
+                ),
               ),
-            ),
           ])
         : null,
       detection.features && detection.features.length > 0
@@ -765,12 +792,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private renderTeachingWarnings(warnings: TeachingWarning[]): m.Children {
     return m('div.sp-teaching-warning-list', [
       m('div.sp-teaching-section-title', 'Warnings'),
-      ...warnings.slice(0, 8).map((warning) =>
-        m('div.sp-teaching-warning', [
-          m('span.sp-teaching-warning-severity', warning.severity || 'info'),
-          m('span', warning.message || warning.code || 'warning'),
-        ]),
-      ),
+      ...warnings
+        .slice(0, 8)
+        .map((warning) =>
+          m('div.sp-teaching-warning', [
+            m('span.sp-teaching-warning-severity', warning.severity || 'info'),
+            m('span', warning.message || warning.code || 'warning'),
+          ]),
+        ),
       warnings.length > 8
         ? m('div.sp-teaching-more', `还有 ${warnings.length - 8} 条提示未展开`)
         : null,
@@ -827,27 +856,31 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
     return m(
       'div.sp-teaching-lanes',
-      lanes.slice(0, 12).map((lane) =>
-        m('div.sp-teaching-lane', [
-          m('div.sp-teaching-lane-role', lane.role),
-          m('div.sp-teaching-lane-title', lane.title || lane.id),
-          m(
-            'div.sp-teaching-lane-meta',
-            lane.threadName || lane.processName || lane.layerName || '-',
-          ),
-          m('div.sp-teaching-lane-foot', [
-            m('span', formatTeachingConfidence(lane.confidence)),
-            m('span', lane.evidenceSource || '-'),
+      lanes
+        .slice(0, 12)
+        .map((lane) =>
+          m('div.sp-teaching-lane', [
+            m('div.sp-teaching-lane-role', lane.role),
+            m('div.sp-teaching-lane-title', lane.title || lane.id),
+            m(
+              'div.sp-teaching-lane-meta',
+              lane.threadName || lane.processName || lane.layerName || '-',
+            ),
+            m('div.sp-teaching-lane-foot', [
+              m('span', formatTeachingConfidence(lane.confidence)),
+              m('span', lane.evidenceSource || '-'),
+            ]),
           ]),
-        ]),
-      ),
+        ),
     );
   }
 
   private renderTeachingDependencies(flow: TeachingObservedFlow): m.Children {
     const dependencies = flow.dependencies || [];
     if (dependencies.length === 0) return null;
-    const lanesById = new Map((flow.lanes || []).map((lane) => [lane.id, lane]));
+    const lanesById = new Map(
+      (flow.lanes || []).map((lane) => [lane.id, lane]),
+    );
     return m('div.sp-teaching-dependencies', [
       m('div.sp-teaching-subtitle', `调度/链路依赖 (${dependencies.length})`),
       m('table.sp-teaching-table', [
@@ -874,7 +907,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
       ]),
       dependencies.length > 16
-        ? m('div.sp-teaching-more', `还有 ${dependencies.length - 16} 条依赖未展开`)
+        ? m(
+            'div.sp-teaching-more',
+            `还有 ${dependencies.length - 16} 条依赖未展开`,
+          )
         : null,
     ]);
   }
@@ -884,7 +920,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   ): m.Children {
     if (criticalTasks.length === 0) return null;
     return m('div.sp-teaching-critical-tasks', [
-      m('div.sp-teaching-subtitle', `Critical task / Wakeup (${criticalTasks.length})`),
+      m(
+        'div.sp-teaching-subtitle',
+        `Critical task / Wakeup (${criticalTasks.length})`,
+      ),
       m('table.sp-teaching-table', [
         m('thead', [
           m('tr', [
@@ -902,18 +941,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               [task.threadName, task.processName].filter(Boolean).join(' / ') ||
               task.name ||
               '-';
-            const waker =
-              task.waker
-                ? [task.waker.threadName, task.waker.processName]
-                    .filter(Boolean)
-                    .join(' / ') || task.waker.kind || '-'
-                : '-';
+            const waker = task.waker
+              ? [task.waker.threadName, task.waker.processName]
+                  .filter(Boolean)
+                  .join(' / ') ||
+                task.waker.kind ||
+                '-'
+              : '-';
             return m('tr', [
               m('td', task.kind),
               m('td', [
                 m('div', owner),
                 task.state ? m('code', task.state) : null,
-                task.evidenceSource ? m('div.sp-teaching-muted', task.evidenceSource) : null,
+                task.evidenceSource
+                  ? m('div.sp-teaching-muted', task.evidenceSource)
+                  : null,
               ]),
               m('td', waker),
               m('td', formatTeachingNs(task.ts)),
@@ -923,7 +965,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
       ]),
       criticalTasks.length > 16
-        ? m('div.sp-teaching-more', `还有 ${criticalTasks.length - 16} 个 task 未展开`)
+        ? m(
+            'div.sp-teaching-more',
+            `还有 ${criticalTasks.length - 16} 个 task 未展开`,
+          )
         : null,
     ]);
   }
@@ -948,8 +993,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           'tbody',
           events.slice(0, 16).map((event) => {
             const owner =
-              [event.threadName, event.processName].filter(Boolean).join(' / ') ||
-              '-';
+              [event.threadName, event.processName]
+                .filter(Boolean)
+                .join(' / ') || '-';
             return m('tr', [
               m('td', event.stage),
               m('td', event.name),
@@ -1010,10 +1056,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ? [
             m('div.sp-teaching-plan-state', [
               m('span.sp-teaching-state-label', 'Pin result'),
-              m(
-                'span.sp-teaching-state-value',
-                `${pinExecution.count} pinned`,
-              ),
+              m('span.sp-teaching-state-value', `${pinExecution.count} pinned`),
               m(
                 'span',
                 `${pinExecution.skipped} skipped / ${pinExecution.failed} failed`,
@@ -1050,7 +1093,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             m('div.sp-teaching-subtitle', '关键线程角色'),
             m('table.sp-teaching-table', [
               m('thead', [
-                m('tr', [m('th', '线程'), m('th', '职责'), m('th', 'Trace 标签')]),
+                m('tr', [
+                  m('th', '线程'),
+                  m('th', '职责'),
+                  m('th', 'Trace 标签'),
+                ]),
               ]),
               m(
                 'tbody',
@@ -1082,7 +1129,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 m(
                   'button.ai-mermaid-copy',
                   {
-                    type: 'button',
+                    'type': 'button',
                     'data-mermaid-b64': encodeBase64Unicode(mermaid),
                   },
                   '复制代码',
@@ -1101,6 +1148,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   oninit(vnode: m.Vnode<AIPanelAttrs>) {
     this.engine = vnode.attrs.engine;
     this.trace = vnode.attrs.trace;
+    this.tracePairWorkspaceController =
+      vnode.attrs.tracePairWorkspaceController ||
+      this.tracePairWorkspaceController;
 
     // Load settings from localStorage
     this.loadSettings();
@@ -1110,6 +1160,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // 检测 Trace 变化并加载对应的历史
     this.handleTraceChange();
+    this.syncTracePairStateFromController();
   }
 
   /**
@@ -1123,28 +1174,164 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return `${info.start}_${info.end}_${info.traceTitle || 'untitled'}`;
   }
 
-  private getCurrentTraceDisplayName(): string {
-    return this.trace?.traceInfo?.traceTitle || '当前 Trace';
+  private getCurrentTraceName(): string {
+    return getCanonicalTraceName(this.trace?.traceInfo, '当前 Trace');
+  }
+
+  private getTracePairWorkspaceScope() {
+    const context = getSmartPerfettoRequestContext();
+    return {
+      key: [
+        context.tenantId,
+        context.userId,
+        context.workspaceId,
+        this.state.settings.backendUrl,
+        this.state.backendTraceId || '',
+      ].join(':'),
+      backendUrl: this.state.settings.backendUrl,
+      backendHeaders: this.buildBackendHeaders(),
+    };
+  }
+
+  private syncTracePairStateFromController(): void {
+    const workspace = this.tracePairWorkspaceController.getState();
+    if (
+      !workspace.currentTrace ||
+      workspace.currentTrace.id !== this.state.backendTraceId
+    ) {
+      return;
+    }
+
+    const previousReferenceTraceId = this.state.referenceTraceId;
+    const previousReferenceTraceName = this.state.referenceTraceName;
+    const nextReferenceTraceId = workspace.referenceTrace?.id || null;
+    this.state.referenceTraceId = nextReferenceTraceId;
+    this.state.referenceTraceName = workspace.referenceTrace?.filename || null;
+    this.state.isReferenceActive = workspace.activeTraceSide === 'reference';
+    this.state.tracePairWorkspaceOpen = workspace.open;
+    this.state.tracePairLayout = workspace.layout;
+    this.state.tracePairSplitPercent = workspace.splitPercent;
+    this.state.tracePairMaximizedTraceSide = workspace.maximizedTraceSide;
+    this.state.tracePairMinimizedTraceSides = new Set(
+      workspace.minimizedTraceSides,
+    );
+
+    if (previousReferenceTraceId === nextReferenceTraceId) {
+      if (previousReferenceTraceName !== this.state.referenceTraceName) {
+        this.saveCurrentSession();
+      }
+      return;
+    }
+    this.cancelSSEConnection();
+    this.state.agentSessionId = null;
+    this.clearAgentObservability();
+    this.state.pendingTraceContext = null;
+    this.state.sseLastEventId = null;
+    this.saveCurrentSession();
+  }
+
+  private openTracePairWorkspace(): void {
+    const currentTraceId = this.state.backendTraceId;
+    if (
+      !currentTraceId ||
+      (this.isAnalysisIdentityLocked() && !this.state.referenceTraceId)
+    )
+      return;
+    const restoredReferenceTraceId = this.state.referenceTraceId;
+    this.tracePairWorkspaceController.open({
+      scope: this.getTracePairWorkspaceScope(),
+      currentTrace: {
+        id: currentTraceId,
+        filename: this.getCurrentTraceName(),
+        fingerprint:
+          this.state.currentTraceFingerprint ||
+          this.getTraceFingerprint() ||
+          undefined,
+      },
+    });
+    void this.fetchAvailableTraces().then(() => {
+      const state = this.tracePairWorkspaceController.getState();
+      if (!state.referenceTrace && restoredReferenceTraceId) {
+        this.tracePairWorkspaceController.selectTrace({
+          pane: 'second',
+          traceId: restoredReferenceTraceId,
+        });
+      }
+    });
+    m.redraw();
+  }
+
+  private getTracePairPaneTitle(traceSide: TracePairTraceSide): string {
+    const workspace = this.tracePairWorkspaceController.getState();
+    const layout =
+      workspace.currentTrace?.id === this.state.backendTraceId
+        ? workspace.layout
+        : this.state.tracePairLayout;
+    const currentPane =
+      workspace.currentTrace?.id === this.state.backendTraceId
+        ? workspace.currentPane
+        : 'first';
+    const pane =
+      traceSide === 'current'
+        ? currentPane
+        : currentPane === 'first'
+          ? 'second'
+          : 'first';
+    const location =
+      layout === 'vertical'
+        ? pane === 'first'
+          ? '上'
+          : '下'
+        : pane === 'first'
+          ? '左'
+          : '右';
+    return `${location}/${traceSide === 'current' ? '主' : '参考'}`;
   }
 
   private buildTracePairContext(): TracePairContext | undefined {
+    const workspace = this.tracePairWorkspaceController.getState();
+    const useWorkspace =
+      workspace.currentTrace?.id === this.state.backendTraceId;
     return buildTracePairContextPayload({
       currentTraceId: this.state.backendTraceId,
-      currentTraceName: this.getCurrentTraceDisplayName(),
-      currentTraceFingerprint: this.state.currentTraceFingerprint || this.getTraceFingerprint(),
-      referenceTraceId: this.state.referenceTraceId,
-      referenceTraceName: this.state.referenceTraceName,
-      activeTraceSide: this.state.isReferenceActive ? 'reference' : 'current',
-      layout: this.state.tracePairLayout,
-      workspaceOpen: this.state.tracePairWorkspaceOpen,
-      splitPercent: this.state.tracePairSplitPercent,
-      maximizedTraceSide: this.state.tracePairMaximizedTraceSide,
-      minimizedTraceSides: this.state.tracePairMinimizedTraceSides,
+      currentTraceName: this.getCurrentTraceName(),
+      currentTraceFingerprint:
+        this.state.currentTraceFingerprint || this.getTraceFingerprint(),
+      referenceTraceId: useWorkspace
+        ? workspace.referenceTrace?.id || null
+        : this.state.referenceTraceId,
+      referenceTraceName: useWorkspace
+        ? workspace.referenceTrace?.filename || null
+        : this.state.referenceTraceName,
+      activeTraceSide: useWorkspace
+        ? workspace.activeTraceSide
+        : this.state.isReferenceActive
+          ? 'reference'
+          : 'current',
+      currentPane: useWorkspace ? workspace.currentPane : 'first',
+      layout: useWorkspace ? workspace.layout : this.state.tracePairLayout,
+      workspaceOpen: useWorkspace
+        ? workspace.open
+        : this.state.tracePairWorkspaceOpen,
+      splitPercent: useWorkspace
+        ? workspace.splitPercent
+        : this.state.tracePairSplitPercent,
+      maximizedTraceSide: useWorkspace
+        ? workspace.maximizedTraceSide
+        : this.state.tracePairMaximizedTraceSide,
+      minimizedTraceSides: useWorkspace
+        ? new Set(workspace.minimizedTraceSides)
+        : this.state.tracePairMinimizedTraceSides,
     });
   }
 
   private buildTracePairSessionFields(): Partial<AISession> {
-    const referenceTraceId = this.state.referenceTraceId?.trim();
+    const workspace = this.tracePairWorkspaceController.getState();
+    const useWorkspace =
+      workspace.currentTrace?.id === this.state.backendTraceId;
+    const referenceTraceId = (
+      useWorkspace ? workspace.referenceTrace?.id : this.state.referenceTraceId
+    )?.trim();
     if (!referenceTraceId) {
       return {
         type: 'single',
@@ -1154,20 +1341,30 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         tracePairLayout: undefined,
         tracePairSplitPercent: undefined,
         tracePairActiveTraceSide: undefined,
+        tracePairCurrentPane: undefined,
       };
     }
 
     return {
       type: 'comparison',
       referenceBackendTraceId: referenceTraceId,
-      referenceTraceName: this.state.referenceTraceName || undefined,
-      tracePairLayout: this.state.tracePairLayout,
+      referenceTraceName: useWorkspace
+        ? workspace.referenceTrace?.filename
+        : this.state.referenceTraceName || undefined,
+      tracePairLayout: useWorkspace
+        ? workspace.layout
+        : this.state.tracePairLayout,
       tracePairSplitPercent: this.normalizeTracePairSplitPercent(
-        this.state.tracePairSplitPercent,
+        useWorkspace
+          ? workspace.splitPercent
+          : this.state.tracePairSplitPercent,
       ),
-      tracePairActiveTraceSide: this.state.isReferenceActive
-        ? 'reference'
-        : 'current',
+      tracePairActiveTraceSide: useWorkspace
+        ? workspace.activeTraceSide
+        : this.state.isReferenceActive
+          ? 'reference'
+          : 'current',
+      tracePairCurrentPane: useWorkspace ? workspace.currentPane : 'first',
     };
   }
 
@@ -1182,21 +1379,41 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.tracePairMinimizedTraceSides = new Set();
     this.state.showTracePicker = false;
     this.state.comparisonTraceLoading = false;
-    this.stopTracePairResize();
     clearComparisonState();
   }
 
-  private restoreTracePairStateFromSession(session: AISession): boolean {
-    const referenceTraceId = typeof session.referenceBackendTraceId === 'string'
-      ? session.referenceBackendTraceId.trim()
-      : '';
+  private restoreTracePairStateFromSession(
+    session: AISession,
+    preserveLivePair: boolean,
+  ): boolean {
+    const referenceTraceId =
+      typeof session.referenceBackendTraceId === 'string'
+        ? session.referenceBackendTraceId.trim()
+        : '';
     if (
       session.type !== 'comparison' ||
       !referenceTraceId ||
       !this.state.backendTraceId
     ) {
       this.clearTracePairSessionState();
-      return false;
+      if (this.state.backendTraceId) {
+        this.tracePairWorkspaceController.hydrateSingleSession(
+          {
+            scope: this.getTracePairWorkspaceScope(),
+            currentTrace: {
+              id: this.state.backendTraceId,
+              filename: this.getCurrentTraceName(),
+              fingerprint:
+                this.state.currentTraceFingerprint ||
+                this.getTraceFingerprint() ||
+                undefined,
+            },
+          },
+          {preserveLivePair},
+        );
+        this.syncTracePairStateFromController();
+      }
+      return this.state.referenceTraceId !== null;
     }
 
     this.state.referenceTraceId = referenceTraceId;
@@ -1212,8 +1429,32 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.tracePairMaximizedTraceSide = null;
     this.state.tracePairMinimizedTraceSides = new Set();
     this.state.comparisonTraceLoading = false;
+    this.tracePairWorkspaceController.hydrateSessionPair(
+      {
+        scope: this.getTracePairWorkspaceScope(),
+        currentTrace: {
+          id: this.state.backendTraceId,
+          filename: this.getCurrentTraceName(),
+          fingerprint:
+            this.state.currentTraceFingerprint ||
+            this.getTraceFingerprint() ||
+            undefined,
+        },
+        referenceTrace: {
+          id: referenceTraceId,
+          filename: session.referenceTraceName || '参考 Trace',
+        },
+        currentPane:
+          session.tracePairCurrentPane === 'second' ? 'second' : 'first',
+        layout: this.state.tracePairLayout,
+        splitPercent: this.state.tracePairSplitPercent,
+        activeTraceSide: this.state.isReferenceActive ? 'reference' : 'current',
+      },
+      {preserveLivePair},
+    );
+    this.syncTracePairStateFromController();
     clearComparisonState();
-    return true;
+    return this.state.referenceTraceId !== null;
   }
 
   private normalizeTracePairSplitPercent(value: unknown): number {
@@ -1309,7 +1550,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         );
       // Preserve backendTraceId from upload state — loadSession may clear it
       const savedBackendTraceId = this.state.backendTraceId;
-      this.loadSession(restorable[0].sessionId);
+      this.loadSession(restorable[0].sessionId, {preserveLiveTracePair: true});
       if (savedBackendTraceId && !this.state.backendTraceId) {
         this.state.backendTraceId = savedBackendTraceId;
         this.saveCurrentSession();
@@ -1412,8 +1653,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             port: parseInt(rpcPort, 10),
-            traceName:
-              this.trace?.traceInfo?.traceTitle || 'External RPC Trace',
+            traceName: this.getCurrentTraceName(),
           }),
         },
       );
@@ -1495,7 +1735,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       // 尝试上传 Trace
       const uploadResult = await uploader.upload(traceSource);
 
-      if (!uploadResult.success || (!uploadResult.rpcTarget && !uploadResult.port)) {
+      if (
+        !uploadResult.success ||
+        (!uploadResult.rpcTarget && !uploadResult.port)
+      ) {
         throw new Error(uploadResult.error || '上传 Trace 失败');
       }
 
@@ -1548,8 +1791,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 从临时存储中恢复 pending backendTraceId
    * 用于在 trace reload 后恢复上传时设置的 traceId
    */
-  private recoverPendingBackendTrace(currentPort?: number, currentLeaseId?: string): string | null {
-    return sessionManager.recoverPendingBackendTrace(currentPort, currentLeaseId);
+  private recoverPendingBackendTrace(
+    currentPort?: number,
+    currentLeaseId?: string,
+  ): string | null {
+    return sessionManager.recoverPendingBackendTrace(
+      currentPort,
+      currentLeaseId,
+    );
   }
 
   /**
@@ -1559,7 +1808,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `✅ **AI 助手已就绪**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载。\n前后端共享同一个 trace_processor，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+      content: `✅ **AI 助手已就绪**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载。\n前后端共享同一个 trace_processor。\n\n可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
       timestamp: Date.now(),
     });
     m.redraw();
@@ -1574,9 +1823,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           : target.leaseMode === 'shared'
             ? '共享'
             : '未知';
-      const queueText = typeof target.leaseQueueLength === 'number'
-        ? `，队列 ${target.leaseQueueLength}`
-        : '';
+      const queueText =
+        typeof target.leaseQueueLength === 'number'
+          ? `，队列 ${target.leaseQueueLength}`
+          : '';
       return `后端 ${modeText} Lease 代理 (${target.leaseId ?? 'unknown'}${queueText})`;
     }
     return `HTTP RPC (端口 ${target.port ?? HttpRpcEngine.rpcPort})`;
@@ -1724,6 +1974,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   oncreate(_vnode: m.VnodeDOM<AIPanelAttrs>) {
+    this.unsubscribeTracePairWorkspace =
+      this.tracePairWorkspaceController.subscribe(() => {
+        this.syncTracePairStateFromController();
+        m.redraw();
+      });
     // Subscribe to assistant command bus.
     this.unsubscribeClearChat = subscribeClearChat(() => {
       void this.clearChat();
@@ -1778,6 +2033,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // Consume any transient state left over from a mode switch — restores
     // input draft, collapsed tables, and any in-flight SSE analysis.
     this.restoreTransientState(consumeTransientState());
+    this.tracePairWorkspaceController.setSelectionLocked(this.state.isLoading);
 
     // Focus input (requires DOM)
     setTimeout(() => {
@@ -1791,7 +2047,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
-    this.stopTracePairResize();
+    this.unsubscribeTracePairWorkspace?.();
+    this.unsubscribeTracePairWorkspace = undefined;
     // Unregister transient saver first so any in-flight switchFloatingMode()
     // that hasn't captured yet won't try to call into a torn-down instance.
     if (this.transientSaverRef) {
@@ -1901,18 +2158,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         isInRpcMode && hasBackendTrace
           ? this.renderHeaderIconButton({
               icon: 'compare_arrows',
-              title: this.state.referenceTraceId
-                ? `对比模式: ${this.state.referenceTraceName || 'Reference Trace'}`
-                : '对比...',
-              active: !!this.state.referenceTraceId || this.state.showTracePicker,
+              title: '打开双 Trace 工作区',
+              label: '双窗',
+              prominent: true,
+              active: this.tracePairWorkspaceController.getState().open,
+              disabled:
+                this.isAnalysisIdentityLocked() && !this.state.referenceTraceId,
               onclick: () => {
-                this.state.showTracePicker = true;
+                this.openTracePairWorkspace();
                 this.state.showResultPicker = false;
                 this.state.showSessionSidebar = false;
                 this.state.showStorySidebar = false;
                 this.state.captureConfigSuggestion.visible = false;
-                this.fetchAvailableTraces();
-                m.redraw();
               },
             })
           : null,
@@ -1961,14 +2218,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           active: this.state.showStorySidebar,
           onclick: () => {
             this.state.showStorySidebar = !this.state.showStorySidebar;
-              if (this.state.showStorySidebar) {
-                this.state.showSessionSidebar = false;
-                this.state.showTracePicker = false;
-                this.state.showResultPicker = false;
-                this.state.captureConfigSuggestion.visible = false;
-              }
-              m.redraw();
-            },
+            if (this.state.showStorySidebar) {
+              this.state.showSessionSidebar = false;
+              this.state.showTracePicker = false;
+              this.state.showResultPicker = false;
+              this.state.captureConfigSuggestion.visible = false;
+            }
+            m.redraw();
+          },
         }),
       ]),
       m('div.ai-header-action-group.ai-header-action-group--session', [
@@ -1976,6 +2233,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.renderHeaderIconButton({
           icon: 'add_comment',
           title: 'New Chat',
+          disabled: this.isAnalysisIdentityLocked(),
           onclick: () => this.clearChat(),
         }),
         this.renderHeaderIconButton({
@@ -1983,30 +2241,38 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           title: this.state.showSessionSidebar ? '隐藏历史对话' : '历史对话',
           active: this.state.showSessionSidebar,
           onclick: () => {
-              this.state.showSessionSidebar = !this.state.showSessionSidebar;
-              if (this.state.showSessionSidebar) {
-                this.state.showStorySidebar = false;
-                this.state.showTracePicker = false;
-                this.state.showResultPicker = false;
-                this.state.captureConfigSuggestion.visible = false;
-              }
-              m.redraw();
-            },
+            this.state.showSessionSidebar = !this.state.showSessionSidebar;
+            if (this.state.showSessionSidebar) {
+              this.state.showStorySidebar = false;
+              this.state.showTracePicker = false;
+              this.state.showResultPicker = false;
+              this.state.captureConfigSuggestion.visible = false;
+            }
+            m.redraw();
+          },
         }),
       ]),
       m('div.ai-header-action-group.ai-header-action-group--window', [
         m('span.ai-header-action-group-label', '窗口'),
-        isDockedSidebar ? this.renderSidebarLayoutSwitch(floatingState.sidebar.layout) : null,
+        isDockedSidebar
+          ? this.renderSidebarLayoutSwitch(floatingState.sidebar.layout)
+          : null,
         isDockedSidebar
           ? this.renderHeaderIconButton({
               icon: 'open_in_new',
-              title: '弹出为浮动窗口（可拖动、可调整大小、跨标签页保持可见）',
+              title: this.isAnalysisIdentityLocked()
+                ? '分析运行中，完成或停止后可切换挂载位置'
+                : '弹出为浮动窗口（可拖动、可调整大小、跨标签页保持可见）',
+              disabled: this.isAnalysisIdentityLocked(),
               onclick: () => this.popOutToFloatingWindow(),
             })
           : null,
         this.renderHeaderIconButton({
           icon: 'settings',
-          title: 'Settings',
+          title: this.isAnalysisIdentityLocked()
+            ? '分析运行中，设置保持只读'
+            : 'Settings',
+          disabled: this.isAnalysisIdentityLocked(),
           onclick: () => this.openSettings(),
         }),
       ]),
@@ -2020,6 +2286,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     active?: boolean;
     disabled?: boolean;
     label?: string;
+    prominent?: boolean;
   }): m.Children {
     return m(
       'button.ai-header-icon-btn',
@@ -2030,12 +2297,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         class: [
           attrs.active ? 'active' : '',
           attrs.disabled ? 'disabled' : '',
-        ].filter(Boolean).join(' '),
+          attrs.prominent ? 'ai-header-icon-btn--prominent' : '',
+        ]
+          .filter(Boolean)
+          .join(' '),
       },
-      [
-        m('i.pf-icon', attrs.icon),
-        attrs.label ? m('span', attrs.label) : null,
-      ],
+      [m('i.pf-icon', attrs.icon), attrs.label ? m('span', attrs.label) : null],
     );
   }
 
@@ -2083,7 +2350,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const suggestion = this.state.captureConfigSuggestion;
     suggestion.visible = !suggestion.visible;
     if (suggestion.visible) {
-      if (!suggestion.request.trim()) suggestion.request = this.state.input.trim();
+      if (!suggestion.request.trim())
+        suggestion.request = this.state.input.trim();
       this.state.showTracePicker = false;
       this.state.showResultPicker = false;
       this.state.showSessionSidebar = false;
@@ -2128,7 +2396,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               rows: 2,
               placeholder: 'debug startup jank',
               oninput: (event: Event) => {
-                suggestion.request = (event.target as HTMLTextAreaElement).value;
+                suggestion.request = (
+                  event.target as HTMLTextAreaElement
+                ).value;
               },
             }),
           ]),
@@ -2152,8 +2422,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               value: suggestion.durationSeconds,
               placeholder: '15',
               oninput: (event: Event) => {
-                suggestion.durationSeconds =
-                  (event.target as HTMLInputElement).value;
+                suggestion.durationSeconds = (
+                  event.target as HTMLInputElement
+                ).value;
               },
             }),
           ]),
@@ -2164,7 +2435,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               value: suggestion.categories,
               placeholder: 'gfx, view',
               oninput: (event: Event) => {
-                suggestion.categories = (event.target as HTMLInputElement).value;
+                suggestion.categories = (
+                  event.target as HTMLInputElement
+                ).value;
               },
             }),
           ]),
@@ -2176,7 +2449,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 disabled: suggestion.loading,
               },
               [
-                m('i.pf-icon', suggestion.loading ? 'hourglass_empty' : 'preview'),
+                m(
+                  'i.pf-icon',
+                  suggestion.loading ? 'hourglass_empty' : 'preview',
+                ),
                 suggestion.loading ? 'Previewing...' : 'Preview',
               ],
             ),
@@ -2195,7 +2471,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
-  private renderCaptureConfigProposal(proposal: TraceConfigProposalV1): m.Children {
+  private renderCaptureConfigProposal(
+    proposal: TraceConfigProposalV1,
+  ): m.Children {
     const configCommand = formatTraceConfigCommand(proposal.command.config);
     const captureCommand = formatTraceConfigCommand(proposal.command.capture);
     return m('div.ai-capture-config-result', [
@@ -2256,11 +2534,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (items.length === 0) return null;
     return m(`div.ai-capture-config-section${tone ? `.${tone}` : ''}`, [
       m('div.ai-capture-config-section-title', title),
-      m('ul', items.map((item) => m('li', item))),
+      m(
+        'ul',
+        items.map((item) => m('li', item)),
+      ),
     ]);
   }
 
-  private renderCaptureConfigCommand(label: string, command: string): m.Children {
+  private renderCaptureConfigCommand(
+    label: string,
+    command: string,
+  ): m.Children {
     return m('div.ai-capture-config-command', [
       m('div.ai-capture-config-command-label', label),
       m('code', command),
@@ -2314,11 +2598,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           body: JSON.stringify(payloadResult.payload),
         },
       );
-      const data = await response.json().catch(() => null) as
-        | TraceConfigProposalApiResponse
-        | null;
+      const data = (await response
+        .json()
+        .catch(() => null)) as TraceConfigProposalApiResponse | null;
       if (!response.ok || !data?.success || !data.proposal) {
-        suggestion.error = data?.error || `Request failed: HTTP ${response.status}`;
+        suggestion.error =
+          data?.error || `Request failed: HTTP ${response.status}`;
         return;
       }
       suggestion.proposal = data.proposal;
@@ -2377,6 +2662,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           ? m(SettingsModal, {
               settings: this.state.settings,
               workspaceContext,
+              readOnly: this.isAnalysisIdentityLocked(),
               onClose: () => this.closeSettings(),
               onSave: (newSettings: AISettings) =>
                 this.saveSettings(newSettings),
@@ -2384,8 +2670,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 this.onWorkspaceSelectionChange(workspaceId),
               onCheckStatus: (url: string, key: string) =>
                 this.checkServerStatus(url, key),
-              onProviderSelectionChange: () =>
-                this.onProviderSelectionChange(),
+              onProviderSelectionChange: () => this.onProviderSelectionChange(),
               initialStatus: this.serverStatus.connected
                 ? this.serverStatus
                 : undefined,
@@ -2421,7 +2706,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               'button.ai-workspace-chip',
               {
                 title: `Workspace: ${workspaceContext.workspaceId}\nTenant: ${workspaceContext.tenantId}\nUser: ${workspaceContext.userId}\nWindow: ${workspaceContext.windowId}`,
-                onclick: () => this.openSettings(),
+                onclick: this.isAnalysisIdentityLocked()
+                  ? undefined
+                  : () => this.openSettings(),
+                disabled: this.isAnalysisIdentityLocked(),
               },
               [
                 m('i.pf-icon', 'workspaces'),
@@ -2491,7 +2779,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     ),
                     m(
                       'span.ai-comparison-pane-name',
-                      this.getCurrentTraceDisplayName(),
+                      this.getCurrentTraceName(),
                     ),
                   ]),
                   m('span.ai-comparison-divider', 'vs'),
@@ -2523,21 +2811,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         ? 'visibility'
                         : 'splitscreen',
                     ),
-                    this.state.tracePairWorkspaceOpen
-                      ? '双窗已开'
-                      : '打开双窗',
+                    this.state.tracePairWorkspaceOpen ? '双窗已开' : '打开双窗',
                   ],
                 ),
                 m(
                   'button.ai-comparison-close',
                   {
                     onclick: () => this.exitComparisonMode(),
-                    title: '退出对比模式',
+                    disabled: this.isAnalysisIdentityLocked(),
+                    title: this.isAnalysisIdentityLocked()
+                      ? '请先停止当前分析再退出对比'
+                      : '退出对比模式',
                   },
-                  [
-                    m('i.pf-icon', 'close'),
-                    '退出',
-                  ],
+                  [m('i.pf-icon', 'close'), '退出'],
                 ),
               ]),
             ])
@@ -2735,8 +3021,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         return m(
                           'div.ai-message',
                           {
-                            key: msg.id,
-                            class: messageClass,
+                            'key': msg.id,
+                            'class': messageClass,
                             'data-ai-message-id': msg.id,
                           },
                           [
@@ -2873,8 +3159,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   this.renderSmartScenePreviewCard(msg),
                                   this.renderSmartSelectionInlineActions(msg),
                                   this.renderQuickRunReceipt(msg.quickRun),
-                                  this.renderAnalysisReceipt(msg.analysisReceipt),
-                                  this.renderUiActionProposals(msg.uiActionProposals),
+                                  this.renderAnalysisReceipt(
+                                    msg.analysisReceipt,
+                                  ),
+                                  this.renderUiActionProposals(
+                                    msg.uiActionProposals,
+                                  ),
 
                                   // SQL Result
                                   (() => {
@@ -3097,7 +3387,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         query
                                           ? m(
                                               'div.ai-sql-query',
-                                              formattedSql?.text || query.trim(),
+                                              formattedSql?.text ||
+                                                query.trim(),
                                             )
                                           : null,
                                         m(SqlResultTable, {
@@ -3108,7 +3399,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                           trace: vnode.attrs.trace, // 传入 trace 对象以支持时间戳跳转
                                           onPin: (data) => this.handlePin(data),
                                           onExport: (format) =>
-                                            this.exportResult(sqlResult, format),
+                                            this.exportResult(
+                                              sqlResult,
+                                              format,
+                                            ),
                                           onInteraction: (interaction) =>
                                             this.handleInteraction(interaction), // v2.0 Focus Tracking
                                           expandableData:
@@ -3291,8 +3585,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
                             // Message actions — available during normal input,
                             // answer streaming, and report generation.
-                            !isProgressMessage &&
-                            msg.content.trim().length > 0
+                            !isProgressMessage && msg.content.trim().length > 0
                               ? m('div.ai-feedback-bar', [
                                   m(
                                     'button.ai-feedback-btn',
@@ -3445,7 +3738,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           ? 'AI 后端未连接...'
                           : aiDisabled
                             ? 'AI 已禁用；可继续输入 /sql、/goto、/anr、/jank 等确定性命令'
-                          : 'Ask anything about your trace...',
+                            : 'Ask anything about your trace...',
                         'value': this.state.input,
                         'oninput': (e: Event) => {
                           this.state.input = (
@@ -3455,8 +3748,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         },
                         'onkeydown': (e: KeyboardEvent) =>
                           this.handleKeyDown(e),
-                        'disabled':
-                          this.state.isLoading || !isInRpcMode,
+                        'disabled': this.state.isLoading || !isInRpcMode,
                       }),
                       m('div.ai-input-controls', [
                         this.renderPresetQuestionButtons(isInRpcMode),
@@ -3467,6 +3759,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           apiKey:
                             this.state.settings.backendApiKey || undefined,
                           compact: true,
+                          disabled: this.isAnalysisIdentityLocked(),
                           onActivate: () => this.onProviderSelectionChange(),
                         }),
                         m('div.ai-input-divider'),
@@ -3517,351 +3810,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               : null,
           ],
         ), // End of ai-content-wrapper
-        this.renderTracePairWorkspace(),
       ],
     );
-  }
-
-  private renderTracePairWorkspace(): m.Children {
-    if (
-      !this.state.tracePairWorkspaceOpen ||
-      !this.state.backendTraceId ||
-      !this.state.referenceTraceId
-    ) {
-      return null;
-    }
-
-    const maximized = this.state.tracePairMaximizedTraceSide;
-    const bodyChildren = maximized
-      ? [this.renderTracePairPane(maximized)]
-      : [
-          this.renderTracePairPane('current'),
-          this.renderTracePairSplitter(),
-          this.renderTracePairPane('reference'),
-        ];
-    const workspaceClass = [
-      this.tracePairResizeActive ? 'is-resizing' : '',
-      maximized ? 'is-maximized' : '',
-    ].filter(Boolean).join(' ');
-
-    return m(
-      'div.ai-trace-pair-workspace',
-      {
-        class: workspaceClass,
-        'data-theme': this.isDarkMode ? 'dark' : 'light',
-      },
-      [
-        m('div.ai-trace-pair-header', [
-          m('div.ai-trace-pair-title', [
-            m('i.pf-icon', 'view_column'),
-            m('span', '双 Trace 工作区'),
-          ]),
-          m('div.ai-trace-pair-summary', [
-            m('span', this.getCurrentTraceDisplayName()),
-            m('span.ai-trace-pair-summary-separator', 'vs'),
-            m('span', this.state.referenceTraceName || '参考 Trace'),
-          ]),
-          m('div.ai-trace-pair-toolbar', [
-            this.renderTracePairLayoutButton('horizontal', 'view_column', '左右'),
-            this.renderTracePairLayoutButton('vertical', 'view_stream', '上下'),
-            m(
-              'button.ai-trace-pair-tool-btn',
-              {
-                onclick: () => this.resetTracePairWorkspaceLayout(),
-                title: '恢复 50/50 布局',
-              },
-              [m('i.pf-icon', 'fit_screen'), '重置'],
-            ),
-            m(
-              'button.ai-trace-pair-tool-btn.ai-trace-pair-tool-btn--primary',
-              {
-                onclick: () => this.closeTracePairWorkspace(),
-                title: '收起双 Trace 工作区',
-              },
-              [m('i.pf-icon', 'close_fullscreen'), '收起'],
-            ),
-          ]),
-        ]),
-        m(
-          'div.ai-trace-pair-body',
-          {
-            class: [
-              `layout-${this.state.tracePairLayout}`,
-              this.state.tracePairMinimizedTraceSides.has('current')
-                ? 'current-minimized'
-                : '',
-              this.state.tracePairMinimizedTraceSides.has('reference')
-                ? 'reference-minimized'
-                : '',
-            ].filter(Boolean).join(' '),
-            style: `--ai-trace-pair-split: ${this.state.tracePairSplitPercent}%;`,
-          },
-          bodyChildren,
-        ),
-      ],
-    );
-  }
-
-  private renderTracePairLayoutButton(
-    layout: TracePairLayout,
-    icon: string,
-    label: string,
-  ): m.Children {
-    return m(
-      'button.ai-trace-pair-tool-btn',
-      {
-        class: this.state.tracePairLayout === layout ? 'active' : '',
-        onclick: () => this.setTracePairLayout(layout),
-        title: `${label}排列`,
-      },
-      [m('i.pf-icon', icon), label],
-    );
-  }
-
-  private renderTracePairPane(traceSide: TracePairTraceSide): m.Children {
-    const frameUrl = this.buildTracePairFrameUrl(traceSide);
-    if (!frameUrl) return null;
-
-    const minimized = this.state.tracePairMinimizedTraceSides.has(traceSide);
-    const maximized = this.state.tracePairMaximizedTraceSide === traceSide;
-    const active = this.state.isReferenceActive === (traceSide === 'reference');
-    const paneClass = [
-      `trace-side-${traceSide}`,
-      minimized ? 'is-minimized' : '',
-      maximized ? 'is-maximized' : '',
-      active ? 'is-active' : '',
-    ].filter(Boolean).join(' ');
-    const title = this.getTracePairPaneTitle(traceSide);
-    const traceName = this.getTracePairPaneTraceName(traceSide);
-
-    return m(
-      'section.ai-trace-pair-pane',
-      {
-        class: paneClass,
-        onmouseenter: () => this.setTracePairActive(traceSide),
-        onfocusin: () => this.setTracePairActive(traceSide),
-      },
-      [
-        m('div.ai-trace-pair-pane-toolbar', [
-          m('div.ai-trace-pair-pane-title', [
-            m('span.ai-trace-pair-pane-side', title),
-            m('span.ai-trace-pair-pane-name', traceName),
-          ]),
-          m('div.ai-trace-pair-pane-actions', [
-            m(
-              'button.ai-trace-pair-icon-btn',
-              {
-                onclick: () => this.openTracePairPaneExternal(traceSide),
-                title: '在新标签页打开此 Trace',
-              },
-              m('i.pf-icon', 'open_in_new'),
-            ),
-            m(
-              'button.ai-trace-pair-icon-btn',
-              {
-                onclick: () => this.toggleTracePairMinimized(traceSide),
-                title: minimized ? '还原窗口' : '最小化窗口',
-              },
-              m('i.pf-icon', minimized ? 'open_in_full' : 'minimize'),
-            ),
-            m(
-              'button.ai-trace-pair-icon-btn',
-              {
-                onclick: () => this.toggleTracePairMaximized(traceSide),
-                title: maximized ? '恢复分屏' : '最大化窗口',
-              },
-              m('i.pf-icon', maximized ? 'close_fullscreen' : 'open_in_full'),
-            ),
-          ]),
-        ]),
-        minimized
-          ? m(
-              'button.ai-trace-pair-minimized-rail',
-              {
-                onclick: () => this.restoreTracePairPane(traceSide),
-                title: '还原窗口',
-              },
-              [
-                m('i.pf-icon', 'open_in_full'),
-                m('span', title),
-              ],
-            )
-          : m('iframe.ai-trace-pair-frame', {
-              src: frameUrl,
-              title: `${title} ${traceName}`,
-              loading: 'eager',
-            }),
-      ],
-    );
-  }
-
-  private renderTracePairSplitter(): m.Children {
-    return m('div.ai-trace-pair-splitter', {
-      role: 'separator',
-      title: '拖动调整两侧窗口大小',
-      onpointerdown: (event: PointerEvent) => this.startTracePairResize(event),
-    }, m('span.ai-trace-pair-splitter-handle'));
-  }
-
-  private buildTracePairFrameUrl(traceSide: TracePairTraceSide): string | null {
-    const traceId = this.getTracePairPaneTraceId(traceSide);
-    if (!traceId) return null;
-
-    const traceFileUrl = buildSmartPerfettoWorkspaceApiUrl(
-      this.state.settings.backendUrl,
-      'traces',
-      `/${traceId}/file`,
-    );
-    const params = new URLSearchParams({
-      url: traceFileUrl,
-      hideSidebar: 'true',
-      mode: 'embedded',
-      smartperfettoDualTrace: 'true',
-      smartperfettoPane: traceSide,
-    });
-    return `${window.location.origin}${window.location.pathname}#!/?${params.toString()}`;
-  }
-
-  private getTracePairPaneTraceId(traceSide: TracePairTraceSide): string | null {
-    return traceSide === 'current'
-      ? this.state.backendTraceId
-      : this.state.referenceTraceId;
-  }
-
-  private getTracePairPaneTraceName(traceSide: TracePairTraceSide): string {
-    return traceSide === 'current'
-      ? this.getCurrentTraceDisplayName()
-      : this.state.referenceTraceName || '参考 Trace';
-  }
-
-  private getTracePairPaneTitle(traceSide: TracePairTraceSide): string {
-    if (traceSide === 'current') {
-      return this.state.tracePairLayout === 'vertical' ? '上/主' : '左/主';
-    }
-    return this.state.tracePairLayout === 'vertical' ? '下/参考' : '右/参考';
-  }
-
-  private openTracePairWorkspace(): void {
-    if (!this.state.backendTraceId || !this.state.referenceTraceId) return;
-    this.state.tracePairWorkspaceOpen = true;
-    this.state.tracePairMaximizedTraceSide = null;
-    this.state.tracePairMinimizedTraceSides = new Set();
-    this.state.showTracePicker = false;
-    m.redraw();
-  }
-
-  private closeTracePairWorkspace(): void {
-    this.state.tracePairWorkspaceOpen = false;
-    this.state.tracePairMaximizedTraceSide = null;
-    this.state.tracePairMinimizedTraceSides = new Set();
-    this.stopTracePairResize();
-    m.redraw();
-  }
-
-  private resetTracePairWorkspaceLayout(): void {
-    this.state.tracePairSplitPercent = 50;
-    this.state.tracePairMaximizedTraceSide = null;
-    this.state.tracePairMinimizedTraceSides = new Set();
-    m.redraw();
-  }
-
-  private setTracePairLayout(layout: TracePairLayout): void {
-    this.state.tracePairLayout = layout;
-    this.state.tracePairMaximizedTraceSide = null;
-    m.redraw();
-  }
-
-  private setTracePairActive(traceSide: TracePairTraceSide): void {
-    const nextIsReference = traceSide === 'reference';
-    if (this.state.isReferenceActive === nextIsReference) return;
-    this.state.isReferenceActive = nextIsReference;
-    m.redraw();
-  }
-
-  private toggleTracePairMaximized(traceSide: TracePairTraceSide): void {
-    this.state.tracePairMaximizedTraceSide =
-      this.state.tracePairMaximizedTraceSide === traceSide ? null : traceSide;
-    this.state.tracePairMinimizedTraceSides = new Set();
-    this.setTracePairActive(traceSide);
-    m.redraw();
-  }
-
-  private toggleTracePairMinimized(traceSide: TracePairTraceSide): void {
-    this.state.tracePairMaximizedTraceSide = null;
-    const minimized = new Set<TracePairTraceSide>();
-    if (!this.state.tracePairMinimizedTraceSides.has(traceSide)) {
-      minimized.add(traceSide);
-    }
-    this.state.tracePairMinimizedTraceSides = minimized;
-    this.setTracePairActive(traceSide === 'current' ? 'reference' : 'current');
-    m.redraw();
-  }
-
-  private restoreTracePairPane(traceSide: TracePairTraceSide): void {
-    const minimized = new Set(this.state.tracePairMinimizedTraceSides);
-    minimized.delete(traceSide);
-    this.state.tracePairMinimizedTraceSides = minimized;
-    this.state.tracePairMaximizedTraceSide = null;
-    this.setTracePairActive(traceSide);
-    m.redraw();
-  }
-
-  private openTracePairPaneExternal(traceSide: TracePairTraceSide): void {
-    const frameUrl = this.buildTracePairFrameUrl(traceSide);
-    if (!frameUrl) return;
-    window.open(frameUrl, '_blank', 'noopener');
-  }
-
-  private startTracePairResize(event: PointerEvent): void {
-    if (this.state.tracePairMaximizedTraceSide) return;
-    const splitter = event.currentTarget as HTMLElement | null;
-    const body = splitter?.parentElement;
-    if (!body) return;
-
-    event.preventDefault();
-    this.stopTracePairResize();
-    this.tracePairResizeActive = true;
-
-    const handleMove = (moveEvent: PointerEvent) => {
-      this.updateTracePairSplit(moveEvent, body);
-    };
-    const handleStop = () => {
-      this.stopTracePairResize();
-      m.redraw();
-    };
-
-    window.addEventListener('pointermove', handleMove);
-    window.addEventListener('pointerup', handleStop, {once: true});
-    window.addEventListener('pointercancel', handleStop, {once: true});
-    this.tracePairResizeCleanup = () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleStop);
-      window.removeEventListener('pointercancel', handleStop);
-      this.tracePairResizeCleanup = null;
-      this.tracePairResizeActive = false;
-    };
-    this.updateTracePairSplit(event, body);
-  }
-
-  private updateTracePairSplit(event: PointerEvent, body: HTMLElement): void {
-    const rect = body.getBoundingClientRect();
-    const rawPercent = this.state.tracePairLayout === 'vertical'
-      ? ((event.clientY - rect.top) / rect.height) * 100
-      : ((event.clientX - rect.left) / rect.width) * 100;
-    if (!Number.isFinite(rawPercent)) return;
-    this.state.tracePairSplitPercent = Math.min(
-      82,
-      Math.max(18, Math.round(rawPercent)),
-    );
-    m.redraw();
-  }
-
-  private stopTracePairResize(): void {
-    if (this.tracePairResizeCleanup) {
-      this.tracePairResizeCleanup();
-      return;
-    }
-    this.tracePairResizeActive = false;
   }
 
   /** Render the preset question buttons inside the input bar controls. */
@@ -3921,23 +3871,26 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     const payload = this.getSmartPreviewPayload();
     const scenes = this.getSmartPreviewScenes().filter((scene) =>
-      this.isSmartSceneAnalysisEligible(scene));
+      this.isSmartSceneAnalysisEligible(scene),
+    );
     const sceneTypeCounts = this.countSceneTypes(scenes);
-    const buttonClass = surface === 'story'
-      ? 'button.ai-story-btn-secondary'
-      : surface === 'inline'
-        ? 'button.ai-smart-inline-btn'
-        : 'button.ai-preset-btn.ai-smart-btn';
+    const buttonClass =
+      surface === 'story'
+        ? 'button.ai-story-btn-secondary'
+        : surface === 'inline'
+          ? 'button.ai-smart-inline-btn'
+          : 'button.ai-preset-btn.ai-smart-btn';
 
     const buttons: m.Children[] = [
       m(
         buttonClass,
         {
-          onclick: () => this.handleSmartAnalysisCommand({
-            scope: 'all',
-            label: '全部场景',
-            ...(payload?.reportId ? {reportId: payload.reportId} : {}),
-          }),
+          onclick: () =>
+            this.handleSmartAnalysisCommand({
+              scope: 'all',
+              label: '全部场景',
+              ...(payload?.reportId ? {reportId: payload.reportId} : {}),
+            }),
           title: `深钻全部 ${scenes.length} 个可分析场景`,
         },
         [
@@ -3953,22 +3906,25 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         0,
       );
       if (count === 0) continue;
-      buttons.push(m(
-        buttonClass,
-        {
-          onclick: () => this.handleSmartAnalysisCommand({
-            scope: 'scene_types',
-            sceneTypes: group.sceneTypes,
-            label: group.label,
-            ...(payload?.reportId ? {reportId: payload.reportId} : {}),
-          }),
-          title: `只深钻 ${group.label} 相关的 ${count} 个场景`,
-        },
-        [
-          m('i.pf-icon', this.smartSelectionIcon(group.label)),
-          surface === 'preset' ? group.label : `${group.label} (${count})`,
-        ],
-      ));
+      buttons.push(
+        m(
+          buttonClass,
+          {
+            onclick: () =>
+              this.handleSmartAnalysisCommand({
+                scope: 'scene_types',
+                sceneTypes: group.sceneTypes,
+                label: group.label,
+                ...(payload?.reportId ? {reportId: payload.reportId} : {}),
+              }),
+            title: `只深钻 ${group.label} 相关的 ${count} 个场景`,
+          },
+          [
+            m('i.pf-icon', this.smartSelectionIcon(group.label)),
+            surface === 'preset' ? group.label : `${group.label} (${count})`,
+          ],
+        ),
+      );
     }
 
     if (buttons.length <= 1) return buttons;
@@ -3976,7 +3932,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       ? m('div.ai-story-cold-preview-actions', buttons)
       : surface === 'inline'
         ? m('div.ai-smart-inline-button-row', buttons)
-      : buttons;
+        : buttons;
   }
 
   private renderSmartSelectionInlineActions(msg: Message): m.Children {
@@ -3998,7 +3954,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const scenes = payload?.scenes || [];
     if (scenes.length === 0) return null;
 
-    const eligibleCount = payload?.eligibleSceneCount ??
+    const eligibleCount =
+      payload?.eligibleSceneCount ??
       scenes.filter((scene) => this.isSmartSceneAnalysisEligible(scene)).length;
     const verification = payload?.sceneVerification;
     const previewRows = scenes.slice(0, 18);
@@ -4025,51 +3982,76 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : null,
       m('div.ai-smart-scene-preview-table', [
         m('table', [
-          m('thead',
-            m('tr', ['#', '类型', '时间', '时长', '进程', '角色', '置信度'].map((title) =>
-              m('th', title),
-            )),
+          m(
+            'thead',
+            m(
+              'tr',
+              ['#', '类型', '时间', '时长', '进程', '角色', '置信度'].map(
+                (title) => m('th', title),
+              ),
+            ),
           ),
-          m('tbody', previewRows.map((scene, index) =>
-            m('tr', {
-              key: scene.id || `${scene.sceneType}-${index}`,
-              class: this.isSmartSceneAnalysisEligible(scene)
-                ? 'ai-smart-scene-row--eligible'
-                : 'ai-smart-scene-row--context',
-            }, [
-              m('td.col-index', `${index + 1}`),
-              m('td.col-type', [
-                m('span.ai-smart-scene-dot', {
-                  class: `ai-smart-scene-dot--${scene.severity || 'unknown'}`,
-                }),
-                SCENE_DISPLAY_NAMES[scene.sceneType] ?? scene.sceneType,
-              ]),
-              m('td.col-range', this.formatSmartSceneRange(scene)),
-              m('td.col-duration', this.formatSmartSceneDuration(scene.durationMs)),
-              m('td.col-process', scene.processName || '-'),
-              m('td.col-role', this.smartSceneRoleLabel(scene)),
-              m('td.col-confidence', this.formatSmartSceneConfidence(scene)),
-            ]),
-          )),
+          m(
+            'tbody',
+            previewRows.map((scene, index) =>
+              m(
+                'tr',
+                {
+                  key: scene.id || `${scene.sceneType}-${index}`,
+                  class: this.isSmartSceneAnalysisEligible(scene)
+                    ? 'ai-smart-scene-row--eligible'
+                    : 'ai-smart-scene-row--context',
+                },
+                [
+                  m('td.col-index', `${index + 1}`),
+                  m('td.col-type', [
+                    m('span.ai-smart-scene-dot', {
+                      class: `ai-smart-scene-dot--${scene.severity || 'unknown'}`,
+                    }),
+                    SCENE_DISPLAY_NAMES[scene.sceneType] ?? scene.sceneType,
+                  ]),
+                  m('td.col-range', this.formatSmartSceneRange(scene)),
+                  m(
+                    'td.col-duration',
+                    this.formatSmartSceneDuration(scene.durationMs),
+                  ),
+                  m('td.col-process', scene.processName || '-'),
+                  m('td.col-role', this.smartSceneRoleLabel(scene)),
+                  m(
+                    'td.col-confidence',
+                    this.formatSmartSceneConfidence(scene),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ]),
       ]),
       scenes.length > previewRows.length
-        ? m('div.ai-smart-scene-preview-more', `另有 ${scenes.length - previewRows.length} 个场景在 Story 面板中展示。`)
+        ? m(
+            'div.ai-smart-scene-preview-more',
+            `另有 ${scenes.length - previewRows.length} 个场景在 Story 面板中展示。`,
+          )
         : null,
     ]);
   }
 
   private isSmartSelectionMessage(msg: Message): boolean {
-    return msg.role === 'assistant' && (
-      !!msg.smartScenePreview ||
-      msg.content.includes('# 智能分析报告：场景盘点') &&
-      msg.content.includes('## 下一步')
+    return (
+      msg.role === 'assistant' &&
+      (!!msg.smartScenePreview ||
+        (msg.content.includes('# 智能分析报告：场景盘点') &&
+          msg.content.includes('## 下一步')))
     );
   }
 
   private hasSmartSceneSelectionReady(): boolean {
-    return this.state.storyState.status === 'selection_ready' &&
-      this.getSmartPreviewScenes().some((scene) => this.isSmartSceneAnalysisEligible(scene));
+    return (
+      this.state.storyState.status === 'selection_ready' &&
+      this.getSmartPreviewScenes().some((scene) =>
+        this.isSmartSceneAnalysisEligible(scene),
+      )
+    );
   }
 
   private getSmartPreviewPayload(): SmartScenePreviewPayload | undefined {
@@ -4078,14 +4060,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       if (payload && Array.isArray(payload.scenes)) return payload;
     }
     const report = this.state.storyState.cachedReport;
-    const scenes = Array.isArray(report?.displayedScenes) ? report.displayedScenes : [];
+    const scenes = Array.isArray(report?.displayedScenes)
+      ? report.displayedScenes
+      : [];
     if (scenes.length === 0) return undefined;
     return {
-      reportId: typeof report?.reportId === 'string' ? report.reportId : undefined,
+      reportId:
+        typeof report?.reportId === 'string' ? report.reportId : undefined,
       scenes,
       sceneVerification: report?.sceneVerification,
       eligibleSceneCount: scenes.filter((scene: any) =>
-        this.isSmartSceneAnalysisEligible(scene)).length,
+        this.isSmartSceneAnalysisEligible(scene),
+      ).length,
       sceneTypeCounts: this.countSceneTypes(scenes),
     };
   }
@@ -4094,21 +4080,30 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return this.getSmartPreviewPayload()?.scenes || [];
   }
 
-  private isSmartSceneAnalysisEligible(scene: SmartDisplayedScene | any): boolean {
-    return scene?.analysisEligible !== false &&
+  private isSmartSceneAnalysisEligible(
+    scene: SmartDisplayedScene | any,
+  ): boolean {
+    return (
+      scene?.analysisEligible !== false &&
       scene?.sceneRole !== 'marker' &&
-      scene?.sceneRole !== 'context';
+      scene?.sceneRole !== 'context'
+    );
   }
 
   private formatSmartVerificationStatus(
     verification: SmartSceneVerificationPayload,
   ): string {
     switch (verification.status) {
-      case 'passed': return '复核通过';
-      case 'needs_review': return '需复核';
-      case 'failed': return '复核失败';
-      case 'skipped': return '已跳过复核';
-      default: return verification.status || '未复核';
+      case 'passed':
+        return '复核通过';
+      case 'needs_review':
+        return '需复核';
+      case 'failed':
+        return '复核失败';
+      case 'skipped':
+        return '已跳过复核';
+      default:
+        return verification.status || '未复核';
     }
   }
 
@@ -4130,7 +4125,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private formatSmartSceneConfidence(scene: SmartDisplayedScene): string {
-    if (typeof scene.confidenceScore === 'number' && Number.isFinite(scene.confidenceScore)) {
+    if (
+      typeof scene.confidenceScore === 'number' &&
+      Number.isFinite(scene.confidenceScore)
+    ) {
       return `${Math.round(scene.confidenceScore * 100)}%`;
     }
     return scene.confidenceLevel || '-';
@@ -4154,28 +4152,37 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private smartSelectionIcon(label: string): string {
     switch (label) {
-      case '启动': return 'rocket_launch';
-      case '滑动': return 'swipe';
-      case '点击': return 'touch_app';
-      case '导航': return 'navigation';
-      case '设备': return 'power_settings_new';
-      case 'ANR': return 'warning';
-      default: return 'filter_alt';
+      case '启动':
+        return 'rocket_launch';
+      case '滑动':
+        return 'swipe';
+      case '点击':
+        return 'touch_app';
+      case '导航':
+        return 'navigation';
+      case '设备':
+        return 'power_settings_new';
+      case 'ANR':
+        return 'warning';
+      default:
+        return 'filter_alt';
     }
   }
 
   private renderQuickRunReceipt(quickRun?: Message['quickRun']): m.Children {
     if (!quickRun) return null;
-    const modeLabel = quickRun.requestedMode === 'auto'
-      ? `智能→${quickRun.resolvedMode === 'quick' ? '快速' : '完整'}`
-      : quickRun.resolvedMode === 'quick'
-        ? '快速'
-        : '完整';
-    const profileLabel = quickRun.profile === 'extended'
-      ? '延展'
-      : quickRun.profile === 'triage'
-        ? 'Triage'
-        : '';
+    const modeLabel =
+      quickRun.requestedMode === 'auto'
+        ? `智能→${quickRun.resolvedMode === 'quick' ? '快速' : '完整'}`
+        : quickRun.resolvedMode === 'quick'
+          ? '快速'
+          : '完整';
+    const profileLabel =
+      quickRun.profile === 'extended'
+        ? '延展'
+        : quickRun.profile === 'triage'
+          ? 'Triage'
+          : '';
     const contextCounts = quickRun.contextInjected;
     const injectedContextTotal =
       contextCounts.conversationTurns +
@@ -4207,30 +4214,63 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const chips: m.Children[] = [
       m('span.ai-quick-run-chip', modeLabel),
       profileLabel ? m('span.ai-quick-run-chip', profileLabel) : null,
-      m('span.ai-quick-run-chip', `${quickRun.actualTurns}/${quickRun.hardCapTurns} turns`),
+      m(
+        'span.ai-quick-run-chip',
+        `${quickRun.actualTurns}/${quickRun.hardCapTurns} turns`,
+      ),
       m('span.ai-quick-run-chip', `目标 ${quickRun.targetTurns}`),
     ];
     if (quickRun.evidence.frontendPrequeryInjected > 0) {
-      chips.push(m('span.ai-quick-run-chip', `已注入选区预查询 ${quickRun.evidence.frontendPrequeryInjected}`));
+      chips.push(
+        m(
+          'span.ai-quick-run-chip',
+          `已注入选区预查询 ${quickRun.evidence.frontendPrequeryInjected}`,
+        ),
+      );
     }
     if (quickRun.evidence.frontendPrequeryCited > 0) {
-      chips.push(m('span.ai-quick-run-chip.ok', `已引用选区预查询 ${quickRun.evidence.frontendPrequeryCited}`));
+      chips.push(
+        m(
+          'span.ai-quick-run-chip.ok',
+          `已引用选区预查询 ${quickRun.evidence.frontendPrequeryCited}`,
+        ),
+      );
     }
     if (quickRun.evidence.citedEvidenceRefs > 0) {
-      chips.push(m('span.ai-quick-run-chip', `已引用证据 ${quickRun.evidence.citedEvidenceRefs}`));
+      chips.push(
+        m(
+          'span.ai-quick-run-chip',
+          `已引用证据 ${quickRun.evidence.citedEvidenceRefs}`,
+        ),
+      );
     }
     if (injectedContextTotal > 0) {
-      chips.push(m('span.ai-quick-run-chip', {title: contextTitle}, `已注入上下文 ${injectedContextTotal}`));
+      chips.push(
+        m(
+          'span.ai-quick-run-chip',
+          {title: contextTitle},
+          `已注入上下文 ${injectedContextTotal}`,
+        ),
+      );
     }
     chips.push(m(`span.ai-quick-run-chip.${verifierClass}`, verifierLabel));
     if (quickRun.enforcement !== 'turn_cap') {
-      chips.push(m('span.ai-quick-run-chip.muted', quickRun.enforcement === 'timeout_only' ? 'Timeout 保护' : '保护不可用'));
+      chips.push(
+        m(
+          'span.ai-quick-run-chip.muted',
+          quickRun.enforcement === 'timeout_only'
+            ? 'Timeout 保护'
+            : '保护不可用',
+        ),
+      );
     }
 
     return m('div.ai-quick-run-receipt', chips);
   }
 
-  private renderAnalysisReceipt(receipt?: Message['analysisReceipt']): m.Children {
+  private renderAnalysisReceipt(
+    receipt?: Message['analysisReceipt'],
+  ): m.Children {
     if (!receipt) return null;
     const gateLabel = {
       passed: '已通过',
@@ -4261,7 +4301,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m('span.ai-quick-run-chip', `回执 v${receipt.schemaVersion}`),
       m('span.ai-quick-run-chip', `${receipt.mode}→${receipt.resolvedMode}`),
       m('span.ai-quick-run-chip', `证据 ${traceEvidenceTotal}`),
-      contextTotal > 0 ? m('span.ai-quick-run-chip', `非证据上下文 ${contextTotal}`) : null,
+      contextTotal > 0
+        ? m('span.ai-quick-run-chip', `非证据上下文 ${contextTotal}`)
+        : null,
       m(
         `span.ai-quick-run-chip.${gateClass[receipt.qualityGates.claimVerification]}`,
         `声明核验 ${gateLabel[receipt.qualityGates.claimVerification]}`,
@@ -4273,31 +4315,39 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
-  private renderQueryReview(review?: SqlQueryResult['queryReview']): m.Children {
+  private renderQueryReview(
+    review?: SqlQueryResult['queryReview'],
+  ): m.Children {
     if (!review) return null;
     const observed = review.observedExecution ?? {};
     const producer = review.producer ?? {};
     const source = review.source ?? {};
     const reads = (review.reads ?? []).map((read) => {
-      const columns = read.columns && read.columns.length > 0
-        ? ` (${read.columns.slice(0, 6).join(', ')}${read.columns.length > 6 ? ', ...' : ''})`
-        : '';
+      const columns =
+        read.columns && read.columns.length > 0
+          ? ` (${read.columns.slice(0, 6).join(', ')}${read.columns.length > 6 ? ', ...' : ''})`
+          : '';
       return `${read.table}${columns} · ${read.confidence}`;
     });
-    const filters = (review.filters ?? []).map((filter) =>
-      `${this.truncateQueryReviewText(filter.expression, 180)} · ${filter.confidence}`,
+    const filters = (review.filters ?? []).map(
+      (filter) =>
+        `${this.truncateQueryReviewText(filter.expression, 180)} · ${filter.confidence}`,
     );
-    const outputs = (review.outputShape ?? []).map((output) =>
-      `${output.name}${output.type ? `:${output.type}` : ''}${output.required ? ' required' : ''}`,
+    const outputs = (review.outputShape ?? []).map(
+      (output) =>
+        `${output.name}${output.type ? `:${output.type}` : ''}${output.required ? ' required' : ''}`,
     );
-    const guardrails = (review.guardrails ?? []).map((guardrail) =>
-      `${guardrail.severity}: ${this.truncateQueryReviewText(guardrail.message || guardrail.ruleId, 180)}`,
+    const guardrails = (review.guardrails ?? []).map(
+      (guardrail) =>
+        `${guardrail.severity}: ${this.truncateQueryReviewText(guardrail.message || guardrail.ruleId, 180)}`,
     );
     const chips = [
       producer.kind || 'unknown_producer',
       source.skillId ? `skill=${source.skillId}` : '',
       source.stepId ? `step=${source.stepId}` : '',
-      source.evidenceRefId ? `evidence=${this.compactQueryReviewId(source.evidenceRefId)}` : '',
+      source.evidenceRefId
+        ? `evidence=${this.compactQueryReviewId(source.evidenceRefId)}`
+        : '',
       typeof observed.rowCount === 'number' ? `rows=${observed.rowCount}` : '',
       typeof observed.durationMs === 'number' ? `${observed.durationMs}ms` : '',
       observed.truncated ? 'truncated' : '',
@@ -4312,9 +4362,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m('div.ai-query-review-body', [
         m('div.ai-query-review-purpose', review.purpose),
         chips.length > 0
-          ? m('div.ai-query-review-chips', chips.map((chip) =>
-              m('span.ai-query-review-chip', chip),
-            ))
+          ? m(
+              'div.ai-query-review-chips',
+              chips.map((chip) => m('span.ai-query-review-chip', chip)),
+            )
           : null,
         this.renderQueryReviewList('Reads', reads),
         this.renderQueryReviewList('Filters', filters),
@@ -4335,9 +4386,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (items.length === 0) return null;
     return m('div.ai-query-review-section', [
       m('div.ai-query-review-section-title', label),
-      m('ul', items.slice(0, 8).map((item) =>
-        m('li', this.truncateQueryReviewText(item, 220)),
-      )),
+      m(
+        'ul',
+        items
+          .slice(0, 8)
+          .map((item) => m('li', this.truncateQueryReviewText(item, 220))),
+      ),
       items.length > 8
         ? m('div.ai-query-review-more', `+${items.length - 8} more`)
         : null,
@@ -4345,29 +4399,43 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private truncateQueryReviewText(text: string, maxLength: number): string {
-    return text.length <= maxLength ? text : `${text.slice(0, maxLength - 3)}...`;
+    return text.length <= maxLength
+      ? text
+      : `${text.slice(0, maxLength - 3)}...`;
   }
 
   private compactQueryReviewId(value: string): string {
     return value.length <= 28 ? value : `${value.slice(0, 25)}...`;
   }
 
-  private renderUiActionProposals(proposals?: Message['uiActionProposals']): m.Children {
+  private renderUiActionProposals(
+    proposals?: Message['uiActionProposals'],
+  ): m.Children {
     if (!proposals || proposals.length === 0) return null;
-    return m('div.ai-ui-action-proposals', proposals.map((proposal) =>
-      m('button.ai-ui-action-btn', {
-        key: proposal.id,
-        title: proposal.reason,
-        onclick: () => this.handleUiActionProposal(proposal),
-      }, [
-        m('i.pf-icon', uiActionProposalIcon(proposal.kind)),
-        m('span', proposal.title),
-      ]),
-    ));
+    return m(
+      'div.ai-ui-action-proposals',
+      proposals.map((proposal) =>
+        m(
+          'button.ai-ui-action-btn',
+          {
+            key: proposal.id,
+            title: proposal.reason,
+            onclick: () => this.handleUiActionProposal(proposal),
+          },
+          [
+            m('i.pf-icon', uiActionProposalIcon(proposal.kind)),
+            m('span', proposal.title),
+          ],
+        ),
+      ),
+    );
   }
 
   private handleUiActionProposal(proposal: UiActionProposalV1): void {
-    if (proposal.kind === 'navigate_timeline' || proposal.kind === 'navigate_range') {
+    if (
+      proposal.kind === 'navigate_timeline' ||
+      proposal.kind === 'navigate_range'
+    ) {
       const navigation = executeUiNavigationProposal(
         proposal,
         this.trace,
@@ -4379,7 +4447,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     const target = findUiActionEvidenceMessage(proposal, this.state.messages);
     if (!target) {
-      this.showUiActionError(proposal, 'matching evidence table is not available in this conversation');
+      this.showUiActionError(
+        proposal,
+        'matching evidence table is not available in this conversation',
+      );
       return;
     }
 
@@ -4390,9 +4461,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
-    const pinned = buildPinnedResultForUiAction(proposal, target, this.generateId());
+    const pinned = buildPinnedResultForUiAction(
+      proposal,
+      target,
+      this.generateId(),
+    );
     if (!pinned) {
-      this.showUiActionError(proposal, 'matching evidence message has no table payload');
+      this.showUiActionError(
+        proposal,
+        'matching evidence message has no table payload',
+      );
       return;
     }
     this.storePinnedResult(pinned);
@@ -4443,70 +4521,64 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       },
     ] as const;
     const currentMode = modes.find((mode) => mode.id === current) ?? modes[2];
-    return m(
-      'div.ai-mode-selector',
-      [
-        m(
-          'button.ai-mode-trigger',
-          {
-            title: '选择分析模式',
-            onclick: (e: MouseEvent) => {
-              e.preventDefault();
-              e.stopPropagation();
-              this.state.showAnalysisModeMenu =
-                !this.state.showAnalysisModeMenu;
-            },
+    return m('div.ai-mode-selector', [
+      m(
+        'button.ai-mode-trigger',
+        {
+          title: '选择分析模式',
+          onclick: (e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.state.showAnalysisModeMenu = !this.state.showAnalysisModeMenu;
           },
-          [
-            m('span.ai-mode-trigger-icon', currentMode.icon),
-            m('span', currentMode.label),
-            m('i.pf-icon', 'keyboard_arrow_down'),
-          ],
-        ),
-        this.state.showAnalysisModeMenu
-          ? m(
-              'div.ai-mode-menu',
-              modes.map((mode) => {
-                const disabled = mode.id === 'fast' && fastDisabled;
-                const active = current === mode.id;
-                return m(
-                  'button.ai-mode-menu-item',
-                  {
-                    class: [
-                      active ? 'active' : '',
-                      disabled ? 'disabled' : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' '),
-                    title: disabled
-                      ? '对比模式下需完整分析才能利用参考 Trace 上下文'
-                      : mode.title,
-                    disabled,
-                    onclick: (e: MouseEvent) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (!disabled) {
-                        this.state.showAnalysisModeMenu = false;
-                        this.onAnalysisModeChange(mode.id);
-                      }
-                    },
+        },
+        [
+          m('span.ai-mode-trigger-icon', currentMode.icon),
+          m('span', currentMode.label),
+          m('i.pf-icon', 'keyboard_arrow_down'),
+        ],
+      ),
+      this.state.showAnalysisModeMenu
+        ? m(
+            'div.ai-mode-menu',
+            modes.map((mode) => {
+              const disabled = mode.id === 'fast' && fastDisabled;
+              const active = current === mode.id;
+              return m(
+                'button.ai-mode-menu-item',
+                {
+                  class: [active ? 'active' : '', disabled ? 'disabled' : '']
+                    .filter(Boolean)
+                    .join(' '),
+                  title: disabled
+                    ? '对比模式下需完整分析才能利用参考 Trace 上下文'
+                    : mode.title,
+                  disabled,
+                  onclick: (e: MouseEvent) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!disabled) {
+                      this.state.showAnalysisModeMenu = false;
+                      this.onAnalysisModeChange(mode.id);
+                    }
                   },
-                  [
-                    m('span.ai-mode-menu-icon', mode.icon),
-                    m('span.ai-mode-menu-label', mode.label),
-                    active ? m('i.pf-icon', 'check') : null,
-                  ],
-                );
-              }),
-            )
-          : null,
-      ],
-    );
+                },
+                [
+                  m('span.ai-mode-menu-icon', mode.icon),
+                  m('span.ai-mode-menu-label', mode.label),
+                  active ? m('i.pf-icon', 'check') : null,
+                ],
+              );
+            }),
+          )
+        : null,
+    ]);
   }
 
   /** Switch analysis mode. Changing mode mid-session clears agentSessionId so the backend
    *  starts a fresh SDK session and avoids context mix between quick and full paths. */
   private onAnalysisModeChange(newMode: 'fast' | 'full' | 'auto'): void {
+    if (this.isAnalysisIdentityLocked()) return;
     if (newMode === this.state.analysisMode) return;
     const hadSession = !!this.state.agentSessionId;
     this.state.analysisMode = newMode;
@@ -4526,6 +4598,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private onProviderSelectionChange(): void {
+    if (this.isAnalysisIdentityLocked()) return;
     const hadSession = !!this.state.agentSessionId;
     if (hadSession) {
       this.state.agentSessionId = null;
@@ -4543,7 +4616,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private onWorkspaceSelectionChange(workspaceId: string): void {
+    if (this.isAnalysisIdentityLocked()) return;
     const previousContext = getSmartPerfettoRequestContext();
+    if (workspaceId === previousContext.workspaceId) return;
+    this.flushSessionSave();
+    this.saveCurrentSession();
+    this.cancelSSEConnection();
     const nextWorkspaceId = setSmartPerfettoWorkspaceId(
       workspaceId,
       previousContext.tenantId,
@@ -4551,7 +4629,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     );
     if (nextWorkspaceId === previousContext.workspaceId) return;
 
-    this.cancelSSEConnection();
+    this.tracePairWorkspaceController.resetScope();
+    resetTransientState();
+    this.state.pendingTraceContext = null;
     this.availableTraces = [];
     this.state.showTracePicker = false;
     this.clearTracePairSessionState();
@@ -4599,7 +4679,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
   }
 
-  private sqlFormatForMessage(messageId: string, rawSql: string): CachedSqlFormat {
+  private sqlFormatForMessage(
+    messageId: string,
+    rawSql: string,
+  ): CachedSqlFormat {
     const raw = rawSql.trim();
     if (!raw) {
       return {raw, text: '', status: 'formatted'};
@@ -4625,6 +4708,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private saveSettings(newSettings: AISettings) {
+    if (this.isAnalysisIdentityLocked()) return;
     this.state.settings = newSettings;
     sessionManager.saveSettings(newSettings);
     this.initBackendStatus();
@@ -4756,7 +4840,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    */
   private migrateOldHistoryToSession(): boolean {
     const fingerprint = this.state.currentTraceFingerprint || 'unknown';
-    const traceName = this.trace?.traceInfo?.traceTitle || 'Migrated Trace';
+    const traceName = getCanonicalTraceName(
+      this.trace?.traceInfo,
+      'Migrated Trace',
+    );
     return sessionManager.migrateOldHistoryToSession(fingerprint, traceName);
   }
 
@@ -4838,7 +4925,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    */
   private createNewSession(): AISession {
     const fingerprint = this.state.currentTraceFingerprint || 'unknown';
-    const traceName = this.trace?.traceInfo?.traceTitle || 'Untitled Trace';
+    const traceName = getCanonicalTraceName(
+      this.trace?.traceInfo,
+      'Untitled Trace',
+    );
 
     const session = sessionManager.createSession(fingerprint, traceName);
 
@@ -4902,7 +4992,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   /**
    * 加载指定 Session
    */
-  loadSession(sessionId: string): boolean {
+  loadSession(
+    sessionId: string,
+    options: {preserveLiveTracePair?: boolean} = {},
+  ): boolean {
+    if (this.isAnalysisIdentityLocked()) return false;
     const session = sessionManager.loadSession(sessionId);
     if (!session) return false;
 
@@ -4943,7 +5037,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.agentSessionId = null;
     }
 
-    const tracePairRestored = this.restoreTracePairStateFromSession(session);
+    const tracePairRestored = this.restoreTracePairStateFromSession(
+      session,
+      options.preserveLiveTracePair === true,
+    );
     if (session.type === 'comparison' && !tracePairRestored) {
       this.state.agentSessionId = null;
       this.state.agentRunId = null;
@@ -5158,10 +5255,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         headers['x-api-key'] = trimmedKey;
         headers['Authorization'] = `Bearer ${trimmedKey}`;
       }
-      const response = await fetch(
-        `${backendUrl.replace(/\/+$/, '')}/health`,
-        {headers: buildSmartPerfettoContextHeaders(headers)},
-      );
+      const response = await fetch(`${backendUrl.replace(/\/+$/, '')}/health`, {
+        headers: buildSmartPerfettoContextHeaders(headers),
+      });
       if (!response.ok) return {connected: false};
       const data = await response.json();
       const aiEngine = data.aiEngine || {};
@@ -5284,7 +5380,9 @@ Click ⚙️ to configure backend connection.`;
 
     if (!input || this.state.isLoading) return;
     if (this.shouldBlockModelBackedRequest(input)) {
-      this.addAiDisabledMessage(input.startsWith('/') ? input.split(/\s+/)[0] : 'analysis');
+      this.addAiDisabledMessage(
+        input.startsWith('/') ? input.split(/\s+/)[0] : 'analysis',
+      );
       m.redraw();
       return;
     }
@@ -5348,7 +5446,9 @@ Click ⚙️ to configure backend connection.`;
     this.state.streamingFlow = createStreamingFlowState();
   }
 
-  private dataSourceKindOrdinalsFromRefs(refs: DataSourceContext[]): Record<string, number> {
+  private dataSourceKindOrdinalsFromRefs(
+    refs: DataSourceContext[],
+  ): Record<string, number> {
     const ordinals: Record<string, number> = {};
     for (const ref of refs) {
       const kind = ref.kind || 'table';
@@ -5646,7 +5746,10 @@ Click ⚙️ to configure backend connection.`;
       this.applySnapshotCreatedEvent(data);
     } else if (eventType === 'analysis_completed') {
       this.applyAnalysisCompletedSnapshotFallback(data);
-    } else if (eventType === 'track_data' || eventType.startsWith('scene_story_')) {
+    } else if (
+      eventType === 'track_data' ||
+      eventType.startsWith('scene_story_')
+    ) {
       this.applySmartStoryEvent(eventType, data);
     }
 
@@ -5672,30 +5775,37 @@ Click ⚙️ to configure backend connection.`;
 
   private applySmartStoryEvent(eventType: string, data?: any): void {
     const payload =
-      data && typeof data === 'object' && data.data && typeof data.data === 'object'
+      data &&
+      typeof data === 'object' &&
+      data.data &&
+      typeof data.data === 'object'
         ? data.data
         : data;
     if (!payload || typeof payload !== 'object') return;
 
     if (eventType === 'scene_story_smart_eta_refined') {
       const expectedDeepDives =
-        typeof payload.expectedDeepDives === 'number' ? payload.expectedDeepDives : 0;
+        typeof payload.expectedDeepDives === 'number'
+          ? payload.expectedDeepDives
+          : 0;
       const etaSec = typeof payload.etaSec === 'number' ? payload.etaSec : 0;
       this.state.loadingPhase =
         payload.selectionMode === 'selection_required'
           ? `智能分析已识别 ${expectedDeepDives} 个可深钻场景`
           : expectedDeepDives > 0
-          ? `智能分析预计深钻 ${expectedDeepDives} 个场景，约 ${etaSec}s`
-          : '智能分析正在生成报告';
+            ? `智能分析预计深钻 ${expectedDeepDives} 个场景，约 ${etaSec}s`
+            : '智能分析正在生成报告';
       this.state.storyState = {
         ...this.state.storyState,
         preview: {
-          traceDurationSec: this.state.storyState.preview?.traceDurationSec ?? 0,
+          traceDurationSec:
+            this.state.storyState.preview?.traceDurationSec ?? 0,
           cached: null,
           estimate: {
             expectedScenes: expectedDeepDives,
             etaSec,
-            estimatedUsd: this.state.storyState.preview?.estimate.estimatedUsd ?? 0,
+            estimatedUsd:
+              this.state.storyState.preview?.estimate.estimatedUsd ?? 0,
             confidence: payload.etaConfidence === 'high' ? 'high' : 'medium',
           },
         },
@@ -5735,7 +5845,8 @@ Click ⚙️ to configure backend connection.`;
         analysisId: this.state.agentSessionId,
         cachedReport: {
           ...(this.state.storyState.cachedReport || {}),
-          reportId: typeof payload.reportId === 'string' ? payload.reportId : undefined,
+          reportId:
+            typeof payload.reportId === 'string' ? payload.reportId : undefined,
           sceneVerification: payload.sceneVerification,
           sceneTypeCounts: payload.sceneTypeCounts,
         },
@@ -5780,7 +5891,10 @@ Click ⚙️ to configure backend connection.`;
       return;
     }
 
-    if (eventType === 'scene_story_failed' || eventType === 'scene_story_dropped') {
+    if (
+      eventType === 'scene_story_failed' ||
+      eventType === 'scene_story_dropped'
+    ) {
       this.state.storyState = {
         ...this.state.storyState,
         status: 'running',
@@ -5791,8 +5905,12 @@ Click ⚙️ to configure backend connection.`;
     if (eventType === 'scene_story_cancelled') {
       this.state.storyState = {
         ...this.state.storyState,
-        status: payload.scope === 'session' ? 'failed' : this.state.storyState.status,
-        lastError: payload.scope === 'session' ? '智能分析已取消' : this.state.storyState.lastError,
+        status:
+          payload.scope === 'session' ? 'failed' : this.state.storyState.status,
+        lastError:
+          payload.scope === 'session'
+            ? '智能分析已取消'
+            : this.state.storyState.lastError,
       };
     }
   }
@@ -5806,8 +5924,7 @@ Click ⚙️ to configure backend connection.`;
 
     this.state.latestAnalysisSnapshot = {
       snapshotId,
-      status:
-        typeof payload.status === 'string' ? payload.status : 'partial',
+      status: typeof payload.status === 'string' ? payload.status : 'partial',
       sceneType:
         typeof payload.sceneType === 'string' ? payload.sceneType : 'general',
       metricCount:
@@ -6332,9 +6449,8 @@ Click ⚙️ to configure backend connection.`;
       selectionContext.startNs !== undefined &&
       selectionContext.endNs !== undefined
     ) {
-      const trackScope = this.buildTrackScopeFromSelectionContext(
-        selectionContext,
-      );
+      const trackScope =
+        this.buildTrackScopeFromSelectionContext(selectionContext);
       return {
         startNs: selectionContext.startNs,
         endNs: selectionContext.endNs,
@@ -7280,12 +7396,19 @@ Click ⚙️ to configure backend connection.`;
     return RANGE_REFERENCE_PATTERNS.some((pattern) => pattern.test(message));
   }
 
-  private captureVisibleWindowContext(message?: string): SelectionContext | null {
-    if (!this.trace || !this.messageReferencesCurrentRange(message)) return null;
+  private captureVisibleWindowContext(
+    message?: string,
+  ): SelectionContext | null {
+    if (!this.trace || !this.messageReferencesCurrentRange(message))
+      return null;
     const visibleSpan = this.trace.timeline.visibleWindow.toTimeSpan();
     const startNs = Number(visibleSpan.start);
     const endNs = Number(visibleSpan.end);
-    if (!Number.isFinite(startNs) || !Number.isFinite(endNs) || endNs <= startNs) {
+    if (
+      !Number.isFinite(startNs) ||
+      !Number.isFinite(endNs) ||
+      endNs <= startNs
+    ) {
       return null;
     }
     return {
@@ -7842,6 +7965,9 @@ Click ⚙️ to configure backend connection.`;
       return;
     }
 
+    const analysisRequest: AnalysisRequestToken =
+      this.analysisRequestCoordinator.begin();
+
     this.setLoadingState(true);
     this.state.completionHandled = false; // Reset completion flag for new analysis
     this.state.displayedSkillProgress.clear(); // Clear progress tracking for new analysis
@@ -7888,11 +8014,13 @@ Click ⚙️ to configure backend connection.`;
         },
       };
 
-      // Comparison mode: include reference trace ID
-      if (this.state.referenceTraceId) {
-        requestBody.referenceTraceId = this.state.referenceTraceId;
-        const tracePairContext = this.buildTracePairContext();
-        if (tracePairContext) {
+      const tracePairContext = this.buildTracePairContext();
+      if (tracePairContext) {
+        const referencePane = tracePairContext.panes.find(
+          (pane) => pane.traceSide === 'reference',
+        );
+        if (referencePane) {
+          requestBody.referenceTraceId = referencePane.traceId;
           requestBody.options.tracePairContext = tracePairContext;
         }
       }
@@ -7906,7 +8034,7 @@ Click ⚙️ to configure backend connection.`;
             '[AIPanel] Injecting selectionContext:',
             selectionContext,
           );
-        if (!this.state.referenceTraceId && !this.state.pendingTraceContext) {
+        if (!tracePairContext && !this.state.pendingTraceContext) {
           const datasets = await this.querySelectionData(selectionContext);
           this.state.pendingTraceContext =
             datasets.length > 0 ? datasets : null;
@@ -7915,12 +8043,15 @@ Click ⚙️ to configure backend connection.`;
 
       // Attach pre-queried trace data (set by quick-action buttons) and consume it
       if (this.state.pendingTraceContext) {
-        requestBody.traceContext = this.state.pendingTraceContext.map(dataset => ({
-          ...dataset,
-          traceSide: dataset.traceSide || 'current',
-          paneSide: dataset.paneSide || 'left',
-          traceId: dataset.traceId || this.state.backendTraceId || undefined,
-        }));
+        requestBody.traceContext = this.state.pendingTraceContext.map(
+          (dataset) => ({
+            ...dataset,
+            traceSide: dataset.traceSide || 'current',
+            paneSide:
+              dataset.paneSide || tracePairContext?.primarySide || 'left',
+            traceId: dataset.traceId || this.state.backendTraceId || undefined,
+          }),
+        );
         this.state.pendingTraceContext = null;
       }
 
@@ -7932,6 +8063,15 @@ Click ⚙️ to configure backend connection.`;
             '[AIPanel] Reusing Agent session for multi-turn dialogue:',
             this.state.agentSessionId,
           );
+      }
+
+      const beforeDispatch =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      if (beforeDispatch !== 'active') {
+        if (beforeDispatch === 'cancelled') {
+          this.applyConfirmedCancellation('cancelled');
+        }
+        return;
       }
 
       const response = await this.fetchBackend(apiUrl, {
@@ -7981,11 +8121,35 @@ Click ⚙️ to configure backend connection.`;
         throw new Error(data.error || 'Analysis failed');
       }
 
+      const sessionId = data.sessionId;
+      const responseRunId =
+        typeof data.runId === 'string' ? data.runId.trim() : '';
+      const afterDispatch =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      if (afterDispatch !== 'active') {
+        if (sessionId && responseRunId) {
+          if (afterDispatch === 'cancelled') {
+            this.state.agentSessionId = sessionId;
+            this.applyAgentObservability(data);
+            await this.cancelAgentSessionAndUpdate(sessionId, responseRunId);
+          } else {
+            await this.requestBackendCancellation(sessionId, responseRunId);
+          }
+        } else if (afterDispatch === 'cancelled') {
+          this.handleCancellationFailure(
+            sessionId || '',
+            new Error('分析回执缺少可取消的 runId'),
+          );
+        }
+        return;
+      }
+
       const requestIdFromHeader = response.headers.get('x-request-id') || '';
       const observabilityUpdated = this.applyAgentObservability({
         ...data,
         requestId: data.requestId || requestIdFromHeader,
       });
+      this.analysisRequestCoordinator.finish(analysisRequest);
       if (observabilityUpdated) {
         if (DEBUG_AI_PANEL)
           console.log(
@@ -7999,7 +8163,6 @@ Click ⚙️ to configure backend connection.`;
       }
 
       // Use SSE for real-time progress updates
-      const sessionId = data.sessionId;
       if (sessionId) {
         // Save sessionId for multi-turn dialogue
         // Only save if this is a new session or reusing existing session
@@ -8031,6 +8194,13 @@ Click ⚙️ to configure backend connection.`;
           console.log('[AIPanel] No sessionId in response, data:', data);
       }
     } catch (e: any) {
+      const requestDisposition =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      if (requestDisposition === 'cancelled') {
+        this.handleCancellationFailure(this.state.agentSessionId || '', e);
+        return;
+      }
+      if (requestDisposition === 'stale') return;
       const message = e?.message || 'Failed to start analysis';
       const quotaStopped =
         e?.terminalStatus === 'quota_exceeded' ||
@@ -8051,13 +8221,19 @@ Click ⚙️ to configure backend connection.`;
         });
       }
     } finally {
-      // Always reset loading state, even on early returns via thrown errors
-      this.setLoadingState(false);
+      const requestDisposition =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      this.analysisRequestCoordinator.finish(analysisRequest);
+      if (requestDisposition !== 'stale' && !this.analysisCancellationPending) {
+        this.setLoadingState(false);
+      }
       m.redraw();
     }
   }
 
-  private async handleSmartAnalysisCommand(selection?: SmartSceneSelectionRequest) {
+  private async handleSmartAnalysisCommand(
+    selection?: SmartSceneSelectionRequest,
+  ) {
     if (this.isAiDisabled()) {
       this.addAiDisabledMessage('智能分析');
       m.redraw();
@@ -8085,8 +8261,13 @@ Click ⚙️ to configure backend connection.`;
       return;
     }
 
+    const analysisRequest: AnalysisRequestToken =
+      this.analysisRequestCoordinator.begin();
+
     const smartAction = selection ? 'analyze' : 'preview';
-    const previewPayload = selection ? this.getSmartPreviewPayload() : undefined;
+    const previewPayload = selection
+      ? this.getSmartPreviewPayload()
+      : undefined;
     const boundSelection = selection
       ? {
           ...selection,
@@ -8119,7 +8300,9 @@ Click ⚙️ to configure backend connection.`;
     updateAISharedState({
       status: 'analyzing',
       findings: [],
-      currentPhase: boundSelection ? `智能分析：${boundSelection.label || '所选场景'}` : '智能分析场景盘点',
+      currentPhase: boundSelection
+        ? `智能分析：${boundSelection.label || '所选场景'}`
+        : '智能分析场景盘点',
       issueCount: 0,
     });
     if (this.trace) clearAIFindingNotes(this.trace);
@@ -8130,6 +8313,15 @@ Click ⚙️ to configure backend connection.`;
         this.state.settings.backendUrl,
         '/analyze',
       );
+      const beforeDispatch =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      if (beforeDispatch !== 'active') {
+        if (beforeDispatch === 'cancelled') {
+          this.applyConfirmedCancellation('cancelled');
+        }
+        return;
+      }
+
       const response = await this.fetchBackend(apiUrl, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -8163,13 +8355,37 @@ Click ⚙️ to configure backend connection.`;
         throw new Error(data.error || 'Smart analysis failed');
       }
 
+      const sessionId = data.sessionId;
+      const responseRunId =
+        typeof data.runId === 'string' ? data.runId.trim() : '';
+      const afterDispatch =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      if (afterDispatch !== 'active') {
+        if (sessionId && responseRunId) {
+          if (afterDispatch === 'cancelled') {
+            this.state.agentSessionId = sessionId;
+            this.state.storyState.analysisId = sessionId;
+            this.applyAgentObservability(data);
+            await this.cancelAgentSessionAndUpdate(sessionId, responseRunId);
+          } else {
+            await this.requestBackendCancellation(sessionId, responseRunId);
+          }
+        } else if (afterDispatch === 'cancelled') {
+          this.handleCancellationFailure(
+            sessionId || '',
+            new Error('分析回执缺少可取消的 runId'),
+          );
+        }
+        return;
+      }
+
       const requestIdFromHeader = response.headers.get('x-request-id') || '';
       this.applyAgentObservability({
         ...data,
         requestId: data.requestId || requestIdFromHeader,
       });
+      this.analysisRequestCoordinator.finish(analysisRequest);
 
-      const sessionId = data.sessionId;
       if (sessionId) {
         this.state.agentSessionId = sessionId;
         this.state.storyState.analysisId = sessionId;
@@ -8177,6 +8393,13 @@ Click ⚙️ to configure backend connection.`;
         await this.listenToAgentSSE(sessionId);
       }
     } catch (e: any) {
+      const requestDisposition =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      if (requestDisposition === 'cancelled') {
+        this.handleCancellationFailure(this.state.agentSessionId || '', e);
+        return;
+      }
+      if (requestDisposition === 'stale') return;
       const message = e?.message || 'Failed to start smart analysis';
       updateAISharedState({
         status:
@@ -8199,7 +8422,12 @@ Click ⚙️ to configure backend connection.`;
         timestamp: Date.now(),
       });
     } finally {
-      this.setLoadingState(false);
+      const requestDisposition =
+        this.analysisRequestCoordinator.disposition(analysisRequest);
+      this.analysisRequestCoordinator.finish(analysisRequest);
+      if (requestDisposition !== 'stale' && !this.analysisCancellationPending) {
+        this.setLoadingState(false);
+      }
       m.redraw();
     }
   }
@@ -8228,40 +8456,142 @@ Click ⚙️ to configure backend connection.`;
     this.state.sseConnectionState = 'disconnected';
   }
 
-  /**
-   * User-initiated analysis cancellation. Aborts the SSE stream,
-   * resets loading state, and adds a cancellation notice to chat.
-   */
-  private cancelAnalysis(): void {
-    this.cancelSSEConnection();
+  private async requestBackendCancellation(
+    sessionId: string,
+    runId: string,
+  ): Promise<{status: string; reason?: string}> {
+    const cancelUrl = buildAssistantApiV1Url(
+      this.state.settings.backendUrl,
+      `/${sessionId}/cancel`,
+    );
+    const response = await this.fetchBackend(cancelUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({runId}),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload: unknown = await response.json();
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      !('status' in payload) ||
+      typeof payload.status !== 'string' ||
+      !('runId' in payload) ||
+      payload.runId !== runId
+    ) {
+      throw new Error('取消接口未返回匹配 runId 的终态');
+    }
+    return {
+      status: payload.status,
+      ...('reason' in payload && typeof payload.reason === 'string'
+        ? {reason: payload.reason}
+        : {}),
+    };
+  }
+
+  private applyConfirmedCancellation(
+    status: string,
+    reason = 'Analysis cancelled by user',
+  ): void {
+    this.analysisCancellationPending = false;
     this.setLoadingState(false);
-    this.resetStreamingFlow();
-    this.resetStreamingAnswer();
-    // P1-4: Best-effort notify backend to stop consuming tokens
-    if (this.state.agentSessionId) {
-      const cancelUrl = buildAssistantApiV1Url(
-        this.state.settings.backendUrl,
-        `/${this.state.agentSessionId}/cancel`,
-      );
-      this.fetchBackend(cancelUrl, {method: 'POST'}).catch(() => {});
+    if (status !== 'cancelled') {
+      updateAISharedState({
+        status: status === 'completed' ? 'completed' : 'error',
+        currentPhase: '',
+      });
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `停止请求到达时，分析状态已是 ${status}。`,
+        timestamp: Date.now(),
+      });
+      this.saveCurrentSession();
+      m.redraw();
+      return;
     }
-    // P2-10: Mark orphaned streaming-flow messages as cancelled
-    for (const msg of this.state.messages) {
-      if (msg.flowTag === 'streaming_flow') {
-        msg.content = '_分析已取消_';
-      }
-    }
-    // P1-F2: Clear agentSessionId after cancellation to avoid resuming a mid-cancelled session
+
+    this.handleSSEEvent('analysis_cancelled', {
+      data: {
+        reason,
+        terminalRunStatus: 'cancelled',
+      },
+    });
     this.state.agentSessionId = null;
     this.clearAgentObservability();
     this.saveCurrentSession();
+    m.redraw();
+  }
+
+  private handleCancellationFailure(sessionId: string, error: unknown): void {
+    this.analysisCancellationPending = false;
+    if (!this.state.agentSessionId?.trim()) {
+      this.state.agentSessionId = null;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: '分析已取消。下次分析将以新会话开始。',
+      content: `停止分析失败：${detail}。请重试。`,
       timestamp: Date.now(),
     });
+    if (sessionId && this.state.agentSessionId === sessionId) {
+      this.setLoadingState(true);
+      updateAISharedState({
+        status: 'analyzing',
+        currentPhase: '停止失败，请重试',
+      });
+      void this.listenToAgentSSE(sessionId, true);
+    } else {
+      this.setLoadingState(false);
+      updateAISharedState({status: 'error', currentPhase: ''});
+    }
+    this.saveCurrentSession();
     m.redraw();
+  }
+
+  private cancelAgentSessionAndUpdate(
+    sessionId: string,
+    runId: string,
+  ): Promise<void> {
+    if (this.analysisCancellationRequest) {
+      return this.analysisCancellationRequest;
+    }
+    const request = this.requestBackendCancellation(sessionId, runId)
+      .then(({status, reason}) =>
+        this.applyConfirmedCancellation(status, reason),
+      )
+      .catch((error: unknown) =>
+        this.handleCancellationFailure(sessionId, error),
+      )
+      .finally(() => {
+        this.analysisCancellationRequest = null;
+      });
+    this.analysisCancellationRequest = request;
+    return request;
+  }
+
+  private cancelAnalysis(): Promise<void> {
+    if (this.analysisCancellationRequest) {
+      return this.analysisCancellationRequest;
+    }
+    const waitingForRunIdentity =
+      this.analysisRequestCoordinator.requestCancel();
+    this.analysisCancellationPending = true;
+    this.cancelSSEConnection();
+    this.state.loadingPhase = '正在停止分析…';
+    updateAISharedState({status: 'analyzing', currentPhase: '正在停止分析'});
+    m.redraw();
+
+    if (waitingForRunIdentity) return Promise.resolve();
+
+    const sessionId = this.state.agentSessionId;
+    const runId = this.state.agentRunId;
+    return sessionId && runId
+      ? this.cancelAgentSessionAndUpdate(sessionId, runId)
+      : Promise.resolve();
   }
 
   /**
@@ -8544,7 +8874,12 @@ Click ⚙️ to configure backend connection.`;
       if (!res.ok) return false;
       const body = await res.json();
       const status = body.status || body.state;
-      if (status === 'completed' || status === 'quota_exceeded' || status === 'cancelled' || status === 'failed') {
+      if (
+        status === 'completed' ||
+        status === 'quota_exceeded' ||
+        status === 'cancelled' ||
+        status === 'failed'
+      ) {
         if (DEBUG_AI_PANEL)
           console.log(
             '[AIPanel] Session already',
@@ -8559,11 +8894,11 @@ Click ⚙️ to configure backend connection.`;
               ? 'error'
               : status === 'cancelled'
                 ? 'cancelled'
-              : status === 'quota_exceeded'
-                ? 'quota_exceeded'
-                : body.result?.partial === true
-                  ? 'partial'
-                : 'completed',
+                : status === 'quota_exceeded'
+                  ? 'quota_exceeded'
+                  : body.result?.partial === true
+                    ? 'partial'
+                    : 'completed',
           currentPhase: '',
           ...(status === 'failed' ? {} : {lastAnalysisTime: Date.now()}),
         });
@@ -8597,9 +8932,8 @@ Click ⚙️ to configure backend connection.`;
             architecture: 'agent-driven',
             data: {
               ...body.result,
-              terminalRunStatus: status === 'quota_exceeded'
-                ? 'quota_exceeded'
-                : 'completed',
+              terminalRunStatus:
+                status === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
             },
             timestamp: Date.now(),
           });
@@ -8673,7 +9007,9 @@ Click ⚙️ to configure backend connection.`;
     const observedFlow = result.observedFlow;
     const detection = result.detection;
     const pipelineType = teachingPrimaryPipelineId(result);
-    const confidence = formatTeachingConfidence(teachingPrimaryConfidence(result));
+    const confidence = formatTeachingConfidence(
+      teachingPrimaryConfidence(result),
+    );
     const lines: string[] = [
       '## 🎓 渲染管线教学',
       '',
@@ -8725,19 +9061,24 @@ Click ⚙️ to configure backend connection.`;
     lines.push(`- **观测泳道**: ${observedFlow?.lanes?.length || 0}`);
     lines.push(`- **实际事件**: ${observedFlow?.events?.length || 0}`);
     lines.push(`- **调度依赖**: ${observedFlow?.dependencies?.length || 0}`);
-    lines.push(`- **Critical task / Wakeup**: ${observedFlow?.criticalTasks?.length || 0}`);
+    lines.push(
+      `- **Critical task / Wakeup**: ${observedFlow?.criticalTasks?.length || 0}`,
+    );
     if (observedFlow?.lanes?.length) {
       lines.push('', '| Lane | 角色 | Trace 标识 | 置信度 | 证据 |');
       lines.push('|------|------|------------|--------|------|');
       for (const lane of observedFlow.lanes.slice(0, 12)) {
-        const marker = lane.threadName || lane.processName || lane.layerName || '-';
+        const marker =
+          lane.threadName || lane.processName || lane.layerName || '-';
         lines.push(
           `| ${lane.title || lane.id} | ${lane.role} | ${marker} | ${formatTeachingConfidence(lane.confidence)} | ${lane.evidenceSource || '-'} |`,
         );
       }
     }
     if (observedFlow?.dependencies?.length) {
-      const lanesById = new Map((observedFlow.lanes || []).map((lane) => [lane.id, lane]));
+      const lanesById = new Map(
+        (observedFlow.lanes || []).map((lane) => [lane.id, lane]),
+      );
       lines.push('', '| From | Relation | To | Evidence |');
       lines.push('|------|----------|----|----------|');
       for (const dependency of observedFlow.dependencies.slice(0, 16)) {
@@ -8757,7 +9098,9 @@ Click ⚙️ to configure backend connection.`;
           task.name ||
           '-';
         const waker = task.waker
-          ? [task.waker.threadName, task.waker.processName].filter(Boolean).join(' / ') ||
+          ? [task.waker.threadName, task.waker.processName]
+              .filter(Boolean)
+              .join(' / ') ||
             task.waker.kind ||
             '-'
           : '-';
@@ -8770,9 +9113,9 @@ Click ⚙️ to configure backend connection.`;
       lines.push('', '| Stage | Slice | Thread / Process | ts(ns) | dur |');
       lines.push('|-------|-------|------------------|--------|-----|');
       for (const event of observedFlow.events.slice(0, 16)) {
-        const owner = [event.threadName, event.processName]
-          .filter(Boolean)
-          .join(' / ') || '-';
+        const owner =
+          [event.threadName, event.processName].filter(Boolean).join(' / ') ||
+          '-';
         lines.push(
           `| ${event.stage} | ${event.name} | ${owner} | ${formatTeachingNs(event.ts)} | ${formatTeachingMs(event.durMs)} |`,
         );
@@ -8786,7 +9129,14 @@ Click ⚙️ to configure backend connection.`;
     }
 
     if (content) {
-      lines.push('', '---', '', `### ${content.title}`, '', content.summary || '');
+      lines.push(
+        '',
+        '---',
+        '',
+        `### ${content.title}`,
+        '',
+        content.summary || '',
+      );
       if (content.threadRoles?.length) {
         lines.push('', '#### 关键线程角色', '', '| 线程 | 职责 | Trace 标签 |');
         lines.push('|------|------|------------|');
@@ -8797,7 +9147,11 @@ Click ⚙️ to configure backend connection.`;
         }
       }
       if (content.keySlices?.length) {
-        lines.push('', '#### 关键 Slice', `\`${content.keySlices.join('`, `')}\``);
+        lines.push(
+          '',
+          '#### 关键 Slice',
+          `\`${content.keySlices.join('`, `')}\``,
+        );
       }
       if (content.mermaidBlocks?.length) {
         lines.push('', '#### 时序图', '', '```mermaid');
@@ -8828,10 +9182,14 @@ Click ⚙️ to configure backend connection.`;
       lines.push(`- 未命中/跳过: ${pinExecution.skipped}`);
       lines.push(`- 失败: ${pinExecution.failed}`);
       if (pinExecution.missingPatterns?.length > 0) {
-        lines.push(`- 未命中的 pattern: ${pinExecution.missingPatterns.join(', ')}`);
+        lines.push(
+          `- 未命中的 pattern: ${pinExecution.missingPatterns.join(', ')}`,
+        );
       }
       if (pinExecution.pinnedTrackNames?.length > 0) {
-        lines.push(`- 已 pin 的 track: ${pinExecution.pinnedTrackNames.join(', ')}`);
+        lines.push(
+          `- 已 pin 的 track: ${pinExecution.pinnedTrackNames.join(', ')}`,
+        );
       }
     }
 
@@ -8876,7 +9234,8 @@ Click ⚙️ to configure backend connection.`;
       hint.pattern || hint.threadName || hint.processName || hint.layerName;
     if (!rawPattern) return null;
 
-    const label = hint.threadName || hint.processName || hint.layerName || rawPattern;
+    const label =
+      hint.threadName || hint.processName || hint.layerName || rawPattern;
     const instruction: TeachingPinInstruction = {
       pattern: rawPattern,
       matchBy: 'name',
@@ -9144,20 +9503,41 @@ Click ⚙️ to configure backend connection.`;
   private async handleStoryCancel() {
     const analysisId = this.state.storyState.analysisId;
     if (!analysisId) return;
-    const path =
-      analysisId === this.state.agentSessionId
-        ? `/${analysisId}/cancel`
-        : `/scene-reconstruct/${analysisId}/cancel`;
+    if (analysisId === this.state.agentSessionId) {
+      if (!this.state.agentRunId) {
+        this.addMessage({
+          id: this.generateId(),
+          role: 'assistant',
+          content: '停止分析失败：当前分析缺少运行标识，请重试。',
+          timestamp: Date.now(),
+        });
+        m.redraw();
+        return;
+      }
+      await this.cancelAnalysis();
+      return;
+    }
     try {
-      await this.fetchBackend(
+      const response = await this.fetchBackend(
         buildAssistantApiV1Url(
           this.state.settings.backendUrl,
-          path,
+          `/scene-reconstruct/${analysisId}/cancel`,
         ),
         {method: 'POST'},
       );
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
     } catch (e) {
       console.warn('[AIPanel] Cancel request failed:', e);
+      const detail = e instanceof Error ? e.message : String(e);
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: `停止分析失败：${detail}。请重试。`,
+        timestamp: Date.now(),
+      });
+      m.redraw();
     }
   }
 
@@ -9307,7 +9687,10 @@ Click ⚙️ to configure backend connection.`;
             m('div.ai-story-cold-preview-title', '选择智能分析范围'),
             m(
               'div',
-              {style: 'font-size: 13px; color: var(--chat-text-secondary); margin-bottom: 12px;'},
+              {
+                style:
+                  'font-size: 13px; color: var(--chat-text-secondary); margin-bottom: 12px;',
+              },
               `已识别 ${this.getSmartPreviewScenes().length} 个场景。选择后才会开始深钻分析。`,
             ),
             this.renderSmartSelectionButtons('story'),
@@ -9961,8 +10344,12 @@ Click ⚙️ to configure backend connection.`;
         );
     }
 
-    pinnedCount.missingPatterns = Array.from(new Set(pinnedCount.missingPatterns));
-    pinnedCount.pinnedTrackNames = Array.from(new Set(pinnedCount.pinnedTrackNames));
+    pinnedCount.missingPatterns = Array.from(
+      new Set(pinnedCount.missingPatterns),
+    );
+    pinnedCount.pinnedTrackNames = Array.from(
+      new Set(pinnedCount.pinnedTrackNames),
+    );
     return pinnedCount;
   }
 
@@ -10027,9 +10414,14 @@ Click ⚙️ to configure backend connection.`;
       return m(
         'div.ai-session-sidebar-item',
         {
-          class: isCurrent ? 'current' : '',
+          class: [
+            isCurrent ? 'current' : '',
+            this.isAnalysisIdentityLocked() && !isCurrent ? 'disabled' : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
           onclick: () => {
-            if (!isCurrent) {
+            if (!isCurrent && !this.isAnalysisIdentityLocked()) {
               this.loadSession(session.sessionId);
             }
           },
@@ -10053,6 +10445,7 @@ Click ⚙️ to configure backend connection.`;
             ? m(
                 'button.ai-session-sidebar-item-delete',
                 {
+                  disabled: this.isAnalysisIdentityLocked(),
                   onclick: (e: MouseEvent) => {
                     e.stopPropagation();
                     if (confirm('确定删除这个对话？')) {
@@ -10093,7 +10486,9 @@ Click ⚙️ to configure backend connection.`;
       m(
         'button.ai-session-sidebar-new',
         {
+          disabled: this.isAnalysisIdentityLocked(),
           onclick: () => {
+            if (this.isAnalysisIdentityLocked()) return;
             this.cancelSSEConnection();
             // 保存当前 session 再创建新的
             this.saveCurrentSession();
@@ -10177,6 +10572,7 @@ Click ⚙️ to configure backend connection.`;
   }
 
   private async clearChat() {
+    if (this.isAnalysisIdentityLocked()) return;
     this.cancelSSEConnection();
     this.setLoadingState(false);
 
@@ -10344,7 +10740,9 @@ Click ⚙️ to configure backend connection.`;
           (a.streamingFlow.dataSourceRefs || []).length,
         dataSourceKindOrdinals:
           a.streamingFlow.dataSourceKindOrdinals ||
-          this.dataSourceKindOrdinalsFromRefs(a.streamingFlow.dataSourceRefs || []),
+          this.dataSourceKindOrdinalsFromRefs(
+            a.streamingFlow.dataSourceRefs || [],
+          ),
       };
       this.state.streamingAnswer = a.streamingAnswer;
       // Mark loading + resume SSE. The resumeFromLastEventId flag tells
@@ -10360,6 +10758,7 @@ Click ⚙️ to configure backend connection.`;
   }
 
   private openSettings() {
+    if (this.isAnalysisIdentityLocked()) return;
     this.state.showSettings = true;
     m.redraw();
   }
@@ -10652,6 +11051,11 @@ Click ⚙️ to configure backend connection.`;
   private setLoadingState(loading: boolean): void {
     this.state.isLoading = loading;
     this.state.loadingPhase = '';
+    this.tracePairWorkspaceController.setSelectionLocked(loading);
+  }
+
+  private isAnalysisIdentityLocked(): boolean {
+    return this.state.isLoading || this.analysisCancellationPending;
   }
 
   /**
@@ -10686,6 +11090,7 @@ Click ⚙️ to configure backend connection.`;
   /** Fetch available traces from backend for the trace picker. */
   private async fetchAvailableTraces(): Promise<void> {
     this.state.comparisonTraceLoading = true;
+    const request = this.tracePairWorkspaceController.beginCatalogLoad();
     m.redraw();
     try {
       const url = buildSmartPerfettoWorkspaceApiUrl(
@@ -10693,20 +11098,32 @@ Click ⚙️ to configure backend connection.`;
         'traces',
       );
       const response = await this.fetchBackend(url);
-      if (response.ok) {
-        const data = await response.json();
-        this.availableTraces = (data.traces || []).map((t: any) => ({
-          id: t.id,
-          originalName: t.originalName || t.name,
-          uploadedAt: t.uploadedAt,
-          size: t.size,
-        }));
+      if (!response.ok) {
+        throw new Error(`Trace 列表请求失败 (${response.status})`);
+      }
+      const parsed = parseWorkspaceTraceCatalogResponse(await response.json());
+      if (!parsed.ok) throw new Error(parsed.error);
+      if (
+        this.tracePairWorkspaceController.completeCatalogLoad(
+          request,
+          parsed.items,
+        )
+      ) {
+        this.availableTraces = [...parsed.items];
       }
     } catch (e) {
       console.warn('[AIPanel] Failed to fetch traces:', e);
-      this.availableTraces = [];
+      if (
+        this.tracePairWorkspaceController.failCatalogLoad(
+          request,
+          e instanceof Error ? e.message : '无法加载 Trace 列表',
+        )
+      ) {
+        this.availableTraces = [];
+      }
     } finally {
-      this.state.comparisonTraceLoading = false;
+      this.state.comparisonTraceLoading =
+        this.tracePairWorkspaceController.getState().catalogLoading;
       m.redraw();
     }
   }
@@ -10727,7 +11144,9 @@ Click ⚙️ to configure backend connection.`;
     const latest = this.state.latestAnalysisSnapshot;
     const traceTitle = this.trace?.traceInfo?.traceTitle;
     const traceId =
-      this.state.backendTraceId || this.state.currentTraceFingerprint || undefined;
+      this.state.backendTraceId ||
+      this.state.currentTraceFingerprint ||
+      undefined;
 
     try {
       const url = buildSmartPerfettoWorkspaceApiUrl(
@@ -10742,7 +11161,9 @@ Click ⚙️ to configure backend connection.`;
           traceId,
           backendTraceId: this.state.backendTraceId || undefined,
           activeSessionId:
-            this.state.agentSessionId || this.state.currentSessionId || undefined,
+            this.state.agentSessionId ||
+            this.state.currentSessionId ||
+            undefined,
           latestSnapshotId: latest?.snapshotId,
           traceTitle: traceTitle || undefined,
           sceneType: latest?.sceneType,
@@ -10758,7 +11179,8 @@ Click ⚙️ to configure backend connection.`;
             .map((item: any) => ({
               windowId: item.windowId,
               userId: typeof item.userId === 'string' ? item.userId : undefined,
-              traceId: typeof item.traceId === 'string' ? item.traceId : undefined,
+              traceId:
+                typeof item.traceId === 'string' ? item.traceId : undefined,
               backendTraceId:
                 typeof item.backendTraceId === 'string'
                   ? item.backendTraceId
@@ -10772,13 +11194,19 @@ Click ⚙️ to configure backend connection.`;
                   ? item.latestSnapshotId
                   : undefined,
               traceTitle:
-                typeof item.traceTitle === 'string' ? item.traceTitle : undefined,
+                typeof item.traceTitle === 'string'
+                  ? item.traceTitle
+                  : undefined,
               sceneType:
                 typeof item.sceneType === 'string' ? item.sceneType : undefined,
               updatedAt:
-                typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+                typeof item.updatedAt === 'number'
+                  ? item.updatedAt
+                  : Date.now(),
               expiresAt:
-                typeof item.expiresAt === 'number' ? item.expiresAt : Date.now(),
+                typeof item.expiresAt === 'number'
+                  ? item.expiresAt
+                  : Date.now(),
             }))
         : [];
       if (this.state.showResultPicker) {
@@ -10802,9 +11230,13 @@ Click ⚙️ to configure backend connection.`;
 
     return [...this.availableAnalysisResults].sort((left, right) => {
       const leftRank =
-        left.id === latestId ? -2 : activeRank.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+        left.id === latestId
+          ? -2
+          : activeRank.get(left.id) ?? Number.MAX_SAFE_INTEGER;
       const rightRank =
-        right.id === latestId ? -2 : activeRank.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+        right.id === latestId
+          ? -2
+          : activeRank.get(right.id) ?? Number.MAX_SAFE_INTEGER;
       if (leftRank !== rightRank) return leftRank - rightRank;
       return right.createdAt - left.createdAt;
     });
@@ -10839,12 +11271,14 @@ Click ⚙️ to configure backend connection.`;
       }
 
       const data = await response.json();
-      this.availableAnalysisResults = (Array.isArray(data.results)
-        ? data.results
-        : [])
+      this.availableAnalysisResults = (
+        Array.isArray(data.results) ? data.results : []
+      )
         .map((item: any) => this.normalizeAnalysisResultItem(item))
-        .filter((item: AnalysisResultPickerItem | null): item is AnalysisResultPickerItem =>
-          item !== null,
+        .filter(
+          (
+            item: AnalysisResultPickerItem | null,
+          ): item is AnalysisResultPickerItem => item !== null,
         );
       this.reconcileLatestAnalysisSnapshotFromResults();
       this.syncResultPickerSelection();
@@ -10852,7 +11286,9 @@ Click ⚙️ to configure backend connection.`;
       console.warn('[AIPanel] Failed to fetch analysis results:', error);
       this.availableAnalysisResults = [];
       this.state.resultPickerError =
-        error instanceof Error ? error.message : 'Failed to load analysis results';
+        error instanceof Error
+          ? error.message
+          : 'Failed to load analysis results';
     } finally {
       if (!options.silent) {
         this.state.resultPickerLoading = false;
@@ -10891,9 +11327,10 @@ Click ⚙️ to configure backend connection.`;
     const sessionId = this.state.agentSessionId || this.state.currentSessionId;
     const traceId = this.state.backendTraceId;
     const candidates = this.availableAnalysisResults
-      .filter((item) =>
-        (sessionId && item.sessionId === sessionId) ||
-        (traceId && item.traceId === traceId),
+      .filter(
+        (item) =>
+          (sessionId && item.sessionId === sessionId) ||
+          (traceId && item.traceId === traceId),
       )
       .sort((left, right) => right.createdAt - left.createdAt);
     return candidates[0]?.id;
@@ -10947,10 +11384,10 @@ Click ⚙️ to configure backend connection.`;
         typeof item.createdBy === 'string' ? item.createdBy : undefined,
       visibility:
         typeof item.visibility === 'string' ? item.visibility : 'private',
-      sceneType: typeof item.sceneType === 'string' ? item.sceneType : 'general',
+      sceneType:
+        typeof item.sceneType === 'string' ? item.sceneType : 'general',
       title: typeof item.title === 'string' ? item.title : item.id,
-      userQuery:
-        typeof item.userQuery === 'string' ? item.userQuery : '',
+      userQuery: typeof item.userQuery === 'string' ? item.userQuery : '',
       traceLabel:
         typeof item.traceLabel === 'string'
           ? item.traceLabel
@@ -11044,8 +11481,8 @@ Click ⚙️ to configure backend connection.`;
         return;
       }
 
-      this.availableAnalysisResults = this.availableAnalysisResults.map((item) =>
-        item.id === updated.id ? updated : item,
+      this.availableAnalysisResults = this.availableAnalysisResults.map(
+        (item) => (item.id === updated.id ? updated : item),
       );
       if (this.state.latestAnalysisSnapshot?.snapshotId === updated.id) {
         this.state.latestAnalysisSnapshot = {
@@ -11054,7 +11491,10 @@ Click ⚙️ to configure backend connection.`;
         };
       }
     } catch (error) {
-      console.warn('[AIPanel] Failed to update analysis result visibility:', error);
+      console.warn(
+        '[AIPanel] Failed to update analysis result visibility:',
+        error,
+      );
       this.addMessage({
         id: this.generateId(),
         role: 'system',
@@ -11083,9 +11523,7 @@ Click ⚙️ to configure backend connection.`;
       return 'missing';
     }
     const value =
-      typeof cell.numericValue === 'number'
-        ? cell.numericValue
-        : cell.value;
+      typeof cell.numericValue === 'number' ? cell.numericValue : cell.value;
     const formattedValue =
       typeof value === 'number'
         ? this.formatComparisonNumber(value)
@@ -11122,7 +11560,9 @@ Click ⚙️ to configure backend connection.`;
     }
 
     const matrix = result.matrix;
-    const inputSnapshotIds = matrix.inputSnapshots.map((item) => item.snapshotId);
+    const inputSnapshotIds = matrix.inputSnapshots.map(
+      (item) => item.snapshotId,
+    );
     const baseline = matrix.inputSnapshots.find(
       (item) => item.snapshotId === matrix.baselineSnapshotId,
     );
@@ -11139,23 +11579,27 @@ Click ⚙️ to configure backend connection.`;
           const delta = row.deltas.find(
             (item) => item.snapshotId === snapshot.snapshotId,
           );
-          const title = snapshot.title || snapshot.traceLabel || snapshot.snapshotId;
+          const title =
+            snapshot.title || snapshot.traceLabel || snapshot.snapshotId;
           return `${title} (${formatAnalysisResultRef(snapshot.snapshotId, inputSnapshotIds)}): ${this.formatComparisonMetricValue(cell, row.unit)}, Δ ${this.formatComparisonDelta(delta, row)}`;
         })
         .join('; ');
       return [
         this.escapeMarkdownTableCell(row.label || row.metricKey),
-        this.escapeMarkdownTableCell(this.formatComparisonMetricValue(row.baseline, row.unit)),
+        this.escapeMarkdownTableCell(
+          this.formatComparisonMetricValue(row.baseline, row.unit),
+        ),
         this.escapeMarkdownTableCell(candidateSummary || 'n/a'),
       ];
     });
-    const table = tableRows.length > 0
-      ? [
-          '| Metric | Baseline | Candidate values and deltas |',
-          '|---|---:|---|',
-          ...tableRows.map((row) => `| ${row[0]} | ${row[1]} | ${row[2]} |`),
-        ].join('\n')
-      : '没有可展示的 metric 行。';
+    const table =
+      tableRows.length > 0
+        ? [
+            '| Metric | Baseline | Candidate values and deltas |',
+            '|---|---:|---|',
+            ...tableRows.map((row) => `| ${row[0]} | ${row[1]} | ${row[2]} |`),
+          ].join('\n')
+        : '没有可展示的 metric 行。';
 
     const exportUrl = buildSmartPerfettoWorkspaceApiUrl(
       this.state.settings.backendUrl,
@@ -11163,12 +11607,20 @@ Click ⚙️ to configure backend connection.`;
       `/${encodeURIComponent(comparison.id)}/report/export`,
     );
     const hiddenRows = matrix.rows.length - rows.length;
-    const hiddenText = hiddenRows > 0 ? `\n\n还有 ${hiddenRows} 行未在消息中展开，完整内容见 HTML 报告。` : '';
+    const hiddenText =
+      hiddenRows > 0
+        ? `\n\n还有 ${hiddenRows} 行未在消息中展开，完整内容见 HTML 报告。`
+        : '';
     const baselineTitle =
-      baseline?.title || baseline?.traceLabel || baseline?.snapshotId || 'baseline';
+      baseline?.title ||
+      baseline?.traceLabel ||
+      baseline?.snapshotId ||
+      'baseline';
     const candidateTitles = candidates
-      .map((item) =>
-        `${item.title || item.traceLabel || item.snapshotId} (${formatAnalysisResultRef(item.snapshotId, inputSnapshotIds)})`)
+      .map(
+        (item) =>
+          `${item.title || item.traceLabel || item.snapshotId} (${formatAnalysisResultRef(item.snapshotId, inputSnapshotIds)})`,
+      )
       .join(', ');
     const baselineRef = baseline?.snapshotId
       ? ` (${formatAnalysisResultRef(baseline.snapshotId, inputSnapshotIds)})`
@@ -11193,19 +11645,26 @@ Click ⚙️ to configure backend connection.`;
     return value !== null && typeof value === 'object';
   }
 
-  private normalizeSimilarityReason(value: unknown): SimilarityMatchReason | null {
+  private normalizeSimilarityReason(
+    value: unknown,
+  ): SimilarityMatchReason | null {
     if (!this.isSimilarityRecord(value) || typeof value.feature !== 'string') {
       return null;
     }
-    const currentValue = this.normalizeSimilarityReasonValue(value.currentValue);
-    const matchedValue = this.normalizeSimilarityReasonValue(value.matchedValue);
+    const currentValue = this.normalizeSimilarityReasonValue(
+      value.currentValue,
+    );
+    const matchedValue = this.normalizeSimilarityReasonValue(
+      value.matchedValue,
+    );
     return {
       feature: value.feature,
       ...(currentValue !== undefined ? {currentValue} : {}),
       ...(matchedValue !== undefined ? {matchedValue} : {}),
-      weight: typeof value.weight === 'number' && Number.isFinite(value.weight)
-        ? value.weight
-        : 0,
+      weight:
+        typeof value.weight === 'number' && Number.isFinite(value.weight)
+          ? value.weight
+          : 0,
     };
   }
 
@@ -11244,9 +11703,10 @@ Click ⚙️ to configure backend connection.`;
       id: value.id,
       source,
       sourceId: value.sourceId,
-      score: typeof value.score === 'number' && Number.isFinite(value.score)
-        ? value.score
-        : 0,
+      score:
+        typeof value.score === 'number' && Number.isFinite(value.score)
+          ? value.score
+          : 0,
       band,
       matchReasons: Array.isArray(value.matchReasons)
         ? value.matchReasons
@@ -11254,13 +11714,17 @@ Click ⚙️ to configure backend connection.`;
             .filter((item): item is SimilarityMatchReason => item !== null)
         : [],
       limitations: Array.isArray(value.limitations)
-        ? value.limitations.filter((item): item is string => typeof item === 'string')
+        ? value.limitations.filter(
+            (item): item is string => typeof item === 'string',
+          )
         : [],
       allowedUse: 'navigation_hint_only',
     };
   }
 
-  private normalizeSimilarityResponse(value: unknown): AnalysisResultSimilarityResponse {
+  private normalizeSimilarityResponse(
+    value: unknown,
+  ): AnalysisResultSimilarityResponse {
     if (!this.isSimilarityRecord(value)) {
       return {success: false, error: 'Invalid similarity response'};
     }
@@ -11279,15 +11743,17 @@ Click ⚙️ to configure backend connection.`;
           .map((item) => this.normalizeSimilarityHint(item))
           .filter((item): item is SimilarityHintV1 => item !== null)
       : hints.filter((item) => item.source === 'case_library');
-    const normalizedHints = hints.length > 0 ? hints : [...snapshotHints, ...caseHints];
+    const normalizedHints =
+      hints.length > 0 ? hints : [...snapshotHints, ...caseHints];
     const response: AnalysisResultSimilarityResponse = {
       success: value.success === true,
       snapshotHints,
       caseHints,
       hints: normalizedHints,
-      count: typeof value.count === 'number' && Number.isFinite(value.count)
-        ? value.count
-        : normalizedHints.length,
+      count:
+        typeof value.count === 'number' && Number.isFinite(value.count)
+          ? value.count
+          : normalizedHints.length,
     };
     if (value.allowedUse === 'navigation_hint_only') {
       response.allowedUse = 'navigation_hint_only';
@@ -11338,7 +11804,10 @@ Click ⚙️ to configure backend connection.`;
     } catch (error) {
       this.state.resultSimilarity = {
         loadingSnapshotId: null,
-        error: error instanceof Error ? error.message : 'Failed to load similarity hints',
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to load similarity hints',
         result: null,
       };
     } finally {
@@ -11351,32 +11820,47 @@ Click ⚙️ to configure backend connection.`;
   }
 
   private formatSimilarityReason(reason: SimilarityMatchReason): string {
-    const current = reason.currentValue === undefined
-      ? ''
-      : `: ${String(reason.currentValue)}`;
-    const matched = reason.matchedValue === undefined
-      ? ''
-      : ` -> ${String(reason.matchedValue)}`;
+    const current =
+      reason.currentValue === undefined
+        ? ''
+        : `: ${String(reason.currentValue)}`;
+    const matched =
+      reason.matchedValue === undefined
+        ? ''
+        : ` -> ${String(reason.matchedValue)}`;
     return `${reason.feature}${current}${matched}`;
   }
 
   private renderSimilarityHint(hint: SimilarityHintV1): m.Vnode {
     return m('div.ai-result-similarity-hint', {key: hint.id}, [
       m('div.ai-result-similarity-hint-header', [
-        m('span.ai-result-similarity-source', this.formatSimilaritySource(hint.source)),
+        m(
+          'span.ai-result-similarity-source',
+          this.formatSimilaritySource(hint.source),
+        ),
         m('span.ai-result-similarity-id', hint.sourceId),
         m(`span.ai-result-similarity-band.${hint.band}`, hint.band),
-        m('span.ai-result-similarity-score', `${Math.round(hint.score * 100)}%`),
+        m(
+          'span.ai-result-similarity-score',
+          `${Math.round(hint.score * 100)}%`,
+        ),
       ]),
       hint.matchReasons.length > 0
-        ? m('div.ai-result-similarity-reasons',
-            hint.matchReasons.slice(0, 4).map((reason) =>
-              m('span.ai-result-similarity-reason', this.formatSimilarityReason(reason)),
-            ),
+        ? m(
+            'div.ai-result-similarity-reasons',
+            hint.matchReasons
+              .slice(0, 4)
+              .map((reason) =>
+                m(
+                  'span.ai-result-similarity-reason',
+                  this.formatSimilarityReason(reason),
+                ),
+              ),
           )
         : null,
       hint.limitations.length > 0
-        ? m('div.ai-result-similarity-limitations',
+        ? m(
+            'div.ai-result-similarity-limitations',
             hint.limitations.slice(0, 2).join(' '),
           )
         : null,
@@ -11410,17 +11894,24 @@ Click ⚙️ to configure backend connection.`;
         m('span', '相似结果提示'),
         m('span.ai-result-similarity-policy', 'navigation_hint_only'),
         result.snapshotId
-          ? m('span.ai-result-similarity-id', formatAnalysisResultRef(
-              result.snapshotId,
-              this.availableAnalysisResults.map((item) => item.id),
-            ))
+          ? m(
+              'span.ai-result-similarity-id',
+              formatAnalysisResultRef(
+                result.snapshotId,
+                this.availableAnalysisResults.map((item) => item.id),
+              ),
+            )
           : null,
       ]),
       hints.length > 0
-        ? m('div.ai-result-similarity-list',
+        ? m(
+            'div.ai-result-similarity-list',
             hints.slice(0, 5).map((hint) => this.renderSimilarityHint(hint)),
           )
-        : m('div.ai-result-similarity-empty', '没有找到足够相似的历史结果或案例。'),
+        : m(
+            'div.ai-result-similarity-empty',
+            '没有找到足够相似的历史结果或案例。',
+          ),
     ]);
   }
 
@@ -11438,7 +11929,8 @@ Click ⚙️ to configure backend connection.`;
     m.redraw();
 
     try {
-      const query = input.query.trim() ||
+      const query =
+        input.query.trim() ||
         `Compare ${input.baseline.title || input.baseline.id} with ${input.candidates
           .map((item) => item.title || item.id)
           .join(', ')}`;
@@ -11458,11 +11950,15 @@ Click ⚙️ to configure backend connection.`;
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         const message =
-          typeof data.error === 'string' ? data.error : `HTTP ${response.status}`;
+          typeof data.error === 'string'
+            ? data.error
+            : `HTTP ${response.status}`;
         throw new Error(message);
       }
 
-      const comparison = data.comparison as AnalysisResultComparisonRun | undefined;
+      const comparison = data.comparison as
+        | AnalysisResultComparisonRun
+        | undefined;
       if (!comparison?.id) {
         throw new Error('Comparison response is missing comparison.id');
       }
@@ -11529,7 +12025,8 @@ Click ⚙️ to configure backend connection.`;
 
   private renderResultPicker(): m.Vnode {
     const selectedCount = this.state.selectedResultCandidateIds.size;
-    const canPrepare = !!this.state.selectedResultBaselineId && selectedCount > 0;
+    const canPrepare =
+      !!this.state.selectedResultBaselineId && selectedCount > 0;
     const comparisonLoading = this.state.resultComparisonLoading;
 
     return m('aside.ai-trace-picker-sidebar.ai-result-picker-sidebar', [
@@ -11623,8 +12120,7 @@ Click ⚙️ to configure backend connection.`;
   private renderResultPickerItem(item: AnalysisResultPickerItem): m.Vnode {
     const isBaseline = item.id === this.state.selectedResultBaselineId;
     const isCandidate = this.state.selectedResultCandidateIds.has(item.id);
-    const isCurrent =
-      item.id === this.state.latestAnalysisSnapshot?.snapshotId;
+    const isCurrent = item.id === this.state.latestAnalysisSnapshot?.snapshotId;
     const activeWindow = this.activeResultWindowStates.find(
       (state) => state.latestSnapshotId === item.id,
     );
@@ -11707,7 +12203,9 @@ Click ⚙️ to configure backend connection.`;
               class: isCandidate ? 'active' : '',
               disabled: isBaseline,
               onclick: () => this.toggleResultCandidate(item.id),
-              title: isBaseline ? 'baseline 不能同时作为 candidate' : '加入候选',
+              title: isBaseline
+                ? 'baseline 不能同时作为 candidate'
+                : '加入候选',
             },
             '候选',
           ),
@@ -11720,7 +12218,10 @@ Click ⚙️ to configure backend connection.`;
               },
               title: '查找相似结果',
             },
-            m('i.pf-icon', isSimilarityLoading ? 'hourglass_empty' : 'travel_explore'),
+            m(
+              'i.pf-icon',
+              isSimilarityLoading ? 'hourglass_empty' : 'travel_explore',
+            ),
           ),
           item.visibility === 'private'
             ? m(
@@ -11771,21 +12272,21 @@ Click ⚙️ to configure backend connection.`;
                           'div.ai-trace-picker-item',
                           {
                             key: t.id,
-                            onclick: () =>
-                              this.enterComparisonMode(
-                                t.id,
-                                t.originalName || t.id,
-                              ),
-                            class:
+                            onclick: this.isAnalysisIdentityLocked()
+                              ? undefined
+                              : () =>
+                                  this.enterComparisonMode(t.id, t.filename),
+                            class: [
                               this.state.referenceTraceId === t.id
                                 ? 'selected'
                                 : '',
+                              this.isAnalysisIdentityLocked() ? 'disabled' : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' '),
                           },
                           [
-                            m(
-                              'div.ai-trace-picker-item-name',
-                              t.originalName || t.id,
-                            ),
+                            m('div.ai-trace-picker-item-name', t.filename),
                             m(
                               'div.ai-trace-picker-item-meta',
                               [
@@ -11814,6 +12315,7 @@ Click ⚙️ to configure backend connection.`;
                 'button.ai-btn-secondary',
                 {
                   onclick: () => this.exitComparisonMode(),
+                  disabled: this.isAnalysisIdentityLocked(),
                 },
                 '退出对比',
               ),
@@ -11828,31 +12330,35 @@ Click ⚙️ to configure backend connection.`;
     refTraceId: string,
     refTraceName: string,
   ): Promise<void> {
-    const hadAgentSession = !!this.state.agentSessionId;
-    this.state.agentSessionId = null;
-    this.state.agentRunId = null;
-    this.state.agentRequestId = null;
-    this.state.agentRunSequence = 0;
-    if (hadAgentSession) {
-      this.clearAgentObservability();
-    }
-    this.state.referenceTraceId = refTraceId;
-    this.state.referenceTraceName = refTraceName;
+    if (this.isAnalysisIdentityLocked()) return;
+    const currentTraceId = this.state.backendTraceId;
+    if (!currentTraceId) return;
+    this.tracePairWorkspaceController.open({
+      scope: this.getTracePairWorkspaceScope(),
+      currentTrace: {
+        id: currentTraceId,
+        filename: this.getCurrentTraceName(),
+        fingerprint:
+          this.state.currentTraceFingerprint ||
+          this.getTraceFingerprint() ||
+          undefined,
+      },
+    });
+    this.tracePairWorkspaceController.setCatalog(this.availableTraces);
+    this.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: refTraceId,
+    });
     this.state.showTracePicker = false;
-    this.state.isReferenceActive = false;
-    this.state.tracePairWorkspaceOpen = false;
-    this.state.tracePairSplitPercent = 50;
-    this.state.tracePairMaximizedTraceSide = null;
-    this.state.tracePairMinimizedTraceSides = new Set();
 
     this.addMessage({
       id: this.generateId(),
       role: 'system',
       content:
         `**对比模式已激活**\n\n` +
-        `- ${this.getTracePairPaneTitle('current')} Trace: ${this.getCurrentTraceDisplayName()}\n` +
+        `- ${this.getTracePairPaneTitle('current')} Trace: ${this.getCurrentTraceName()}\n` +
         `- ${this.getTracePairPaneTitle('reference')} Trace: ${refTraceName}\n\n` +
-        `同页双 Trace 工作区保持收起。`,
+        `已在同页双 Trace 工作区中打开。`,
       timestamp: Date.now(),
     });
     this.saveCurrentSession();
@@ -11861,7 +12367,10 @@ Click ⚙️ to configure backend connection.`;
 
   /** Exit comparison mode. */
   private exitComparisonMode(): void {
+    if (this.isAnalysisIdentityLocked()) return;
     const hadComparisonSession = !!this.state.agentSessionId;
+    this.tracePairWorkspaceController.close();
+    this.tracePairWorkspaceController.clearReference();
     this.clearTracePairSessionState();
     this.state.agentSessionId = null;
     this.state.agentRunId = null;

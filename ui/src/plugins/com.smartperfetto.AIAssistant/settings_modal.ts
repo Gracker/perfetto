@@ -27,6 +27,7 @@ import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backen
 export interface SettingsModalAttrs {
   settings: AISettings;
   workspaceContext: SmartPerfettoRequestContext;
+  readOnly?: boolean;
   onClose: () => void;
   onSave: (settings: AISettings) => void;
   onWorkspaceChange: (workspaceId: string) => void;
@@ -377,7 +378,14 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     this.serverStatus = vnode.attrs.initialStatus ?? null;
     this.workspaceId = vnode.attrs.workspaceContext.workspaceId;
     this.showBackendAuth =
-      !!this.settings.backendApiKey || !!vnode.attrs.initialStatus?.authRequired;
+      !!this.settings.backendApiKey ||
+      !!vnode.attrs.initialStatus?.authRequired;
+  }
+
+  onupdate(vnode: m.Vnode<SettingsModalAttrs>) {
+    if (vnode.attrs.readOnly && this.currentTab === 'providers') {
+      this.currentTab = 'connection';
+    }
   }
 
   private async checkStatus() {
@@ -418,25 +426,42 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     const providerMode = status.providerMode || diagnostics.providerMode;
     const lightModel = diagnostics.lightModel;
     const protocol = diagnostics.protocol;
-    const baseUrl = diagnostics.baseUrl
-      || (diagnostics.baseUrlConfigured === false ? 'SDK default / not set' : undefined);
-    const outputLanguage = diagnostics.outputLanguage?.displayName
-      || diagnostics.outputLanguage?.value;
+    const baseUrl =
+      diagnostics.baseUrl ||
+      (diagnostics.baseUrlConfigured === false
+        ? 'SDK default / not set'
+        : undefined);
+    const outputLanguage =
+      diagnostics.outputLanguage?.displayName ||
+      diagnostics.outputLanguage?.value;
     const sdkBinary = diagnostics.sdkBinary;
     const sdkBinaryLabel = sdkBinary
       ? [
           sdkBinary.source || 'unknown',
           sdkBinary.fallbackUsed ? 'fallback' : '',
           sdkBinary.chosenPath || sdkBinary.error || '',
-        ].filter(Boolean).join(' | ')
+        ]
+          .filter(Boolean)
+          .join(' | ')
       : undefined;
 
     return m('details', {style: MODAL_STYLES.debugDetails, open: true}, [
-      m('summary', {style: MODAL_STYLES.debugSummary}, 'Effective Configuration'),
+      m(
+        'summary',
+        {style: MODAL_STYLES.debugSummary},
+        'Effective Configuration',
+      ),
       m('div', {style: MODAL_STYLES.debugRows}, [
-        this.renderStatusRow('Config Source', formatRuntimeSource(status.source)),
+        this.renderStatusRow(
+          'Config Source',
+          formatRuntimeSource(status.source),
+        ),
         status.credentialSource
-          ? this.renderStatusRow('Credential Source', status.credentialSource, true)
+          ? this.renderStatusRow(
+              'Credential Source',
+              status.credentialSource,
+              true,
+            )
           : null,
         status.activeProvider
           ? this.renderStatusRow(
@@ -447,12 +472,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
         providerMode
           ? this.renderStatusRow('Provider Mode', providerMode, true)
           : null,
-        protocol
-          ? this.renderStatusRow('Protocol', protocol, true)
-          : null,
-        baseUrl
-          ? this.renderStatusRow('Base URL', baseUrl, true)
-          : null,
+        protocol ? this.renderStatusRow('Protocol', protocol, true) : null,
+        baseUrl ? this.renderStatusRow('Base URL', baseUrl, true) : null,
         lightModel
           ? this.renderStatusRow('Light Model', lightModel, true)
           : null,
@@ -625,7 +646,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
           {
             style: {
               ...MODAL_STYLES.statusValue,
-              color: status.aiEnabled === false ? COLORS.warning : COLORS.success,
+              color:
+                status.aiEnabled === false ? COLORS.warning : COLORS.success,
             },
           },
           status.aiEnabled === false ? 'No' : 'Yes',
@@ -683,6 +705,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   }
 
   view(vnode: m.Vnode<SettingsModalAttrs>) {
+    const readOnly = vnode.attrs.readOnly === true;
     return m(
       'div',
       {style: MODAL_STYLES.overlay},
@@ -730,6 +753,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               onclick: () => {
                 this.currentTab = 'providers';
               },
+              disabled: readOnly,
+              title: readOnly ? '分析运行中，Provider 配置保持只读' : undefined,
             },
             '\u{1F916} Providers',
           ),
@@ -751,19 +776,34 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
         ]),
 
         this.currentTab === 'providers'
-          ? m('div', {style: {...MODAL_STYLES.content, padding: 0}}, [
-              m(ProviderPanel, {
-                backendUrl: this.settings.backendUrl,
-                apiKey: this.settings.backendApiKey || undefined,
-                aiEnabled: this.serverStatus?.aiEnabled,
-                aiDisabledReason:
-                  this.serverStatus?.disabledReason ||
-                  this.serverStatus?.aiPolicy?.disabledReason,
-                onClose: () => vnode.attrs.onClose(),
-                onProviderSelectionChange: () =>
-                  vnode.attrs.onProviderSelectionChange(),
-              }),
-            ])
+          ? readOnly
+            ? m(
+                'div',
+                {style: MODAL_STYLES.content},
+                m(
+                  'div',
+                  {
+                    style: {
+                      ...MODAL_STYLES.alertBox,
+                      ...MODAL_STYLES.alertWarning,
+                    },
+                  },
+                  '分析运行中，Provider 配置与切换保持只读。',
+                ),
+              )
+            : m('div', {style: {...MODAL_STYLES.content, padding: 0}}, [
+                m(ProviderPanel, {
+                  backendUrl: this.settings.backendUrl,
+                  apiKey: this.settings.backendApiKey || undefined,
+                  aiEnabled: this.serverStatus?.aiEnabled,
+                  aiDisabledReason:
+                    this.serverStatus?.disabledReason ||
+                    this.serverStatus?.aiPolicy?.disabledReason,
+                  onClose: () => vnode.attrs.onClose(),
+                  onProviderSelectionChange: () =>
+                    vnode.attrs.onProviderSelectionChange(),
+                }),
+              ])
           : this.currentTab === 'codebases'
             ? m('div', {style: {...MODAL_STYLES.content, padding: 0}}, [
                 m(CodebasePanel, {
@@ -771,141 +811,173 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                   apiKey: this.settings.backendApiKey || undefined,
                 }),
               ])
-          : m('div', {style: MODAL_STYLES.content}, [
-              m('div', {style: MODAL_STYLES.section}, [
-                m(
-                  'h4',
-                  {style: MODAL_STYLES.sectionTitle},
-                  'Backend Connection',
-                ),
-                m('div', {style: MODAL_STYLES.field}, [
-                  m('label', {style: MODAL_STYLES.fieldLabel}, [
-                    m('span', {style: MODAL_STYLES.fieldIcon}, '🏢'),
-                    'Workspace ID',
-                  ]),
-                  m('input[type=text]', {
-                    style: MODAL_STYLES.input,
-                    value: this.workspaceId,
-                    onchange: (e: Event) => {
-                      this.workspaceId = (e.target as HTMLInputElement).value;
-                    },
-                    placeholder: vnode.attrs.workspaceContext.workspaceId,
-                  }),
-                  m(
-                    'div',
-                    {style: MODAL_STYLES.hint},
-                    `Tenant: ${vnode.attrs.workspaceContext.tenantId} · User: ${vnode.attrs.workspaceContext.userId} · Window: ${vnode.attrs.workspaceContext.windowId}`,
-                  ),
-                ]),
-                m('div', {style: MODAL_STYLES.field}, [
-                  m('label', {style: MODAL_STYLES.fieldLabel}, [
-                    m('span', {style: MODAL_STYLES.fieldIcon}, '🖥️'),
-                    'Backend URL',
-                  ]),
-                  m('input[type=text]', {
-                    style: MODAL_STYLES.input,
-                    value: this.settings.backendUrl,
-                    onchange: (e: Event) => {
-                      this.settings.backendUrl = (
-                        e.target as HTMLInputElement
-                      ).value;
-                    },
-                    placeholder: getDefaultSmartPerfettoBackendUrl(),
-                  }),
-                ]),
-                m('div', {style: MODAL_STYLES.field}, [
-                  m(
-                    'button',
-                    {
-                      type: 'button',
-                      style: {
-                        ...MODAL_STYLES.btn,
-                        ...MODAL_STYLES.btnSecondary,
-                        width: '100%',
-                        justifyContent: 'space-between',
-                        padding: '10px 12px',
-                      },
-                      onclick: () => {
-                        this.showBackendAuth = !this.showBackendAuth;
-                      },
-                    },
-                    [
-                      m('span', 'Advanced backend auth'),
-                      m('span', this.showBackendAuth ? '▲' : '▼'),
-                    ],
-                  ),
-                  m(
-                    'div',
-                    {style: {...MODAL_STYLES.hint, marginTop: '6px'}},
-                    'Leave this empty for local single-user runs. Only fill it when the backend was started with SMARTPERFETTO_API_KEY.',
-                  ),
-                ]),
-                this.showBackendAuth
-                  ? m('div', {style: MODAL_STYLES.field}, [
-                      m('label', {style: MODAL_STYLES.fieldLabel}, [
-                        m('span', {style: MODAL_STYLES.fieldIcon}, '🔐'),
-                        'Backend Access Token',
-                      ]),
-                      m('input[type=password]', {
-                        style: MODAL_STYLES.input,
-                        value: this.settings.backendApiKey || '',
-                        onchange: (e: Event) => {
-                          this.settings.backendApiKey = (
-                            e.target as HTMLInputElement
-                          ).value;
+            : m('div', {style: MODAL_STYLES.content}, [
+                readOnly
+                  ? m(
+                      'div',
+                      {
+                        style: {
+                          ...MODAL_STYLES.alertBox,
+                          ...MODAL_STYLES.alertWarning,
+                          marginBottom: '16px',
                         },
-                        placeholder: 'Optional SMARTPERFETTO_API_KEY',
-                      }),
-                      m(
-                        'div',
-                        {style: MODAL_STYLES.hint},
-                        'This protects SmartPerfetto backend APIs. It is not a model provider key; model provider keys belong on the Providers tab.',
-                      ),
-                    ])
+                      },
+                      '分析运行中，Workspace、Backend URL、访问凭据与 Provider 保持只读。',
+                    )
                   : null,
-              ]),
-
-              m('div', {style: MODAL_STYLES.section}, [
-                m('h4', {style: MODAL_STYLES.sectionTitle}, 'Server Status'),
-                m(
-                  'div',
-                  {style: {display: 'flex', alignItems: 'center', gap: '12px'}},
-                  [
+                m('div', {style: MODAL_STYLES.section}, [
+                  m(
+                    'h4',
+                    {style: MODAL_STYLES.sectionTitle},
+                    'Backend Connection',
+                  ),
+                  m('div', {style: MODAL_STYLES.field}, [
+                    m('label', {style: MODAL_STYLES.fieldLabel}, [
+                      m('span', {style: MODAL_STYLES.fieldIcon}, '🏢'),
+                      'Workspace ID',
+                    ]),
+                    m('input[type=text]', {
+                      style: MODAL_STYLES.input,
+                      value: this.workspaceId,
+                      onchange: (e: Event) => {
+                        if (readOnly) return;
+                        this.workspaceId = (e.target as HTMLInputElement).value;
+                      },
+                      disabled: readOnly,
+                      placeholder: vnode.attrs.workspaceContext.workspaceId,
+                    }),
+                    m(
+                      'div',
+                      {style: MODAL_STYLES.hint},
+                      `Tenant: ${vnode.attrs.workspaceContext.tenantId} · User: ${vnode.attrs.workspaceContext.userId} · Window: ${vnode.attrs.workspaceContext.windowId}`,
+                    ),
+                  ]),
+                  m('div', {style: MODAL_STYLES.field}, [
+                    m('label', {style: MODAL_STYLES.fieldLabel}, [
+                      m('span', {style: MODAL_STYLES.fieldIcon}, '🖥️'),
+                      'Backend URL',
+                    ]),
+                    m('input[type=text]', {
+                      style: MODAL_STYLES.input,
+                      value: this.settings.backendUrl,
+                      onchange: (e: Event) => {
+                        if (readOnly) return;
+                        this.settings.backendUrl = (
+                          e.target as HTMLInputElement
+                        ).value;
+                      },
+                      disabled: readOnly,
+                      placeholder: getDefaultSmartPerfettoBackendUrl(),
+                    }),
+                  ]),
+                  m('div', {style: MODAL_STYLES.field}, [
                     m(
                       'button',
                       {
+                        type: 'button',
                         style: {
-                          ...MODAL_STYLES.statusBtn,
-                          ...(this.isChecking
-                            ? MODAL_STYLES.statusBtnDisabled
-                            : {}),
+                          ...MODAL_STYLES.btn,
+                          ...MODAL_STYLES.btnSecondary,
+                          width: '100%',
+                          justifyContent: 'space-between',
+                          padding: '10px 12px',
                         },
-                        onclick: () => this.checkStatus(),
-                        disabled: this.isChecking,
+                        onclick: () => {
+                          if (readOnly) return;
+                          this.showBackendAuth = !this.showBackendAuth;
+                        },
+                        disabled: readOnly,
                       },
-                      this.isChecking ? '⏳ Checking...' : '🔌 Check Status',
+                      [
+                        m('span', 'Advanced backend auth'),
+                        m('span', this.showBackendAuth ? '▲' : '▼'),
+                      ],
                     ),
-                  ],
-                ),
-                this.renderStatusCard(),
-              ]),
-
-              m(
-                'div',
-                {style: {...MODAL_STYLES.alertBox, ...MODAL_STYLES.alertInfo}},
-                [
-                  m('span', {style: MODAL_STYLES.alertIcon}, 'ℹ️'),
-                  m('div', [
-                    m('span', 'Use the '),
-                    m('strong', 'Providers'),
                     m(
-                      'span',
-                      ' tab to add, test, activate, and switch AI provider profiles. Saving a provider is not enough; the active profile is what overrides backend/.env.',
+                      'div',
+                      {style: {...MODAL_STYLES.hint, marginTop: '6px'}},
+                      'Leave this empty for local single-user runs. Only fill it when the backend was started with SMARTPERFETTO_API_KEY.',
                     ),
                   ]),
-                ],
-              ),
-            ]),
+                  this.showBackendAuth
+                    ? m('div', {style: MODAL_STYLES.field}, [
+                        m('label', {style: MODAL_STYLES.fieldLabel}, [
+                          m('span', {style: MODAL_STYLES.fieldIcon}, '🔐'),
+                          'Backend Access Token',
+                        ]),
+                        m('input[type=password]', {
+                          style: MODAL_STYLES.input,
+                          value: this.settings.backendApiKey || '',
+                          onchange: (e: Event) => {
+                            if (readOnly) return;
+                            this.settings.backendApiKey = (
+                              e.target as HTMLInputElement
+                            ).value;
+                          },
+                          disabled: readOnly,
+                          placeholder: 'Optional SMARTPERFETTO_API_KEY',
+                        }),
+                        m(
+                          'div',
+                          {style: MODAL_STYLES.hint},
+                          'This protects SmartPerfetto backend APIs. It is not a model provider key; model provider keys belong on the Providers tab.',
+                        ),
+                      ])
+                    : null,
+                ]),
+
+                m('div', {style: MODAL_STYLES.section}, [
+                  m('h4', {style: MODAL_STYLES.sectionTitle}, 'Server Status'),
+                  m(
+                    'div',
+                    {
+                      style: {
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                      },
+                    },
+                    [
+                      m(
+                        'button',
+                        {
+                          style: {
+                            ...MODAL_STYLES.statusBtn,
+                            ...(this.isChecking
+                              ? MODAL_STYLES.statusBtnDisabled
+                              : {}),
+                          },
+                          onclick: () => this.checkStatus(),
+                          disabled: this.isChecking,
+                        },
+                        this.isChecking ? '⏳ Checking...' : '🔌 Check Status',
+                      ),
+                    ],
+                  ),
+                  this.renderStatusCard(),
+                ]),
+
+                m(
+                  'div',
+                  {
+                    style: {
+                      ...MODAL_STYLES.alertBox,
+                      ...MODAL_STYLES.alertInfo,
+                    },
+                  },
+                  [
+                    m('span', {style: MODAL_STYLES.alertIcon}, 'ℹ️'),
+                    m('div', [
+                      m('span', 'Use the '),
+                      m('strong', 'Providers'),
+                      m(
+                        'span',
+                        ' tab to add, test, activate, and switch AI provider profiles. Saving a provider is not enough; the active profile is what overrides backend/.env.',
+                      ),
+                    ]),
+                  ],
+                ),
+              ]),
 
         this.currentTab === 'connection'
           ? m('div', {style: MODAL_STYLES.footer}, [
@@ -922,9 +994,14 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                 {
                   style: {...MODAL_STYLES.btn, ...MODAL_STYLES.btnPrimary},
                   onclick: () => {
+                    if (readOnly) return;
                     vnode.attrs.onWorkspaceChange(this.workspaceId);
                     vnode.attrs.onSave(this.settings);
                   },
+                  disabled: readOnly,
+                  title: readOnly
+                    ? '分析运行中无法保存身份相关设置'
+                    : undefined,
                 },
                 '\u{1F4BE} Save Settings',
               ),

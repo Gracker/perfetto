@@ -17,10 +17,19 @@
 // limitations under the License.
 
 import {afterEach, beforeEach, describe, it, expect, vi} from 'vitest';
+import type {Mock} from 'vitest';
 
 import {AIPanel} from './ai_panel';
+import {getAISharedState} from './ai_shared_state';
+import {getFloatingState, updateFloatingState} from './ai_floating_state';
+import {
+  switchFloatingMode,
+  toggleSidebarCollapsedWithTransientState,
+} from './ai_transient_state';
 import {sessionManager} from './session_manager';
-import type {AIPanelState, TracePairTraceSide} from './types';
+import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import type {TracePairWorkspaceScope} from './trace_pair_workspace_state_model';
+import type {AIPanelState} from './types';
 
 type TestAIPanel = {
   state: AIPanelState;
@@ -30,7 +39,7 @@ type TestAIPanel = {
       start: bigint;
       end: bigint;
     };
-    notes: {
+    notes?: {
       removeNote: () => void;
     };
   };
@@ -40,17 +49,46 @@ type TestAIPanel = {
   saveCurrentSession: () => void;
   fetchBackend: (url: string, init?: RequestInit) => Promise<Response>;
   handleChatMessage: (message: string) => Promise<void>;
-  renderTableSourceContext: (source: Parameters<AIPanel['renderTableSourceContext']>[0]) => unknown;
+  renderTableSourceContext: (
+    source: Parameters<AIPanel['renderTableSourceContext']>[0],
+  ) => unknown;
 };
+
+type MutableTestAIPanel = TestAIPanel & {
+  engine?: {mode: 'HTTP_RPC'};
+  tracePairWorkspaceController: TracePairWorkspaceController;
+  fetchAvailableTraces: Mock<() => Promise<void>>;
+  renderHeaderActions: (
+    isInRpcMode: boolean,
+    hasBackendTrace: boolean,
+    isConnected: boolean,
+  ) => unknown;
+  getTracePairWorkspaceScope: () => TracePairWorkspaceScope;
+  loadSession: (
+    sessionId: string,
+    options?: {preserveLiveTracePair?: boolean},
+  ) => boolean;
+  verifyBackendTrace: Mock<() => Promise<void>>;
+  buildTracePairContext: () => unknown;
+  syncTracePairStateFromController: () => void;
+  saveCurrentSession: Mock<() => void>;
+  fetchBackend: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
+  cancelAnalysis: () => Promise<void>;
+  handleStoryCancel: () => Promise<void>;
+  exitComparisonMode: () => void;
+  saveSettings: (settings: AIPanelState['settings']) => void;
+  openSettings: () => void;
+};
+
+function createMutableTestPanel(): MutableTestAIPanel {
+  return new AIPanel() as unknown as MutableTestAIPanel;
+}
 
 function collectVNodeText(node: any): string {
   if (node === null || node === undefined || node === false) return '';
   if (typeof node === 'string' || typeof node === 'number') return String(node);
   if (Array.isArray(node)) return node.map(collectVNodeText).join(' ');
-  const parts = [
-    node.text,
-    node.children,
-  ].filter((part) => part !== undefined);
+  const parts = [node.text, node.children].filter((part) => part !== undefined);
   return parts.map(collectVNodeText).join(' ');
 }
 
@@ -115,6 +153,116 @@ describe('AIPanel analysis mode menu', () => {
 });
 
 describe('AIPanel header tool panels', () => {
+  it('opens the dual-trace shell before a history trace is selected', () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.currentTraceFingerprint = 'fingerprint-current';
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+    };
+    panel.fetchAvailableTraces = vi.fn(async () => {});
+
+    const header = panel.renderHeaderActions(true, true, true);
+    findVNodeByTitle(header, '打开双 Trace 工作区').attrs.onclick();
+
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      open: true,
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+      referenceTrace: null,
+    });
+    expect(panel.fetchAvailableTraces).toHaveBeenCalledTimes(1);
+    expect(panel.state.showTracePicker).toBe(false);
+  });
+
+  it('does not open a new trace pair while a single-trace analysis is running', () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.isLoading = true;
+
+    const header = panel.renderHeaderActions(true, true, true);
+    const button = findVNodeByTitle(header, '打开双 Trace 工作区');
+    const newChatButton = findVNodeByTitle(header, 'New Chat');
+    const settingsButton = findVNodeByTitle(header, '分析运行中，设置保持只读');
+
+    expect(button.attrs.disabled).toBe(true);
+    expect(button.attrs.onclick).toBeUndefined();
+    expect(newChatButton.attrs.disabled).toBe(true);
+    expect(newChatButton.attrs.onclick).toBeUndefined();
+    expect(settingsButton.attrs.disabled).toBe(true);
+    expect(settingsButton.attrs.onclick).toBeUndefined();
+    expect(panel.tracePairWorkspaceController.getState().open).toBe(false);
+  });
+
+  it('hard-blocks settings writes while analysis identity is locked', () => {
+    const panel = createMutableTestPanel();
+    const originalSettings = panel.state.settings;
+    const saveSettings = vi.spyOn(sessionManager, 'saveSettings');
+    panel.state.isLoading = true;
+
+    panel.openSettings();
+    panel.saveSettings({...originalSettings, backendUrl: 'http://other'});
+
+    expect(panel.state.showSettings).toBe(false);
+    expect(panel.state.settings).toBe(originalSettings);
+    expect(saveSettings).not.toHaveBeenCalled();
+    saveSettings.mockRestore();
+  });
+
+  it('does not load another conversation while analysis is running', () => {
+    const panel = createMutableTestPanel();
+    panel.state.isLoading = true;
+    const loadSession = vi.spyOn(sessionManager, 'loadSession');
+
+    expect(panel.loadSession('history-session')).toBe(false);
+    expect(loadSession).not.toHaveBeenCalled();
+
+    loadSession.mockRestore();
+  });
+
+  it('reopens an existing locked pair while analysis is running', () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.referenceTraceId = 'history-a';
+    panel.state.referenceTraceName = 'history-a.pftrace';
+    panel.state.isLoading = true;
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+    };
+    panel.fetchAvailableTraces = vi.fn(async () => {});
+    panel.tracePairWorkspaceController.open({
+      scope: panel.getTracePairWorkspaceScope(),
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a.pftrace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-a',
+    });
+    panel.tracePairWorkspaceController.setSelectionLocked(true);
+    panel.tracePairWorkspaceController.close();
+
+    const header = panel.renderHeaderActions(true, true, true);
+    const button = findVNodeByTitle(header, '打开双 Trace 工作区');
+    expect(button.attrs.disabled).not.toBe(true);
+    button.attrs.onclick();
+
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      open: true,
+      selectionLocked: true,
+      referenceTrace: {id: 'history-a'},
+    });
+  });
+
   it('keeps capture config mutually exclusive with Story and history panels', () => {
     const panel = new AIPanel() as any;
     panel.fetchAvailableTraces = vi.fn();
@@ -613,19 +761,240 @@ describe('AIPanel trace-pair session restore', () => {
     expect(panel.state.agentSessionId).toBeNull();
   });
 
+  it('applies an explicitly loaded comparison session over the live pair', () => {
+    const session = sessionManager.createSession(
+      'trace-a',
+      'current.trace',
+      'backend-current',
+    );
+    sessionManager.updateSession('trace-a', session.sessionId, {
+      agentSessionId: 'agent-b',
+      type: 'comparison',
+      referenceBackendTraceId: 'history-b',
+      referenceTraceName: 'history-b.pftrace',
+      tracePairLayout: 'vertical',
+      tracePairSplitPercent: 64,
+      tracePairCurrentPane: 'second',
+    });
+
+    const panel = createMutableTestPanel();
+    panel.engine = {mode: 'HTTP_RPC'};
+    panel.verifyBackendTrace = vi.fn();
+    panel.state.backendTraceId = 'backend-current';
+    panel.tracePairWorkspaceController.open({
+      scope: panel.getTracePairWorkspaceScope(),
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a.pftrace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-a',
+    });
+
+    expect(panel.loadSession(session.sessionId)).toBe(true);
+
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      referenceTrace: {id: 'history-b', filename: 'history-b.pftrace'},
+      currentPane: 'second',
+      layout: 'vertical',
+      splitPercent: 64,
+    });
+    expect(panel.state.agentSessionId).toBe('agent-b');
+  });
+
+  it('keeps the live pair when the panel auto-restores an older session', () => {
+    const session = sessionManager.createSession(
+      'trace-a',
+      'current.trace',
+      'backend-current',
+    );
+    sessionManager.updateSession('trace-a', session.sessionId, {
+      agentSessionId: 'agent-a',
+      type: 'comparison',
+      referenceBackendTraceId: 'history-a',
+      referenceTraceName: 'history-a.pftrace',
+    });
+
+    const panel = createMutableTestPanel();
+    panel.engine = {mode: 'HTTP_RPC'};
+    panel.verifyBackendTrace = vi.fn();
+    panel.state.backendTraceId = 'backend-current';
+    panel.tracePairWorkspaceController.open({
+      scope: panel.getTracePairWorkspaceScope(),
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-b', filename: 'history-b.pftrace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-b',
+    });
+
+    expect(
+      panel.loadSession(session.sessionId, {
+        preserveLiveTracePair: true,
+      }),
+    ).toBe(true);
+
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      open: true,
+      referenceTrace: {id: 'history-b', filename: 'history-b.pftrace'},
+    });
+    expect(panel.state.referenceTraceId).toBe('history-b');
+    expect(panel.state.agentSessionId).toBeNull();
+  });
+
+  it('atomically loads a single session over the live comparison pair', () => {
+    const session = sessionManager.createSession(
+      'trace-a',
+      'current.trace',
+      'backend-current',
+    );
+    sessionManager.updateSession('trace-a', session.sessionId, {
+      agentSessionId: 'agent-single',
+      type: 'single',
+    });
+
+    const panel = createMutableTestPanel();
+    panel.engine = {mode: 'HTTP_RPC'};
+    panel.verifyBackendTrace = vi.fn();
+    panel.state.backendTraceId = 'backend-current';
+    panel.tracePairWorkspaceController.open({
+      scope: panel.getTracePairWorkspaceScope(),
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a.pftrace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-a',
+    });
+
+    expect(panel.loadSession(session.sessionId)).toBe(true);
+
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      open: false,
+      referenceTrace: null,
+    });
+    expect(panel.state.referenceTraceId).toBeNull();
+    expect(panel.buildTracePairContext()).toBeUndefined();
+    expect(panel.state.agentSessionId).toBe('agent-single');
+  });
+
+  it('persists a canonical reference name without invalidating continuation', () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.referenceTraceId = 'history-a';
+    panel.state.referenceTraceName = 'history-a';
+    panel.state.agentSessionId = 'agent-a';
+    panel.saveCurrentSession = vi.fn();
+    panel.tracePairWorkspaceController.open({
+      scope: {key: 'workspace/current', backendUrl: 'http://localhost:3000'},
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-a',
+    });
+    panel.syncTracePairStateFromController();
+    panel.state.agentSessionId = 'agent-a';
+    panel.saveCurrentSession.mockClear();
+
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a.pftrace'},
+    ]);
+    panel.syncTracePairStateFromController();
+
+    expect(panel.state.referenceTraceName).toBe('history-a.pftrace');
+    expect(panel.state.agentSessionId).toBe('agent-a');
+    expect(panel.saveCurrentSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates continuation only when the semantic pair changes', () => {
+    const panel = createMutableTestPanel();
+    const pendingDataset = {label: 'pending', columns: [], rows: []};
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.referenceTraceId = 'history-a';
+    panel.state.referenceTraceName = 'history-a.trace';
+    panel.state.agentSessionId = 'agent-a';
+    panel.state.agentRunId = 'run-a';
+    panel.state.agentRequestId = 'request-a';
+    panel.state.agentRunSequence = 4;
+    panel.state.pendingTraceContext = [pendingDataset];
+    panel.state.sseLastEventId = 27;
+    panel.saveCurrentSession = vi.fn();
+    panel.tracePairWorkspaceController.open({
+      scope: {key: 'workspace/current', backendUrl: 'http://localhost:3000'},
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a.trace'},
+      {id: 'history-b', filename: 'history-b.trace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-a',
+    });
+    panel.syncTracePairStateFromController();
+    panel.state.agentSessionId = 'agent-a';
+    panel.state.agentRunId = 'run-a';
+    panel.state.agentRequestId = 'request-a';
+    panel.state.agentRunSequence = 4;
+    panel.state.pendingTraceContext = [pendingDataset];
+    panel.state.sseLastEventId = 27;
+
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'backend-current',
+    });
+    panel.syncTracePairStateFromController();
+    expect(panel.state.agentSessionId).toBe('agent-a');
+    expect(panel.state.pendingTraceContext).toEqual([pendingDataset]);
+
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'first',
+      traceId: 'history-b',
+    });
+    panel.syncTracePairStateFromController();
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.agentRunId).toBeNull();
+    expect(panel.state.agentRequestId).toBeNull();
+    expect(panel.state.agentRunSequence).toBe(0);
+    expect(panel.state.pendingTraceContext).toBeNull();
+    expect(panel.state.sseLastEventId).toBeNull();
+  });
+
   it('sends live dual-trace workspace context with analysis requests', async () => {
     const panel = new AIPanel() as any;
     panel.state.backendTraceId = 'backend-current';
     panel.state.currentTraceFingerprint = 'fingerprint-current';
     panel.state.referenceTraceId = 'backend-reference';
     panel.state.referenceTraceName = 'reference.trace';
-    panel.state.tracePairWorkspaceOpen = true;
-    panel.state.tracePairLayout = 'vertical';
-    panel.state.tracePairSplitPercent = 66;
-    panel.state.tracePairMaximizedTraceSide = 'reference';
-    panel.state.tracePairMinimizedTraceSides =
-      new Set<TracePairTraceSide>(['current']);
-    panel.state.isReferenceActive = true;
+    panel.tracePairWorkspaceController.open({
+      scope: {key: 'workspace/current', backendUrl: 'http://localhost:3000'},
+      currentTrace: {
+        id: 'backend-current',
+        filename: 'current.trace',
+        fingerprint: 'fingerprint-current',
+      },
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'backend-reference', filename: 'reference.trace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'first',
+      traceId: 'backend-reference',
+    });
+    panel.tracePairWorkspaceController.setLayout('vertical');
+    panel.tracePairWorkspaceController.setSplitPercent(66);
+    panel.tracePairWorkspaceController.toggleMaximized('reference');
     panel.trace = {
       traceInfo: {
         traceTitle: 'current.trace',
@@ -640,14 +1009,20 @@ describe('AIPanel trace-pair session restore', () => {
     panel.captureSelectionContext = vi.fn(async () => null);
     panel.listenToAgentSSE = vi.fn(async () => {});
     panel.saveCurrentSession = vi.fn();
-    const fetchBackend = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
-      success: true,
-      sessionId: 'agent-session',
-      isNewSession: true,
-    }), {
-      status: 200,
-      headers: {'x-request-id': 'request-1'},
-    }));
+    const fetchBackend = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            sessionId: 'agent-session',
+            isNewSession: true,
+          }),
+          {
+            status: 200,
+            headers: {'x-request-id': 'request-1'},
+          },
+        ),
+    );
     panel.fetchBackend = fetchBackend;
 
     await panel.handleChatMessage('对比上方和下方 Trace 的启动速度差异');
@@ -663,16 +1038,15 @@ describe('AIPanel trace-pair session restore', () => {
         tracePairContext: {
           schemaVersion: 1,
           layout: 'vertical',
-          primarySide: 'top',
-          referenceSide: 'bottom',
-          activeSide: 'bottom',
+          primarySide: 'bottom',
+          referenceSide: 'top',
+          activeSide: 'top',
           workspaceOpen: true,
           splitPercent: 66,
           maximizedTraceSide: 'reference',
-          minimizedTraceSides: ['current'],
           panes: [
             {
-              side: 'top',
+              side: 'bottom',
               traceSide: 'current',
               traceId: 'backend-current',
               traceName: 'current.trace',
@@ -681,7 +1055,7 @@ describe('AIPanel trace-pair session restore', () => {
               visualState: 'context_only',
             },
             {
-              side: 'bottom',
+              side: 'top',
               traceSide: 'reference',
               traceId: 'backend-reference',
               traceName: 'reference.trace',
@@ -693,13 +1067,360 @@ describe('AIPanel trace-pair session restore', () => {
       },
     });
     expect(requestBody.options.tracePairContext.aliases).toMatchObject({
-      '上方': 'current',
-      '上边': 'current',
-      '下方': 'reference',
-      '下边': 'reference',
-      top: 'current',
-      bottom: 'reference',
+      上方: 'reference',
+      上边: 'reference',
+      下方: 'current',
+      下边: 'current',
+      top: 'reference',
+      bottom: 'current',
     });
     expect(panel.listenToAgentSSE).toHaveBeenCalledWith('agent-session');
+  });
+
+  it('cancels a session that arrives after stop was requested', async () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+      notes: {
+        removeNote: vi.fn(),
+      },
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.listenToAgentSSE = vi.fn(async () => {});
+    panel.saveCurrentSession = vi.fn();
+    let resolveAnalyze: ((response: Response) => void) | undefined;
+    const analyzeResponse = new Promise<Response>((resolve) => {
+      resolveAnalyze = resolve;
+    });
+    const fetchBackend = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.endsWith('/analyze')) return analyzeResponse;
+      return new Response(
+        JSON.stringify({
+          success: true,
+          sessionId: 'agent-late',
+          runId: 'run-late',
+          status: 'cancelled',
+          outcome: 'cancelled',
+          reason: 'Analysis cancelled by user',
+        }),
+        {status: 200},
+      );
+    });
+    panel.fetchBackend = fetchBackend;
+
+    const analysisPromise = panel.handleChatMessage('compare traces');
+    await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(1));
+    updateFloatingState({
+      mode: 'sidebar',
+      sidebar: {collapsed: false},
+    });
+    switchFloatingMode('tab');
+    expect(getFloatingState().mode).toBe('sidebar');
+    expect(getFloatingState().sidebar.collapsed).toBe(true);
+    toggleSidebarCollapsedWithTransientState();
+    expect(getFloatingState().sidebar.collapsed).toBe(false);
+    const cancellationPromise = panel.cancelAnalysis();
+    resolveAnalyze?.(
+      new Response(
+        JSON.stringify({
+          success: true,
+          sessionId: 'agent-late',
+          runId: 'run-late',
+          isNewSession: true,
+        }),
+        {status: 200},
+      ),
+    );
+
+    await Promise.all([analysisPromise, cancellationPromise]);
+
+    expect(fetchBackend).toHaveBeenCalledTimes(2);
+    expect(fetchBackend.mock.calls[1][0]).toContain('/agent-late/cancel');
+    expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
+      runId: 'run-late',
+    });
+    expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.isLoading).toBe(false);
+    expect(getAISharedState().status).toBe('cancelled');
+    expect(
+      panel.state.messages.filter(
+        (message: {content: string}) => message.content === '分析已取消。',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('waits for the new run identity before stopping a continued session', async () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.agentSessionId = 'agent-existing';
+    panel.state.agentRunId = 'run-completed';
+    panel.state.messages.push({
+      id: 'prior-progress',
+      role: 'assistant',
+      content: '上一轮有效进度证据',
+      timestamp: 1,
+      flowTag: 'streaming_flow',
+    });
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+      notes: {
+        removeNote: vi.fn(),
+      },
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.listenToAgentSSE = vi.fn(async () => {});
+    panel.saveCurrentSession = vi.fn();
+    let resolveAnalyze: ((response: Response) => void) | undefined;
+    const analyzeResponse = new Promise<Response>((resolve) => {
+      resolveAnalyze = resolve;
+    });
+    const fetchBackend = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.endsWith('/analyze')) return analyzeResponse;
+      return new Response(
+        JSON.stringify({
+          success: true,
+          sessionId: 'agent-existing',
+          runId: 'run-current',
+          status: 'cancelled',
+          outcome: 'cancelled',
+          reason: 'Analysis cancelled by user',
+        }),
+        {status: 200},
+      );
+    });
+    panel.fetchBackend = fetchBackend;
+
+    const analysisPromise = panel.handleChatMessage('continued analysis');
+    await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(1));
+
+    const cancellationPromise = panel.cancelAnalysis();
+    expect(fetchBackend).toHaveBeenCalledTimes(1);
+    expect(panel.state.isLoading).toBe(true);
+
+    resolveAnalyze?.(
+      new Response(
+        JSON.stringify({
+          success: true,
+          sessionId: 'agent-existing',
+          runId: 'run-current',
+          isNewSession: false,
+        }),
+        {status: 200},
+      ),
+    );
+    await Promise.all([analysisPromise, cancellationPromise]);
+
+    expect(fetchBackend).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
+      runId: 'run-current',
+    });
+    expect(
+      panel.state.messages.find(
+        (message: {id: string}) => message.id === 'prior-progress',
+      )?.content,
+    ).toBe('上一轮有效进度证据');
+    expect(
+      panel.state.messages.filter(
+        (message: {content: string}) => message.content === '分析已取消。',
+      ),
+    ).toHaveLength(1);
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.agentRunId).toBeNull();
+  });
+
+  it('sends the established run identity when stopping an active SSE run', async () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+      notes: {
+        removeNote: vi.fn(),
+      },
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.saveCurrentSession = vi.fn();
+    let finishSse: (() => void) | undefined;
+    panel.listenToAgentSSE = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSse = resolve;
+        }),
+    );
+    const fetchBackend = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.endsWith('/analyze')) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            sessionId: 'agent-running',
+            runId: 'run-running',
+            isNewSession: true,
+          }),
+          {status: 200},
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          sessionId: 'agent-running',
+          runId: 'run-running',
+          status: 'cancelled',
+          outcome: 'cancelled',
+          reason: 'Analysis cancelled by user',
+        }),
+        {status: 200},
+      );
+    });
+    panel.fetchBackend = fetchBackend;
+
+    const analysisPromise = panel.handleChatMessage('active analysis');
+    await vi.waitFor(() =>
+      expect(panel.listenToAgentSSE).toHaveBeenCalledOnce(),
+    );
+
+    const cancellationPromise = panel.cancelAnalysis();
+    await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
+      runId: 'run-running',
+    });
+
+    finishSse?.();
+    await Promise.all([analysisPromise, cancellationPromise]);
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.agentRunId).toBeNull();
+  });
+
+  it('sends the established run identity when Story cancels an agent analysis', async () => {
+    const panel = createMutableTestPanel();
+    panel.state.agentSessionId = 'agent-story';
+    panel.state.agentRunId = 'run-story';
+    panel.state.storyState.status = 'running';
+    panel.state.storyState.analysisId = 'agent-story';
+    panel.state.isLoading = true;
+    panel.saveCurrentSession = vi.fn();
+    panel.fetchBackend = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            sessionId: 'agent-story',
+            runId: 'run-story',
+            status: 'cancelled',
+            outcome: 'cancelled',
+            reason: 'Analysis cancelled by user',
+          }),
+          {status: 200},
+        ),
+    );
+
+    await panel.handleStoryCancel();
+
+    expect(panel.fetchBackend).toHaveBeenCalledTimes(1);
+    expect(panel.fetchBackend.mock.calls[0][0]).toContain(
+      '/agent-story/cancel',
+    );
+    expect(
+      JSON.parse(String(panel.fetchBackend.mock.calls[0][1]?.body)),
+    ).toEqual({
+      runId: 'run-story',
+    });
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.agentRunId).toBeNull();
+    expect(getAISharedState().status).toBe('cancelled');
+  });
+
+  it('does not reconnect an empty session when a pre-session stop fails', async () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.agentSessionId = '';
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+      notes: {
+        removeNote: vi.fn(),
+      },
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.listenToAgentSSE = vi.fn(async () => {});
+    panel.saveCurrentSession = vi.fn();
+    let rejectAnalyze: ((error: Error) => void) | undefined;
+    panel.fetchBackend = vi.fn(
+      async () =>
+        new Promise<Response>((_resolve, reject) => {
+          rejectAnalyze = reject;
+        }),
+    );
+
+    const analysisPromise = panel.handleChatMessage('compare traces');
+    await vi.waitFor(() => expect(panel.fetchBackend).toHaveBeenCalledTimes(1));
+    await panel.cancelAnalysis();
+    rejectAnalyze?.(new Error('network unavailable'));
+    await analysisPromise;
+
+    expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.isLoading).toBe(false);
+    expect(getAISharedState().status).toBe('error');
+  });
+
+  it('keeps a running comparison intact when semantic exit is requested', () => {
+    const panel = createMutableTestPanel();
+    panel.state.backendTraceId = 'backend-current';
+    panel.state.referenceTraceId = 'history-a';
+    panel.state.referenceTraceName = 'history-a.pftrace';
+    panel.state.agentSessionId = 'agent-running';
+    panel.state.agentRunId = 'run-running';
+    panel.state.agentRequestId = 'request-running';
+    panel.state.agentRunSequence = 3;
+    panel.state.isLoading = true;
+    panel.saveCurrentSession = vi.fn();
+    panel.tracePairWorkspaceController.open({
+      scope: {key: 'workspace/current', backendUrl: 'http://localhost:3000'},
+      currentTrace: {id: 'backend-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'history-a', filename: 'history-a.pftrace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-a',
+    });
+    panel.tracePairWorkspaceController.setSelectionLocked(true);
+    const messageCount = panel.state.messages.length;
+
+    panel.exitComparisonMode();
+
+    expect(panel.state.referenceTraceId).toBe('history-a');
+    expect(panel.state.agentSessionId).toBe('agent-running');
+    expect(panel.state.agentRunId).toBe('run-running');
+    expect(panel.state.agentRequestId).toBe('request-running');
+    expect(panel.state.agentRunSequence).toBe(3);
+    expect(panel.state.messages).toHaveLength(messageCount);
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      open: true,
+      selectionLocked: true,
+      referenceTrace: {id: 'history-a'},
+    });
+    expect(panel.saveCurrentSession).not.toHaveBeenCalled();
   });
 });

@@ -16,7 +16,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import m from 'mithril';
 import './styles.scss';
 import {isTimelineRouteActive} from '../../frontend/timeline_route';
 import {App} from '../../public/app';
@@ -30,13 +29,20 @@ import {
 import {restoreOverlayTracks} from './track_overlay';
 import {createAIAreaSelectionTab} from './ai_area_selection_tab';
 import {getAISharedState, resetAISharedState} from './ai_shared_state';
-import {AI_NOTE_COLORS, resetActiveNoteIds} from './ai_timeline_notes';
+import {resetActiveNoteIds} from './ai_timeline_notes';
 import {locateFloatingWindow, setupFloatingWindow} from './ai_floating_window';
-import {getFloatingState, toggleSidebarCollapsed, updateFloatingState} from './ai_floating_state';
-import {resetTransientState, switchFloatingMode} from './ai_transient_state';
+import {getFloatingState, updateFloatingState} from './ai_floating_state';
+import {
+  resetTransientState,
+  switchFloatingMode,
+  toggleSidebarCollapsedWithTransientState,
+} from './ai_transient_state';
 import {setupCriticalPathExtension} from './critical_path_extension';
 import {setDefaultBackendUrl} from '../../core/backend_uploader';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
+import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import {installTracePairFrameRedrawListener} from './trace_pair_workspace';
+import {getAIAssistantSurfacePolicy} from './ai_surface_policy';
 
 // Inject smart-detected backend URL at module load time, BEFORE any trace
 // auto-upload kicks in.
@@ -54,7 +60,7 @@ function toggleSidebarPanel(): void {
     locateFloatingWindow();
   } else if (state.mode === 'sidebar') {
     if (state.sidebar.collapsed) {
-      toggleSidebarCollapsed();
+      toggleSidebarCollapsedWithTransientState();
     } else {
       switchFloatingMode('tab');
     }
@@ -67,6 +73,7 @@ export default class implements PerfettoPlugin {
   static readonly id = 'com.smartperfetto.AIAssistant';
 
   static onActivate(app: App): void {
+    if (!getAIAssistantSurfacePolicy().registerCommands) return;
     app.commands.registerCommand({
       id: 'com.smartperfetto.AIAssistant.OpenPanel',
       name: 'Open AI Assistant',
@@ -120,6 +127,11 @@ export default class implements PerfettoPlugin {
   }
 
   async onTraceLoad(ctx: Trace): Promise<void> {
+    const surfacePolicy = getAIAssistantSurfacePolicy();
+    if (surfacePolicy.installFrameRedrawBridge) {
+      ctx.trash.defer(installTracePairFrameRedrawListener(ctx.raf));
+    }
+    if (!surfacePolicy.setupAssistantOwner) return;
     // Reset shared state to prevent cross-trace leakage (Codex #5).
     resetAISharedState();
     // Reset timeline note tracking so old trace IDs don't leak into the new
@@ -131,11 +143,31 @@ export default class implements PerfettoPlugin {
     // Force floating mode off on trace load (popup never auto-opens)
     updateFloatingState({mode: 'tab'});
 
-    // Mount the unified surface host on document.body. The host dispatches
-    // to FloatingWindow (mode=floating), SidebarPanel (mode=sidebar), or
-    // null (mode=tab). Only one AIPanel instance exists at any time.
-    const surfaceHandle = setupFloatingWindow(ctx);
-    ctx.trash.defer(() => surfaceHandle.dispose());
+    const tracePairWorkspaceController = new TracePairWorkspaceController();
+    const tracePairIdentity = (): string => {
+      const state = tracePairWorkspaceController.getState();
+      return [
+        state.scope?.key || '',
+        state.currentTrace?.id || '',
+        state.referenceTrace?.id || '',
+      ].join(':');
+    };
+    let previousTracePairIdentity = tracePairIdentity();
+    const unsubscribeTracePair = tracePairWorkspaceController.subscribe(() => {
+      const nextTracePairIdentity = tracePairIdentity();
+      if (nextTracePairIdentity === previousTracePairIdentity) return;
+      previousTracePairIdentity = nextTracePairIdentity;
+      resetTransientState();
+    });
+    const surfaceHandle = setupFloatingWindow(
+      ctx,
+      tracePairWorkspaceController,
+    );
+    ctx.trash.defer(() => {
+      unsubscribeTracePair();
+      surfaceHandle.dispose();
+      tracePairWorkspaceController.resetScope();
+    });
     const criticalPathHandle = setupCriticalPathExtension(ctx);
     ctx.trash.defer(() => criticalPathHandle.dispose());
 
@@ -153,9 +185,10 @@ export default class implements PerfettoPlugin {
           idle: 'AI Ready',
           ready: 'AI Ready',
           analyzing: `AI: ${state.currentPhase || 'Analyzing...'}`,
-          completed: state.issueCount > 0
-            ? `AI: ${state.issueCount} issue${state.issueCount > 1 ? 's' : ''}`
-            : 'AI: Done',
+          completed:
+            state.issueCount > 0
+              ? `AI: ${state.issueCount} issue${state.issueCount > 1 ? 's' : ''}`
+              : 'AI: Done',
           partial: 'AI: Partial',
           quota_exceeded: 'AI: Quota',
           cancelled: 'AI: Cancelled',
@@ -179,52 +212,6 @@ export default class implements PerfettoPlugin {
             toggleSidebarPanel();
           },
         };
-      },
-      popupContent: () => {
-        const state = getAISharedState();
-        if (state.status === 'analyzing') {
-          return m('div', {style: 'padding: 8px; font-size: 12px'},
-            m('div', {style: 'color: #1a73e8; font-weight: 500'}, state.currentPhase || 'Analyzing...'),
-          );
-        }
-        if (state.status === 'partial') {
-          return m('div', {style: 'padding: 8px; font-size: 12px; color: #b06000'},
-            'Analysis completed with a partial result. Open the assistant for details.',
-          );
-        }
-        if (state.status === 'cancelled') {
-          return m('div', {style: 'padding: 8px; font-size: 12px; color: #5f6368'},
-            'Analysis cancelled. Open the assistant for details.',
-          );
-        }
-        if (state.findings.length === 0) {
-          return m('div', {style: 'padding: 8px; font-size: 12px; color: #5f6368'},
-            state.status === 'completed'
-              ? 'Analysis complete. No issues found.'
-              : 'Click to open AI Assistant.',
-          );
-        }
-        const MAX_FINDINGS = 8;
-        const visibleFindings = state.findings.slice(0, MAX_FINDINGS);
-        const overflowCount = state.findings.length - MAX_FINDINGS;
-        return m('div', {style: 'padding: 6px; max-height: 200px; overflow-y: auto'},
-          visibleFindings.map((f) =>
-            m('div', {
-              style: `
-                padding: 4px 8px;
-                margin: 2px 0;
-                font-size: 12px;
-                border-left: 3px solid ${AI_NOTE_COLORS[f.type] ?? AI_NOTE_COLORS.insight};
-                background: #f8f9fa;
-                border-radius: 0 4px 4px 0;
-              `,
-            }, f.label),
-          ),
-          overflowCount > 0
-            ? m('div', {style: 'font-size: 11px; color: #80868b; padding: 4px 8px'},
-                `+${overflowCount} more`)
-            : null,
-        );
       },
     });
 

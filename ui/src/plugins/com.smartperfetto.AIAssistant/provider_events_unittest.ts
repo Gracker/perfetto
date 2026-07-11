@@ -5,6 +5,8 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {MockedFunction} from 'vitest';
 
 import {ProviderQuickSwitcher} from './provider_switcher';
+import {SettingsModal} from './settings_modal';
+import {DEFAULT_SETTINGS} from './types';
 import {
   createProviderCatalogEventSource,
   notifyProviderCatalogChanged,
@@ -117,5 +119,78 @@ describe('Provider catalog change events', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(root.textContent).toContain('DeepSeek Work');
+  });
+});
+
+describe('Analysis identity lock', () => {
+  it('keeps connection settings and Provider mutation controls read-only', () => {
+    const onSave = vi.fn();
+    const onWorkspaceChange = vi.fn();
+    const onProviderSelectionChange = vi.fn();
+
+    m.mount(root, {
+      view: () =>
+        m(SettingsModal, {
+          settings: {...DEFAULT_SETTINGS},
+          workspaceContext: {
+            tenantId: 'tenant-a',
+            userId: 'user-a',
+            workspaceId: 'workspace-a',
+            windowId: 'window-a',
+          },
+          readOnly: true,
+          onClose: () => {},
+          onSave,
+          onWorkspaceChange,
+          onCheckStatus: async () => ({connected: true}),
+          onProviderSelectionChange,
+        }),
+    });
+    m.redraw.sync();
+
+    const providerTab = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Providers'),
+    );
+    const saveButton = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Save Settings'),
+    );
+    const inputs = Array.from(root.querySelectorAll('input'));
+
+    expect(providerTab?.disabled).toBe(true);
+    expect(saveButton?.disabled).toBe(true);
+    expect(inputs.length).toBeGreaterThan(1);
+    expect(inputs.every((input) => input.disabled)).toBe(true);
+
+    saveButton?.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onWorkspaceChange).not.toHaveBeenCalled();
+    expect(onProviderSelectionChange).not.toHaveBeenCalled();
+  });
+
+  it('hard-blocks quick-switcher mouse and keyboard mutations', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(providerPayload('DeepSeek Work')));
+
+    m.mount(root, {
+      view: () =>
+        m(ProviderQuickSwitcher, {
+          backendUrl: 'http://backend',
+          disabled: true,
+        }),
+    });
+    await flushAsyncWork();
+    m.redraw.sync();
+
+    const toggle = root.querySelector('button');
+    if (!toggle) throw new Error('Provider switcher button missing');
+    expect(toggle.disabled).toBe(true);
+
+    toggle.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}));
+    await flushAsyncWork();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === 'POST'),
+    ).toBe(false);
   });
 });

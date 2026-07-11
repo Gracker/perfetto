@@ -41,7 +41,12 @@ export function maybeOpenTraceFromRoute(route: Route) {
     // /?url=https://example.com/path/to/trace.pftrace
     // Works with any public HTTPS URL. The service worker firewall enforces
     // that only GET requests without query strings are allowed.
-    loadTraceFromUrl(url);
+    loadTraceFromUrl(
+      url,
+      typeof route.args.traceFileName === 'string'
+        ? route.args.traceFileName
+        : undefined,
+    );
     return;
   }
 
@@ -214,17 +219,18 @@ async function maybeOpenCachedTrace(traceUuid: string) {
   }
 }
 
-function loadTraceFromUrl(url: string) {
+function loadTraceFromUrl(url: string, traceFileName?: string) {
   const isLocalhostTraceUrl = ['127.0.0.1', 'localhost'].includes(
     new URL(url).hostname,
   );
 
-  if (isLocalhostTraceUrl) {
+  if (isLocalhostTraceUrl || url.startsWith('blob:')) {
     // This handles the special case of tools/record_android_trace serving the
     // traces from a local webserver and killing it immediately after having
     // seen the HTTP GET request. In those cases store the trace as a file, so
     // when users click on share we don't fail the re-fetch().
-    const fileName = url.split('/').pop() ?? 'local_trace.pftrace';
+    const fileName =
+      traceFileName?.trim() || url.split('/').pop() || 'local_trace.pftrace';
     const request = fetch(url)
       .then((response) => response.blob())
       .then((b) => AppImpl.instance.openTraceFromFile(new File([b], fileName)))

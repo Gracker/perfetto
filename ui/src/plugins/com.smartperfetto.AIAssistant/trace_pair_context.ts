@@ -15,6 +15,7 @@ export interface BuildTracePairContextInput {
   referenceTraceId: string | null;
   referenceTraceName?: string | null;
   activeTraceSide: TracePairTraceSide;
+  currentPane: 'first' | 'second';
   layout: TracePairLayout;
   workspaceOpen: boolean;
   splitPercent: number;
@@ -25,6 +26,7 @@ export interface BuildTracePairContextInput {
 export type BuildHorizontalTracePairContextInput = Omit<
   BuildTracePairContextInput,
   | 'activeTraceSide'
+  | 'currentPane'
   | 'layout'
   | 'workspaceOpen'
   | 'splitPercent'
@@ -34,46 +36,54 @@ export type BuildHorizontalTracePairContextInput = Omit<
   isReferenceActive: boolean;
 };
 
-const TRACE_PAIR_ALIASES: Record<string, TracePairTraceSide> = {
-  left: 'current',
-  top: 'current',
+const TRACE_PAIR_SEMANTIC_ALIASES: Record<string, TracePairTraceSide> = {
   primary: 'current',
   main: 'current',
   current: 'current',
-  '左': 'current',
-  '左侧': 'current',
-  '左边': 'current',
-  '左窗口': 'current',
-  '上': 'current',
-  '上方': 'current',
-  '上边': 'current',
-  '上面': 'current',
-  '上窗口': 'current',
   '主': 'current',
   '当前': 'current',
-  right: 'reference',
-  bottom: 'reference',
   reference: 'reference',
   baseline: 'reference',
-  '右': 'reference',
-  '右侧': 'reference',
-  '右边': 'reference',
-  '右窗口': 'reference',
-  '下': 'reference',
-  '下方': 'reference',
-  '下边': 'reference',
-  '下面': 'reference',
-  '下窗口': 'reference',
   '参考': 'reference',
 };
+
+const FIRST_PANE_ALIASES = [
+  'left',
+  'top',
+  '左',
+  '左侧',
+  '左边',
+  '左窗口',
+  '上',
+  '上方',
+  '上边',
+  '上面',
+  '上窗口',
+] as const;
+
+const SECOND_PANE_ALIASES = [
+  'right',
+  'bottom',
+  '右',
+  '右侧',
+  '右边',
+  '右窗口',
+  '下',
+  '下方',
+  '下边',
+  '下面',
+  '下窗口',
+] as const;
 
 export function buildTracePairContext(
   input: BuildTracePairContextInput,
 ): TracePairContext | undefined {
   if (!input.currentTraceId || !input.referenceTraceId) return undefined;
 
-  const primarySide = input.layout === 'vertical' ? 'top' : 'left';
-  const referenceSide = input.layout === 'vertical' ? 'bottom' : 'right';
+  const firstSide = input.layout === 'vertical' ? 'top' : 'left';
+  const secondSide = input.layout === 'vertical' ? 'bottom' : 'right';
+  const primarySide = input.currentPane === 'first' ? firstSide : secondSide;
+  const referenceSide = input.currentPane === 'first' ? secondSide : firstSide;
   const activeSide = input.activeTraceSide === 'reference'
     ? referenceSide
     : primarySide;
@@ -112,7 +122,7 @@ export function buildTracePairContext(
       ? {maximizedTraceSide: input.maximizedTraceSide}
       : {}),
     ...(minimizedTraceSides.length > 0 ? {minimizedTraceSides} : {}),
-    aliases: {...TRACE_PAIR_ALIASES},
+    aliases: buildTracePairAliases(input.currentPane),
     panes: [currentPane, referencePane],
   };
 }
@@ -123,12 +133,24 @@ export function buildHorizontalTracePairContext(
   return buildTracePairContext({
     ...input,
     activeTraceSide: input.isReferenceActive ? 'reference' : 'current',
+    currentPane: 'first',
     layout: 'horizontal',
     workspaceOpen: false,
     splitPercent: 50,
     maximizedTraceSide: null,
     minimizedTraceSides: new Set(),
   });
+}
+
+function buildTracePairAliases(
+  currentPane: 'first' | 'second',
+): Record<string, TracePairTraceSide> {
+  const firstTraceSide = currentPane === 'first' ? 'current' : 'reference';
+  const secondTraceSide = currentPane === 'first' ? 'reference' : 'current';
+  const aliases = {...TRACE_PAIR_SEMANTIC_ALIASES};
+  for (const alias of FIRST_PANE_ALIASES) aliases[alias] = firstTraceSide;
+  for (const alias of SECOND_PANE_ALIASES) aliases[alias] = secondTraceSide;
+  return aliases;
 }
 
 function isTracePaneLive(

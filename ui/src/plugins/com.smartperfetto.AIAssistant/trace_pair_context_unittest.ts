@@ -90,6 +90,7 @@ describe('buildTracePairContext', () => {
       referenceTraceId: 'trace-reference',
       referenceTraceName: 'reference.trace',
       activeTraceSide: 'reference',
+      currentPane: 'first',
       layout: 'vertical',
       workspaceOpen: true,
       splitPercent: 61.2,
@@ -129,6 +130,7 @@ describe('buildTracePairContext', () => {
       referenceTraceId: 'trace-reference',
       referenceTraceName: 'reference.trace',
       activeTraceSide: 'current',
+      currentPane: 'first',
       layout: 'horizontal',
       workspaceOpen: true,
       splitPercent: 12,
@@ -152,6 +154,40 @@ describe('buildTracePairContext', () => {
           traceSide: 'reference',
           visualState: 'context_only',
         },
+      ],
+    });
+  });
+
+  it('maps current and reference roles after the panes are swapped', () => {
+    const context = buildTracePairContext({
+      currentTraceId: 'trace-current',
+      currentTraceName: 'current.trace',
+      referenceTraceId: 'trace-reference',
+      referenceTraceName: 'reference.trace',
+      activeTraceSide: 'current',
+      currentPane: 'second',
+      layout: 'horizontal',
+      workspaceOpen: true,
+      splitPercent: 50,
+      maximizedTraceSide: null,
+      minimizedTraceSides: new Set<TracePairTraceSide>(),
+    });
+
+    expect(context).toMatchObject({
+      primarySide: 'right',
+      referenceSide: 'left',
+      activeSide: 'right',
+      aliases: {
+        left: 'reference',
+        current: 'current',
+        right: 'current',
+        reference: 'reference',
+        '左窗口': 'reference',
+        '右窗口': 'current',
+      },
+      panes: [
+        {side: 'right', traceSide: 'current'},
+        {side: 'left', traceSide: 'reference'},
       ],
     });
   });

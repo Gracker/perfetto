@@ -19,15 +19,16 @@ import m from 'mithril';
 import {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {AIPanel} from './ai_panel';
+import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {
   clamp,
   getFloatingState,
   SIDEBAR_MIN_HEIGHT,
   SIDEBAR_MIN_WIDTH,
-  toggleSidebarCollapsed,
   updateFloatingState,
 } from './ai_floating_state';
 import {getAISharedState} from './ai_shared_state';
+import {toggleSidebarCollapsedWithTransientState} from './ai_transient_state';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -128,15 +129,24 @@ function startResize(e: MouseEvent): void {
 
 export interface SidebarPanelAttrs {
   trace: Trace;
+  tracePairWorkspaceController: TracePairWorkspaceController;
 }
 
 export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
   view({attrs}: m.Vnode<SidebarPanelAttrs>): m.Children {
     const s = getFloatingState();
-    if (s.sidebar.collapsed) {
-      return this.renderCollapsed();
-    }
-    return this.renderExpanded(attrs.trace, s.sidebar.width, s.sidebar.height, s.sidebar.layout);
+    const workspaceOpen = attrs.tracePairWorkspaceController.getState().open;
+    return m.fragment({}, [
+      this.renderCollapsed(!s.sidebar.collapsed, workspaceOpen),
+      this.renderExpanded(
+        attrs.trace,
+        attrs.tracePairWorkspaceController,
+        s.sidebar.width,
+        s.sidebar.height,
+        s.sidebar.layout,
+        s.sidebar.collapsed,
+      ),
+    ]);
   }
 
   onremove(): void {
@@ -146,43 +156,73 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
 
   // ── Collapsed strip ────────────────────────────────────────────────
 
-  private renderCollapsed(): m.Children {
+  private renderCollapsed(hidden: boolean, workspaceOpen: boolean): m.Children {
     const shared = getAISharedState();
     const isAnalyzing = shared.status === 'analyzing';
     const issueCount = shared.issueCount;
 
-    return m('.ai-sidebar-collapsed', {
-      onclick: () => toggleSidebarCollapsed(),
-      title: '展开 AI 侧边栏',
-    }, [
-      m(Icon, {icon: 'smart_toy', style: `font-size: 18px; ${isAnalyzing ? 'animation: ai-sidebar-pulse 1.5s ease-in-out infinite;' : ''}`}),
-      issueCount > 0
-        ? m('.ai-sidebar-badge', String(issueCount))
-        : null,
-    ]);
+    return m(
+      'button.ai-sidebar-collapsed',
+      {
+        'type': 'button',
+        'class': workspaceOpen ? 'ai-sidebar-collapsed--workspace' : undefined,
+        'style': hidden ? 'display: none;' : undefined,
+        'onclick': () => toggleSidebarCollapsedWithTransientState(),
+        'title': workspaceOpen
+          ? '展开 AI 侧边栏（双 Trace 工作区保持打开）'
+          : '展开 AI 侧边栏',
+        'aria-label': '展开 AI 侧边栏',
+        'aria-hidden': hidden ? 'true' : undefined,
+        'data-workspace-open': workspaceOpen ? 'true' : 'false',
+      },
+      [
+        m(Icon, {
+          icon: 'smart_toy',
+          style: `font-size: 18px; ${isAnalyzing ? 'animation: ai-sidebar-pulse 1.5s ease-in-out infinite;' : ''}`,
+        }),
+        m('span.ai-sidebar-collapsed-label', 'AI'),
+        issueCount > 0 ? m('.ai-sidebar-badge', String(issueCount)) : null,
+      ],
+    );
   }
 
   // ── Expanded panel ─────────────────────────────────────────────────
 
   private renderExpanded(
     trace: Trace,
+    tracePairWorkspaceController: TracePairWorkspaceController,
     width: number,
     height: number,
     layout: 'right' | 'bottom',
+    hidden: boolean,
   ): m.Children {
-    return m(`.ai-sidebar-expanded.ai-sidebar-expanded--${layout}`, {
-      style: layout === 'bottom' ? `height: ${height}px;` : `width: ${width}px;`,
-    }, [
-      m(`.ai-sidebar-resize-handle.ai-sidebar-resize-handle--${layout}`, {
-        onmousedown: startResize,
-        title: layout === 'bottom' ? '拖动调整高度' : '拖动调整宽度',
-      }),
+    return m(
+      `.ai-sidebar-expanded.ai-sidebar-expanded--${layout}`,
+      {
+        'style': hidden
+          ? 'display: none;'
+          : layout === 'bottom'
+            ? `height: ${height}px;`
+            : `width: ${width}px;`,
+        'aria-hidden': hidden ? 'true' : undefined,
+      },
+      [
+        m(`.ai-sidebar-resize-handle.ai-sidebar-resize-handle--${layout}`, {
+          onmousedown: startResize,
+          title: layout === 'bottom' ? '拖动调整高度' : '拖动调整宽度',
+        }),
 
-      // Content: AIPanel
-      m('.ai-sidebar-content', m(AIPanel, {
-        engine: trace.engine,
-        trace,
-      })),
-    ]);
+        // Content: AIPanel
+        m(
+          '.ai-sidebar-content',
+          m(AIPanel, {
+            key: 'analysis-request-owner',
+            engine: trace.engine,
+            trace,
+            tracePairWorkspaceController,
+          }),
+        ),
+      ],
+    );
   }
 }

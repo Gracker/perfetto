@@ -111,7 +111,9 @@ type DegradedPayload = {
 
 type RawSSEEvent = Record<string, unknown> | null | undefined;
 type SqlResultData = NonNullable<Message['sqlResult']>;
-type SqlColumnDefinition = NonNullable<SqlResultData['columnDefinitions']>[number];
+type SqlColumnDefinition = NonNullable<
+  SqlResultData['columnDefinitions']
+>[number];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -121,12 +123,19 @@ function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
-function readOptionalNumberField(source: Record<string, unknown>, key: string): number | undefined {
+function readOptionalNumberField(
+  source: Record<string, unknown>,
+  key: string,
+): number | undefined {
   const value = source[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
-function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | undefined {
+function toAnalysisCompletedPayload(
+  value: unknown,
+): AnalysisCompletedPayload | undefined {
   const source = asRecord(value);
   if (Object.keys(source).length === 0) return undefined;
 
@@ -148,8 +157,12 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   if (Array.isArray(source.identityResolutions)) {
     payload.identityResolutions = source.identityResolutions;
   }
-  if (isRecord(source.smartScenePreview) && Array.isArray(source.smartScenePreview.scenes)) {
-    payload.smartScenePreview = source.smartScenePreview as unknown as SmartScenePreviewPayload;
+  if (
+    isRecord(source.smartScenePreview) &&
+    Array.isArray(source.smartScenePreview.scenes)
+  ) {
+    payload.smartScenePreview =
+      source.smartScenePreview as unknown as SmartScenePreviewPayload;
   }
 
   const reportUrl = readStringField(source, 'reportUrl');
@@ -186,10 +199,12 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
     payload.quickRun = source.quickRun as unknown as QuickRunReceipt;
   }
   if (isRecord(source.analysisReceipt)) {
-    payload.analysisReceipt = source.analysisReceipt as unknown as AnalysisReceiptV1;
+    payload.analysisReceipt =
+      source.analysisReceipt as unknown as AnalysisReceiptV1;
   }
   if (Array.isArray(source.uiActionProposals)) {
-    payload.uiActionProposals = source.uiActionProposals as unknown as UiActionProposalV1[];
+    payload.uiActionProposals =
+      source.uiActionProposals as unknown as UiActionProposalV1[];
   }
 
   const terminationReason = readStringField(source, 'terminationReason');
@@ -199,7 +214,11 @@ function toAnalysisCompletedPayload(value: unknown): AnalysisCompletedPayload | 
   if (terminationMessage) payload.terminationMessage = terminationMessage;
 
   const terminalRunStatus = readStringField(source, 'terminalRunStatus');
-  if (terminalRunStatus === 'completed' || terminalRunStatus === 'cancelled' || terminalRunStatus === 'quota_exceeded') {
+  if (
+    terminalRunStatus === 'completed' ||
+    terminalRunStatus === 'cancelled' ||
+    terminalRunStatus === 'quota_exceeded'
+  ) {
     payload.terminalRunStatus = terminalRunStatus;
   }
 
@@ -225,7 +244,9 @@ function uiActionProposalMessageUpdate(
   payload: AnalysisCompletedPayload | undefined,
 ): Pick<Message, 'uiActionProposals'> {
   const proposals = payload?.uiActionProposals;
-  return proposals && proposals.length > 0 ? {uiActionProposals: proposals} : {};
+  return proposals && proposals.length > 0
+    ? {uiActionProposals: proposals}
+    : {};
 }
 
 function toDegradedPayload(value: unknown): DegradedPayload {
@@ -270,22 +291,37 @@ function eventPayload(event: RawSSEEvent): Record<string, unknown> {
   return asRecord(eventRecord.data);
 }
 
-function readStringField(source: Record<string, unknown>, key: string, fallback = ''): string {
+function readStringField(
+  source: Record<string, unknown>,
+  key: string,
+  fallback = '',
+): string {
   const value = source[key];
   return typeof value === 'string' ? value : fallback;
 }
 
-function readNumberField(source: Record<string, unknown>, key: string, fallback = 0): number {
+function readNumberField(
+  source: Record<string, unknown>,
+  key: string,
+  fallback = 0,
+): number {
   const value = source[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function readBooleanField(source: Record<string, unknown>, key: string, fallback = false): boolean {
+function readBooleanField(
+  source: Record<string, unknown>,
+  key: string,
+  fallback = false,
+): boolean {
   const value = source[key];
   return typeof value === 'boolean' ? value : fallback;
 }
 
-function readStringArrayField(source: Record<string, unknown>, key: string): string[] {
+function readStringArrayField(
+  source: Record<string, unknown>,
+  key: string,
+): string[] {
   const value = source[key];
   if (!Array.isArray(value)) return [];
   return value
@@ -293,31 +329,43 @@ function readStringArrayField(source: Record<string, unknown>, key: string): str
     .filter((item) => item.length > 0);
 }
 
-function readAliasedValue(source: Record<string, unknown>, keys: readonly string[]): unknown {
+function readAliasedValue(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): unknown {
   for (const key of keys) {
     if (key in source) return source[key];
   }
   return undefined;
 }
 
-function readAliasedUnknownArray(source: Record<string, unknown>, keys: readonly string[]): unknown[] {
+function readAliasedUnknownArray(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): unknown[] {
   const value = readAliasedValue(source, keys);
   return Array.isArray(value) ? value : [];
 }
 
-function readAliasedRecord(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+function readAliasedRecord(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
   return asRecord(readAliasedValue(source, keys));
 }
 
 function readAliasedRecordArray(
   source: Record<string, unknown>,
-  keys: readonly string[]
+  keys: readonly string[],
 ): Record<string, unknown>[] {
-  return readAliasedUnknownArray(source, keys)
-    .filter((item): item is Record<string, unknown> => isRecord(item));
+  return readAliasedUnknownArray(source, keys).filter(
+    (item): item is Record<string, unknown> => isRecord(item),
+  );
 }
 
-function readLegacySummary(value: unknown): {title: string; content: string} | undefined {
+function readLegacySummary(
+  value: unknown,
+): {title: string; content: string} | undefined {
   if (!isRecord(value)) return undefined;
   const title = readStringField(value, 'title');
   const content = readStringField(value, 'content');
@@ -328,7 +376,9 @@ function readLegacySummary(value: unknown): {title: string; content: string} | u
   };
 }
 
-function readSummaryReport(value: unknown): SqlResultData['summaryReport'] | undefined {
+function readSummaryReport(
+  value: unknown,
+): SqlResultData['summaryReport'] | undefined {
   if (!isRecord(value)) return undefined;
 
   const title = readStringField(value, 'title');
@@ -356,9 +406,12 @@ function readSummaryReport(value: unknown): SqlResultData['summaryReport'] | und
       if (!name && !metricValue) continue;
 
       const statusRaw = readStringField(metric, 'status');
-      const status = statusRaw === 'good' || statusRaw === 'warning' || statusRaw === 'critical'
-        ? statusRaw
-        : undefined;
+      const status =
+        statusRaw === 'good' ||
+        statusRaw === 'warning' ||
+        statusRaw === 'critical'
+          ? statusRaw
+          : undefined;
 
       keyMetrics.push({
         name,
@@ -375,7 +428,9 @@ function readSummaryReport(value: unknown): SqlResultData['summaryReport'] | und
   return summaryReport;
 }
 
-function readExpandableData(value: unknown): SqlResultData['expandableData'] | undefined {
+function readExpandableData(
+  value: unknown,
+): SqlResultData['expandableData'] | undefined {
   if (!Array.isArray(value)) return undefined;
 
   const entries: NonNullable<SqlResultData['expandableData']> = [];
@@ -387,7 +442,11 @@ function readExpandableData(value: unknown): SqlResultData['expandableData'] | u
     const result = asRecord(entryRecord.result);
     const sections = isRecord(result.sections) ? result.sections : undefined;
     const error = readStringField(result, 'error') || undefined;
-    const success = readBooleanField(result, 'success', sections !== undefined && !error);
+    const success = readBooleanField(
+      result,
+      'success',
+      sections !== undefined && !error,
+    );
 
     entries.push({
       item,
@@ -413,7 +472,7 @@ export interface SSEHandlerContext {
   updateMessage: (
     messageId: string,
     updates: Partial<Message>,
-    options?: {persist?: boolean}
+    options?: {persist?: boolean},
   ) => void;
   /** Generate a unique message ID */
   generateId: () => string;
@@ -445,7 +504,11 @@ export interface SSEHandlerContext {
 
   // Track overlay - callback when overlay-eligible data arrives
   /** Called with columns+rows from skill steps that have timeline overlay configs */
-  onOverlayDataReceived?: (overlayId: string, columns: string[], rows: unknown[][]) => void;
+  onOverlayDataReceived?: (
+    overlayId: string,
+    columns: string[],
+    rows: unknown[][],
+  ) => void;
 }
 
 /**
@@ -476,7 +539,12 @@ const ANSWER_TIMELINE_SNAPSHOT_FORCE_DELTA_CHARS = 160;
 const ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
 const ANSWER_TIMELINE_SNIPPET_MAX_CHARS = 220;
 
-type StreamingFlowSection = 'phase' | 'thought' | 'tool' | 'output' | 'conversation';
+type StreamingFlowSection =
+  | 'phase'
+  | 'thought'
+  | 'tool'
+  | 'output'
+  | 'conversation';
 
 function normalizeFlowLine(value: unknown): string {
   return String(value ?? '')
@@ -485,7 +553,11 @@ function normalizeFlowLine(value: unknown): string {
     .slice(0, 240);
 }
 
-function appendFlowLine(lines: string[], rawLine: unknown, max: number): boolean {
+function appendFlowLine(
+  lines: string[],
+  rawLine: unknown,
+  max: number,
+): boolean {
   const line = normalizeFlowLine(rawLine);
   if (!line) return false;
   if (lines[lines.length - 1] === line) return false;
@@ -496,7 +568,10 @@ function appendFlowLine(lines: string[], rawLine: unknown, max: number): boolean
   return true;
 }
 
-function flowSectionLines(flow: StreamingFlowState, section: StreamingFlowSection): string[] {
+function flowSectionLines(
+  flow: StreamingFlowState,
+  section: StreamingFlowSection,
+): string[] {
   switch (section) {
     case 'phase':
       return flow.phases;
@@ -513,7 +588,7 @@ function flowSectionLines(flow: StreamingFlowState, section: StreamingFlowSectio
 
 function getFlowSectionMessageId(
   flow: StreamingFlowState,
-  section: StreamingFlowSection
+  section: StreamingFlowSection,
 ): string | null {
   switch (section) {
     case 'phase':
@@ -532,7 +607,7 @@ function getFlowSectionMessageId(
 function setFlowSectionMessageId(
   flow: StreamingFlowState,
   section: StreamingFlowSection,
-  messageId: string | null
+  messageId: string | null,
 ): void {
   switch (section) {
     case 'phase':
@@ -561,13 +636,19 @@ function flowStatusHint(flow: StreamingFlowState): string {
   if (flow.status === 'completed') {
     return '_流程完成，结论已生成。_';
   }
+  if (flow.status === 'cancelled') {
+    return '_流程已取消，未生成完整结论。_';
+  }
   if (flow.status === 'failed') {
     return `_流程中断: ${flow.error || '发生错误'}_`;
   }
   return '_等待后端事件..._';
 }
 
-function buildStreamingFlowContent(flow: StreamingFlowState, section: StreamingFlowSection): string {
+function buildStreamingFlowContent(
+  flow: StreamingFlowState,
+  section: StreamingFlowSection,
+): string {
   const lines: string[] = [];
   switch (section) {
     case 'phase':
@@ -610,27 +691,32 @@ function buildStreamingFlowContent(flow: StreamingFlowState, section: StreamingF
 }
 
 /** Build HTML for sub-agent status cards. */
-function buildSubAgentCardsHtml(agents: StreamingFlowState['subAgents']): string {
+function buildSubAgentCardsHtml(
+  agents: StreamingFlowState['subAgents'],
+): string {
   const cards = agents.map((a) => {
-    const statusIcon = a.status === 'running' ? '⏳' : a.status === 'completed' ? '✅' : '❌';
+    const statusIcon =
+      a.status === 'running' ? '⏳' : a.status === 'completed' ? '✅' : '❌';
     const statusClass = `sub-agent-${a.status}`;
     const dur = a.completedAt
       ? `${Math.round((a.completedAt - a.startedAt) / 1000)}s`
       : `${Math.round((Date.now() - a.startedAt) / 1000)}s...`;
     const tools = a.toolUses !== undefined ? ` · ${a.toolUses} 次调用` : '';
-    return `<div class="ai-sub-agent-card ${statusClass}">`
-      + `<span class="ai-sub-agent-icon">${statusIcon}</span>`
-      + `<span class="ai-sub-agent-name">${a.agentName}</span>`
-      + `<span class="ai-sub-agent-desc">${a.description}</span>`
-      + `<span class="ai-sub-agent-meta">${dur}${tools}</span>`
-      + `</div>`;
+    return (
+      `<div class="ai-sub-agent-card ${statusClass}">` +
+      `<span class="ai-sub-agent-icon">${statusIcon}</span>` +
+      `<span class="ai-sub-agent-name">${a.agentName}</span>` +
+      `<span class="ai-sub-agent-desc">${a.description}</span>` +
+      `<span class="ai-sub-agent-meta">${dur}${tools}</span>` +
+      `</div>`
+    );
   });
   return `<div class="ai-sub-agent-cards">${cards.join('')}</div>`;
 }
 
 function resolveStreamingFlowMessageId(
   ctx: SSEHandlerContext,
-  section: StreamingFlowSection
+  section: StreamingFlowSection,
 ): string | null {
   const flow = ctx.streamingFlow;
   const messageId = getFlowSectionMessageId(flow, section);
@@ -645,7 +731,7 @@ function resolveStreamingFlowMessageId(
 
 function ensureStreamingFlowMessage(
   ctx: SSEHandlerContext,
-  section: StreamingFlowSection
+  section: StreamingFlowSection,
 ): string | null {
   const flow = ctx.streamingFlow;
   if (flow.status === 'idle') {
@@ -681,19 +767,24 @@ function ensureStreamingFlowMessage(
 function refreshStreamingFlowMessage(
   ctx: SSEHandlerContext,
   section: StreamingFlowSection,
-  options: {createIfMissing?: boolean; persist?: boolean} = {}
+  options: {createIfMissing?: boolean; persist?: boolean} = {},
 ): void {
   const flow = ctx.streamingFlow;
-  const messageId = options.createIfMissing === false
-    ? resolveStreamingFlowMessageId(ctx, section)
-    : ensureStreamingFlowMessage(ctx, section);
+  const messageId =
+    options.createIfMissing === false
+      ? resolveStreamingFlowMessageId(ctx, section)
+      : ensureStreamingFlowMessage(ctx, section);
   if (!messageId) return;
   flow.lastUpdatedAt = Date.now();
-  ctx.updateMessage(messageId, {
-    content: buildStreamingFlowContent(flow, section),
-    timestamp: flow.lastUpdatedAt,
-    flowTag: 'streaming_flow',
-  }, {persist: options.persist === true});
+  ctx.updateMessage(
+    messageId,
+    {
+      content: buildStreamingFlowContent(flow, section),
+      timestamp: flow.lastUpdatedAt,
+      flowTag: 'streaming_flow',
+    },
+    {persist: options.persist === true},
+  );
 }
 
 function isConversationTimelineEnabled(ctx: SSEHandlerContext): boolean {
@@ -702,14 +793,22 @@ function isConversationTimelineEnabled(ctx: SSEHandlerContext): boolean {
 
 function pushStreamingPhase(ctx: SSEHandlerContext, line: string): void {
   if (isConversationTimelineEnabled(ctx)) return;
-  if (appendFlowLine(ctx.streamingFlow.phases, line, STREAM_FLOW_LIMITS.phases)) {
+  if (
+    appendFlowLine(ctx.streamingFlow.phases, line, STREAM_FLOW_LIMITS.phases)
+  ) {
     refreshStreamingFlowMessage(ctx, 'phase');
   }
 }
 
 function pushStreamingThought(ctx: SSEHandlerContext, line: string): void {
   if (isConversationTimelineEnabled(ctx)) return;
-  if (appendFlowLine(ctx.streamingFlow.thoughts, line, STREAM_FLOW_LIMITS.thoughts)) {
+  if (
+    appendFlowLine(
+      ctx.streamingFlow.thoughts,
+      line,
+      STREAM_FLOW_LIMITS.thoughts,
+    )
+  ) {
     refreshStreamingFlowMessage(ctx, 'thought');
   }
 }
@@ -723,7 +822,9 @@ function pushStreamingTool(ctx: SSEHandlerContext, line: string): void {
 
 function pushStreamingOutput(ctx: SSEHandlerContext, line: string): void {
   if (isConversationTimelineEnabled(ctx)) return;
-  if (appendFlowLine(ctx.streamingFlow.outputs, line, STREAM_FLOW_LIMITS.outputs)) {
+  if (
+    appendFlowLine(ctx.streamingFlow.outputs, line, STREAM_FLOW_LIMITS.outputs)
+  ) {
     refreshStreamingFlowMessage(ctx, 'output');
   }
 }
@@ -735,11 +836,17 @@ function pushConversationStep(
   ctx: SSEHandlerContext,
   phase: ConversationStepTimelineItem['phase'],
   role: ConversationStepTimelineItem['role'],
-  text: string
+  text: string,
 ): void {
   const flow = ctx.streamingFlow;
   const ordinal = flow.conversationLastOrdinal + 1;
-  flow.conversationPendingSteps[ordinal] = { ordinal, phase, role, text, timestamp: Date.now() };
+  flow.conversationPendingSteps[ordinal] = {
+    ordinal,
+    phase,
+    role,
+    text,
+    timestamp: Date.now(),
+  };
   const changed = flushConversationTimeline(ctx);
   if (!changed) {
     refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
@@ -759,7 +866,9 @@ function refreshSubAgentCards(ctx: SSEHandlerContext): void {
   }
 }
 
-function getConversationPhaseLabel(phase: ConversationStepTimelineItem['phase']): string {
+function getConversationPhaseLabel(
+  phase: ConversationStepTimelineItem['phase'],
+): string {
   switch (phase) {
     case 'progress':
       return '进度';
@@ -774,15 +883,24 @@ function getConversationPhaseLabel(phase: ConversationStepTimelineItem['phase'])
   }
 }
 
-function getConversationRoleLabel(role: ConversationStepTimelineItem['role']): string {
+function getConversationRoleLabel(
+  role: ConversationStepTimelineItem['role'],
+): string {
   return role === 'system' ? '系统' : '助手';
 }
 
-function renderConversationStepLine(step: ConversationStepTimelineItem): string {
+function renderConversationStepLine(
+  step: ConversationStepTimelineItem,
+): string {
   const phaseLabel = getConversationPhaseLabel(step.phase);
   const roleLabel = getConversationRoleLabel(step.role);
   const timeStr = step.timestamp
-    ? new Date(step.timestamp).toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'})
+    ? new Date(step.timestamp).toLocaleTimeString('zh-CN', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
     : '';
   const timePrefix = timeStr ? `\`${timeStr}\` ` : '';
   return `${timePrefix}#${step.ordinal} [${phaseLabel}/${roleLabel}] ${step.text}`;
@@ -792,7 +910,7 @@ function renderAnswerTimelineLine(
   flow: StreamingFlowState,
   phase: ConversationStepTimelineItem['phase'],
   role: ConversationStepTimelineItem['role'],
-  text: string
+  text: string,
 ): string {
   const phaseLabel = getConversationPhaseLabel(phase);
   const roleLabel = getConversationRoleLabel(role);
@@ -810,7 +928,7 @@ function appendAnswerTimelineLine(
   ctx: SSEHandlerContext,
   phase: ConversationStepTimelineItem['phase'],
   role: ConversationStepTimelineItem['role'],
-  text: string
+  text: string,
 ): boolean {
   const lineText = normalizeFlowLine(text);
   if (!lineText) return false;
@@ -826,7 +944,7 @@ function appendAnswerTimelineLine(
   const changed = appendFlowLine(
     flow.conversationLines,
     line,
-    STREAM_FLOW_LIMITS.conversation
+    STREAM_FLOW_LIMITS.conversation,
   );
   if (changed) {
     refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
@@ -886,18 +1004,21 @@ function shouldAppendAnswerTimelineSnapshot(
   token: string,
   snippet: string,
   textLength: number,
-  options: {force?: boolean} = {}
+  options: {force?: boolean} = {},
 ): boolean {
   if (!snippet || snippet === flow.answerTimelineLastSnapshot) return false;
   if (options.force === true) return true;
   if (snippet.length < ANSWER_TIMELINE_SNAPSHOT_MIN_CHARS) return false;
 
   const now = Date.now();
-  const charDelta = Math.max(0, textLength - flow.answerTimelineLastSnapshotCharCount);
-  const intervalOk = (
-    flow.answerTimelineLastSnapshotAt === null ||
-    now - flow.answerTimelineLastSnapshotAt >= ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS
+  const charDelta = Math.max(
+    0,
+    textLength - flow.answerTimelineLastSnapshotCharCount,
   );
+  const intervalOk =
+    flow.answerTimelineLastSnapshotAt === null ||
+    now - flow.answerTimelineLastSnapshotAt >=
+      ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS;
   const boundary = token.includes('\n') || /[。！？!?；;：:]$/.test(token);
 
   return (
@@ -911,10 +1032,12 @@ function recordAnswerTimelineSnapshot(
   ctx: SSEHandlerContext,
   snippet: string,
   textLength: number,
-  label = '流式更新'
+  label = '流式更新',
 ): void {
   const flow = ctx.streamingFlow;
-  if (appendAnswerTimelineLine(ctx, 'result', 'agent', `${label}: ${snippet}`)) {
+  if (
+    appendAnswerTimelineLine(ctx, 'result', 'agent', `${label}: ${snippet}`)
+  ) {
     flow.answerTimelineLastSnapshot = snippet;
     flow.answerTimelineLastSnapshotCharCount = textLength;
     flow.answerTimelineLastSnapshotAt = Date.now();
@@ -924,7 +1047,7 @@ function recordAnswerTimelineSnapshot(
 function syncAnswerStreamToConversationTimeline(
   ctx: SSEHandlerContext,
   token: string,
-  options: {force?: boolean; completed?: boolean} = {}
+  options: {force?: boolean; completed?: boolean} = {},
 ): void {
   const answer = ctx.streamingAnswer;
   const answerText = `${answer.content}${answer.pending}`.trim();
@@ -937,18 +1060,31 @@ function syncAnswerStreamToConversationTimeline(
   const flow = ctx.streamingFlow;
   const snippet = extractAnswerTimelineSnippet(answerText);
   const textLength = answerText.length;
-  if (shouldAppendAnswerTimelineSnapshot(flow, token, snippet, textLength, options)) {
+  if (
+    shouldAppendAnswerTimelineSnapshot(
+      flow,
+      token,
+      snippet,
+      textLength,
+      options,
+    )
+  ) {
     recordAnswerTimelineSnapshot(
       ctx,
       snippet,
       textLength,
-      options.completed === true ? '最终更新' : '流式更新'
+      options.completed === true ? '最终更新' : '流式更新',
     );
   }
 
   if (options.completed === true && !flow.answerTimelineCompleted) {
     flow.answerTimelineCompleted = true;
-    appendAnswerTimelineLine(ctx, 'result', 'agent', `最终回答已输出（${textLength} 字）。`);
+    appendAnswerTimelineLine(
+      ctx,
+      'result',
+      'agent',
+      `最终回答已输出（${textLength} 字）。`,
+    );
     refreshStreamingFlowMessage(ctx, 'conversation', {
       createIfMissing: true,
       persist: true,
@@ -956,7 +1092,9 @@ function syncAnswerStreamToConversationTimeline(
   }
 }
 
-function getConversationPhaseMinGapMs(phase: ConversationStepTimelineItem['phase']): number {
+function getConversationPhaseMinGapMs(
+  phase: ConversationStepTimelineItem['phase'],
+): number {
   switch (phase) {
     case 'thinking':
       return 80;
@@ -974,7 +1112,7 @@ function getConversationPhaseMinGapMs(phase: ConversationStepTimelineItem['phase
 
 function flushConversationTimeline(
   ctx: SSEHandlerContext,
-  options: {force?: boolean} = {}
+  options: {force?: boolean} = {},
 ): boolean {
   const flow = ctx.streamingFlow;
   let changed = false;
@@ -1004,7 +1142,13 @@ function flushConversationTimeline(
 
     delete flow.conversationPendingSteps[nextOrdinal];
     const line = renderConversationStepLine(step);
-    if (appendFlowLine(flow.conversationLines, line, STREAM_FLOW_LIMITS.conversation)) {
+    if (
+      appendFlowLine(
+        flow.conversationLines,
+        line,
+        STREAM_FLOW_LIMITS.conversation,
+      )
+    ) {
       changed = true;
     }
     flow.conversationLastOrdinal = nextOrdinal;
@@ -1020,38 +1164,7 @@ function flushConversationTimeline(
   return changed;
 }
 
-function completeStreamingFlow(ctx: SSEHandlerContext): void {
-  if (ctx.streamingFlow.status === 'running' || ctx.streamingFlow.status === 'idle') {
-    ctx.streamingFlow.status = 'completed';
-    if (ctx.streamingFlow.conversationFlushTimer) {
-      clearTimeout(ctx.streamingFlow.conversationFlushTimer);
-      ctx.streamingFlow.conversationFlushTimer = undefined;
-    }
-    if (ctx.streamingFlow.conversationEnabled) {
-      flushConversationTimeline(ctx, {force: true});
-    }
-    const hasLegacyFlow = (
-      ctx.streamingFlow.phases.length > 0 ||
-      ctx.streamingFlow.thoughts.length > 0 ||
-      ctx.streamingFlow.tools.length > 0 ||
-      ctx.streamingFlow.outputs.length > 0
-    );
-    refreshStreamingFlowMessage(ctx, 'phase', {
-      createIfMissing: hasLegacyFlow,
-      persist: true,
-    });
-    if (ctx.streamingFlow.conversationEnabled) {
-      refreshStreamingFlowMessage(ctx, 'conversation', {
-        createIfMissing: ctx.streamingFlow.conversationLines.length > 0,
-        persist: true,
-      });
-    }
-  }
-}
-
-function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
-  ctx.streamingFlow.status = 'failed';
-  ctx.streamingFlow.error = normalizeFlowLine(error || 'unknown_error');
+function persistSettledStreamingFlow(ctx: SSEHandlerContext): void {
   if (ctx.streamingFlow.conversationFlushTimer) {
     clearTimeout(ctx.streamingFlow.conversationFlushTimer);
     ctx.streamingFlow.conversationFlushTimer = undefined;
@@ -1059,12 +1172,11 @@ function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
   if (ctx.streamingFlow.conversationEnabled) {
     flushConversationTimeline(ctx, {force: true});
   }
-  const hasLegacyFlow = (
+  const hasLegacyFlow =
     ctx.streamingFlow.phases.length > 0 ||
     ctx.streamingFlow.thoughts.length > 0 ||
     ctx.streamingFlow.tools.length > 0 ||
-    ctx.streamingFlow.outputs.length > 0
-  );
+    ctx.streamingFlow.outputs.length > 0;
   refreshStreamingFlowMessage(ctx, 'phase', {
     createIfMissing: hasLegacyFlow,
     persist: true,
@@ -1075,6 +1187,29 @@ function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
       persist: true,
     });
   }
+}
+
+function completeStreamingFlow(ctx: SSEHandlerContext): void {
+  if (
+    ctx.streamingFlow.status !== 'running' &&
+    ctx.streamingFlow.status !== 'idle'
+  ) {
+    return;
+  }
+  ctx.streamingFlow.status = 'completed';
+  persistSettledStreamingFlow(ctx);
+}
+
+function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
+  ctx.streamingFlow.status = 'failed';
+  ctx.streamingFlow.error = normalizeFlowLine(error || 'unknown_error');
+  persistSettledStreamingFlow(ctx);
+}
+
+function cancelStreamingFlow(ctx: SSEHandlerContext): void {
+  ctx.streamingFlow.status = 'cancelled';
+  ctx.streamingFlow.error = null;
+  persistSettledStreamingFlow(ctx);
 }
 
 function ensureStreamingAnswerMessage(ctx: SSEHandlerContext): string {
@@ -1104,7 +1239,7 @@ function ensureStreamingAnswerMessage(ctx: SSEHandlerContext): string {
 
 function flushStreamingAnswer(
   ctx: SSEHandlerContext,
-  options: {force?: boolean; persist?: boolean} = {}
+  options: {force?: boolean; persist?: boolean} = {},
 ): void {
   const answer = ctx.streamingAnswer;
   if (!options.force && !answer.pending) return;
@@ -1116,11 +1251,15 @@ function flushStreamingAnswer(
   }
 
   answer.lastUpdatedAt = Date.now();
-  ctx.updateMessage(messageId, {
-    content: answer.content,
-    timestamp: answer.lastUpdatedAt,
-    flowTag: 'answer_stream',
-  }, {persist: options.persist === true});
+  ctx.updateMessage(
+    messageId,
+    {
+      content: answer.content,
+      timestamp: answer.lastUpdatedAt,
+      flowTag: 'answer_stream',
+    },
+    {persist: options.persist === true},
+  );
 }
 
 function completeStreamingAnswer(ctx: SSEHandlerContext): void {
@@ -1148,12 +1287,18 @@ function failStreamingAnswer(ctx: SSEHandlerContext): void {
 function describeEnvelopeOutput(envelope: DataEnvelope): string {
   const title = inferDataSourceTitle({
     source: envelope.meta?.source,
-    title: envelope.display?.title || envelope.meta?.stepId || envelope.meta?.skillId || '数据更新',
+    title:
+      envelope.display?.title ||
+      envelope.meta?.stepId ||
+      envelope.meta?.skillId ||
+      '数据更新',
     columns: envelopeColumnsForContext(envelope),
     query: readStringField(asRecord(envelope), 'sql') || undefined,
   });
   const payload = envelope.data;
-  const rowCount = Array.isArray(payload?.rows) ? payload.rows.length : undefined;
+  const rowCount = Array.isArray(payload?.rows)
+    ? payload.rows.length
+    : undefined;
   const traceLabel = traceLocationLabel(
     readEnvelopeTraceSide(envelope),
     readEnvelopePaneSide(envelope),
@@ -1165,19 +1310,23 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
   return `${tracePrefix}${title} (${envelope.display?.format || 'table'})`;
 }
 
-function inferDataSourceReason(input: {
-  source?: string;
-  layer?: string;
-  title?: string;
-  query?: string;
-  columns?: string[];
-  planPhaseId?: string;
-  planPhaseTitle?: string;
-}, fallbackReason = ''): string {
+function inferDataSourceReason(
+  input: {
+    source?: string;
+    layer?: string;
+    title?: string;
+    query?: string;
+    columns?: string[];
+    planPhaseId?: string;
+    planPhaseTitle?: string;
+  },
+  fallbackReason = '',
+): string {
   const source = (input.source || '').toLowerCase();
   const title = (input.title || '').toLowerCase();
   const layer = (input.layer || '').toLowerCase();
-  const planPhase = `${input.planPhaseId || ''} ${input.planPhaseTitle || ''}`.toLowerCase();
+  const planPhase =
+    `${input.planPhaseId || ''} ${input.planPhaseTitle || ''}`.toLowerCase();
   const identity = `${title} ${source} ${planPhase}`;
   const columns = (input.columns || []).map((col) => col.toLowerCase());
   const joinedColumns = columns.join(' ');
@@ -1270,10 +1419,16 @@ function inferDataSourceReason(input: {
     return '确定本轮分析对应的启动窗口、TTID/TTFD 和边界时间，避免后续表格查错时间段。';
   }
 
-  if (/slice_name/.test(joinedColumns) && /state_pct|state_dur_ms/.test(joinedColumns)) {
+  if (
+    /slice_name/.test(joinedColumns) &&
+    /state_pct|state_dur_ms/.test(joinedColumns)
+  ) {
     return '验证目标 slice 在不同线程状态下的耗时分布，用来判断这段时间是在真正运行还是在等待。';
   }
-  if (/slice_name/.test(joinedColumns) && /self_ms|self_percent/.test(joinedColumns)) {
+  if (
+    /slice_name/.test(joinedColumns) &&
+    /self_ms|self_percent/.test(joinedColumns)
+  ) {
     return '核对热点 slice 的自耗时贡献，用来判断优化应落到哪个函数、任务或业务标签。';
   }
   if (/slice_name/.test(joinedColumns) && /dur_ms/.test(joinedColumns)) {
@@ -1295,7 +1450,11 @@ function inferDataSourceReason(input: {
     }
     return '补齐 Skill 未直接覆盖的验证点；重点看结果是否命中目标时间窗、目标线程和结论提到的实体。';
   }
-  if (source.includes('invoke_skill') || source.includes('skill') || source.includes(':')) {
+  if (
+    source.includes('invoke_skill') ||
+    source.includes('skill') ||
+    source.includes(':')
+  ) {
     return 'Skill 返回的结构化证据，用来支撑后续筛选、下钻或结论判断。';
   }
 
@@ -1405,7 +1564,9 @@ function inferDataMeaning(title: string, columns: string[]): string {
 }
 
 function isGenericSqlTitle(title: string): boolean {
-  return /^sql\s+query(?:\s*\(\s*\d+\s*rows?\s*\))?$/i.test(normalizeFlowLine(title));
+  return /^sql\s+query(?:\s*\(\s*\d+\s*rows?\s*\))?$/i.test(
+    normalizeFlowLine(title),
+  );
 }
 
 function inferDataSourceTitle(input: {
@@ -1456,7 +1617,7 @@ function isLowSignalReason(reason: string): boolean {
 }
 
 function readPlanPhaseAttribution(
-  source: Record<string, unknown>
+  source: Record<string, unknown>,
 ): DataSourceContext['planPhaseAttribution'] | undefined {
   const value = source.planPhaseAttribution;
   switch (value) {
@@ -1480,40 +1641,56 @@ function compactEvidenceRef(value: string | undefined): string {
   return tail ? `...${tail}` : `${value.slice(0, 24)}...${value.slice(-16)}`;
 }
 
-function readEnvelopeTraceSide(envelope: DataEnvelope): 'current' | 'reference' | undefined {
+function readEnvelopeTraceSide(
+  envelope: DataEnvelope,
+): 'current' | 'reference' | undefined {
   const envelopeRecord = asRecord(envelope);
   const provenance = asRecord(envelopeRecord.traceProvenance);
-  return normalizeTraceSide(envelope.meta?.traceSide)
-    || normalizeTraceSide(envelopeRecord.traceSide)
-    || normalizeTraceSide(provenance.traceSide);
+  return (
+    normalizeTraceSide(envelope.meta?.traceSide) ||
+    normalizeTraceSide(envelopeRecord.traceSide) ||
+    normalizeTraceSide(provenance.traceSide)
+  );
 }
 
-function readEnvelopePaneSide(envelope: DataEnvelope): TracePaneSide | undefined {
+function readEnvelopePaneSide(
+  envelope: DataEnvelope,
+): TracePaneSide | undefined {
   const envelopeRecord = asRecord(envelope);
   const metaRecord = asRecord(envelope.meta as unknown);
   const provenance = asRecord(envelopeRecord.traceProvenance);
-  return normalizePaneSide(metaRecord.paneSide)
-    || normalizePaneSide(envelopeRecord.paneSide)
-    || normalizePaneSide(provenance.paneSide);
+  return (
+    normalizePaneSide(metaRecord.paneSide) ||
+    normalizePaneSide(envelopeRecord.paneSide) ||
+    normalizePaneSide(provenance.paneSide)
+  );
 }
 
 function readEnvelopeTraceId(envelope: DataEnvelope): string | undefined {
   const envelopeRecord = asRecord(envelope);
   const provenance = asRecord(envelopeRecord.traceProvenance);
-  return readStringField(envelope.meta as unknown as Record<string, unknown>, 'traceId')
-    || readStringField(envelopeRecord, 'traceId')
-    || readStringField(provenance, 'traceId')
-    || undefined;
+  return (
+    readStringField(
+      envelope.meta as unknown as Record<string, unknown>,
+      'traceId',
+    ) ||
+    readStringField(envelopeRecord, 'traceId') ||
+    readStringField(provenance, 'traceId') ||
+    undefined
+  );
 }
 
 function stableEnvelopeContentHash(envelope: DataEnvelope): string {
-  const stableContent = JSON.stringify({
-    source: envelope.meta?.source,
-    skillId: envelope.meta?.skillId,
-    stepId: envelope.meta?.stepId,
-    title: envelope.display?.title,
-    data: envelope.data,
-  }, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
+  const stableContent = JSON.stringify(
+    {
+      source: envelope.meta?.source,
+      skillId: envelope.meta?.skillId,
+      stepId: envelope.meta?.stepId,
+      title: envelope.display?.title,
+      data: envelope.data,
+    },
+    (_key, value) => (typeof value === 'bigint' ? value.toString() : value),
+  );
   let hash = 0;
   for (let i = 0; i < stableContent.length; i++) {
     hash = ((hash << 5) - hash + stableContent.charCodeAt(i)) | 0;
@@ -1538,7 +1715,11 @@ function dataEnvelopeDeduplicationKey(
       occurrenceIndex,
       envelope.meta?.timestamp,
       stableEnvelopeContentHash(envelope),
-    ].filter((part) => part !== undefined && part !== null && String(part) !== '').join(':');
+    ]
+      .filter(
+        (part) => part !== undefined && part !== null && String(part) !== '',
+      )
+      .join(':');
     return [evidenceRefId, occurrence || 'stable'].join(':occurrence:');
   }
   return [
@@ -1575,7 +1756,9 @@ function envelopeColumnsForContext(envelope: DataEnvelope): string[] {
   if (Array.isArray(displayColumns)) {
     return displayColumns
       .map((column) => asRecord(column).name)
-      .filter((name): name is string => typeof name === 'string' && name.length > 0);
+      .filter(
+        (name): name is string => typeof name === 'string' && name.length > 0,
+      );
   }
   return [];
 }
@@ -1589,17 +1772,21 @@ function registerEnvelopeSourceContext(
     columns: string[];
     query: string;
     kind: DataSourceContext['kind'];
-  }> = {}
+  }> = {},
 ): DataSourceContext {
   const envelopeRecord = asRecord(envelope);
   const metaRecord = asRecord(envelope.meta as unknown);
-  const sql = extra.query || readStringField(envelopeRecord, 'sql') || undefined;
+  const sql =
+    extra.query || readStringField(envelopeRecord, 'sql') || undefined;
   const rows = envelope.data?.rows;
-  const rowCount = extra.rowCount ?? (Array.isArray(rows) ? rows.length : undefined);
+  const rowCount =
+    extra.rowCount ?? (Array.isArray(rows) ? rows.length : undefined);
   const source = [
     envelope.meta.skillId || envelope.meta.source,
     envelope.meta.stepId,
-  ].filter(Boolean).join('#');
+  ]
+    .filter(Boolean)
+    .join('#');
 
   return registerDataSourceContext(ctx, {
     title,
@@ -1614,13 +1801,15 @@ function registerEnvelopeSourceContext(
     paneSide: readEnvelopePaneSide(envelope),
     traceId: readEnvelopeTraceId(envelope),
     queryHash: readStringField(metaRecord, 'queryHash') || undefined,
-    sourceToolCallId: readStringField(metaRecord, 'sourceToolCallId') || undefined,
+    sourceToolCallId:
+      readStringField(metaRecord, 'sourceToolCallId') || undefined,
     paramsHash: readStringField(metaRecord, 'paramsHash') || undefined,
     planPhaseId: readStringField(metaRecord, 'planPhaseId') || undefined,
     planPhaseTitle: readStringField(metaRecord, 'planPhaseTitle') || undefined,
     planPhaseGoal: readStringField(metaRecord, 'planPhaseGoal') || undefined,
     planPhaseAttribution: readPlanPhaseAttribution(metaRecord),
-    planPhaseWarning: readStringField(metaRecord, 'planPhaseWarning') || undefined,
+    planPhaseWarning:
+      readStringField(metaRecord, 'planPhaseWarning') || undefined,
     producerReason: readStringField(metaRecord, 'producerReason') || undefined,
     toolNarration: readStringField(metaRecord, 'toolNarration') || undefined,
   });
@@ -1650,7 +1839,7 @@ function registerDataSourceContext(
     planPhaseWarning?: string;
     producerReason?: string;
     toolNarration?: string;
-  }
+  },
 ): DataSourceContext {
   const flow = ctx.streamingFlow;
   flow.dataSourceOrdinal = (flow.dataSourceOrdinal || 0) + 1;
@@ -1668,26 +1857,29 @@ function registerDataSourceContext(
   const meaning = isDiagnostic
     ? '包含失败工具、错误信息、原始 SQL 或上下文；它说明数据缺失原因，不证明性能结论。'
     : inferDataMeaning(title, input.columns || []);
-  const refPrefix = input.kind === 'summary'
-    ? '摘要'
-    : input.kind === 'metric'
-      ? '指标'
-      : input.kind === 'chart'
-        ? '图'
-        : input.kind === 'text'
-          ? '文本'
-          : input.kind === 'diagnostic'
-            ? '诊断'
-            : input.kind === 'timeline'
-              ? '时间线'
-              : '表';
+  const refPrefix =
+    input.kind === 'summary'
+      ? '摘要'
+      : input.kind === 'metric'
+        ? '指标'
+        : input.kind === 'chart'
+          ? '图'
+          : input.kind === 'text'
+            ? '文本'
+            : input.kind === 'diagnostic'
+              ? '诊断'
+              : input.kind === 'timeline'
+                ? '时间线'
+                : '表';
   const refKind = input.kind || 'table';
   const refOrdinal = (flow.dataSourceKindOrdinals[refKind] || 0) + 1;
   flow.dataSourceKindOrdinals[refKind] = refOrdinal;
   const sourceContext: DataSourceContext = {
     ref: `${refPrefix} ${refOrdinal}`,
     title: title || '数据表',
-    source: normalizeFlowLine(input.source || input.layer || 'analysis') || 'analysis',
+    source:
+      normalizeFlowLine(input.source || input.layer || 'analysis') ||
+      'analysis',
     reason,
     meaning,
     kind: input.kind,
@@ -1715,9 +1907,10 @@ function registerDataSourceContext(
 function dataSourceLine(ref: DataSourceContext): string {
   const count = typeof ref.rowCount === 'number' ? `，${ref.rowCount} 行` : '';
   const phase = ref.phase ? `，${ref.phase}` : '';
-  const planPhase = ref.planPhaseTitle || ref.planPhaseId
-    ? `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`
-    : '';
+  const planPhase =
+    ref.planPhaseTitle || ref.planPhaseId
+      ? `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`
+      : '';
   const trace = traceLocationLabel(ref.traceSide, ref.paneSide);
   const tracePrefix = trace ? `${trace} · ` : '';
   const reason = ref.reason ? `，用途: ${ref.reason}` : '';
@@ -1731,16 +1924,35 @@ function collectClaimReferencedSourceContexts(
   const referenced = new Set<DataSourceContext>();
   if (!contract || typeof contract !== 'object') return referenced;
 
-  const claims = readAliasedRecordArray(asRecord(contract), CONTRACT_ALIASES.root.claims);
+  const claims = readAliasedRecordArray(
+    asRecord(contract),
+    CONTRACT_ALIASES.root.claims,
+  );
   for (const claim of claims) {
-    const references = readAliasedRecordArray(claim, CONTRACT_ALIASES.claim.references);
+    const references = readAliasedRecordArray(
+      claim,
+      CONTRACT_ALIASES.claim.references,
+    );
     for (const ref of references) {
-      const evidenceRefId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId));
-      const sourceRef = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef));
-      const sourceToolCallId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId));
+      const evidenceRefId = conclusionText(
+        readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId),
+      );
+      const sourceRef = conclusionText(
+        readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef),
+      );
+      const sourceToolCallId = conclusionText(
+        readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId),
+      );
       if (!evidenceRefId && !sourceRef && !sourceToolCallId) continue;
       for (const context of refs) {
-        if (sourceContextMatchesClaim(context, evidenceRefId, sourceRef, sourceToolCallId)) {
+        if (
+          sourceContextMatchesClaim(
+            context,
+            evidenceRefId,
+            sourceRef,
+            sourceToolCallId,
+          )
+        ) {
           referenced.add(context);
         }
       }
@@ -1759,18 +1971,21 @@ function renderDataSourceIndexSection(
   const headCount = 100;
   const tailCount = 20;
   const referencedRefs = collectClaimReferencedSourceContexts(contract, refs);
-  const displayedRefs = refs.length > maxInlineRefs
-    ? refs.filter((ref, index) =>
-        index < headCount ||
-        index >= refs.length - tailCount ||
-        referencedRefs.has(ref)
-      )
-    : refs;
+  const displayedRefs =
+    refs.length > maxInlineRefs
+      ? refs.filter(
+          (ref, index) =>
+            index < headCount ||
+            index >= refs.length - tailCount ||
+            referencedRefs.has(ref),
+        )
+      : refs;
   const omittedCount = Math.max(0, refs.length - displayedRefs.length);
-  const pinnedReferencedCount = refs.filter((ref, index) =>
-    referencedRefs.has(ref) &&
-    index >= headCount &&
-    index < refs.length - tailCount
+  const pinnedReferencedCount = refs.filter(
+    (ref, index) =>
+      referencedRefs.has(ref) &&
+      index >= headCount &&
+      index < refs.length - tailCount,
   ).length;
 
   return [
@@ -1781,7 +1996,9 @@ function renderDataSourceIndexSection(
       ? `本轮共有 ${refs.length} 个数据来源；为避免结论过长，这里列出前 ${headCount} 个和后 ${tailCount} 个${pinnedReferencedCount > 0 ? `，并额外保留 ${pinnedReferencedCount} 个被逐句引用命中的来源` : ''}，省略中间 ${omittedCount} 个。完整来源仍保留在本轮表格消息中；结果快照可能受快照上限裁剪。`
       : '',
     ...displayedRefs.map(dataSourceLine),
-  ].filter(Boolean).join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function appendDataSourceIndex(
@@ -1792,17 +2009,14 @@ function appendDataSourceIndex(
   const section = renderDataSourceIndexSection(ctx, contract);
   if (!section) return content;
 
-  const existingSystemIndex = /(?:\n---)?\n##\s*数据来源索引（系统生成）[\s\S]*?(?=\n---\n|$)/;
+  const existingSystemIndex =
+    /(?:\n---)?\n##\s*数据来源索引（系统生成）[\s\S]*?(?=\n---\n|$)/;
   if (existingSystemIndex.test(content)) {
     if (!contract) return content;
     return content.replace(existingSystemIndex, `\n\n${section}`);
   }
 
-  return [
-    content.trimEnd(),
-    '',
-    section,
-  ].join('\n');
+  return [content.trimEnd(), '', section].join('\n');
 }
 
 /**
@@ -1810,7 +2024,7 @@ function appendDataSourceIndex(
  */
 export function handleProgressEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const phase = normalizeFlowLine(readStringField(payload, 'phase'));
@@ -1821,26 +2035,32 @@ export function handleProgressEvent(
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: formatAnalysisPlanMessage(payload.plan, readStringField(payload, 'message')),
+      content: formatAnalysisPlanMessage(
+        payload.plan,
+        readStringField(payload, 'message'),
+      ),
       timestamp: Date.now(),
       flowTag: 'progress_note',
     });
-    return { loadingPhase: phaseMessage || '分析计划已确认' };
+    return {loadingPhase: phaseMessage || '分析计划已确认'};
   }
 
   if (phaseMessage) {
     pushStreamingPhase(ctx, phaseMessage);
-    return { loadingPhase: phaseMessage };
+    return {loadingPhase: phaseMessage};
   }
 
   if (phase) {
     pushStreamingPhase(ctx, `阶段: ${phase}`);
-    return { loadingPhase: phase };
+    return {loadingPhase: phase};
   }
   return {};
 }
 
-function formatAnalysisPlanMessage(plan: unknown, fallbackMessage?: string): string {
+function formatAnalysisPlanMessage(
+  plan: unknown,
+  fallbackMessage?: string,
+): string {
   if (!isRecord(plan)) {
     return `### 🧭 分析计划已确认\n\n${fallbackMessage || '先收集证据，再给根因假设。'}`;
   }
@@ -1861,7 +2081,10 @@ function formatAnalysisPlanMessage(plan: unknown, fallbackMessage?: string): str
 
   const strategy = asRecord(planRecord.strategy);
   if (Object.keys(strategy).length > 0) {
-    const strategyName = readStringField(strategy, 'name') || readStringField(strategy, 'id') || 'unknown';
+    const strategyName =
+      readStringField(strategy, 'name') ||
+      readStringField(strategy, 'id') ||
+      'unknown';
     lines.push('', `策略: **${strategyName}**`);
   }
 
@@ -1869,7 +2092,9 @@ function formatAnalysisPlanMessage(plan: unknown, fallbackMessage?: string): str
   const steps = rawSteps.map((step) => asRecord(step));
   if (steps.length > 0) {
     lines.push('', '**步骤**');
-    const sorted = [...steps].sort((a, b) => (readNumberField(a, 'order', 0)) - (readNumberField(b, 'order', 0)));
+    const sorted = [...steps].sort(
+      (a, b) => readNumberField(a, 'order', 0) - readNumberField(b, 'order', 0),
+    );
     for (const step of sorted) {
       const order = readNumberField(step, 'order', 0);
       const title = readStringField(step, 'title', '步骤');
@@ -1878,7 +2103,9 @@ function formatAnalysisPlanMessage(plan: unknown, fallbackMessage?: string): str
     }
   }
 
-  const evidence = Array.isArray(planRecord.evidence) ? planRecord.evidence : [];
+  const evidence = Array.isArray(planRecord.evidence)
+    ? planRecord.evidence
+    : [];
   if (evidence.length > 0) {
     lines.push('', '**证据清单**');
     for (const item of evidence) {
@@ -1894,15 +2121,19 @@ function formatAnalysisPlanMessage(plan: unknown, fallbackMessage?: string): str
  * Normalize markdown spacing to avoid excessive vertical gaps in chat bubbles.
  */
 function normalizeMarkdownSpacing(content: string): string {
-  return content
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
-    // Collapse 3+ blank lines (including whitespace-only lines) into 1 blank line.
-    .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
-    .trim();
+  return (
+    content
+      .replace(/\r\n/g, '\n')
+      .replace(/[ \t]+\n/g, '\n')
+      // Collapse 3+ blank lines (including whitespace-only lines) into 1 blank line.
+      .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
+      .trim()
+  );
 }
 
-function normalizeColumnDefinitions(columns: unknown): SqlColumnDefinition[] | undefined {
+function normalizeColumnDefinitions(
+  columns: unknown,
+): SqlColumnDefinition[] | undefined {
   if (!Array.isArray(columns)) return undefined;
 
   const definitions = columns
@@ -1915,9 +2146,16 @@ function normalizeColumnDefinitions(columns: unknown): SqlColumnDefinition[] | u
         if (typeof col.label === 'string') normalized.label = col.label;
         if (typeof col.type === 'string') normalized.type = col.type;
         if (typeof col.format === 'string') normalized.format = col.format;
-        if (typeof col.clickAction === 'string') normalized.clickAction = col.clickAction;
-        if (typeof col.durationColumn === 'string') normalized.durationColumn = col.durationColumn;
-        if (col.unit === 'ns' || col.unit === 'us' || col.unit === 'ms' || col.unit === 's') {
+        if (typeof col.clickAction === 'string')
+          normalized.clickAction = col.clickAction;
+        if (typeof col.durationColumn === 'string')
+          normalized.durationColumn = col.durationColumn;
+        if (
+          col.unit === 'ns' ||
+          col.unit === 'us' ||
+          col.unit === 'ms' ||
+          col.unit === 's'
+        ) {
           normalized.unit = col.unit;
         }
         if (typeof col.hidden === 'boolean') normalized.hidden = col.hidden;
@@ -1935,7 +2173,7 @@ function normalizeColumnDefinitions(columns: unknown): SqlColumnDefinition[] | u
  */
 export function handleSqlExecutedEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const result = asRecord(payload.result);
@@ -1981,11 +2219,15 @@ export function handleSqlExecutedEvent(
  */
 export function handleSkillSectionEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const section = eventPayload(data);
   if (Object.keys(section).length > 0) {
-    const sectionTitle = readStringField(section, 'sectionTitle', 'Skill Section');
+    const sectionTitle = readStringField(
+      section,
+      'sectionTitle',
+      'Skill Section',
+    );
     const rowCount = readNumberField(section, 'rowCount', 0);
     const sectionIndex = readNumberField(section, 'sectionIndex', 0);
     const totalSections = readNumberField(section, 'totalSections', 0);
@@ -2003,28 +2245,27 @@ export function handleSkillSectionEvent(
           columns: normalizedColumns,
         })
       : undefined;
-    pushStreamingOutput(
-      ctx,
-      `${sectionTitle} (${rowCount} 行)`
-    );
+    pushStreamingOutput(ctx, `${sectionTitle} (${rowCount} 行)`);
     // Show progress for this section - use sectionTitle for compact display
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
       content: hasTableShape
-        ? ''  // No message content, title is in table header
+        ? '' // No message content, title is in table header
         : `📊 ${sectionTitle}：0 行，未返回可展示列`,
       timestamp: Date.now(),
-      sqlResult: hasTableShape ? {
-        columns,
-        rows,
-        rowCount,
-        query: '',  // No SQL display
-        sectionTitle: `${sectionTitle} (${sectionIndex}/${totalSections})`,
-        expandableData,
-        summary,
-        sourceContext,
-      } : undefined,
+      sqlResult: hasTableShape
+        ? {
+            columns,
+            rows,
+            rowCount,
+            query: '', // No SQL display
+            sectionTitle: `${sectionTitle} (${sectionIndex}/${totalSections})`,
+            expandableData,
+            summary,
+            sourceContext,
+          }
+        : undefined,
     });
   }
   return {};
@@ -2035,16 +2276,22 @@ export function handleSkillSectionEvent(
  */
 export function handleSkillDiagnosticsEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const diagnostics = Array.isArray(payload.diagnostics)
     ? payload.diagnostics.map((item) => asRecord(item))
     : [];
   if (diagnostics.length > 0) {
-    const criticalItems = diagnostics.filter((d) => readStringField(d, 'severity') === 'critical');
-    const warningItems = diagnostics.filter((d) => readStringField(d, 'severity') === 'warning');
-    const infoItems = diagnostics.filter((d) => readStringField(d, 'severity') === 'info');
+    const criticalItems = diagnostics.filter(
+      (d) => readStringField(d, 'severity') === 'critical',
+    );
+    const warningItems = diagnostics.filter(
+      (d) => readStringField(d, 'severity') === 'warning',
+    );
+    const infoItems = diagnostics.filter(
+      (d) => readStringField(d, 'severity') === 'info',
+    );
 
     let content = '**🔍 诊断结果**\n\n';
     if (criticalItems.length > 0) {
@@ -2089,13 +2336,14 @@ export function handleSkillDiagnosticsEvent(
  */
 export function handleSkillLayeredResultEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const result = asRecord(payload.result);
   const resultLayers = asRecord(result.layers);
   const directLayers = asRecord(payload.layers);
-  const layeredResult = Object.keys(resultLayers).length > 0 ? resultLayers : directLayers;
+  const layeredResult =
+    Object.keys(resultLayers).length > 0 ? resultLayers : directLayers;
   if (Object.keys(layeredResult).length === 0) return {};
 
   // Deduplication check
@@ -2106,18 +2354,31 @@ export function handleSkillLayeredResultEvent(
     'unknown';
   const deduplicationKey = `skill_layered_result:${skillId}`;
   if (ctx.displayedSkillProgress.has(deduplicationKey)) {
-    if (DEBUG_SSE) console.log('[SSEHandlers] Skipping duplicate skill_layered_result:', deduplicationKey);
+    if (DEBUG_SSE)
+      console.log(
+        '[SSEHandlers] Skipping duplicate skill_layered_result:',
+        deduplicationKey,
+      );
     return {};
   }
   ctx.displayedSkillProgress.add(deduplicationKey);
 
-  if (DEBUG_SSE) console.log('[SSEHandlers] skill_layered_result received:', payload);
+  if (DEBUG_SSE)
+    console.log('[SSEHandlers] skill_layered_result received:', payload);
   const layers = layeredResult;
-  const metadata = Object.keys(resultMetadata).length > 0 ? resultMetadata : {
-    skillName: readStringField(payload, 'skillName') || readStringField(payload, 'skillId'),
-  };
+  const metadata =
+    Object.keys(resultMetadata).length > 0
+      ? resultMetadata
+      : {
+          skillName:
+            readStringField(payload, 'skillName') ||
+            readStringField(payload, 'skillId'),
+        };
 
-  pushStreamingOutput(ctx, `技能结果: ${readStringField(metadata, 'skillName', skillId)}`);
+  pushStreamingOutput(
+    ctx,
+    `技能结果: ${readStringField(metadata, 'skillName', skillId)}`,
+  );
 
   // Process overview layer (L1)
   const overview = asRecord(layers.overview ?? layers.L1);
@@ -2133,9 +2394,13 @@ export function handleSkillLayeredResultEvent(
   }
 
   // Show conclusion card if available
-  const conclusionCandidate = result.conclusion ?? extractConclusionFromOverview(overview);
+  const conclusionCandidate =
+    result.conclusion ?? extractConclusionFromOverview(overview);
   const conclusion = asRecord(conclusionCandidate);
-  if (readStringField(conclusion, 'category') && readStringField(conclusion, 'category') !== 'UNKNOWN') {
+  if (
+    readStringField(conclusion, 'category') &&
+    readStringField(conclusion, 'category') !== 'UNKNOWN'
+  ) {
     renderConclusionCard(conclusion, ctx);
   }
 
@@ -2154,10 +2419,12 @@ export function handleSkillLayeredResultEvent(
 function processOverviewLayer(
   overview: Record<string, unknown>,
   metadata: Record<string, unknown>,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): void {
   // Helper to check if object is a StepResult format
-  const isStepResult = (obj: unknown): obj is {data: unknown[]; display?: Record<string, unknown>} => {
+  const isStepResult = (
+    obj: unknown,
+  ): obj is {data: unknown[]; display?: Record<string, unknown>} => {
     const record = asRecord(obj);
     return Array.isArray(record.data);
   };
@@ -2165,7 +2432,9 @@ function processOverviewLayer(
   // Helper to extract data from StepResult
   const extractData = (obj: unknown): Record<string, unknown>[] | null => {
     if (isStepResult(obj)) {
-      return obj.data.filter((item): item is Record<string, unknown> => isRecord(item));
+      return obj.data.filter((item): item is Record<string, unknown> =>
+        isRecord(item),
+      );
     }
     return null;
   };
@@ -2237,8 +2506,8 @@ function processOverviewLayer(
               ...displayColumnDefs
                 .map((def) => def.name)
                 .filter((name: string) => rowColumns.includes(name)),
-              ...rowColumns.filter((name) =>
-                !displayColumnDefs.some((def) => def.name === name)
+              ...rowColumns.filter(
+                (name) => !displayColumnDefs.some((def) => def.name === name),
               ),
             ]
           : rowColumns;
@@ -2246,7 +2515,7 @@ function processOverviewLayer(
           ? displayColumnDefs.filter((def) => orderedColumns.includes(def.name))
           : undefined;
         const rows = dataArray.map((item) =>
-          orderedColumns.map(col => item[col])
+          orderedColumns.map((col) => item[col]),
         );
         const sourceContext = registerDataSourceContext(ctx, {
           title,
@@ -2274,7 +2543,7 @@ function processOverviewLayer(
     } else if (isRecord(val)) {
       // Nested object: display as single-row table
       const objColumns = Object.keys(val);
-      const objRow = objColumns.map(col => val[col]);
+      const objRow = objColumns.map((col) => val[col]);
       const sourceContext = registerDataSourceContext(ctx, {
         title: formatLayerName(key),
         source: readStringField(metadata, 'skillName') || 'skill_overview',
@@ -2303,7 +2572,10 @@ function processOverviewLayer(
 /**
  * Build chart data from step result.
  */
-function buildChartData(obj: unknown, title: string): Message['chartData'] | null {
+function buildChartData(
+  obj: unknown,
+  title: string,
+): Message['chartData'] | null {
   const dataArray = asRecord(obj).data;
   if (!Array.isArray(dataArray) || dataArray.length === 0) return null;
 
@@ -2311,15 +2583,17 @@ function buildChartData(obj: unknown, title: string): Message['chartData'] | nul
   if (!isRecord(firstRow)) return null;
 
   const keys = Object.keys(firstRow);
-  const labelKey = keys.find(k =>
-    k.toLowerCase().includes('label') ||
-    k.toLowerCase().includes('name') ||
-    k.toLowerCase().includes('type')
+  const labelKey = keys.find(
+    (k) =>
+      k.toLowerCase().includes('label') ||
+      k.toLowerCase().includes('name') ||
+      k.toLowerCase().includes('type'),
   );
-  const valueKey = keys.find(k =>
-    k.toLowerCase().includes('value') ||
-    k.toLowerCase().includes('count') ||
-    k.toLowerCase().includes('total')
+  const valueKey = keys.find(
+    (k) =>
+      k.toLowerCase().includes('value') ||
+      k.toLowerCase().includes('count') ||
+      k.toLowerCase().includes('total'),
   );
 
   if (!labelKey || !valueKey) return null;
@@ -2339,7 +2613,10 @@ function buildChartData(obj: unknown, title: string): Message['chartData'] | nul
 /**
  * Build metric data from step result.
  */
-function buildMetricData(obj: unknown, title: string): Message['metricData'] | null {
+function buildMetricData(
+  obj: unknown,
+  title: string,
+): Message['metricData'] | null {
   const dataArray = asRecord(obj).data;
   if (!Array.isArray(dataArray) || dataArray.length === 0) return null;
 
@@ -2347,18 +2624,22 @@ function buildMetricData(obj: unknown, title: string): Message['metricData'] | n
   if (!isRecord(firstRow)) return null;
 
   const keys = Object.keys(firstRow);
-  const valueKey = keys.find(k =>
-    k.toLowerCase().includes('value') ||
-    k.toLowerCase().includes('total') ||
-    k.toLowerCase().includes('avg')
+  const valueKey = keys.find(
+    (k) =>
+      k.toLowerCase().includes('value') ||
+      k.toLowerCase().includes('total') ||
+      k.toLowerCase().includes('avg'),
   );
 
   if (valueKey) {
     const value = firstRow[valueKey];
     const rawStatus = firstRow.status;
-    const status = rawStatus === 'good' || rawStatus === 'warning' || rawStatus === 'critical'
-      ? rawStatus
-      : undefined;
+    const status =
+      rawStatus === 'good' ||
+      rawStatus === 'warning' ||
+      rawStatus === 'critical'
+        ? rawStatus
+        : undefined;
     return {
       title: title,
       value: typeof value === 'number' ? value.toFixed(2) : String(value),
@@ -2383,16 +2664,20 @@ function buildMetricData(obj: unknown, title: string): Message['metricData'] | n
 function processListLayer(
   list: Record<string, unknown>,
   deep: Record<string, unknown> | undefined,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): void {
   // Helper to check if object is a StepResult format
-  const isStepResult = (obj: unknown): obj is {data: unknown; display?: unknown} => {
+  const isStepResult = (
+    obj: unknown,
+  ): obj is {data: unknown; display?: unknown} => {
     const record = asRecord(obj);
     if (!('data' in record)) return false;
     if (Array.isArray(record.data)) return true;
     const dataRecord = asRecord(record.data);
-    if (Object.keys(dataRecord).length > 0 &&
-        (Array.isArray(dataRecord.columns) || Array.isArray(dataRecord.rows))) {
+    if (
+      Object.keys(dataRecord).length > 0 &&
+      (Array.isArray(dataRecord.columns) || Array.isArray(dataRecord.rows))
+    ) {
       return true;
     }
     return false;
@@ -2405,17 +2690,21 @@ function processListLayer(
   };
 
   // Helper to find frame detail in deep layer
-  const findFrameDetail = (frameId: string | number, sessionId?: string | number): Record<string, unknown> | null => {
+  const findFrameDetail = (
+    frameId: string | number,
+    sessionId?: string | number,
+  ): Record<string, unknown> | null => {
     if (!deep || !isRecord(deep)) return null;
 
-    const sessionKeys = sessionId !== undefined
-      ? [String(sessionId), `session_${sessionId}`]
-      : [];
+    const sessionKeys =
+      sessionId !== undefined
+        ? [String(sessionId), `session_${sessionId}`]
+        : [];
     const frameKeys = [String(frameId), `frame_${frameId}`];
 
     for (const [sid, frames] of Object.entries(deep)) {
       if (sessionId !== undefined) {
-        const sessionMatches = sessionKeys.some(sk => sid === sk);
+        const sessionMatches = sessionKeys.some((sk) => sid === sk);
         if (!sessionMatches) continue;
       }
 
@@ -2453,7 +2742,10 @@ function processListLayer(
       }
       isExpandable = readBooleanField(displayConfig, 'expandable');
 
-      const metadataCandidates = [displayConfig.metadataFields, displayConfig.metadata_columns];
+      const metadataCandidates = [
+        displayConfig.metadataFields,
+        displayConfig.metadata_columns,
+      ];
       for (const candidate of metadataCandidates) {
         if (Array.isArray(candidate)) {
           metadataColumns = candidate
@@ -2463,7 +2755,10 @@ function processListLayer(
         }
       }
 
-      const hiddenCandidates = [displayConfig.hidden_columns, displayConfig.hiddenColumns];
+      const hiddenCandidates = [
+        displayConfig.hidden_columns,
+        displayConfig.hiddenColumns,
+      ];
       for (const candidate of hiddenCandidates) {
         if (Array.isArray(candidate)) {
           hiddenColumns = candidate
@@ -2478,14 +2773,13 @@ function processListLayer(
       // Keep duration columns that are required by navigate_range bindings.
       if (displayColumnDefs && hiddenColumns.length > 0) {
         const durationDeps = new Set(
-          displayColumnDefs
-            .flatMap((def) => (
-              def?.clickAction === 'navigate_range' &&
-              typeof def?.durationColumn === 'string' &&
-              def.durationColumn.length > 0
-                ? [def.durationColumn]
-                : []
-            ))
+          displayColumnDefs.flatMap((def) =>
+            def?.clickAction === 'navigate_range' &&
+            typeof def?.durationColumn === 'string' &&
+            def.durationColumn.length > 0
+              ? [def.durationColumn]
+              : [],
+          ),
         );
         hiddenColumns = hiddenColumns.filter((name) => !durationDeps.has(name));
       }
@@ -2500,14 +2794,13 @@ function processListLayer(
 
       if (displayColumnDefs && hiddenColumns.length > 0) {
         const durationDeps = new Set(
-          displayColumnDefs
-            .flatMap((def) => (
-              def?.clickAction === 'navigate_range' &&
-              typeof def?.durationColumn === 'string' &&
-              def.durationColumn.length > 0
-                ? [def.durationColumn]
-                : []
-            ))
+          displayColumnDefs.flatMap((def) =>
+            def?.clickAction === 'navigate_range' &&
+            typeof def?.durationColumn === 'string' &&
+            def.durationColumn.length > 0
+              ? [def.durationColumn]
+              : [],
+          ),
         );
         hiddenColumns = hiddenColumns.filter((name) => !durationDeps.has(name));
       }
@@ -2515,13 +2808,17 @@ function processListLayer(
       if (isDataPayloadFormat(stepData)) {
         // NEW DataPayload format
         const allColumns = stepData.columns || [];
-        const allRows = (stepData.rows || []).filter((row): row is unknown[] => Array.isArray(row));
+        const allRows = (stepData.rows || []).filter((row): row is unknown[] =>
+          Array.isArray(row),
+        );
         preBindedExpandableData = readExpandableData(stepData.expandableData);
         summaryReport = stepData.summary;
 
         items = allRows.map((row) => {
           const obj: Record<string, unknown> = {};
-          allColumns.forEach((col: string, i: number) => { obj[col] = row[i]; });
+          allColumns.forEach((col: string, i: number) => {
+            obj[col] = row[i];
+          });
           return obj;
         });
 
@@ -2536,14 +2833,10 @@ function processListLayer(
             }
             return false;
           });
-          rows = allRows.map((row) =>
-            visibleIndices.map(idx => row[idx])
-          );
+          rows = allRows.map((row) => visibleIndices.map((idx) => row[idx]));
         } else {
           columns = allColumns;
-          rows = allRows.map((row) =>
-            row.map((val) => val)
-          );
+          rows = allRows.map((row) => row.map((val) => val));
         }
 
         if (displayColumnDefs && displayColumnDefs.length > 0) {
@@ -2551,29 +2844,35 @@ function processListLayer(
             ...displayColumnDefs
               .map((def) => def.name)
               .filter((name: string) => columns.includes(name)),
-            ...columns.filter((name) =>
-              !displayColumnDefs!.some((def) => def.name === name)
+            ...columns.filter(
+              (name) => !displayColumnDefs!.some((def) => def.name === name),
             ),
           ];
 
-          const indexMap = new Map(columns.map((name: string, idx: number) => [name, idx]));
+          const indexMap = new Map(
+            columns.map((name: string, idx: number) => [name, idx]),
+          );
           columns = ordered;
           rows = rows.map((row) =>
-            ordered.map((name: string) => row[indexMap.get(name) ?? -1])
+            ordered.map((name: string) => row[indexMap.get(name) ?? -1]),
           );
 
           filteredColumnDefs = displayColumnDefs.filter((def) =>
-            columns.includes(def.name)
+            columns.includes(def.name),
           );
         }
       } else {
         // Legacy format: data is array of row objects
         items = Array.isArray(stepData)
-          ? stepData.filter((item): item is Record<string, unknown> => isRecord(item))
+          ? stepData.filter((item): item is Record<string, unknown> =>
+              isRecord(item),
+            )
           : [];
       }
     } else if (Array.isArray(value)) {
-      items = value.filter((item): item is Record<string, unknown> => isRecord(item));
+      items = value.filter((item): item is Record<string, unknown> =>
+        isRecord(item),
+      );
     }
 
     // Skip if no data
@@ -2583,23 +2882,25 @@ function processListLayer(
     if (columns.length === 0 && items.length > 0) {
       const allColumns = Object.keys(items[0] || {});
       const columnsToHide = new Set([...metadataColumns, ...hiddenColumns]);
-      const visibleColumns = allColumns.filter(col => !columnsToHide.has(col));
+      const visibleColumns = allColumns.filter(
+        (col) => !columnsToHide.has(col),
+      );
       if (displayColumnDefs && displayColumnDefs.length > 0) {
         columns = [
           ...displayColumnDefs
             .map((def) => def.name)
             .filter((name: string) => visibleColumns.includes(name)),
-          ...visibleColumns.filter((name) =>
-            !displayColumnDefs!.some((def) => def.name === name)
+          ...visibleColumns.filter(
+            (name) => !displayColumnDefs!.some((def) => def.name === name),
           ),
         ];
         filteredColumnDefs = displayColumnDefs.filter((def) =>
-          columns.includes(def.name)
+          columns.includes(def.name),
         );
       } else {
         columns = visibleColumns;
       }
-      rows = items.map((item) => columns.map(col => item[col]));
+      rows = items.map((item) => columns.map((col) => item[col]));
     }
 
     // Build expandable data
@@ -2607,15 +2908,19 @@ function processListLayer(
     if (preBindedExpandableData && preBindedExpandableData.length > 0) {
       expandableData = preBindedExpandableData;
     } else if (isExpandable && deep) {
-      const generatedExpandableData: NonNullable<SqlResultData['expandableData']> = [];
+      const generatedExpandableData: NonNullable<
+        SqlResultData['expandableData']
+      > = [];
       for (const item of items) {
         const rawFrameId = item.frame_id ?? item.frameId ?? item.id;
-        if (typeof rawFrameId !== 'string' && typeof rawFrameId !== 'number') continue;
+        if (typeof rawFrameId !== 'string' && typeof rawFrameId !== 'number')
+          continue;
 
         const rawSessionId = item.session_id ?? item.sessionId;
-        const sessionId = (typeof rawSessionId === 'string' || typeof rawSessionId === 'number')
-          ? rawSessionId
-          : undefined;
+        const sessionId =
+          typeof rawSessionId === 'string' || typeof rawSessionId === 'number'
+            ? rawSessionId
+            : undefined;
 
         const frameDetail = findFrameDetail(rawFrameId, sessionId);
         if (!frameDetail) continue;
@@ -2624,11 +2929,14 @@ function processListLayer(
         const detailItem = isRecord(frameDetail.item) ? frameDetail.item : item;
         generatedExpandableData.push({
           item: detailItem,
-          result: { success: true, sections },
+          result: {success: true, sections},
         });
       }
 
-      expandableData = generatedExpandableData.length > 0 ? generatedExpandableData : undefined;
+      expandableData =
+        generatedExpandableData.length > 0
+          ? generatedExpandableData
+          : undefined;
     }
 
     // Extract metadata for header display
@@ -2660,7 +2968,10 @@ function processListLayer(
         columnDefinitions: filteredColumnDefs,
         sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
         expandableData,
-        metadata: Object.keys(extractedMetadata).length > 0 ? extractedMetadata : undefined,
+        metadata:
+          Object.keys(extractedMetadata).length > 0
+            ? extractedMetadata
+            : undefined,
         summaryReport: readSummaryReport(summaryReport),
         sourceContext,
       },
@@ -2671,19 +2982,30 @@ function processListLayer(
 /**
  * Render conclusion card from analysis result.
  */
-function renderConclusionCard(conclusion: Record<string, unknown>, ctx: SSEHandlerContext): void {
+function renderConclusionCard(
+  conclusion: Record<string, unknown>,
+  ctx: SSEHandlerContext,
+): void {
   const category = readStringField(conclusion, 'category', 'UNKNOWN');
   const component = readStringField(conclusion, 'component', 'unknown');
   const summary = readStringField(conclusion, 'summary', '暂无总结');
   const suggestion = readStringField(conclusion, 'suggestion');
   const evidence = readStringArrayField(conclusion, 'evidence');
-  const confidencePercent = Math.round(readNumberField(conclusion, 'confidence', 0.5) * 100);
+  const confidencePercent = Math.round(
+    readNumberField(conclusion, 'confidence', 0.5) * 100,
+  );
 
-  const categoryEmoji = category === 'APP' ? '📱' :
-                        category === 'SYSTEM' ? '⚙️' :
-                        category === 'MIXED' ? '🔄' : '❓';
-  const confidenceBar = '█'.repeat(Math.floor(confidencePercent / 10)) +
-                        '░'.repeat(10 - Math.floor(confidencePercent / 10));
+  const categoryEmoji =
+    category === 'APP'
+      ? '📱'
+      : category === 'SYSTEM'
+        ? '⚙️'
+        : category === 'MIXED'
+          ? '🔄'
+          : '❓';
+  const confidenceBar =
+    '█'.repeat(Math.floor(confidencePercent / 10)) +
+    '░'.repeat(10 - Math.floor(confidencePercent / 10));
 
   let conclusionContent = `## 🎯 分析结论\n\n`;
   conclusionContent += `**问题分类:** ${categoryEmoji} **${translateCategory(category)}**\n`;
@@ -2761,9 +3083,13 @@ function conclusionText(value: unknown): string {
 
 function normalizeClaimSourceRef(value: string): string {
   const text = normalizeFlowLine(value).replace(/：/g, ':').toLowerCase();
-  const localized = text.match(/^(表|摘要|指标|图|文本|时间线|诊断)\s*([0-9]+)/);
+  const localized = text.match(
+    /^(表|摘要|指标|图|文本|时间线|诊断)\s*([0-9]+)/,
+  );
   if (localized) return `${localized[1]} ${Number(localized[2])}`;
-  const english = text.match(/^(table|summary|metric|chart|figure|text|timeline|diagnostic|diagnosis)\s*#?\s*([0-9]+)/);
+  const english = text.match(
+    /^(table|summary|metric|chart|figure|text|timeline|diagnostic|diagnosis)\s*#?\s*([0-9]+)/,
+  );
   if (english) {
     const prefixMap: Record<string, string> = {
       table: '表',
@@ -2782,8 +3108,10 @@ function normalizeClaimSourceRef(value: string): string {
 }
 
 function sourceRefMatches(contextRef: string, sourceRef: string): boolean {
-  return contextRef === sourceRef ||
-    normalizeClaimSourceRef(contextRef) === normalizeClaimSourceRef(sourceRef);
+  return (
+    contextRef === sourceRef ||
+    normalizeClaimSourceRef(contextRef) === normalizeClaimSourceRef(sourceRef)
+  );
 }
 
 function claimValueMatches(actual: unknown, expected: unknown): boolean {
@@ -2807,13 +3135,14 @@ type ClaimValueComparison = {
   approximate?: boolean;
 };
 
-function parseClaimNumberLiteral(value: unknown): ParsedClaimNumber | undefined {
+function parseClaimNumberLiteral(
+  value: unknown,
+): ParsedClaimNumber | undefined {
   if (typeof value !== 'number' && typeof value !== 'string') return undefined;
-  const raw = String(value)
-    .replace(/,/g, '')
-    .replace(/％/g, '%')
-    .trim();
-  const match = raw.match(/^([+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?)\s*(?:%|ms|s|ns|us|µs|fps|hz|mhz|ghz|帧|次|行)?$/i);
+  const raw = String(value).replace(/,/g, '').replace(/％/g, '%').trim();
+  const match = raw.match(
+    /^([+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?)\s*(?:%|ms|s|ns|us|µs|fps|hz|mhz|ghz|帧|次|行)?$/i,
+  );
   if (!match) return undefined;
   const parsed = Number(match[1]);
   if (!Number.isFinite(parsed)) return undefined;
@@ -2822,23 +3151,28 @@ function parseClaimNumberLiteral(value: unknown): ParsedClaimNumber | undefined 
   const mantissa = literal.split('e')[0];
   const decimalPart = mantissa.includes('.') ? mantissa.split('.')[1] : '';
   const integerLiteral = decimalPart.length === 0;
-  const tolerance = decimalPart.length > 0
-    ? (0.5 * Math.pow(10, -decimalPart.length)) + 1e-9
-    : 0.5 + 1e-9;
+  const tolerance =
+    decimalPart.length > 0
+      ? 0.5 * Math.pow(10, -decimalPart.length) + 1e-9
+      : 0.5 + 1e-9;
   return {value: parsed, integerLiteral, tolerance};
 }
 
-function compareClaimValue(actual: unknown, expected: unknown): ClaimValueComparison {
+function compareClaimValue(
+  actual: unknown,
+  expected: unknown,
+): ClaimValueComparison {
   if (claimValueMatches(actual, expected)) return {matches: true};
 
   const actualParsed = parseClaimNumberLiteral(actual);
   const expectedParsed = parseClaimNumberLiteral(expected);
   if (actualParsed && expectedParsed) {
-    const tolerance = expectedParsed.integerLiteral &&
+    const tolerance =
+      expectedParsed.integerLiteral &&
       Number.isInteger(actualParsed.value) &&
       Number.isInteger(expectedParsed.value)
-      ? 1e-9
-      : expectedParsed.tolerance;
+        ? 1e-9
+        : expectedParsed.tolerance;
     if (Math.abs(actualParsed.value - expectedParsed.value) <= tolerance) {
       return {matches: true, approximate: true};
     }
@@ -2856,11 +3190,18 @@ function sourceContextMatchesClaim(
   if (!context) return false;
   if (!evidenceRefId && !sourceRef && !sourceToolCallId) return false;
   if (evidenceRefId && context.evidenceRefId !== evidenceRefId) return false;
-  if (sourceToolCallId && context.sourceToolCallId !== sourceToolCallId) return false;
+  if (sourceToolCallId && context.sourceToolCallId !== sourceToolCallId)
+    return false;
   // evidenceRefId and sourceToolCallId are machine identifiers. sourceRef is
   // an LLM-visible label such as "表 1" or "摘要 2", so it must not veto an
   // otherwise exact machine-id match when ref numbering changes.
-  if (!evidenceRefId && !sourceToolCallId && sourceRef && !sourceRefMatches(context.ref, sourceRef)) return false;
+  if (
+    !evidenceRefId &&
+    !sourceToolCallId &&
+    sourceRef &&
+    !sourceRefMatches(context.ref, sourceRef)
+  )
+    return false;
   return true;
 }
 
@@ -2869,15 +3210,24 @@ function findClaimSource(
   evidenceRefId: string,
   sourceRef: string,
   sourceToolCallId: string,
-): { source?: DataSourceContext; sqlResult?: SqlResultData; ambiguous?: boolean } {
+): {
+  source?: DataSourceContext;
+  sqlResult?: SqlResultData;
+  ambiguous?: boolean;
+} {
   if (!ctx) return {};
 
   const sources = ctx.streamingFlow.dataSourceRefs.filter((ref) =>
-    sourceContextMatchesClaim(ref, evidenceRefId, sourceRef, sourceToolCallId)
+    sourceContextMatchesClaim(ref, evidenceRefId, sourceRef, sourceToolCallId),
   );
   const messages = ctx.getMessages().filter((msg) => {
     const context = msg.sqlResult?.sourceContext || msg.sourceContext;
-    return sourceContextMatchesClaim(context, evidenceRefId, sourceRef, sourceToolCallId);
+    return sourceContextMatchesClaim(
+      context,
+      evidenceRefId,
+      sourceRef,
+      sourceToolCallId,
+    );
   });
   return {
     source: sources[0],
@@ -2890,7 +3240,10 @@ function parseClaimSelectorScalar(value: string): string | number | boolean {
   const text = normalizeFlowLine(value).replace(/^['"]|['"]$/g, '');
   if (/^(true|false)$/i.test(text)) return /^true$/i.test(text);
   const numeric = Number(text);
-  if (Number.isFinite(numeric) && /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?$/i.test(text)) {
+  if (
+    Number.isFinite(numeric) &&
+    /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?$/i.test(text)
+  ) {
     return numeric;
   }
   return text;
@@ -2918,7 +3271,9 @@ function parseClaimRowSelectorString(value: string): Record<string, unknown> {
   return selector;
 }
 
-function readClaimRowSelector(ref: Record<string, unknown>): Record<string, unknown> {
+function readClaimRowSelector(
+  ref: Record<string, unknown>,
+): Record<string, unknown> {
   const value = readAliasedValue(ref, CONTRACT_ALIASES.claimRef.rowSelector);
   if (typeof value === 'string') return parseClaimRowSelectorString(value);
   return readAliasedRecord(ref, CONTRACT_ALIASES.claimRef.rowSelector);
@@ -2931,23 +3286,27 @@ function normalizeClaimColumnName(value: string): string {
 function resolveClaimColumn(
   sqlResult: SqlResultData,
   column: string,
-): { index?: number; status?: string } {
+): {index?: number; status?: string} {
   const exactIndex = sqlResult.columns.indexOf(column);
   if (exactIndex >= 0) return {index: exactIndex};
 
   const normalizedColumn = normalizeClaimColumnName(column);
   const normalizedMatches = sqlResult.columns
     .map((name, index) => ({name, index}))
-    .filter(({name}) => normalizeClaimColumnName(String(name)) === normalizedColumn);
-  if (normalizedMatches.length === 1) return {index: normalizedMatches[0].index};
+    .filter(
+      ({name}) => normalizeClaimColumnName(String(name)) === normalizedColumn,
+    );
+  if (normalizedMatches.length === 1)
+    return {index: normalizedMatches[0].index};
   if (normalizedMatches.length > 1) return {status: '未核验: 列名不唯一'};
 
   const labelMatches = (sqlResult.columnDefinitions || [])
     .map((definition, index) => ({definition, index}))
-    .filter(({definition}) =>
-      typeof definition.label === 'string' &&
-      normalizeClaimColumnName(definition.label) === normalizedColumn &&
-      sqlResult.columns.includes(definition.name)
+    .filter(
+      ({definition}) =>
+        typeof definition.label === 'string' &&
+        normalizeClaimColumnName(definition.label) === normalizedColumn &&
+        sqlResult.columns.includes(definition.name),
     );
   if (labelMatches.length === 1) {
     return {index: sqlResult.columns.indexOf(labelMatches[0].definition.name)};
@@ -2957,7 +3316,11 @@ function resolveClaimColumn(
   return {status: '未通过: 列不存在'};
 }
 
-function rowMatchesSelector(row: unknown[], sqlResult: SqlResultData, selector: Record<string, unknown>): boolean {
+function rowMatchesSelector(
+  row: unknown[],
+  sqlResult: SqlResultData,
+  selector: Record<string, unknown>,
+): boolean {
   for (const [column, expected] of Object.entries(selector)) {
     const resolvedColumn = resolveClaimColumn(sqlResult, column);
     if (resolvedColumn.index === undefined) return false;
@@ -2971,11 +3334,17 @@ function resolveClaimRow(
   rowIndexValue: unknown,
   rowIndex: number | undefined,
   rowSelector: Record<string, unknown>,
-): { row?: unknown[]; rowLabel?: string; status?: string } {
-  const hasRowIndex = rowIndexValue !== undefined && rowIndexValue !== null && conclusionText(rowIndexValue) !== '';
+): {row?: unknown[]; rowLabel?: string; status?: string} {
+  const hasRowIndex =
+    rowIndexValue !== undefined &&
+    rowIndexValue !== null &&
+    conclusionText(rowIndexValue) !== '';
   if (hasRowIndex) {
     if (rowIndex === undefined || !Number.isInteger(rowIndex) || rowIndex < 0) {
-      return {rowLabel: rowIndex !== undefined ? `row ${rowIndex}` : '', status: '未通过: 行号无效'};
+      return {
+        rowLabel: rowIndex !== undefined ? `row ${rowIndex}` : '',
+        status: '未通过: 行号无效',
+      };
     }
     const row = sqlResult.rows[rowIndex];
     return row
@@ -2990,9 +3359,14 @@ function resolveClaimRow(
     .map((row, idx) => ({row, idx}))
     .filter(({row}) => rowMatchesSelector(row, sqlResult, rowSelector));
   const selectorLabel = `rowSelector ${selectorEntries.map(([key, value]) => `${key}=${String(value)}`).join(', ')}`;
-  if (matches.length === 0) return {rowLabel: selectorLabel, status: '未通过: rowSelector 未命中'};
-  if (matches.length > 1) return {rowLabel: selectorLabel, status: '未核验: rowSelector 不唯一'};
-  return {row: matches[0].row, rowLabel: `${selectorLabel} -> row ${matches[0].idx}`};
+  if (matches.length === 0)
+    return {rowLabel: selectorLabel, status: '未通过: rowSelector 未命中'};
+  if (matches.length > 1)
+    return {rowLabel: selectorLabel, status: '未核验: rowSelector 不唯一'};
+  return {
+    row: matches[0].row,
+    rowLabel: `${selectorLabel} -> row ${matches[0].idx}`,
+  };
 }
 
 type ClaimReferenceAudit = {
@@ -3007,24 +3381,46 @@ function auditClaimReference(
   ref: Record<string, unknown>,
   ctx: SSEHandlerContext | undefined,
 ): ClaimReferenceAudit {
-  const evidenceRefId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId));
-  const sourceRef = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef));
-  const sourceToolCallId = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId));
-  const rowIndexValue = readAliasedValue(ref, CONTRACT_ALIASES.claimRef.rowIndex);
+  const evidenceRefId = conclusionText(
+    readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId),
+  );
+  const sourceRef = conclusionText(
+    readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef),
+  );
+  const sourceToolCallId = conclusionText(
+    readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId),
+  );
+  const rowIndexValue = readAliasedValue(
+    ref,
+    CONTRACT_ALIASES.claimRef.rowIndex,
+  );
   const rowIndex = conclusionNumber(rowIndexValue);
   const rowSelector = readClaimRowSelector(ref);
-  const column = conclusionText(readAliasedValue(ref, CONTRACT_ALIASES.claimRef.column));
+  const column = conclusionText(
+    readAliasedValue(ref, CONTRACT_ALIASES.claimRef.column),
+  );
   const expectedValue = readAliasedValue(ref, CONTRACT_ALIASES.claimRef.value);
-  const hasExpectedValue = expectedValue !== undefined && expectedValue !== null && `${expectedValue}` !== '';
-  const matched = findClaimSource(ctx, evidenceRefId, sourceRef, sourceToolCallId);
+  const hasExpectedValue =
+    expectedValue !== undefined &&
+    expectedValue !== null &&
+    `${expectedValue}` !== '';
+  const matched = findClaimSource(
+    ctx,
+    evidenceRefId,
+    sourceRef,
+    sourceToolCallId,
+  );
   const sourceRefMismatch = Boolean(
     sourceRef &&
-    matched.source &&
-    !sourceRefMatches(matched.source.ref, sourceRef)
+      matched.source &&
+      !sourceRefMatches(matched.source.ref, sourceRef),
   );
-  const label = sourceRef && !sourceRefMismatch
-    ? sourceRef
-    : matched.source?.ref || sourceRef || (evidenceRefId ? compactEvidenceRef(evidenceRefId) : '');
+  const label =
+    sourceRef && !sourceRefMismatch
+      ? sourceRef
+      : matched.source?.ref ||
+        sourceRef ||
+        (evidenceRefId ? compactEvidenceRef(evidenceRefId) : '');
   const resolvedRow = matched.sqlResult
     ? resolveClaimRow(matched.sqlResult, rowIndexValue, rowIndex, rowSelector)
     : {};
@@ -3037,9 +3433,13 @@ function auditClaimReference(
   } else if (!matched.source && !matched.sqlResult) {
     status = '未核验: 未找到来源';
   } else if (!matched.sqlResult) {
-    status = rowIndex !== undefined || Object.keys(rowSelector).length > 0 || column || expectedValue !== undefined
-      ? '未核验: 来源不是表格数据'
-      : '已找到来源';
+    status =
+      rowIndex !== undefined ||
+      Object.keys(rowSelector).length > 0 ||
+      column ||
+      expectedValue !== undefined
+        ? '未核验: 来源不是表格数据'
+        : '已找到来源';
   } else if (resolvedRow.status) {
     status = resolvedRow.status;
   } else if (resolvedRow.row) {
@@ -3051,7 +3451,10 @@ function auditClaimReference(
       } else if (!hasExpectedValue) {
         status = '未核验: 未提供期望值';
       } else {
-        const comparison = compareClaimValue(row[resolvedColumn.index], expectedValue);
+        const comparison = compareClaimValue(
+          row[resolvedColumn.index],
+          expectedValue,
+        );
         if (!comparison.matches) {
           status = `未通过: 值不匹配，实际 ${String(row[resolvedColumn.index] ?? '')}`;
         } else {
@@ -3062,14 +3465,16 @@ function auditClaimReference(
       status = expectedValue !== undefined ? '未核验: 未提供列名' : '已核对';
     }
   } else {
-    status = column || expectedValue !== undefined
-      ? '未核验: 未提供行号或 rowSelector'
-      : '已找到来源';
+    status =
+      column || expectedValue !== undefined
+        ? '未核验: 未提供行号或 rowSelector'
+        : '已找到来源';
   }
 
   return {
     label: label || '未命名来源',
-    rowLabel: resolvedRow.rowLabel || (rowIndex !== undefined ? `row ${rowIndex}` : ''),
+    rowLabel:
+      resolvedRow.rowLabel || (rowIndex !== undefined ? `row ${rowIndex}` : ''),
     column,
     status,
     sourceRefMismatch: sourceRefMismatch && Boolean(matched.source),
@@ -3081,7 +3486,8 @@ function compactClaimAuditStatus(statuses: string[]): string {
   if (failed) return failed;
   const unverified = statuses.find((status) => status.startsWith('未核验'));
   if (unverified) return unverified;
-  if (statuses.some((status) => status.includes('近似匹配'))) return '已核对（含近似匹配）';
+  if (statuses.some((status) => status.includes('近似匹配')))
+    return '已核对（含近似匹配）';
   if (statuses.some((status) => status === '已找到来源')) return '已找到来源';
   return '已核对';
 }
@@ -3090,14 +3496,17 @@ function renderClaimReferencesSummary(
   references: Record<string, unknown>[],
   ctx: SSEHandlerContext | undefined,
 ): string {
-  const groups = new Map<string, {
-    label: string;
-    rows: Set<string>;
-    columns: Set<string>;
-    statuses: string[];
-    mismatchCount: number;
-    referenceCount: number;
-  }>();
+  const groups = new Map<
+    string,
+    {
+      label: string;
+      rows: Set<string>;
+      columns: Set<string>;
+      statuses: string[];
+      mismatchCount: number;
+      referenceCount: number;
+    }
+  >();
 
   for (const ref of references) {
     const audit = auditClaimReference(ref, ctx);
@@ -3115,7 +3524,10 @@ function renderClaimReferencesSummary(
     const group = groups.get(key)!;
     if (audit.rowLabel) group.rows.add(audit.rowLabel);
     if (audit.column) {
-      for (const column of audit.column.split(/[,，]/).map((part) => normalizeFlowLine(part)).filter(Boolean)) {
+      for (const column of audit.column
+        .split(/[,，]/)
+        .map((part) => normalizeFlowLine(part))
+        .filter(Boolean)) {
         group.columns.add(column);
       }
     }
@@ -3128,14 +3540,17 @@ function renderClaimReferencesSummary(
   const rendered = [...groups.values()].slice(0, maxGroups).map((group) => {
     const rows = [...group.rows];
     const columns = [...group.columns];
-    const rowText = rows.length > 0
-      ? `，${rows.slice(0, 2).join(' / ')}${rows.length > 2 ? ` 等 ${rows.length} 行` : ''}`
-      : '';
-    const columnText = columns.length > 0
-      ? `，列 ${columns.slice(0, 6).join('/')}${columns.length > 6 ? ` 等 ${columns.length} 列` : ''}`
-      : '';
+    const rowText =
+      rows.length > 0
+        ? `，${rows.slice(0, 2).join(' / ')}${rows.length > 2 ? ` 等 ${rows.length} 行` : ''}`
+        : '';
+    const columnText =
+      columns.length > 0
+        ? `，列 ${columns.slice(0, 6).join('/')}${columns.length > 6 ? ` 等 ${columns.length} 列` : ''}`
+        : '';
     const status = compactClaimAuditStatus(group.statuses);
-    const mismatchText = group.mismatchCount > 0 ? '，source_ref 已按系统来源校正' : '';
+    const mismatchText =
+      group.mismatchCount > 0 ? '，source_ref 已按系统来源校正' : '';
     return `${group.label}${rowText}${columnText}，${status}${mismatchText}`;
   });
 
@@ -3151,24 +3566,39 @@ function renderConclusionClaimsSection(
 ): string {
   if (!contract || typeof contract !== 'object') return '';
   const contractRecord = asRecord(contract);
-  const claims = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.claims);
+  const claims = readAliasedRecordArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.claims,
+  );
   if (claims.length === 0) return '';
 
   const lines: string[] = ['## 逐句数据引用（系统核对结果）'];
   const maxClaims = 20;
   claims.slice(0, maxClaims).forEach((item, idx: number) => {
-    const claimId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.id)) || `Q${idx + 1}`;
-    const conclusionId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.conclusionId));
-    const claimText = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.text)) || '未命名结论片段';
-    const references = readAliasedRecordArray(item, CONTRACT_ALIASES.claim.references);
-    const refText = references.length > 0
-      ? renderClaimReferencesSummary(references, ctx)
-      : '未提供行/列引用';
+    const claimId =
+      conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.id)) ||
+      `Q${idx + 1}`;
+    const conclusionId = conclusionText(
+      readAliasedValue(item, CONTRACT_ALIASES.claim.conclusionId),
+    );
+    const claimText =
+      conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.text)) ||
+      '未命名结论片段';
+    const references = readAliasedRecordArray(
+      item,
+      CONTRACT_ALIASES.claim.references,
+    );
+    const refText =
+      references.length > 0
+        ? renderClaimReferencesSummary(references, ctx)
+        : '未提供行/列引用';
     const cid = conclusionId ? ` / ${conclusionId}` : '';
     lines.push(`- ${claimId}${cid}: ${claimText}（${refText}）`);
   });
   if (claims.length > maxClaims) {
-    lines.push(`- 其余 ${claims.length - maxClaims} 条 claim 未展开；完整结构化引用仍保留在结果快照中。`);
+    lines.push(
+      `- 其余 ${claims.length - maxClaims} 条 claim 未展开；完整结构化引用仍保留在结果快照中。`,
+    );
   }
   return lines.join('\n');
 }
@@ -3182,7 +3612,10 @@ function appendConclusionClaims(
   const section = renderConclusionClaimsSection(contract, ctx);
   if (!section) return content;
   const withoutStructuredClaims = content
-    .replace(/(?:\n---)?\n##\s*逐句数据引用（结构化来源）[\s\S]*?(?=\n##\s+|\n---\n|$)/, '')
+    .replace(
+      /(?:\n---)?\n##\s*逐句数据引用（结构化来源）[\s\S]*?(?=\n##\s+|\n---\n|$)/,
+      '',
+    )
     .trimEnd();
   return [withoutStructuredClaims, '', '---', section].join('\n');
 }
@@ -3194,7 +3627,9 @@ function readCodeAwareRecordArray(
   for (const key of keys) {
     const value = source[key];
     if (Array.isArray(value)) {
-      return value.filter((item): item is Record<string, unknown> => isRecord(item));
+      return value.filter((item): item is Record<string, unknown> =>
+        isRecord(item),
+      );
     }
   }
   return [];
@@ -3204,13 +3639,15 @@ function formatCodeLineRange(value: unknown): string {
   if (Array.isArray(value) && value.length >= 2) {
     const start = conclusionNumber(value[0]);
     const end = conclusionNumber(value[1]);
-    if (start !== undefined && end !== undefined) return `${Math.round(start)}-${Math.round(end)}`;
+    if (start !== undefined && end !== undefined)
+      return `${Math.round(start)}-${Math.round(end)}`;
   }
   const record = asRecord(value);
   const start = conclusionNumber(record.start ?? record.startLine);
   const end = conclusionNumber(record.end ?? record.endLine);
   if (start === undefined && end === undefined) return '';
-  if (start !== undefined && end !== undefined) return `${Math.round(start)}-${Math.round(end)}`;
+  if (start !== undefined && end !== undefined)
+    return `${Math.round(start)}-${Math.round(end)}`;
   return String(Math.round(start ?? end ?? 0));
 }
 
@@ -3236,7 +3673,9 @@ function renderCodeAwareReferencesSection(
     lines.push('- None');
   } else {
     refs.slice(0, 12).forEach((ref, index) => {
-      const chunkId = conclusionText(ref.chunkId || ref.chunk_id || `ref-${index + 1}`);
+      const chunkId = conclusionText(
+        ref.chunkId || ref.chunk_id || `ref-${index + 1}`,
+      );
       const filePath = conclusionText(ref.filePath || ref.file_path);
       const lineRange = formatCodeLineRange(ref.lineRange || ref.line_range);
       const symbol = conclusionText(ref.symbol);
@@ -3249,10 +3688,14 @@ function renderCodeAwareReferencesSection(
         symbol ? `symbol ${symbol}` : '',
         codebaseId ? `codebase ${codebaseId}` : '',
       ].filter(Boolean);
-      lines.push(`- \`${chunkId}\`${meta.length > 0 ? ` - ${meta.join('；')}` : ''}`);
+      lines.push(
+        `- \`${chunkId}\`${meta.length > 0 ? ` - ${meta.join('；')}` : ''}`,
+      );
     });
     if (refs.length > 12) {
-      lines.push(`- ${refs.length - 12} more code references are available in the result snapshot.`);
+      lines.push(
+        `- ${refs.length - 12} more code references are available in the result snapshot.`,
+      );
     }
   }
 
@@ -3260,15 +3703,25 @@ function renderCodeAwareReferencesSection(
     lines.push('');
     lines.push('## Patch proposals');
     patches.slice(0, 8).forEach((patch, index) => {
-      const id = conclusionText(patch.id || patch.patchId || patch.patch_id || `patch-${index + 1}`);
-      const status = conclusionText(patch.status || patch.patchStatus || patch.patch_status) || 'unverified';
-      const rationale = conclusionText(patch.rationale || patch.reason || patch.summary);
-      const copyHint = status === 'verified'
-        ? 'verified by backend apply-check'
-        : status === 'sketch'
-          ? 'sketch only; no copyable diff'
-          : 'unverified; no copyable diff';
-      lines.push(`- \`${id}\` - ${status} (${copyHint})${rationale ? `: ${rationale}` : ''}`);
+      const id = conclusionText(
+        patch.id || patch.patchId || patch.patch_id || `patch-${index + 1}`,
+      );
+      const status =
+        conclusionText(
+          patch.status || patch.patchStatus || patch.patch_status,
+        ) || 'unverified';
+      const rationale = conclusionText(
+        patch.rationale || patch.reason || patch.summary,
+      );
+      const copyHint =
+        status === 'verified'
+          ? 'verified by backend apply-check'
+          : status === 'sketch'
+            ? 'sketch only; no copyable diff'
+            : 'unverified; no copyable diff';
+      lines.push(
+        `- \`${id}\` - ${status} (${copyHint})${rationale ? `: ${rationale}` : ''}`,
+      );
     });
   }
 
@@ -3292,7 +3745,10 @@ function appendFinalEvidenceSections(
   resultSnapshotId?: string,
 ): string {
   const withSources = appendDataSourceIndex(content, ctx, contract);
-  const withSnapshot = appendAnalysisResultReference(withSources, resultSnapshotId);
+  const withSnapshot = appendAnalysisResultReference(
+    withSources,
+    resultSnapshotId,
+  );
   const withCodeRefs = appendCodeAwareReferences(withSnapshot, contract);
   return appendConclusionClaims(withCodeRefs, contract, ctx);
 }
@@ -3307,11 +3763,13 @@ function appendClaimVerificationSummary(
   const hasVerifier = Object.keys(verifier).length > 0;
   const claimSupportCount = payload.claimSupport?.length || 0;
   const identityCount = payload.identityResolutions?.length || 0;
-  if (!hasVerifier && claimSupportCount === 0 && identityCount === 0) return content;
+  if (!hasVerifier && claimSupportCount === 0 && identityCount === 0)
+    return content;
 
   const status = readStringField(verifier, 'status', 'not_checked');
   const checked = readOptionalNumberField(verifier, 'checkedClaimCount') ?? 0;
-  const unsupported = readOptionalNumberField(verifier, 'unsupportedClaimCount') ?? 0;
+  const unsupported =
+    readOptionalNumberField(verifier, 'unsupportedClaimCount') ?? 0;
   const issues = Array.isArray(verifier.issues) ? verifier.issues : [];
   const lines = [
     '## 断言验证结果',
@@ -3329,7 +3787,9 @@ function appendClaimVerificationSummary(
     lines.push(`- ${claimId} \`${code}\`${message ? `: ${message}` : ''}`);
   });
   if (issues.length > 5) {
-    lines.push(`- ${issues.length - 5} more verifier issues are available in the HTML report/export.`);
+    lines.push(
+      `- ${issues.length - 5} more verifier issues are available in the HTML report/export.`,
+    );
   }
   payload.claimSupport?.slice(0, 5).forEach((support, index) => {
     const item = asRecord(support);
@@ -3348,7 +3808,9 @@ function appendClaimVerificationSummary(
         readStringField(context, 'artifactId'),
         readStringField(context, 'sourceArtifactId'),
         readStringField(context, 'sourceToolCallId'),
-      ].filter(Boolean).join(' / ');
+      ]
+        .filter(Boolean)
+        .join(' / ');
       const loc = [
         traceLocationLabel(
           normalizeTraceSide(readStringField(context, 'traceSide')),
@@ -3356,25 +3818,37 @@ function appendClaimVerificationSummary(
         ),
         cell.column ? `col=${String(cell.column)}` : '',
         cell.rowIndex !== undefined ? `row=${String(cell.rowIndex)}` : '',
-        cell.actualValue !== undefined ? `actual=${String(cell.actualValue)}` : '',
+        cell.actualValue !== undefined
+          ? `actual=${String(cell.actualValue)}`
+          : '',
         cell.value !== undefined ? `expected=${String(cell.value)}` : '',
-      ].filter(Boolean).join(', ');
+      ]
+        .filter(Boolean)
+        .join(', ');
       const identity = asRecord(anchorRecord.identity);
       const identityText = readStringField(identity, 'identityRefId')
         ? `, identity=${readStringField(identity, 'identityRefId')}(${readStringField(identity, 'status', 'unknown')})`
         : '';
-      lines.push(`  - anchor ${anchorIndex + 1}: ${refs || 'unreferenced'}${loc ? ` [${loc}]` : ''}${identityText}`);
+      lines.push(
+        `  - anchor ${anchorIndex + 1}: ${refs || 'unreferenced'}${loc ? ` [${loc}]` : ''}${identityText}`,
+      );
     });
   });
   payload.identityResolutions?.slice(0, 5).forEach((identity, index) => {
     const item = asRecord(identity);
-    const warnings = Array.isArray(item.warnings) ? item.warnings.map(String).filter(Boolean) : [];
-    lines.push(`- identity ${readStringField(item, 'identityRefId', String(index + 1))}: ${readStringField(item, 'status', 'unknown')}${warnings.length ? ` - ${warnings.slice(0, 2).join('; ')}` : ''}`);
+    const warnings = Array.isArray(item.warnings)
+      ? item.warnings.map(String).filter(Boolean)
+      : [];
+    lines.push(
+      `- identity ${readStringField(item, 'identityRefId', String(index + 1))}: ${readStringField(item, 'status', 'unknown')}${warnings.length ? ` - ${warnings.slice(0, 2).join('; ')}` : ''}`,
+    );
   });
   return [content.trimEnd(), '', '---', lines.join('\n')].join('\n');
 }
 
-function buildPartialResultWarning(payload: AnalysisCompletedPayload | undefined): string | undefined {
+function buildPartialResultWarning(
+  payload: AnalysisCompletedPayload | undefined,
+): string | undefined {
   if (payload?.partial !== true) return undefined;
   const reason =
     payload.terminationMessage ||
@@ -3382,7 +3856,10 @@ function buildPartialResultWarning(payload: AnalysisCompletedPayload | undefined
     '本次分析结果已标记为 partial，结论可能不完整。';
   return [
     '> **结果完整性提示**',
-    ...reason.split(/\r?\n/).filter(Boolean).map(line => `> ${line}`),
+    ...reason
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => `> ${line}`),
   ].join('\n');
 }
 
@@ -3391,7 +3868,8 @@ function prependPartialResultWarning(
   payload: AnalysisCompletedPayload | undefined,
 ): string {
   const warning = buildPartialResultWarning(payload);
-  if (!warning || /结果完整性提示|Result Completeness Notice/i.test(content)) return content;
+  if (!warning || /结果完整性提示|Result Completeness Notice/i.test(content))
+    return content;
   return [warning, '', content.trimStart()].join('\n');
 }
 
@@ -3431,7 +3909,9 @@ function isSectionSeparator(line: string): boolean {
 }
 
 function isSnapshotReferenceLine(line: string): boolean {
-  return /^\s*(?:[-*]\s*)?(?:Result\s*ID|Snapshot(?:\s*ID)?|结果\s*ID|快照)\s*[:：]\s*/i.test(line);
+  return /^\s*(?:[-*]\s*)?(?:Result\s*ID|Snapshot(?:\s*ID)?|结果\s*ID|快照)\s*[:：]\s*/i.test(
+    line,
+  );
 }
 
 function removeTrailingAppendixSeparator(lines: string[]): void {
@@ -3482,7 +3962,10 @@ function stripFrontendHiddenReportAppendix(content: string): string {
   }
 
   removeTrailingAppendixSeparator(kept);
-  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return kept
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function buildVisibleConclusionContent(
@@ -3561,27 +4044,53 @@ function renderConclusionContract(
     return out;
   };
 
-  const conclusions = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.conclusions);
-  const clusters = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.clusters);
-  const evidenceChain = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.evidenceChain);
-  const claims = readAliasedRecordArray(contractRecord, CONTRACT_ALIASES.root.claims);
-  const uncertainties = readAliasedUnknownArray(contractRecord, CONTRACT_ALIASES.root.uncertainties);
-  const nextSteps = readAliasedUnknownArray(contractRecord, CONTRACT_ALIASES.root.nextSteps);
-  const metadata = readAliasedRecord(contractRecord, CONTRACT_ALIASES.root.metadata);
+  const conclusions = readAliasedRecordArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.conclusions,
+  );
+  const clusters = readAliasedRecordArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.clusters,
+  );
+  const evidenceChain = readAliasedRecordArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.evidenceChain,
+  );
+  const claims = readAliasedRecordArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.claims,
+  );
+  const uncertainties = readAliasedUnknownArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.uncertainties,
+  );
+  const nextSteps = readAliasedUnknownArray(
+    contractRecord,
+    CONTRACT_ALIASES.root.nextSteps,
+  );
+  const metadata = readAliasedRecord(
+    contractRecord,
+    CONTRACT_ALIASES.root.metadata,
+  );
 
   const resolveClusterHeading = (): string => {
     const sceneId = toText(
       readAliasedValue(contractRecord, CONTRACT_ALIASES.root.sceneId) ??
-      readAliasedValue(metadata, CONTRACT_ALIASES.metadata.sceneId)
+        readAliasedValue(metadata, CONTRACT_ALIASES.metadata.sceneId),
     ).toLowerCase();
-    return sceneId === 'jank' ? '## 掉帧聚类（先看大头）' : '## 聚类（先看大头）';
+    return sceneId === 'jank'
+      ? '## 掉帧聚类（先看大头）'
+      : '## 聚类（先看大头）';
   };
 
   const resolveClusterLimit = (): number | undefined => {
-    const clusterPolicy = readAliasedRecord(metadata, CONTRACT_ALIASES.metadata.clusterPolicy);
+    const clusterPolicy = readAliasedRecord(
+      metadata,
+      CONTRACT_ALIASES.metadata.clusterPolicy,
+    );
     const maxClusters = toNumber(
       readAliasedValue(clusterPolicy, CONTRACT_ALIASES.metadata.maxClusters) ??
-      readAliasedValue(metadata, CONTRACT_ALIASES.metadata.maxClusters)
+        readAliasedValue(metadata, CONTRACT_ALIASES.metadata.maxClusters),
     );
     if (maxClusters === undefined || maxClusters <= 0) return undefined;
     return Math.round(maxClusters);
@@ -3602,22 +4111,34 @@ function renderConclusionContract(
     lines.push('1. 结论信息缺失（证据不足）');
   } else {
     conclusions.slice(0, 3).forEach((item, idx: number) => {
-      const statement = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.statement));
-      const trigger = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.trigger));
-      const supply = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.supply));
-      const amplification = toText(readAliasedValue(item, CONTRACT_ALIASES.conclusion.amplification));
+      const statement = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.conclusion.statement),
+      );
+      const trigger = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.conclusion.trigger),
+      );
+      const supply = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.conclusion.supply),
+      );
+      const amplification = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.conclusion.amplification),
+      );
       let resolved = statement;
       if (!resolved && (trigger || supply || amplification)) {
         const parts: string[] = [];
         if (trigger) parts.push(`触发因子（直接原因）: ${trigger}`);
         if (supply) parts.push(`供给约束（资源瓶颈）: ${supply}`);
-        if (amplification) parts.push(`放大路径（问题放大环节）: ${amplification}`);
+        if (amplification)
+          parts.push(`放大路径（问题放大环节）: ${amplification}`);
         resolved = parts.join('；');
       }
       const confidence = toPercent(
-        readAliasedValue(item, CONTRACT_ALIASES.conclusion.confidence)
+        readAliasedValue(item, CONTRACT_ALIASES.conclusion.confidence),
       );
-      const suffix = confidence !== undefined ? `（置信度: ${Math.round(confidence)}%）` : '';
+      const suffix =
+        confidence !== undefined
+          ? `（置信度: ${Math.round(confidence)}%）`
+          : '';
       lines.push(`${idx + 1}. ${resolved || '结论信息缺失'}${suffix}`);
     });
   }
@@ -3628,25 +4149,42 @@ function renderConclusionContract(
     lines.push('- 暂无');
   } else {
     const clusterLimit = resolveClusterLimit();
-    const clusterItems = clusterLimit !== undefined ? clusters.slice(0, clusterLimit) : clusters;
+    const clusterItems =
+      clusterLimit !== undefined ? clusters.slice(0, clusterLimit) : clusters;
     clusterItems.forEach((item) => {
-      const cluster = toText(readAliasedValue(item, CONTRACT_ALIASES.cluster.cluster));
-      const description = toText(readAliasedValue(item, CONTRACT_ALIASES.cluster.description));
-      const frames = toNumber(readAliasedValue(item, CONTRACT_ALIASES.cluster.frames));
-      const percentage = toPercent(readAliasedValue(item, CONTRACT_ALIASES.cluster.percentage));
-      const label = description ? `${cluster || 'K?'}: ${description}` : (cluster || 'K?');
+      const cluster = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.cluster),
+      );
+      const description = toText(
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.description),
+      );
+      const frames = toNumber(
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.frames),
+      );
+      const percentage = toPercent(
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.percentage),
+      );
+      const label = description
+        ? `${cluster || 'K?'}: ${description}`
+        : cluster || 'K?';
       const metrics: string[] = [];
       if (frames !== undefined) metrics.push(`${Math.round(frames)}帧`);
       if (percentage !== undefined) metrics.push(`${percentage.toFixed(1)}%`);
       const frameRefs = readFrameRefs(
-        readAliasedValue(item, CONTRACT_ALIASES.cluster.frameRefs)
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.frameRefs),
       );
       const omittedFrames = toNumber(
-        readAliasedValue(item, CONTRACT_ALIASES.cluster.omittedFrames)
+        readAliasedValue(item, CONTRACT_ALIASES.cluster.omittedFrames),
       );
-      const frameRefText = frameRefs.length > 0 ? `；帧: ${frameRefs.join(' / ')}` : '';
-      const omittedHint = omittedFrames && omittedFrames > 0 ? `（其余 ${Math.round(omittedFrames)} 帧省略）` : '';
-      lines.push(`- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}${omittedHint}`);
+      const frameRefText =
+        frameRefs.length > 0 ? `；帧: ${frameRefs.join(' / ')}` : '';
+      const omittedHint =
+        omittedFrames && omittedFrames > 0
+          ? `（其余 ${Math.round(omittedFrames)} 帧省略）`
+          : '';
+      lines.push(
+        `- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}${omittedHint}`,
+      );
     });
   }
   lines.push('');
@@ -3657,9 +4195,13 @@ function renderConclusionContract(
   } else {
     evidenceChain.slice(0, 12).forEach((item, idx: number) => {
       const cid = toText(
-        readAliasedValue(item, CONTRACT_ALIASES.evidence.conclusionId) || `C${idx + 1}`
+        readAliasedValue(item, CONTRACT_ALIASES.evidence.conclusionId) ||
+          `C${idx + 1}`,
       );
-      const evidence = readAliasedValue(item, CONTRACT_ALIASES.evidence.evidence);
+      const evidence = readAliasedValue(
+        item,
+        CONTRACT_ALIASES.evidence.evidence,
+      );
       if (Array.isArray(evidence)) {
         for (const entry of evidence) {
           const text = toText(entry);
@@ -3668,9 +4210,9 @@ function renderConclusionContract(
       } else {
         const text = toText(
           readAliasedValue(item, CONTRACT_ALIASES.evidence.text) ||
-          evidence ||
-          readAliasedValue(item, CONTRACT_ALIASES.evidence.statement) ||
-          readAliasedValue(item, CONTRACT_ALIASES.evidence.data)
+            evidence ||
+            readAliasedValue(item, CONTRACT_ALIASES.evidence.statement) ||
+            readAliasedValue(item, CONTRACT_ALIASES.evidence.data),
         );
         if (text) lines.push(`- ${cid}: ${text}`);
       }
@@ -3705,18 +4247,27 @@ function renderConclusionContract(
     });
   }
 
-  const metadataConfidence = readAliasedValue(metadata, CONTRACT_ALIASES.metadata.confidencePercent);
-  const metadataRounds = readAliasedValue(metadata, CONTRACT_ALIASES.metadata.rounds);
-  const confidence =
-    toPercent(
-      metadataConfidence ??
-      readAliasedValue(contractRecord, CONTRACT_ALIASES.root.confidence)
-    );
-  const rounds = toNumber(metadataRounds ?? readAliasedValue(contractRecord, CONTRACT_ALIASES.root.rounds));
+  const metadataConfidence = readAliasedValue(
+    metadata,
+    CONTRACT_ALIASES.metadata.confidencePercent,
+  );
+  const metadataRounds = readAliasedValue(
+    metadata,
+    CONTRACT_ALIASES.metadata.rounds,
+  );
+  const confidence = toPercent(
+    metadataConfidence ??
+      readAliasedValue(contractRecord, CONTRACT_ALIASES.root.confidence),
+  );
+  const rounds = toNumber(
+    metadataRounds ??
+      readAliasedValue(contractRecord, CONTRACT_ALIASES.root.rounds),
+  );
   if (confidence !== undefined || rounds !== undefined) {
     lines.push('');
     lines.push('## 分析元数据');
-    if (confidence !== undefined) lines.push(`- 置信度: ${Math.round(confidence)}%`);
+    if (confidence !== undefined)
+      lines.push(`- 置信度: ${Math.round(confidence)}%`);
     if (rounds !== undefined) lines.push(`- 分析轮次: ${Math.round(rounds)}`);
   }
 
@@ -3728,23 +4279,31 @@ function renderConclusionContract(
  */
 export function handleAnalysisCompletedEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
   const architecture = readStringField(eventRecord, 'architecture');
   const rawPayload = asRecord(eventRecord.data);
   const payload = toAnalysisCompletedPayload(eventRecord.data);
   const rawConclusionContract = rawPayload.conclusionContract;
-  const conclusionContract = payload?.conclusionContract ??
+  const conclusionContract =
+    payload?.conclusionContract ??
     (isRecord(rawConclusionContract) ? rawConclusionContract : undefined);
-  if (DEBUG_SSE) console.log('[SSEHandlers] analysis_completed received, architecture:', architecture || 'unknown');
+  if (DEBUG_SSE)
+    console.log(
+      '[SSEHandlers] analysis_completed received, architecture:',
+      architecture || 'unknown',
+    );
 
   mergeConversationTimelineFromAnalysisCompleted(rawPayload, ctx);
 
   // Guard against duplicate conclusion handling — but still extract reportUrl
   // (agentv3 sends 'conclusion' first, then 'analysis_completed' carries reportUrl)
   if (ctx.completionHandled) {
-    if (DEBUG_SSE) console.log('[SSEHandlers] Completion already handled, extracting reportUrl only');
+    if (DEBUG_SSE)
+      console.log(
+        '[SSEHandlers] Completion already handled, extracting reportUrl only',
+      );
     const reportUrl = payload?.reportUrl;
     const resultSnapshotId = payload?.resultSnapshotId;
     const canonicalConclusion = payload?.conclusion || payload?.answer;
@@ -3772,25 +4331,37 @@ export function handleAnalysisCompletedEvent(
       // replace any earlier streamed placeholder tokens.
       const answerMsgId = ctx.streamingAnswer.messageId;
       if (answerMsgId) {
-        const existing = ctx.getMessages().find((msg) => msg.id === answerMsgId);
-        ctx.updateMessage(answerMsgId, {
-          ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
-          ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
-          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-          ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
-          ...uiActionProposalMessageUpdate(payload),
-          ...(canonicalContent
-            ? {content: canonicalContent}
-            : existing
-              ? {content: buildVisibleConclusionContentWithReportAppendix(
-                existing.content,
-                conclusionContract,
-                ctx,
-                resultSnapshotId,
-                payload,
-              )}
+        const existing = ctx
+          .getMessages()
+          .find((msg) => msg.id === answerMsgId);
+        ctx.updateMessage(
+          answerMsgId,
+          {
+            ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+            ...(payload?.smartScenePreview
+              ? {smartScenePreview: payload.smartScenePreview}
               : {}),
-        }, {persist: true});
+            ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+            ...(payload?.analysisReceipt
+              ? {analysisReceipt: payload.analysisReceipt}
+              : {}),
+            ...uiActionProposalMessageUpdate(payload),
+            ...(canonicalContent
+              ? {content: canonicalContent}
+              : existing
+                ? {
+                    content: buildVisibleConclusionContentWithReportAppendix(
+                      existing.content,
+                      conclusionContract,
+                      ctx,
+                      resultSnapshotId,
+                      payload,
+                    ),
+                  }
+                : {}),
+          },
+          {persist: true},
+        );
       } else {
         // No streamed answer — find the last assistant message (conclusion added by 'conclusion' event)
         const messages = ctx.getMessages();
@@ -3801,44 +4372,68 @@ export function handleAnalysisCompletedEvent(
             !messages[i].sqlResult &&
             messages[i].content.trim().length > 0
           ) {
-            ctx.updateMessage(messages[i].id, {
-              ...(reportUrl && !messages[i].reportUrl
-                ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
-                : {}),
-              ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
-              ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-              ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
-              ...uiActionProposalMessageUpdate(payload),
-              content: canonicalContent ||
-                buildVisibleConclusionContentWithReportAppendix(
-                  messages[i].content,
-                  conclusionContract,
-                  ctx,
-                  resultSnapshotId,
-                  payload,
-                ),
-            }, {persist: true});
+            ctx.updateMessage(
+              messages[i].id,
+              {
+                ...(reportUrl && !messages[i].reportUrl
+                  ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
+                  : {}),
+                ...(payload?.smartScenePreview
+                  ? {smartScenePreview: payload.smartScenePreview}
+                  : {}),
+                ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+                ...(payload?.analysisReceipt
+                  ? {analysisReceipt: payload.analysisReceipt}
+                  : {}),
+                ...uiActionProposalMessageUpdate(payload),
+                content:
+                  canonicalContent ||
+                  buildVisibleConclusionContentWithReportAppendix(
+                    messages[i].content,
+                    conclusionContract,
+                    ctx,
+                    resultSnapshotId,
+                    payload,
+                  ),
+              },
+              {persist: true},
+            );
             break;
           }
         }
-        if (canonicalContent && !messages.some((msg) => msg.role === 'assistant' && !msg.sqlResult && msg.content.trim().length > 0)) {
+        if (
+          canonicalContent &&
+          !messages.some(
+            (msg) =>
+              msg.role === 'assistant' &&
+              !msg.sqlResult &&
+              msg.content.trim().length > 0,
+          )
+        ) {
           ctx.addMessage({
             id: ctx.generateId(),
             role: 'assistant',
             content: canonicalContent,
             timestamp: Date.now(),
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
-            ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+            ...(payload?.smartScenePreview
+              ? {smartScenePreview: payload.smartScenePreview}
+              : {}),
             ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-            ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+            ...(payload?.analysisReceipt
+              ? {analysisReceipt: payload.analysisReceipt}
+              : {}),
             ...uiActionProposalMessageUpdate(payload),
           });
         }
       }
     } else if (payload?.reportError) {
-      console.warn('[SSEHandlers] HTML report generation failed:', payload.reportError);
+      console.warn(
+        '[SSEHandlers] HTML report generation failed:',
+        payload.reportError,
+      );
     }
-    return { isTerminal: true, stopLoading: true };
+    return {isTerminal: true, stopLoading: true};
   }
 
   // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
@@ -3866,15 +4461,22 @@ export function handleAnalysisCompletedEvent(
 
     const reportUrl = payload?.reportUrl;
     if (!reportUrl && payload?.reportError) {
-      console.warn('[SSEHandlers] HTML report generation failed:', payload.reportError);
+      console.warn(
+        '[SSEHandlers] HTML report generation failed:',
+        payload.reportError,
+      );
     }
 
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
     const hasStreamedAnswer = Boolean(
       streamedAnswerMessageId &&
-      ctx.getMessages().some(
-        (m) => m.id === streamedAnswerMessageId && String(m.content || '').trim().length > 0
-      )
+        ctx
+          .getMessages()
+          .some(
+            (m) =>
+              m.id === streamedAnswerMessageId &&
+              String(m.content || '').trim().length > 0,
+          ),
     );
 
     if (hasStreamedAnswer && streamedAnswerMessageId) {
@@ -3882,21 +4484,29 @@ export function handleAnalysisCompletedEvent(
       ctx.streamingAnswer.content = content;
       ctx.streamingAnswer.pending = '';
       ctx.streamingAnswer.status = 'completed';
-      ctx.updateMessage(streamedAnswerMessageId, {
-        content,
-        timestamp: Date.now(),
-        reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
-        flowTag: 'answer_stream',
-        ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
-        ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-        ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
-        ...uiActionProposalMessageUpdate(payload),
-      }, {persist: true});
+      ctx.updateMessage(
+        streamedAnswerMessageId,
+        {
+          content,
+          timestamp: Date.now(),
+          reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
+          flowTag: 'answer_stream',
+          ...(payload?.smartScenePreview
+            ? {smartScenePreview: payload.smartScenePreview}
+            : {}),
+          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+          ...(payload?.analysisReceipt
+            ? {analysisReceipt: payload.analysisReceipt}
+            : {}),
+          ...uiActionProposalMessageUpdate(payload),
+        },
+        {persist: true},
+      );
     } else {
-    // Check if conclusion was already shown
+      // Check if conclusion was already shown
       const messages = ctx.getMessages();
       const hasConclusionAlready = messages.some(
-        m => m.role === 'assistant' && m.content.includes('🎯 分析结论')
+        (m) => m.role === 'assistant' && m.content.includes('🎯 分析结论'),
       );
 
       if (!hasConclusionAlready) {
@@ -3906,9 +4516,13 @@ export function handleAnalysisCompletedEvent(
           content: content,
           timestamp: Date.now(),
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
-          ...(payload?.smartScenePreview ? {smartScenePreview: payload.smartScenePreview} : {}),
+          ...(payload?.smartScenePreview
+            ? {smartScenePreview: payload.smartScenePreview}
+            : {}),
           ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-          ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+          ...(payload?.analysisReceipt
+            ? {analysisReceipt: payload.analysisReceipt}
+            : {}),
           ...uiActionProposalMessageUpdate(payload),
         });
       }
@@ -3920,18 +4534,34 @@ export function handleAnalysisCompletedEvent(
   if (!answerContent) {
     const reportUrl = payload?.reportUrl;
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
-    if ((reportUrl || payload?.quickRun || payload?.analysisReceipt || payload?.uiActionProposals?.length) && streamedAnswerMessageId) {
-      const streamedMsg = ctx.getMessages().find(
-        (m) => m.id === streamedAnswerMessageId && String(m.content || '').trim().length > 0
-      );
+    if (
+      (reportUrl ||
+        payload?.quickRun ||
+        payload?.analysisReceipt ||
+        payload?.uiActionProposals?.length) &&
+      streamedAnswerMessageId
+    ) {
+      const streamedMsg = ctx
+        .getMessages()
+        .find(
+          (m) =>
+            m.id === streamedAnswerMessageId &&
+            String(m.content || '').trim().length > 0,
+        );
       if (streamedMsg) {
         completeStreamingAnswer(ctx);
-        ctx.updateMessage(streamedAnswerMessageId, {
-          ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
-          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-          ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
-          ...uiActionProposalMessageUpdate(payload),
-        }, {persist: true});
+        ctx.updateMessage(
+          streamedAnswerMessageId,
+          {
+            ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
+            ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+            ...(payload?.analysisReceipt
+              ? {analysisReceipt: payload.analysisReceipt}
+              : {}),
+            ...uiActionProposalMessageUpdate(payload),
+          },
+          {persist: true},
+        );
       }
     }
     completeStreamingFlow(ctx);
@@ -3949,7 +4579,7 @@ export function handleAnalysisCompletedEvent(
     completeStreamingAnswer(ctx);
   }
 
-  return { isTerminal: true, stopLoading: true };
+  return {isTerminal: true, stopLoading: true};
 }
 
 export function handleAnalysisCancelledEvent(
@@ -3958,15 +4588,21 @@ export function handleAnalysisCancelledEvent(
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
   const payload = asRecord(eventRecord.data ?? eventRecord);
-  const reason = readStringField(payload, 'reason') || readStringField(eventRecord, 'reason');
+  const reason =
+    readStringField(payload, 'reason') ||
+    readStringField(eventRecord, 'reason');
 
-  pushStreamingOutput(ctx, '分析已取消');
-  completeStreamingFlow(ctx);
+  cancelStreamingFlow(ctx);
   if (ctx.streamingAnswer.status === 'streaming') {
     completeStreamingAnswer(ctx);
   }
 
-  const message = reason ? `分析已取消：${reason}` : '分析已取消。';
+  const isDefaultUserCancellation =
+    reason === 'Analysis cancelled by user' || reason === 'Aborted by user';
+  const message =
+    reason && !isDefaultUserCancellation
+      ? `分析已取消：${reason}`
+      : '分析已取消。';
   const lastMessage = ctx.getMessages()[ctx.getMessages().length - 1];
   if (
     !lastMessage ||
@@ -3981,7 +4617,7 @@ export function handleAnalysisCancelledEvent(
     });
   }
 
-  return { isTerminal: true, stopLoading: true };
+  return {isTerminal: true, stopLoading: true};
 }
 
 export function handleDegradedEvent(
@@ -3989,7 +4625,9 @@ export function handleDegradedEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
-  const payload = toDegradedPayload(eventRecord.data ?? eventRecord.content ?? eventRecord);
+  const payload = toDegradedPayload(
+    eventRecord.data ?? eventRecord.content ?? eventRecord,
+  );
   const message =
     payload.message ||
     payload.terminationReason ||
@@ -4005,7 +4643,7 @@ export function handleDegradedEvent(
  */
 export function handleHypothesisGeneratedEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const hypotheses = readStringArrayField(payload, 'hypotheses');
@@ -4056,7 +4694,7 @@ export function handleHypothesisGeneratedEvent(
  */
 export function handleRoundStartEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   if (Object.keys(payload).length > 0) {
@@ -4081,13 +4719,14 @@ export function handleRoundStartEvent(
  */
 export function handleAgentTaskDispatchedEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   if (Object.keys(payload).length > 0) {
     const taskCount = readNumberField(payload, 'taskCount', 0);
     const agents = readStringArrayField(payload, 'agents');
-    const message = readStringField(payload, 'message') || `派发 ${taskCount} 个任务`;
+    const message =
+      readStringField(payload, 'message') || `派发 ${taskCount} 个任务`;
     const agentText = agents.length > 0 ? ` -> ${agents.join(', ')}` : '';
     pushStreamingTool(ctx, `${message}${agentText}`);
 
@@ -4112,7 +4751,7 @@ export function handleAgentTaskDispatchedEvent(
  */
 export function handleSynthesisCompleteEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   if (Object.keys(payload).length > 0) {
@@ -4120,7 +4759,10 @@ export function handleSynthesisCompleteEvent(
     const updatedHypotheses = readNumberField(payload, 'updatedHypotheses', 0);
     const message = readStringField(payload, 'message') || '综合分析结果';
     pushStreamingPhase(ctx, message);
-    pushStreamingOutput(ctx, `确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`);
+    pushStreamingOutput(
+      ctx,
+      `确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
+    );
 
     ctx.addMessage({
       id: ctx.generateId(),
@@ -4138,18 +4780,26 @@ export function handleSynthesisCompleteEvent(
  */
 export function handleStrategyDecisionEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   if (Object.keys(payload).length > 0) {
     const strategy = readStringField(payload, 'strategy') || 'continue';
     const confidence = readNumberField(payload, 'confidence', 0);
     const message = readStringField(payload, 'message') || `策略: ${strategy}`;
-    pushStreamingPhase(ctx, `${message} (置信度 ${(confidence * 100).toFixed(0)}%)`);
+    pushStreamingPhase(
+      ctx,
+      `${message} (置信度 ${(confidence * 100).toFixed(0)}%)`,
+    );
 
-    const strategyEmoji = strategy === 'conclude' ? '✅' :
-                         strategy === 'deep_dive' ? '🔍' :
-                         strategy === 'pivot' ? '↩️' : '➡️';
+    const strategyEmoji =
+      strategy === 'conclude'
+        ? '✅'
+        : strategy === 'deep_dive'
+          ? '🔍'
+          : strategy === 'pivot'
+            ? '↩️'
+            : '➡️';
 
     ctx.addMessage({
       id: ctx.generateId(),
@@ -4167,17 +4817,24 @@ export function handleStrategyDecisionEvent(
  */
 export function handleDataEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
   if (Object.keys(eventRecord).length === 0) return {};
 
-  if (DEBUG_SSE) console.log('[SSEHandlers] v2.0 data event received:', eventRecord.id, eventRecord.envelope);
+  if (DEBUG_SSE)
+    console.log(
+      '[SSEHandlers] v2.0 data event received:',
+      eventRecord.id,
+      eventRecord.envelope,
+    );
 
   const rawEnvelope = eventRecord.envelope;
   const envelopeCandidates = Array.isArray(rawEnvelope)
     ? rawEnvelope
-    : (rawEnvelope ? [rawEnvelope] : []);
+    : rawEnvelope
+      ? [rawEnvelope]
+      : [];
 
   for (let i = 0; i < envelopeCandidates.length; i++) {
     const candidate = envelopeCandidates[i];
@@ -4187,10 +4844,18 @@ export function handleDataEvent(
     }
 
     const envelope = candidate;
-    const deduplicationKey = dataEnvelopeDeduplicationKey(envelope, readStringField(eventRecord, 'id'), i);
+    const deduplicationKey = dataEnvelopeDeduplicationKey(
+      envelope,
+      readStringField(eventRecord, 'id'),
+      i,
+    );
 
     if (ctx.displayedSkillProgress.has(deduplicationKey)) {
-      if (DEBUG_SSE) console.log('[SSEHandlers] Skipping duplicate data envelope:', deduplicationKey);
+      if (DEBUG_SSE)
+        console.log(
+          '[SSEHandlers] Skipping duplicate data envelope:',
+          deduplicationKey,
+        );
       continue;
     }
     ctx.displayedSkillProgress.add(deduplicationKey);
@@ -4199,12 +4864,18 @@ export function handleDataEvent(
     renderDataEnvelope(envelope, ctx);
 
     // Trigger track overlay when overlay-eligible data arrives
-    if (envelope.meta.stepId && envelope.data.columns?.length
-        && envelope.data.rows?.length && ctx.onOverlayDataReceived) {
+    if (
+      envelope.meta.stepId &&
+      envelope.data.columns?.length &&
+      envelope.data.rows?.length &&
+      ctx.onOverlayDataReceived
+    ) {
       const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
       if (overlayId) {
         ctx.onOverlayDataReceived(
-          overlayId, envelope.data.columns, envelope.data.rows,
+          overlayId,
+          envelope.data.columns,
+          envelope.data.rows,
         );
       }
     }
@@ -4216,7 +4887,10 @@ export function handleDataEvent(
 /**
  * Render a DataEnvelope based on its display format.
  */
-function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): void {
+function renderDataEnvelope(
+  envelope: DataEnvelope,
+  ctx: SSEHandlerContext,
+): void {
   const format = envelope.display.format || 'table';
   const payload = envelope.data;
   const title = envelope.display.title;
@@ -4227,16 +4901,23 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
     case 'text':
       if (payload.text) {
         const isDiagnostic = envelope.meta.type === 'diagnostic';
-        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
-          kind: isDiagnostic ? 'diagnostic' : 'text',
-        });
+        const sourceContext = registerEnvelopeSourceContext(
+          ctx,
+          envelope,
+          title,
+          {
+            kind: isDiagnostic ? 'diagnostic' : 'text',
+          },
+        );
         const notice = isDiagnostic
           ? '> 这是失败诊断，不是可引用的数据表或性能证据。需要修正 SQL/工具参数后重试。'
           : '';
         ctx.addMessage({
           id: ctx.generateId(),
           role: 'assistant',
-          content: [`**${title}**`, notice, String(payload.text)].filter(Boolean).join('\n\n'),
+          content: [`**${title}**`, notice, String(payload.text)]
+            .filter(Boolean)
+            .join('\n\n'),
           timestamp: Date.now(),
           sourceContext,
         });
@@ -4245,12 +4926,19 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
 
     case 'summary':
       if (payload.summary) {
-        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, payload.summary.title || title, {
-          kind: 'summary',
-        });
+        const sourceContext = registerEnvelopeSourceContext(
+          ctx,
+          envelope,
+          payload.summary.title || title,
+          {
+            kind: 'summary',
+          },
+        );
         const sections: string[] = [`## 📊 ${payload.summary.title || title}`];
 
-        const normalizedBody = normalizeMarkdownSpacing(String(payload.summary.content || ''));
+        const normalizedBody = normalizeMarkdownSpacing(
+          String(payload.summary.content || ''),
+        );
         if (normalizedBody) {
           sections.push(normalizedBody);
         }
@@ -4258,10 +4946,16 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
         if (payload.summary.metrics && payload.summary.metrics.length > 0) {
           const metricLines: string[] = ['### 关键指标'];
           for (const metric of payload.summary.metrics) {
-            const icon = metric.severity === 'critical' ? '🔴' :
-                         metric.severity === 'warning' ? '🟡' : '🟢';
+            const icon =
+              metric.severity === 'critical'
+                ? '🔴'
+                : metric.severity === 'warning'
+                  ? '🟡'
+                  : '🟢';
             const unit = metric.unit || '';
-            metricLines.push(`${icon} **${metric.label}:** ${metric.value}${unit}`);
+            metricLines.push(
+              `${icon} **${metric.label}:** ${metric.value}${unit}`,
+            );
           }
           sections.push(metricLines.join('\n'));
         }
@@ -4280,13 +4974,22 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
 
     case 'metric':
       if (payload.summary && payload.summary.metrics) {
-        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
-          kind: 'metric',
-        });
+        const sourceContext = registerEnvelopeSourceContext(
+          ctx,
+          envelope,
+          title,
+          {
+            kind: 'metric',
+          },
+        );
         let metricContent = `### 📈 ${title}\n\n`;
         for (const metric of payload.summary.metrics) {
-          const icon = metric.severity === 'critical' ? '🔴' :
-                       metric.severity === 'warning' ? '🟡' : '🟢';
+          const icon =
+            metric.severity === 'critical'
+              ? '🔴'
+              : metric.severity === 'warning'
+                ? '🟡'
+                : '🟢';
           const unit = metric.unit || '';
           metricContent += `| ${icon} ${metric.label} | **${metric.value}${unit}** |\n`;
         }
@@ -4303,22 +5006,39 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
     case 'chart':
       if (payload.chart) {
         const chartConfig = asRecord(payload.chart);
-        const chartColumns = Array.isArray(chartConfig.columns) ? chartConfig.columns : [];
-        const chartRows = Array.isArray(chartConfig.rows) ? chartConfig.rows : [];
-        const chartData = Array.isArray(chartConfig.data) ? chartConfig.data : [];
-        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
-          kind: 'chart',
-          rowCount: chartRows.length > 0 ? chartRows.length : chartData.length || undefined,
-          columns: chartColumns.map((column) => String(column)),
-        });
+        const chartColumns = Array.isArray(chartConfig.columns)
+          ? chartConfig.columns
+          : [];
+        const chartRows = Array.isArray(chartConfig.rows)
+          ? chartConfig.rows
+          : [];
+        const chartData = Array.isArray(chartConfig.data)
+          ? chartConfig.data
+          : [];
+        const sourceContext = registerEnvelopeSourceContext(
+          ctx,
+          envelope,
+          title,
+          {
+            kind: 'chart',
+            rowCount:
+              chartRows.length > 0
+                ? chartRows.length
+                : chartData.length || undefined,
+            columns: chartColumns.map((column) => String(column)),
+          },
+        );
 
         if (chartColumns.length > 0 && chartRows.length > 0) {
           // Render chart data as a markdown table
           const header = chartColumns.map(String).join(' | ');
           const separator = chartColumns.map(() => '---').join(' | ');
-          const rowLines = chartRows.slice(0, 10).map((r: unknown) =>
-            Array.isArray(r) ? r.map(String).join(' | ') : String(r)
-          ).join(' |\n| ');
+          const rowLines = chartRows
+            .slice(0, 10)
+            .map((r: unknown) =>
+              Array.isArray(r) ? r.map(String).join(' | ') : String(r),
+            )
+            .join(' |\n| ');
           const chartContent = `### \uD83D\uDCC9 ${title}\n\n| ${header} |\n| ${separator} |\n| ${rowLines} |`;
           ctx.addMessage({
             id: ctx.generateId(),
@@ -4334,10 +5054,13 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
           if (dataKeys.length > 0) {
             const header = dataKeys.join(' | ');
             const separator = dataKeys.map(() => '---').join(' | ');
-            const rowLines = chartData.slice(0, 10).map((item: unknown) => {
-              const rec = asRecord(item);
-              return dataKeys.map(k => String(rec[k] ?? '')).join(' | ');
-            }).join(' |\n| ');
+            const rowLines = chartData
+              .slice(0, 10)
+              .map((item: unknown) => {
+                const rec = asRecord(item);
+                return dataKeys.map((k) => String(rec[k] ?? '')).join(' | ');
+              })
+              .join(' |\n| ');
             const chartContent = `### \uD83D\uDCC9 ${title}\n\n| ${header} |\n| ${separator} |\n| ${rowLines} |`;
             ctx.addMessage({
               id: ctx.generateId(),
@@ -4359,7 +5082,11 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
           let chartContent = `### \uD83D\uDCC9 ${title}\n\n`;
           chartContent += `**\u56FE\u8868\u7C7B\u578B:** ${readStringField(chartConfig, 'type', 'unknown')}\n\n`;
           chartContent += `*[\u56FE\u8868\u6E32\u67D3\u6682\u672A\u5B9E\u73B0\uFF0C\u6570\u636E\u5DF2\u8BB0\u5F55]*\n`;
-          if (DEBUG_SSE) console.log('[SSEHandlers] Chart data received but no renderable data:', chartConfig);
+          if (DEBUG_SSE)
+            console.log(
+              '[SSEHandlers] Chart data received but no renderable data:',
+              chartConfig,
+            );
           ctx.addMessage({
             id: ctx.generateId(),
             role: 'assistant',
@@ -4372,9 +5099,14 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
       break;
 
     case 'timeline':
-      const timelineSourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
-        kind: 'timeline',
-      });
+      const timelineSourceContext = registerEnvelopeSourceContext(
+        ctx,
+        envelope,
+        title,
+        {
+          kind: 'timeline',
+        },
+      );
       ctx.addMessage({
         id: ctx.generateId(),
         role: 'assistant',
@@ -4391,7 +5123,10 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
       let filteredRows = rawResult.rows;
       let filteredColumnDefs = rawResult.columnDefinitions;
 
-      if (rawResult.columnDefinitions && Array.isArray(rawResult.columnDefinitions)) {
+      if (
+        rawResult.columnDefinitions &&
+        Array.isArray(rawResult.columnDefinitions)
+      ) {
         const hiddenFromDefs = rawResult.columnDefinitions
           .filter((c) => c.hidden === true)
           .map((c) => c.name);
@@ -4400,31 +5135,38 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
 
         if (columnsToHide.size > 0 && rawResult.columns.length > 0) {
           const visibleIndices: number[] = [];
-          filteredColumns = rawResult.columns.filter((col: string, idx: number) => {
-            if (!columnsToHide.has(col)) {
-              visibleIndices.push(idx);
-              return true;
-            }
-            return false;
-          });
+          filteredColumns = rawResult.columns.filter(
+            (col: string, idx: number) => {
+              if (!columnsToHide.has(col)) {
+                visibleIndices.push(idx);
+                return true;
+              }
+              return false;
+            },
+          );
 
           filteredRows = rawResult.rows.map((row) =>
-            visibleIndices.map(idx => row[idx])
+            visibleIndices.map((idx) => row[idx]),
           );
 
           filteredColumnDefs = rawResult.columnDefinitions.filter(
-            (def) => !columnsToHide.has(def.name)
+            (def) => !columnsToHide.has(def.name),
           );
         }
       }
 
       if (filteredColumns.length > 0 || filteredRows.length === 0) {
-        const sourceContext = registerEnvelopeSourceContext(ctx, envelope, title, {
-          kind: 'table',
-          rowCount: filteredRows.length,
-          columns: filteredColumns,
-          query: sql,
-        });
+        const sourceContext = registerEnvelopeSourceContext(
+          ctx,
+          envelope,
+          title,
+          {
+            kind: 'table',
+            rowCount: filteredRows.length,
+            columns: filteredColumns,
+            query: sql,
+          },
+        );
         ctx.addMessage({
           id: ctx.generateId(),
           role: 'assistant',
@@ -4443,7 +5185,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
             defaultCollapsed: envelope.display.defaultCollapsed,
             maxVisibleRows: envelope.display.maxVisibleRows,
             queryReview: rawResult.queryReview,
-            expandableData: rawResult.expandableData,  // 【修复】传递 expandableData 用于行展开功能
+            expandableData: rawResult.expandableData, // 【修复】传递 expandableData 用于行展开功能
             sourceContext,
           },
         });
@@ -4457,7 +5199,7 @@ function renderDataEnvelope(envelope: DataEnvelope, ctx: SSEHandlerContext): voi
  */
 export function handleSkillErrorEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
   if (Object.keys(eventRecord).length > 0) {
@@ -4471,9 +5213,13 @@ export function handleSkillErrorEvent(
       error,
       timestamp: Date.now(),
     };
-    if (DEBUG_SSE) console.log('[SSEHandlers] Skill error collected:', errorInfo);
+    if (DEBUG_SSE)
+      console.log('[SSEHandlers] Skill error collected:', errorInfo);
     ctx.collectedErrors.push(errorInfo);
-    pushStreamingOutput(ctx, `步骤错误: ${errorInfo.skillId}${errorInfo.stepId ? `/${errorInfo.stepId}` : ''}`);
+    pushStreamingOutput(
+      ctx,
+      `步骤错误: ${errorInfo.skillId}${errorInfo.stepId ? `/${errorInfo.stepId}` : ''}`,
+    );
   }
   return {};
 }
@@ -4483,12 +5229,13 @@ export function handleSkillErrorEvent(
  */
 export function handleErrorEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   failStreamingAnswer(ctx);
 
   const payload = eventPayload(data);
-  const error = readStringField(payload, 'error') || readStringField(payload, 'message');
+  const error =
+    readStringField(payload, 'error') || readStringField(payload, 'message');
 
   if (error) {
     failStreamingFlow(ctx, error);
@@ -4507,7 +5254,7 @@ export function handleErrorEvent(
     showErrorSummary(ctx);
   }
 
-  return { isTerminal: true, stopLoading: true };
+  return {isTerminal: true, stopLoading: true};
 }
 
 /**
@@ -4517,12 +5264,17 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
   if (ctx.collectedErrors.length === 0) return;
 
   // Group errors by skillId
-  const errorsBySkill = new Map<string, Array<{ stepId?: string; error: string }>>();
+  const errorsBySkill = new Map<
+    string,
+    Array<{stepId?: string; error: string}>
+  >();
   for (const err of ctx.collectedErrors) {
     if (!errorsBySkill.has(err.skillId)) {
       errorsBySkill.set(err.skillId, []);
     }
-    errorsBySkill.get(err.skillId)!.push({ stepId: err.stepId, error: err.error });
+    errorsBySkill
+      .get(err.skillId)!
+      .push({stepId: err.stepId, error: err.error});
   }
 
   let summaryContent = `### ⚠️ 分析过程中遇到 ${ctx.collectedErrors.length} 个错误\n\n`;
@@ -4558,10 +5310,11 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
  */
 export function handleCircuitBreakerEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const breakerData = eventPayload(data);
-  if (DEBUG_SSE) console.log('[SSEHandlers] circuit_breaker received:', breakerData);
+  if (DEBUG_SSE)
+    console.log('[SSEHandlers] circuit_breaker received:', breakerData);
 
   const reason = readStringField(breakerData, 'reason', '分析保护机制已触发');
   const agentId = readStringField(breakerData, 'agentId', 'agent');
@@ -4583,21 +5336,32 @@ export function handleCircuitBreakerEvent(
  */
 export function handleStrategySelectedEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const strategyData = eventPayload(data);
-  if (DEBUG_SSE) console.log('[SSEHandlers] strategy_selected received:', strategyData);
+  if (DEBUG_SSE)
+    console.log('[SSEHandlers] strategy_selected received:', strategyData);
 
   if (Object.keys(strategyData).length === 0) return {};
 
-  const selectionMethod = readStringField(strategyData, 'selectionMethod', 'keyword');
+  const selectionMethod = readStringField(
+    strategyData,
+    'selectionMethod',
+    'keyword',
+  );
   const strategyName = readStringField(strategyData, 'strategyName', 'unknown');
-  const confidencePercent = Math.round(readNumberField(strategyData, 'confidence', 0) * 100);
-  const reasoning = readStringField(strategyData, 'reasoning', '开始执行分析流水线...');
+  const confidencePercent = Math.round(
+    readNumberField(strategyData, 'confidence', 0) * 100,
+  );
+  const reasoning = readStringField(
+    strategyData,
+    'reasoning',
+    '开始执行分析流水线...',
+  );
   const methodEmoji = selectionMethod === 'llm' ? '🧠' : '🔑';
   pushStreamingPhase(
     ctx,
-    `选择策略 ${strategyName} (${confidencePercent}%, ${selectionMethod})`
+    `选择策略 ${strategyName} (${confidencePercent}%, ${selectionMethod})`,
   );
 
   ctx.addMessage({
@@ -4616,10 +5380,11 @@ export function handleStrategySelectedEvent(
  */
 export function handleStrategyFallbackEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const fallbackData = eventPayload(data);
-  if (DEBUG_SSE) console.log('[SSEHandlers] strategy_fallback received:', fallbackData);
+  if (DEBUG_SSE)
+    console.log('[SSEHandlers] strategy_fallback received:', fallbackData);
 
   if (Object.keys(fallbackData).length === 0) return {};
   const reason = readStringField(fallbackData, 'reason', '未命中预设策略');
@@ -4641,10 +5406,11 @@ export function handleStrategyFallbackEvent(
  */
 export function handleFocusUpdatedEvent(
   data: RawSSEEvent,
-  _ctx: SSEHandlerContext  // eslint-disable-line @typescript-eslint/no-unused-vars
+  _ctx: SSEHandlerContext, // eslint-disable-line @typescript-eslint/no-unused-vars
 ): SSEHandlerResult {
   // Focus updates are typically silent - just log for debugging
-  if (DEBUG_SSE) console.log('[SSEHandlers] focus_updated:', eventPayload(data));
+  if (DEBUG_SSE)
+    console.log('[SSEHandlers] focus_updated:', eventPayload(data));
   return {};
 }
 
@@ -4654,17 +5420,17 @@ export function handleFocusUpdatedEvent(
 export function handleThoughtEvent(
   data: RawSSEEvent,
   ctx: SSEHandlerContext,
-  source: 'assistant' | 'worker'
+  source: 'assistant' | 'worker',
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
   const payload = eventPayload(data);
   const content = normalizeFlowLine(
     readStringField(payload, 'thought') ||
-    readStringField(payload, 'content') ||
-    readStringField(payload, 'message') ||
-    readStringField(eventRecord, 'thought') ||
-    readStringField(eventRecord, 'content') ||
-    readStringField(eventRecord, 'message')
+      readStringField(payload, 'content') ||
+      readStringField(payload, 'message') ||
+      readStringField(eventRecord, 'thought') ||
+      readStringField(eventRecord, 'content') ||
+      readStringField(eventRecord, 'message'),
   );
   if (!content) return {};
 
@@ -4678,19 +5444,23 @@ export function handleThoughtEvent(
  */
 export function handleAgentDialogueEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const task = asRecord(payload.task);
-  const phase = normalizeFlowLine(payload.phase || payload.type || 'task_dispatched');
-  const agentId = normalizeFlowLine(payload.agentId || payload.agent || 'agent');
+  const phase = normalizeFlowLine(
+    payload.phase || payload.type || 'task_dispatched',
+  );
+  const agentId = normalizeFlowLine(
+    payload.agentId || payload.agent || 'agent',
+  );
   const taskId = normalizeFlowLine(payload.taskId || payload.task_id || '');
   const title = normalizeFlowLine(
     payload.taskTitle ||
-    task.title ||
-    task.description ||
-    payload.message ||
-    ''
+      task.title ||
+      task.description ||
+      payload.message ||
+      '',
   );
 
   const taskSuffix = taskId ? ` (#${taskId})` : '';
@@ -4704,18 +5474,20 @@ export function handleAgentDialogueEvent(
  */
 export function handleAgentResponseEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const response = asRecord(payload.response);
-  const agentId = normalizeFlowLine(payload.agentId || payload.agent || 'agent');
+  const agentId = normalizeFlowLine(
+    payload.agentId || payload.agent || 'agent',
+  );
   const taskId = normalizeFlowLine(payload.taskId || payload.task_id || '');
   const summary = normalizeFlowLine(
     payload.message ||
-    payload.summary ||
-    response.summary ||
-    response.conclusion ||
-    '任务完成'
+      payload.summary ||
+      response.summary ||
+      response.conclusion ||
+      '任务完成',
   );
 
   const taskSuffix = taskId ? ` (#${taskId})` : '';
@@ -4729,15 +5501,16 @@ export function handleAgentResponseEvent(
  */
 export function handleToolCallEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
-  const phase = normalizeFlowLine(readStringField(payload, 'phase', 'task_dispatched')).toLowerCase();
-  const isCompletedPhase = (
+  const phase = normalizeFlowLine(
+    readStringField(payload, 'phase', 'task_dispatched'),
+  ).toLowerCase();
+  const isCompletedPhase =
     phase.includes('completed') ||
     phase.includes('done') ||
-    phase.includes('finished')
-  );
+    phase.includes('finished');
   if (isCompletedPhase) {
     return handleAgentResponseEvent({data: payload}, ctx);
   }
@@ -4749,7 +5522,7 @@ export function handleToolCallEvent(
  */
 export function handleFindingEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const findingsRaw = Array.isArray(payload.findings) ? payload.findings : [];
@@ -4760,7 +5533,7 @@ export function handleFindingEvent(
     const finding = asRecord(item);
     const title = normalizeFlowLine(
       readStringField(finding, 'title') ||
-      readStringField(finding, 'description')
+        readStringField(finding, 'description'),
     );
     if (title) {
       pushStreamingOutput(ctx, title);
@@ -4774,7 +5547,7 @@ export function handleFindingEvent(
  */
 export function handleStageTransitionEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const stageName = normalizeFlowLine(readStringField(payload, 'stageName'));
@@ -4785,9 +5558,10 @@ export function handleStageTransitionEvent(
 
   if (!stageName && stageIndex < 0) return {};
 
-  const stageSeq = stageIndex >= 0 && totalStages > 0
-    ? ` (${stageIndex + 1}/${totalStages})`
-    : '';
+  const stageSeq =
+    stageIndex >= 0 && totalStages > 0
+      ? ` (${stageIndex + 1}/${totalStages})`
+      : '';
   const label = skipped ? '跳过阶段' : '进入阶段';
   const detail = stageName ? ` ${stageName}` : '';
   const reason = skipped && skipReason ? `: ${skipReason}` : '';
@@ -4795,7 +5569,9 @@ export function handleStageTransitionEvent(
   return {};
 }
 
-function toConversationPhase(value: string): ConversationStepTimelineItem['phase'] {
+function toConversationPhase(
+  value: string,
+): ConversationStepTimelineItem['phase'] {
   switch (value) {
     case 'thinking':
     case 'tool':
@@ -4808,7 +5584,9 @@ function toConversationPhase(value: string): ConversationStepTimelineItem['phase
   }
 }
 
-function toConversationRole(value: string): ConversationStepTimelineItem['role'] {
+function toConversationRole(
+  value: string,
+): ConversationStepTimelineItem['role'] {
   return value === 'system' ? 'system' : 'agent';
 }
 
@@ -4817,7 +5595,7 @@ function toConversationRole(value: string): ConversationStepTimelineItem['role']
  */
 export function handleConversationStepEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const eventRecord = asRecord(data);
   const payload = eventPayload(data);
@@ -4825,14 +5603,13 @@ export function handleConversationStepEvent(
 
   const text = normalizeFlowLine(
     readStringField(content, 'text') ||
-    readStringField(payload, 'text') ||
-    readStringField(payload, 'message')
+      readStringField(payload, 'text') ||
+      readStringField(payload, 'message'),
   );
   if (!text) return {};
 
   const eventId = normalizeFlowLine(
-    readStringField(payload, 'eventId') ||
-    readStringField(eventRecord, 'id')
+    readStringField(payload, 'eventId') || readStringField(eventRecord, 'id'),
   );
   if (eventId && ctx.streamingFlow.conversationSeenEventIds.has(eventId)) {
     return {};
@@ -4840,7 +5617,9 @@ export function handleConversationStepEvent(
   if (eventId) {
     ctx.streamingFlow.conversationSeenEventIds.add(eventId);
     if (ctx.streamingFlow.conversationSeenEventIds.size > 512) {
-      const first = ctx.streamingFlow.conversationSeenEventIds.values().next().value;
+      const first = ctx.streamingFlow.conversationSeenEventIds
+        .values()
+        .next().value;
       if (typeof first === 'string') {
         ctx.streamingFlow.conversationSeenEventIds.delete(first);
       }
@@ -4863,12 +5642,21 @@ export function handleConversationStepEvent(
   }
 
   if (!flow.conversationPendingSteps[ordinal]) {
-    const eventTimestamp = readNumberField(asRecord(data), 'timestamp', 0)
-      || readNumberField(payload, 'timestamp', 0);
+    const eventTimestamp =
+      readNumberField(asRecord(data), 'timestamp', 0) ||
+      readNumberField(payload, 'timestamp', 0);
     flow.conversationPendingSteps[ordinal] = {
       ordinal,
-      phase: toConversationPhase(normalizeFlowLine(readStringField(payload, 'phase', 'progress')).toLowerCase()),
-      role: toConversationRole(normalizeFlowLine(readStringField(payload, 'role', 'agent')).toLowerCase()),
+      phase: toConversationPhase(
+        normalizeFlowLine(
+          readStringField(payload, 'phase', 'progress'),
+        ).toLowerCase(),
+      ),
+      role: toConversationRole(
+        normalizeFlowLine(
+          readStringField(payload, 'role', 'agent'),
+        ).toLowerCase(),
+      ),
       text,
       timestamp: eventTimestamp > 0 ? eventTimestamp : Date.now(),
     };
@@ -4883,7 +5671,7 @@ export function handleConversationStepEvent(
 
 function mergeConversationTimelineFromAnalysisCompleted(
   source: Record<string, unknown>,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): void {
   const timeline = Array.isArray(source.conversationTimeline)
     ? source.conversationTimeline
@@ -4919,7 +5707,7 @@ function mergeConversationTimelineFromAnalysisCompleted(
  */
 export function handleAnswerTokenEvent(
   data: RawSSEEvent,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
   const rawToken = payload.token ?? payload.delta ?? '';
@@ -4951,7 +5739,10 @@ export function handleAnswerTokenEvent(
   }
 
   if (done) {
-    syncAnswerStreamToConversationTimeline(ctx, '', {force: true, completed: true});
+    syncAnswerStreamToConversationTimeline(ctx, '', {
+      force: true,
+      completed: true,
+    });
     pushStreamingOutput(ctx, '最终回答已输出');
     completeStreamingAnswer(ctx);
   }
@@ -4966,7 +5757,7 @@ export function handleAnswerTokenEvent(
 export function handleSSEEvent(
   eventType: string,
   data: unknown,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const eventData = asRecord(data);
   if (DEBUG_SSE) console.log('[SSEHandlers] SSE event:', eventType, eventData);
@@ -4989,11 +5780,12 @@ export function handleSSEEvent(
   } else if (eventType === 'analysis_completed') {
     const payload = toAnalysisCompletedPayload(eventData.data);
     updateAISharedState({
-      status: payload?.terminalRunStatus === 'quota_exceeded'
-        ? 'quota_exceeded'
-        : payload?.partial === true
-          ? 'partial'
-          : 'completed',
+      status:
+        payload?.terminalRunStatus === 'quota_exceeded'
+          ? 'quota_exceeded'
+          : payload?.partial === true
+            ? 'partial'
+            : 'completed',
       lastAnalysisTime: Date.now(),
     });
   }
@@ -5004,7 +5796,7 @@ export function handleSSEEvent(
 function handleSSEEventInner(
   eventType: string,
   eventData: Record<string, unknown>,
-  ctx: SSEHandlerContext
+  ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   switch (eventType) {
     case 'connected':
@@ -5124,12 +5916,20 @@ function handleSSEEventInner(
         const flutter = asRecord(arch.flutter);
         const compose = readBooleanField(arch, 'compose', false);
         const webview = asRecord(arch.webview);
-        const archDesc = archType
-          + (Object.keys(flutter).length > 0 ? ` (Flutter ${readStringField(flutter, 'engine', '')})` : '')
-          + (compose ? ' (Compose)' : '')
-          + (Object.keys(webview).length > 0 ? ` (WebView ${readStringField(webview, 'engine', '')})` : '');
+        const archDesc =
+          archType +
+          (Object.keys(flutter).length > 0
+            ? ` (Flutter ${readStringField(flutter, 'engine', '')})`
+            : '') +
+          (compose ? ' (Compose)' : '') +
+          (Object.keys(webview).length > 0
+            ? ` (WebView ${readStringField(webview, 'engine', '')})`
+            : '');
         const confidence = readNumberField(arch, 'confidence', 0);
-        pushStreamingPhase(ctx, `检测到渲染架构: ${archDesc} (置信度: ${Math.round(confidence * 100)}%)`);
+        pushStreamingPhase(
+          ctx,
+          `检测到渲染架构: ${archDesc} (置信度: ${Math.round(confidence * 100)}%)`,
+        );
       }
       return {};
     }
@@ -5159,17 +5959,21 @@ function handleSSEEventInner(
         const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
         const hasStreamedAnswerMessage = Boolean(
           streamedAnswerMessageId &&
-          ctx.getMessages().some((msg) => msg.id === streamedAnswerMessageId)
+            ctx.getMessages().some((msg) => msg.id === streamedAnswerMessageId),
         );
         if (hasStreamedAnswerMessage && streamedAnswerMessageId) {
           ctx.streamingAnswer.content = content;
           ctx.streamingAnswer.pending = '';
           ctx.streamingAnswer.status = 'completed';
-          ctx.updateMessage(streamedAnswerMessageId, {
-            content,
-            timestamp: Date.now(),
-            flowTag: 'answer_stream',
-          }, {persist: true});
+          ctx.updateMessage(
+            streamedAnswerMessageId,
+            {
+              content,
+              timestamp: Date.now(),
+              flowTag: 'answer_stream',
+            },
+            {persist: true},
+          );
         } else {
           ctx.addMessage({
             id: ctx.generateId(),
@@ -5184,14 +5988,16 @@ function handleSSEEventInner(
         ctx.setCompletionHandled(true);
       }
       // Not terminal — analysis_completed with reportUrl still follows
-      return { stopLoading: true };
+      return {stopLoading: true};
     }
 
     case 'sub_agent_started': {
       const subPayload = eventPayload(eventData);
       const agentName = readStringField(subPayload, 'agentName') || 'sub-agent';
       const desc = readStringField(subPayload, 'description') || agentName;
-      const msg = readStringField(subPayload, 'message') || `委托子代理 [${agentName}]: ${desc}`;
+      const msg =
+        readStringField(subPayload, 'message') ||
+        `委托子代理 [${agentName}]: ${desc}`;
       // Track sub-agent card state
       ctx.streamingFlow.subAgents.push({
         agentName,
@@ -5202,7 +6008,12 @@ function handleSSEEventInner(
       pushStreamingTool(ctx, msg);
       // Also push to conversation timeline if enabled
       if (isConversationTimelineEnabled(ctx)) {
-        pushConversationStep(ctx, 'tool', 'system', `🤖 委托 ${agentName}: ${desc}`);
+        pushConversationStep(
+          ctx,
+          'tool',
+          'system',
+          `🤖 委托 ${agentName}: ${desc}`,
+        );
       }
       refreshSubAgentCards(ctx);
       return {};
@@ -5211,22 +6022,35 @@ function handleSSEEventInner(
     case 'sub_agent_completed': {
       const subPayload = eventPayload(eventData);
       const agentName = readStringField(subPayload, 'agentName') || 'sub-agent';
-      const msg = readStringField(subPayload, 'message') || `子代理 [${agentName}] 完成证据收集`;
+      const msg =
+        readStringField(subPayload, 'message') ||
+        `子代理 [${agentName}] 完成证据收集`;
       // Update sub-agent card state
       const card = ctx.streamingFlow.subAgents.find(
-        (a) => a.agentName === agentName && a.status === 'running'
+        (a) => a.agentName === agentName && a.status === 'running',
       );
       if (card) {
         card.status = 'completed';
         card.completedAt = Date.now();
         const usage = subPayload.usage ?? subPayload;
-        const toolUses = readNumberField(usage as Record<string, unknown>, 'tool_uses', -1);
+        const toolUses = readNumberField(
+          usage as Record<string, unknown>,
+          'tool_uses',
+          -1,
+        );
         if (toolUses >= 0) card.toolUses = toolUses;
       }
       pushStreamingTool(ctx, msg);
       if (isConversationTimelineEnabled(ctx)) {
-        const dur = card ? `${Math.round((Date.now() - card.startedAt) / 1000)}s` : '';
-        pushConversationStep(ctx, 'result', 'system', `✅ ${agentName} 完成${dur ? ` (${dur})` : ''}`);
+        const dur = card
+          ? `${Math.round((Date.now() - card.startedAt) / 1000)}s`
+          : '';
+        pushConversationStep(
+          ctx,
+          'result',
+          'system',
+          `✅ ${agentName} 完成${dur ? ` (${dur})` : ''}`,
+        );
       }
       refreshSubAgentCards(ctx);
       return {};
@@ -5248,7 +6072,8 @@ function handleSSEEventInner(
 
     case 'incremental_scope':
       // Incremental scope changes are internal - just log
-      if (DEBUG_SSE) console.log('[SSEHandlers] incremental_scope:', eventData.data);
+      if (DEBUG_SSE)
+        console.log('[SSEHandlers] incremental_scope:', eventData.data);
       {
         const payload = asRecord(eventData.data);
         const scopeType = payload.scopeType;
@@ -5271,10 +6096,11 @@ function handleSSEEventInner(
       if (ctx.streamingAnswer.status === 'streaming') {
         completeStreamingAnswer(ctx);
       }
-      return { stopLoading: true };
+      return {stopLoading: true};
 
     default:
-      if (DEBUG_SSE) console.warn(`[SSEHandlers] Unhandled event type: ${eventType}`);
+      if (DEBUG_SSE)
+        console.warn(`[SSEHandlers] Unhandled event type: ${eventType}`);
       return {};
   }
 }

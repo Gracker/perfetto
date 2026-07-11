@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "playwright.smartperfetto.config.ts",
+    "smartperfetto_test/**/*.ts",
+    "src/frontend/debug.ts",
+    "src/**/*.d.ts"
+  ],
+  "exclude": [
+    "./node_modules/",
+    "./src/test/diff_viewer/",
+    "./src/service_worker/",
+    "./src/gen/",
+    "./out"
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node", "@playwright/test"]
+  }
+}

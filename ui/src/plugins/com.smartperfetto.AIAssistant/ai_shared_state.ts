@@ -26,7 +26,13 @@ import m from 'mithril';
  */
 export interface AIFinding {
   id: string;
-  type: 'jank' | 'anr' | 'slow_function' | 'binder_slow' | 'warning' | 'insight';
+  type:
+    | 'jank'
+    | 'anr'
+    | 'slow_function'
+    | 'binder_slow'
+    | 'warning'
+    | 'insight';
   label: string;
   timestampNs: bigint;
   durationNs?: bigint;
@@ -38,7 +44,15 @@ export interface AIFinding {
  */
 export interface AISharedState {
   /** Current analysis lifecycle phase. */
-  status: 'idle' | 'ready' | 'analyzing' | 'completed' | 'partial' | 'quota_exceeded' | 'cancelled' | 'error';
+  status:
+    | 'idle'
+    | 'ready'
+    | 'analyzing'
+    | 'completed'
+    | 'partial'
+    | 'quota_exceeded'
+    | 'cancelled'
+    | 'error';
   /** Number of issues found in the latest analysis. */
   issueCount: number;
   /** Human-readable phase label (e.g. "Executing scrolling_analysis"). */
@@ -77,6 +91,10 @@ let sharedState: AISharedState = createDefaultState();
 /** Read the current shared state (treat as immutable snapshot). */
 export function getAISharedState(): Readonly<AISharedState> {
   return sharedState;
+}
+
+export function isAIAnalysisIdentityLocked(): boolean {
+  return sharedState.status === 'analyzing';
 }
 
 /** Merge partial updates into the shared state. */

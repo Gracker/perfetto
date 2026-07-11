@@ -493,6 +493,7 @@ export class SessionManager {
       tracePairLayout?: AISession['tracePairLayout'];
       tracePairSplitPercent?: number;
       tracePairActiveTraceSide?: AISession['tracePairActiveTraceSide'];
+      tracePairCurrentPane?: AISession['tracePairCurrentPane'];
     }
   ): boolean {
     const storage = this.loadSessionsStorage();

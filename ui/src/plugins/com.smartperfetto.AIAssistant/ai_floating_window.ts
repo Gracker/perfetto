@@ -58,6 +58,9 @@ import {
 } from './ai_floating_state';
 import {SidebarPanel} from './ai_sidebar_panel';
 import {switchFloatingMode} from './ai_transient_state';
+import {isAIAnalysisIdentityLocked} from './ai_shared_state';
+import {TracePairWorkspace} from './trace_pair_workspace';
+import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 
 // ── Layout constants ────────────────────────────────────────────────────
 
@@ -188,18 +191,37 @@ let dismissLayoutMenu: (() => void) | null = null;
  * the window to hang off the left edge as long as DRAG_MIN_VISIBLE_X
  * pixels remain visible on the right of the title bar).
  */
-function clampPosition(x: number, y: number, width: number): {x: number; y: number} {
+function clampPosition(
+  x: number,
+  y: number,
+  width: number,
+): {x: number; y: number} {
   return {
-    x: clamp(x, -width + DRAG_MIN_VISIBLE_X, window.innerWidth - DRAG_TITLEBAR_REACH),
+    x: clamp(
+      x,
+      -width + DRAG_MIN_VISIBLE_X,
+      window.innerWidth - DRAG_TITLEBAR_REACH,
+    ),
     y: clamp(y, 0, window.innerHeight - TITLEBAR_HEIGHT),
   };
 }
 
 /** Clamp a candidate size to the current viewport (minus margin). */
-function clampSize(width: number, height: number): {width: number; height: number} {
+function clampSize(
+  width: number,
+  height: number,
+): {width: number; height: number} {
   return {
-    width: clamp(width, FLOATING_MIN_WIDTH, window.innerWidth - VIEWPORT_MARGIN),
-    height: clamp(height, FLOATING_MIN_HEIGHT, window.innerHeight - VIEWPORT_MARGIN),
+    width: clamp(
+      width,
+      FLOATING_MIN_WIDTH,
+      window.innerWidth - VIEWPORT_MARGIN,
+    ),
+    height: clamp(
+      height,
+      FLOATING_MIN_HEIGHT,
+      window.innerHeight - VIEWPORT_MARGIN,
+    ),
   };
 }
 
@@ -327,6 +349,7 @@ const LAYOUT_MENU_STYLES = {
 
 interface FloatingWindowAttrs {
   trace: Trace;
+  tracePairWorkspaceController: TracePairWorkspaceController;
 }
 
 class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
@@ -346,118 +369,172 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
 
   view({attrs}: m.Vnode<FloatingWindowAttrs>): m.Children {
     const s = getFloatingState();
-    return m('div', {
-      style: `${STYLES.window}
+    const identityLocked = isAIAnalysisIdentityLocked();
+    return m(
+      'div',
+      {
+        'data-ai-floating-window': 'true',
+        'style': `${STYLES.window}
         left: ${s.position.x}px;
         top: ${s.position.y}px;
         width: ${s.size.width}px;
         height: ${s.size.height}px;
       `,
-      // Click-away: close the layout menu when user clicks anywhere
-      // inside the window that isn't the menu or its trigger.
-      onclick: (e: MouseEvent) => {
-        if (!this.showLayoutMenu) return;
-        const target = e.target as HTMLElement;
-        if (target.closest('[data-layout-menu]') || target.closest('[data-layout-trigger]')) return;
-        this.showLayoutMenu = false;
-      },
-    }, [
-      // ── Title bar (drag handle) ──
-      m('div', {
-        style: STYLES.titlebar,
-        onmousedown: (e: MouseEvent) => {
-          // Ignore mousedown on buttons inside the title bar
-          if ((e.target as HTMLElement).closest('button')) return;
-          startGesture('drag', e);
+        // Click-away: close the layout menu when user clicks anywhere
+        // inside the window that isn't the menu or its trigger.
+        'onclick': (e: MouseEvent) => {
+          if (!this.showLayoutMenu) return;
+          const target = e.target as HTMLElement;
+          if (
+            target.closest('[data-layout-menu]') ||
+            target.closest('[data-layout-trigger]')
+          )
+            return;
+          this.showLayoutMenu = false;
         },
-      }, [
-        m('span', {style: STYLES.titleIcon}, '\u{1F916}'),
-        m('span', {style: STYLES.titleText}, 'AI Assistant — 浮动窗口'),
-        // Layout dropdown trigger — Windows Snap Assist style presets.
-        m('button', {
-          'data-layout-trigger': 'true',
-          'style': STYLES.iconBtn,
-          'title': '预设布局（左半屏 / 右半屏 / 最大化等）',
-          'onclick': () => {
-            this.showLayoutMenu = !this.showLayoutMenu;
+      },
+      [
+        // ── Title bar (drag handle) ──
+        m(
+          'div',
+          {
+            style: STYLES.titlebar,
+            onmousedown: (e: MouseEvent) => {
+              // Ignore mousedown on buttons inside the title bar
+              if ((e.target as HTMLElement).closest('button')) return;
+              startGesture('drag', e);
+            },
           },
-          'onmouseover': (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.background = BTN_BG_HOVER;
-          },
-          'onmouseout': (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.background = BTN_BG_IDLE;
-          },
-        }, [
-          m(Icon, {icon: 'dashboard', style: 'font-size: 14px'}),
-        ]),
-        // Reset geometry — recovery hatch if user somehow lost the window.
-        m('button', {
-          style: STYLES.iconBtn,
-          title: '重置位置和大小（恢复默认）',
-          onclick: () => resetFloatingGeometry(),
-          onmouseover: (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.background = BTN_BG_HOVER;
-          },
-          onmouseout: (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.background = BTN_BG_IDLE;
-          },
-        }, [
-          m(Icon, {icon: 'restart_alt', style: 'font-size: 14px'}),
-        ]),
-        m('button', {
-          style: STYLES.iconBtn,
-          title: '收回到 AI Dock',
-          onclick: () => switchFloatingMode('sidebar'),
-          onmouseover: (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.background = BTN_BG_HOVER;
-          },
-          onmouseout: (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.background = BTN_BG_IDLE;
-          },
-        }, [
-          m(Icon, {icon: 'close_fullscreen', style: 'font-size: 14px'}),
-          m('span', 'Dock'),
-        ]),
-      ]),
+          [
+            m('span', {style: STYLES.titleIcon}, '\u{1F916}'),
+            m('span', {style: STYLES.titleText}, 'AI Assistant — 浮动窗口'),
+            // Layout dropdown trigger — Windows Snap Assist style presets.
+            m(
+              'button',
+              {
+                'data-layout-trigger': 'true',
+                'style': STYLES.iconBtn,
+                'title': '预设布局（左半屏 / 右半屏 / 最大化等）',
+                'onclick': () => {
+                  this.showLayoutMenu = !this.showLayoutMenu;
+                },
+                'onmouseover': (e: MouseEvent) => {
+                  (e.currentTarget as HTMLElement).style.background =
+                    BTN_BG_HOVER;
+                },
+                'onmouseout': (e: MouseEvent) => {
+                  (e.currentTarget as HTMLElement).style.background =
+                    BTN_BG_IDLE;
+                },
+              },
+              [m(Icon, {icon: 'dashboard', style: 'font-size: 14px'})],
+            ),
+            // Reset geometry — recovery hatch if user somehow lost the window.
+            m(
+              'button',
+              {
+                style: STYLES.iconBtn,
+                title: '重置位置和大小（恢复默认）',
+                onclick: () => resetFloatingGeometry(),
+                onmouseover: (e: MouseEvent) => {
+                  (e.currentTarget as HTMLElement).style.background =
+                    BTN_BG_HOVER;
+                },
+                onmouseout: (e: MouseEvent) => {
+                  (e.currentTarget as HTMLElement).style.background =
+                    BTN_BG_IDLE;
+                },
+              },
+              [m(Icon, {icon: 'restart_alt', style: 'font-size: 14px'})],
+            ),
+            m(
+              'button',
+              {
+                style: STYLES.iconBtn,
+                title: identityLocked
+                  ? '分析运行中，完成或停止后可切换挂载位置'
+                  : '收回到 AI Dock',
+                onclick: identityLocked
+                  ? undefined
+                  : () => switchFloatingMode('sidebar'),
+                disabled: identityLocked,
+                onmouseover: (e: MouseEvent) => {
+                  (e.currentTarget as HTMLElement).style.background =
+                    BTN_BG_HOVER;
+                },
+                onmouseout: (e: MouseEvent) => {
+                  (e.currentTarget as HTMLElement).style.background =
+                    BTN_BG_IDLE;
+                },
+              },
+              [
+                m(Icon, {icon: 'close_fullscreen', style: 'font-size: 14px'}),
+                m('span', 'Dock'),
+              ],
+            ),
+          ],
+        ),
 
-      // ── Layout dropdown menu ──
-      this.showLayoutMenu ? m('div', {
-        'data-layout-menu': 'true',
-        'style': LAYOUT_MENU_STYLES.menu,
-      }, FLOATING_SNAP_LAYOUTS.map((opt) =>
-        m('button', {
-          key: opt.id,
-          style: LAYOUT_MENU_STYLES.menuItem,
-          title: opt.tooltip,
-          onclick: () => {
-            applyFloatingSnapLayout(opt.id);
-            this.showLayoutMenu = false;
-          },
-          onmouseover: (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.cssText = LAYOUT_MENU_STYLES.menuItemHover;
-          },
-          onmouseout: (e: MouseEvent) => {
-            (e.currentTarget as HTMLElement).style.cssText = LAYOUT_MENU_STYLES.menuItem;
-          },
-        }, [
-          m(Icon, {icon: opt.icon, style: 'font-size: 16px; color: var(--pf-color-text-muted, #75797c);'}),
-          m('span', opt.label),
-        ]),
-      )) : null,
+        // ── Layout dropdown menu ──
+        this.showLayoutMenu
+          ? m(
+              'div',
+              {
+                'data-layout-menu': 'true',
+                'style': LAYOUT_MENU_STYLES.menu,
+              },
+              FLOATING_SNAP_LAYOUTS.map((opt) =>
+                m(
+                  'button',
+                  {
+                    key: opt.id,
+                    style: LAYOUT_MENU_STYLES.menuItem,
+                    title: opt.tooltip,
+                    onclick: () => {
+                      applyFloatingSnapLayout(opt.id);
+                      this.showLayoutMenu = false;
+                    },
+                    onmouseover: (e: MouseEvent) => {
+                      (e.currentTarget as HTMLElement).style.cssText =
+                        LAYOUT_MENU_STYLES.menuItemHover;
+                    },
+                    onmouseout: (e: MouseEvent) => {
+                      (e.currentTarget as HTMLElement).style.cssText =
+                        LAYOUT_MENU_STYLES.menuItem;
+                    },
+                  },
+                  [
+                    m(Icon, {
+                      icon: opt.icon,
+                      style:
+                        'font-size: 16px; color: var(--pf-color-text-muted, #75797c);',
+                    }),
+                    m('span', opt.label),
+                  ],
+                ),
+              ),
+            )
+          : null,
 
-      // ── Content: AIPanel ──
-      m('div', {style: STYLES.content}, m(AIPanel, {
-        engine: attrs.trace.engine,
-        trace: attrs.trace,
-      })),
+        // ── Content: AIPanel ──
+        m(
+          'div',
+          {style: STYLES.content},
+          m(AIPanel, {
+            engine: attrs.trace.engine,
+            trace: attrs.trace,
+            tracePairWorkspaceController: attrs.tracePairWorkspaceController,
+          }),
+        ),
 
-      // ── Resize handle (bottom-right) ──
-      m('div', {
-        style: STYLES.resizeHandle,
-        onmousedown: (e: MouseEvent) => startGesture('resize', e),
-        title: '拖动调整大小',
-      }),
-    ]);
+        // ── Resize handle (bottom-right) ──
+        m('div', {
+          style: STYLES.resizeHandle,
+          onmousedown: (e: MouseEvent) => startGesture('resize', e),
+          title: '拖动调整大小',
+        }),
+      ],
+    );
   }
 }
 
@@ -508,7 +585,7 @@ export function locateFloatingWindow(): void {
   // than the earlier subtle box-shadow-only flash.
   const host = document.getElementById(HOST_DIV_ID);
   if (!host) return;
-  const windowEl = host.firstElementChild as HTMLElement | null;
+  const windowEl = host.querySelector<HTMLElement>('[data-ai-floating-window]');
   if (!windowEl) return;
   // Pulse uses Perfetto primary slate-blue (rgb 61,86,136 = #3d5688) so the
   // attention animation matches the rest of Perfetto chrome instead of
@@ -519,15 +596,18 @@ export function locateFloatingWindow(): void {
       {transform: 'scale(1)', boxShadow: WINDOW_BASE_SHADOW},
       {
         transform: 'scale(1.04)',
-        boxShadow: '0 20px 60px rgba(61, 86, 136, 0.55), 0 0 0 4px rgba(61, 86, 136, 0.9)',
+        boxShadow:
+          '0 20px 60px rgba(61, 86, 136, 0.55), 0 0 0 4px rgba(61, 86, 136, 0.9)',
       },
       {
         transform: 'scale(1)',
-        boxShadow: '0 12px 40px rgba(61, 86, 136, 0.35), 0 0 0 2px rgba(61, 86, 136, 0.5)',
+        boxShadow:
+          '0 12px 40px rgba(61, 86, 136, 0.35), 0 0 0 2px rgba(61, 86, 136, 0.5)',
       },
       {
         transform: 'scale(1.02)',
-        boxShadow: '0 16px 50px rgba(61, 86, 136, 0.45), 0 0 0 3px rgba(61, 86, 136, 0.7)',
+        boxShadow:
+          '0 16px 50px rgba(61, 86, 136, 0.45), 0 0 0 3px rgba(61, 86, 136, 0.7)',
       },
       {transform: 'scale(1)', boxShadow: WINDOW_BASE_SHADOW},
     ],
@@ -576,13 +656,25 @@ function getStatusbarHeight(): number {
     : 0;
 }
 
-function syncDockSpace(): void {
+function syncDockSpace(
+  tracePairWorkspaceController: TracePairWorkspaceController,
+): void {
   const s = getFloatingState();
-  if (s.mode === 'sidebar' && isTimelineRouteActive()) {
+  const timelineActive = isTimelineRouteActive();
+  const sidebarVisible = timelineActive && s.mode === 'sidebar';
+  const workspaceVisible =
+    timelineActive && tracePairWorkspaceController.getState().open;
+
+  if (sidebarVisible || workspaceVisible) {
     document.documentElement.style.setProperty(
       STATUSBAR_HEIGHT_VAR,
       `${getStatusbarHeight()}px`,
     );
+  } else {
+    document.documentElement.style.removeProperty(STATUSBAR_HEIGHT_VAR);
+  }
+
+  if (sidebarVisible) {
     document.documentElement.style.setProperty(
       RIGHT_RAIL_VAR,
       `${getEffectiveSidebarWidth()}px`,
@@ -592,7 +684,8 @@ function syncDockSpace(): void {
       `${getEffectiveSidebarHeight()}px`,
     );
   } else {
-    clearDockSpace();
+    document.documentElement.style.removeProperty(RIGHT_RAIL_VAR);
+    document.documentElement.style.removeProperty(BOTTOM_RAIL_VAR);
   }
 }
 
@@ -602,15 +695,10 @@ function clearDockSpace(): void {
   document.documentElement.style.removeProperty(STATUSBAR_HEIGHT_VAR);
 }
 
-/**
- * Mount the surface host on document.body and start its render loop.
- * Call dispose() on trace unload to clean up.
- *
- * The host div always exists in the DOM. Its content switches between
- * FloatingWindow (mode === 'floating'), SidebarPanel (mode === 'sidebar'),
- * or null (mode === 'tab'). Only one surface renders at a time.
- */
-export function setupFloatingWindow(trace: Trace): FloatingWindowHandle {
+export function setupFloatingWindow(
+  trace: Trace,
+  tracePairWorkspaceController: TracePairWorkspaceController,
+): FloatingWindowHandle {
   // Reuse an existing host if a previous trace left one behind (defensive),
   // otherwise create a fresh div. Keep it under `.pf-ui-main` so Perfetto
   // popups/modals and the SmartPerfetto host share one stacking context.
@@ -621,19 +709,20 @@ export function setupFloatingWindow(trace: Trace): FloatingWindowHandle {
   // unmount path and also detaches any prior auto-redraw subscription.
   m.mount(hostDiv, null);
 
-  // Root component participating in Mithril's global auto-redraw. view()
-  // reads floating mode synchronously each redraw: when mode is 'tab' it
-  // returns null so Mithril unmounts the subtree (AIPanel.onremove fires);
-  // when mode is 'floating' it mounts FloatingWindow; when 'sidebar' it
-  // mounts SidebarPanel. Only one surface renders at a time — single
-  // AIPanel instance invariant is preserved.
   const FloatingRoot: m.Component = {
     view: () => {
       if (!isTimelineRouteActive()) return null;
       const mode = getFloatingState().mode;
-      if (mode === 'floating') return m(FloatingWindow, {trace});
-      if (mode === 'sidebar') return m(SidebarPanel, {trace});
-      return null;
+      const assistantSurface =
+        mode === 'floating'
+          ? m(FloatingWindow, {trace, tracePairWorkspaceController})
+          : mode === 'sidebar'
+            ? m(SidebarPanel, {trace, tracePairWorkspaceController})
+            : null;
+      return m.fragment({}, [
+        m(TracePairWorkspace, {controller: tracePairWorkspaceController}),
+        assistantSurface,
+      ]);
     },
   };
   m.mount(hostDiv, FloatingRoot);
@@ -645,15 +734,20 @@ export function setupFloatingWindow(trace: Trace): FloatingWindowHandle {
   // updateFloatingState bursts from drag/resize gestures collapse to one
   // redraw per frame.
   const unsubscribeState = subscribeFloatingState(() => {
-    syncDockSpace();
+    syncDockSpace(tracePairWorkspaceController);
+    m.redraw();
+  });
+  const unsubscribeTracePair = tracePairWorkspaceController.subscribe(() => {
+    syncDockSpace(tracePairWorkspaceController);
     m.redraw();
   });
   // Run once on setup so the CSS variable is correct for the initial mode.
-  syncDockSpace();
+  syncDockSpace(tracePairWorkspaceController);
 
   // Re-render when the viewport resizes — clamp current geometry in case
   // the window is now partially or fully off-screen, or sidebar is too wide.
   const onResize = (): void => {
+    syncDockSpace(tracePairWorkspaceController);
     const s: FloatingState = getFloatingState();
     if (s.mode === 'floating') {
       const size = clampSize(s.size.width, s.size.height);
@@ -671,7 +765,7 @@ export function setupFloatingWindow(trace: Trace): FloatingWindowHandle {
   };
   window.addEventListener('resize', onResize);
   const onRouteChange = (): void => {
-    syncDockSpace();
+    syncDockSpace(tracePairWorkspaceController);
     m.redraw();
   };
   window.addEventListener('hashchange', onRouteChange);
@@ -696,6 +790,7 @@ export function setupFloatingWindow(trace: Trace): FloatingWindowHandle {
   return {
     dispose: () => {
       unsubscribeState();
+      unsubscribeTracePair();
       window.removeEventListener('resize', onResize);
       window.removeEventListener('hashchange', onRouteChange);
       // Tear down any in-flight drag/resize gesture — if the trace unloads

@@ -44,8 +44,10 @@ import {
   clampSidebarHeight,
   clampSidebarWidth,
   getFloatingState,
+  toggleSidebarCollapsed,
   updateFloatingState,
 } from './ai_floating_state';
+import {isAIAnalysisIdentityLocked} from './ai_shared_state';
 import {StreamingAnswerState, StreamingFlowState} from './types';
 
 /**
@@ -145,14 +147,12 @@ export function unregisterTransientSaver(saver: () => TransientState): void {
  */
 export function captureTransientState(): void {
   if (!activeSaver) {
-    pendingSnapshot = null;
     return;
   }
   try {
     pendingSnapshot = activeSaver();
   } catch (e) {
     console.warn('[AITransientState] saver threw', e);
-    pendingSnapshot = null;
   }
 }
 
@@ -187,6 +187,17 @@ export function resetTransientState(): void {
  * captured after, the snapshot would be empty on the new instance's mount.
  */
 export function switchFloatingMode(newMode: FloatingMode): void {
+  const currentState = getFloatingState();
+  if (isAIAnalysisIdentityLocked() && currentState.mode !== newMode) {
+    if (
+      currentState.mode === 'sidebar' &&
+      newMode === 'tab' &&
+      !currentState.sidebar.collapsed
+    ) {
+      toggleSidebarCollapsed();
+    }
+    return;
+  }
   captureTransientState();
   // Before entering floating mode, clamp the saved geometry against the
   // current viewport. Otherwise a position saved in a different viewport
@@ -206,4 +217,10 @@ export function switchFloatingMode(newMode: FloatingMode): void {
     }
   }
   updateFloatingState({mode: newMode});
+}
+
+export function toggleSidebarCollapsedWithTransientState(): void {
+  const state = getFloatingState();
+  if (state.mode !== 'sidebar') return;
+  toggleSidebarCollapsed();
 }

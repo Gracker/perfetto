@@ -123,6 +123,7 @@ export interface ProviderQuickSwitcherAttrs {
   backendUrl: string;
   apiKey?: string;
   compact?: boolean;
+  disabled?: boolean;
   onActivate?: () => void;
 }
 
@@ -314,38 +315,54 @@ export function providerHasClaudeSurface(provider: ProviderConfig): boolean {
 
 export function providerHasOpenAISurface(provider: ProviderConfig): boolean {
   const conn = provider.connection;
-  if (provider.type === 'openai' || provider.type === 'ollama' || isDualSurfaceProviderType(provider.type)) {
+  if (
+    provider.type === 'openai' ||
+    provider.type === 'ollama' ||
+    isDualSurfaceProviderType(provider.type)
+  ) {
     return true;
   }
   return !!(
     conn.openaiBaseUrl ||
     conn.openaiApiKey ||
     conn.openaiProtocol ||
-    (provider.type === 'custom' && conn.agentRuntime === 'openai-agents-sdk' && (conn.baseUrl || conn.apiKey))
+    (provider.type === 'custom' &&
+      conn.agentRuntime === 'openai-agents-sdk' &&
+      (conn.baseUrl || conn.apiKey))
   );
 }
 
-export function providerHasPiAgentCoreSurface(provider: ProviderConfig): boolean {
+export function providerHasPiAgentCoreSurface(
+  provider: ProviderConfig,
+): boolean {
   const conn = provider.connection;
-  return provider.type === 'custom' && !!(
-    conn.agentRuntime === 'pi-agent-core' ||
-    conn.piAgentCoreModelJson ||
-    conn.piAgentCoreModulePath
+  return (
+    provider.type === 'custom' &&
+    !!(
+      conn.agentRuntime === 'pi-agent-core' ||
+      conn.piAgentCoreModelJson ||
+      conn.piAgentCoreModulePath
+    )
   );
 }
 
 export function providerHasOpenCodeSurface(provider: ProviderConfig): boolean {
   const conn = provider.connection;
-  return provider.type === 'custom' && !!(
-    conn.agentRuntime === 'opencode' ||
-    conn.openCodeModelJson ||
-    conn.openCodeSdkModulePath ||
-    conn.openaiBaseUrl ||
-    conn.baseUrl
+  return (
+    provider.type === 'custom' &&
+    !!(
+      conn.agentRuntime === 'opencode' ||
+      conn.openCodeModelJson ||
+      conn.openCodeSdkModulePath ||
+      conn.openaiBaseUrl ||
+      conn.baseUrl
+    )
   );
 }
 
-export function resolveProviderRuntime(provider?: ProviderConfig): AgentRuntimeKind {
+export function resolveProviderRuntime(
+  provider?: ProviderConfig,
+): AgentRuntimeKind {
   const runtime = provider?.connection.agentRuntime;
   if (
     runtime === 'openai-agents-sdk' ||
@@ -359,7 +376,11 @@ export function resolveProviderRuntime(provider?: ProviderConfig): AgentRuntimeK
   if (provider.type === 'openai' || provider.type === 'ollama') {
     return 'openai-agents-sdk';
   }
-  if (provider.type === 'custom' && providerHasOpenAISurface(provider) && !providerHasClaudeSurface(provider)) {
+  if (
+    provider.type === 'custom' &&
+    providerHasOpenAISurface(provider) &&
+    !providerHasClaudeSurface(provider)
+  ) {
     return 'openai-agents-sdk';
   }
   return 'claude-agent-sdk';
@@ -369,8 +390,10 @@ export function providerSupportsRuntime(
   provider: ProviderConfig,
   runtime: AgentRuntimeKind,
 ): boolean {
-  if (runtime === 'openai-agents-sdk') return providerHasOpenAISurface(provider);
-  if (runtime === 'pi-agent-core') return providerHasPiAgentCoreSurface(provider);
+  if (runtime === 'openai-agents-sdk')
+    return providerHasOpenAISurface(provider);
+  if (runtime === 'pi-agent-core')
+    return providerHasPiAgentCoreSurface(provider);
   if (runtime === 'opencode') return providerHasOpenCodeSurface(provider);
   return providerHasClaudeSurface(provider);
 }

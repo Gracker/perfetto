@@ -64,6 +64,7 @@ import {
 } from '../core/command_manager';
 import {type HotkeyConfig, HotkeyContext} from '../widgets/hotkey_context';
 import {sleepMs} from '../base/utils';
+import {getSmartPerfettoBackendCspSources} from '../core/smartperfetto_backend_url';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -139,8 +140,8 @@ function setupContentSecurityPolicy() {
     'ws://127.0.0.1:9001', // Ditto, for the websocket RPC.
     'ws://127.0.0.1:9167', // For Web Device Proxy.
     // SmartPerfetto backend port pool (9100-9199 should be enough)
-    ...Array.from({ length: 100 }, (_, i) => `http://127.0.0.1:${9100 + i}`),
-    ...Array.from({ length: 100 }, (_, i) => `ws://127.0.0.1:${9100 + i}`),
+    ...Array.from({length: 100}, (_, i) => `http://127.0.0.1:${9100 + i}`),
+    ...Array.from({length: 100}, (_, i) => `ws://127.0.0.1:${9100 + i}`),
   ];
   if (CSP_WS_PERMISSIVE_PORT.get()) {
     const route = Router.parseUrl(window.location.href);
@@ -172,9 +173,7 @@ function setupContentSecurityPolicy() {
       `'self'`,
       'ws://127.0.0.1:8037', // For the adb websocket server.
       'https:', // Allow any HTTPS; service worker firewall adds granular filtering.
-      'http://localhost:3000', // For SmartPerfetto AI backend.
-      'http://127.0.0.1:3000', // For SmartPerfetto AI backend.
-      `http://${location.hostname}:3000`, // For SmartPerfetto AI backend (remote access).
+      ...getSmartPerfettoBackendCspSources(),
       'https://*.google-analytics.com',
       'https://*.googleapis.com', // For Google Cloud Storage fetches.
       'blob:',
@@ -346,7 +345,7 @@ function main() {
     (e: MouseEvent) => {
       if (e.ctrlKey) e.preventDefault();
     },
-    { passive: false },
+    {passive: false},
   );
 
   cssLoadPromise.then(() => onCssLoaded(app));
@@ -412,7 +411,7 @@ function onCssLoaded(app: AppImpl) {
       // print dialog.
       hotkeys.push({
         hotkey: 'Mod+P',
-        callback: () => { },
+        callback: () => {},
       });
 
       const currentTraceId = app.trace?.engine.engineId ?? 'no-trace';
@@ -425,7 +424,7 @@ function onCssLoaded(app: AppImpl) {
       // forces a remount.
       const uiMainKey = `${currentTraceId}-${themeSetting.get()}`;
 
-      return m(ThemeProvider, { theme: themeSetting.get() }, [
+      return m(ThemeProvider, {theme: themeSetting.get()}, [
         m(
           HotkeyContext,
           {
@@ -437,7 +436,7 @@ function onCssLoaded(app: AppImpl) {
             // behavior).
             focusable: false,
           },
-          m(OverlayContainer, { fillHeight: true }, m(UiMain, { key: uiMainKey })),
+          m(OverlayContainer, {fillHeight: true}, m(UiMain, {key: uiMainKey})),
         ),
       ]);
     },
@@ -473,7 +472,7 @@ function onCssLoaded(app: AppImpl) {
     }
 
     // Add support for opening traces from postMessage().
-    window.addEventListener('message', postMessageHandler, { passive: true });
+    window.addEventListener('message', postMessageHandler, {passive: true});
 
     // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
     // cases.
@@ -515,8 +514,8 @@ function maybeChangeRpcPortFromFragment() {
           m(
             'span',
             'For security reasons before connecting to a non-standard ' +
-            'TraceProcessor port you need to manually enable the flag to ' +
-            'relax the Content Security Policy and restart the UI.',
+              'TraceProcessor port you need to manually enable the flag to ' +
+              'relax the Content Security Policy and restart the UI.',
           ),
         ),
         buttons: [

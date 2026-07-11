@@ -51,8 +51,10 @@ function normalizeBackendUrl(value: unknown): string | undefined {
 }
 
 export function getSmartPerfettoBackendPort(): string {
-  return normalizePort(readRuntimeConfig().backendPort)
-    || DEFAULT_SMARTPERFETTO_BACKEND_PORT;
+  return (
+    normalizePort(readRuntimeConfig().backendPort) ||
+    DEFAULT_SMARTPERFETTO_BACKEND_PORT
+  );
 }
 
 export function getDefaultSmartPerfettoBackendUrl(): string {
@@ -61,6 +63,12 @@ export function getDefaultSmartPerfettoBackendUrl(): string {
 
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
   return `${protocol}//${window.location.hostname}:${getSmartPerfettoBackendPort()}`;
+}
+
+export function getSmartPerfettoBackendCspSources(): ReadonlyArray<string> {
+  const backendUrl = new URL(getDefaultSmartPerfettoBackendUrl());
+  const websocketProtocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  return [backendUrl.origin, `${websocketProtocol}//${backendUrl.host}`];
 }
 
 export function isDefaultSmartPerfettoBackendUrl(value: unknown): boolean {
