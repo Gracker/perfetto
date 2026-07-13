@@ -299,6 +299,15 @@ function teachingPrimaryPipelineId(result: TeachingPipelineResult): string {
   );
 }
 
+function teachingPrimaryRenderingTypeId(
+  result: TeachingPipelineResult,
+): string | undefined {
+  return (
+    result.detection?.primaryRenderingTypeId ||
+    result.detection?.renderingType?.id
+  );
+}
+
 function teachingPrimaryConfidence(
   result: TeachingPipelineResult,
 ): number | undefined {
@@ -740,8 +749,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   ): m.Children {
     const detection = result.detection;
     const subvariants = detection.subvariants || {};
+    const renderingTypeId = teachingPrimaryRenderingTypeId(result);
+    const pipelineId = teachingPrimaryPipelineId(result);
+    const identityChips: Array<{
+      label: string;
+      value: string | undefined;
+    }> = renderingTypeId
+      ? [
+          {label: '出图类型', value: renderingTypeId},
+          {label: '检测子路径', value: pipelineId},
+        ]
+      : [{label: 'Pipeline', value: pipelineId}];
     const chips: Array<{label: string; value: string | undefined}> = [
-      {label: 'Pipeline', value: teachingPrimaryPipelineId(result)},
+      ...identityChips,
       {
         label: 'Confidence',
         value: formatTeachingConfidence(teachingPrimaryConfidence(result)),
@@ -765,10 +785,38 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           ]),
         ),
       ),
+      detection.renderingTypeCandidates &&
+      detection.renderingTypeCandidates.length > 1
+        ? m('div.sp-teaching-inline-list', [
+            m('span', '候选出图类型'),
+            ...detection.renderingTypeCandidates
+              .slice(0, 5)
+              .map((candidate) =>
+                m(
+                  'code',
+                  `${candidate.id} ${formatTeachingConfidence(candidate.confidence)}`,
+                ),
+              ),
+          ])
+        : null,
       detection.candidates && detection.candidates.length > 1
         ? m('div.sp-teaching-inline-list', [
-            m('span', '候选类型'),
+            m('span', renderingTypeId ? '候选子路径' : '候选类型'),
             ...detection.candidates
+              .slice(0, 5)
+              .map((candidate) =>
+                m(
+                  'code',
+                  `${candidate.id} ${formatTeachingConfidence(candidate.confidence)}`,
+                ),
+              ),
+          ])
+        : null,
+      detection.relatedRenderingTypes &&
+      detection.relatedRenderingTypes.length > 0
+        ? m('div.sp-teaching-inline-list', [
+            m('span', '伴随出图类型'),
+            ...detection.relatedRenderingTypes
               .slice(0, 5)
               .map((candidate) =>
                 m(
@@ -9006,7 +9054,8 @@ Click ⚙️ to configure backend connection.`;
     const content = teachingContent(result);
     const observedFlow = result.observedFlow;
     const detection = result.detection;
-    const pipelineType = teachingPrimaryPipelineId(result);
+    const pipelineId = teachingPrimaryPipelineId(result);
+    const renderingTypeId = teachingPrimaryRenderingTypeId(result);
     const confidence = formatTeachingConfidence(
       teachingPrimaryConfidence(result),
     );
@@ -9014,8 +9063,15 @@ Click ⚙️ to configure backend connection.`;
       '## 🎓 渲染管线教学',
       '',
       '### 检测结果',
-      `- **管线类型**: \`${pipelineType}\` (置信度: ${confidence})`,
     ];
+    if (renderingTypeId) {
+      lines.push(
+        `- **出图类型**: \`${renderingTypeId}\` (置信度: ${confidence})`,
+        `- **检测子路径**: \`${pipelineId}\``,
+      );
+    } else {
+      lines.push(`- **管线类型**: \`${pipelineId}\` (置信度: ${confidence})`);
+    }
 
     const subvariants = detection.subvariants || {};
     for (const [label, value] of [
@@ -9029,13 +9085,41 @@ Click ⚙️ to configure backend connection.`;
       }
     }
 
-    if (detection.candidates && detection.candidates.length > 1) {
+    if (
+      detection.renderingTypeCandidates &&
+      detection.renderingTypeCandidates.length > 1
+    ) {
       lines.push(
-        `- **候选类型**: ${detection.candidates
+        `- **候选出图类型**: ${detection.renderingTypeCandidates
           .slice(0, 5)
           .map(
             (candidate) =>
               `${candidate.id} (${formatTeachingConfidence(candidate.confidence)})`,
+          )
+          .join(', ')}`,
+      );
+    }
+    if (detection.candidates && detection.candidates.length > 1) {
+      lines.push(
+        `- **${renderingTypeId ? '候选子路径' : '候选类型'}**: ${detection.candidates
+          .slice(0, 5)
+          .map(
+            (candidate) =>
+              `${candidate.id} (${formatTeachingConfidence(candidate.confidence)})`,
+          )
+          .join(', ')}`,
+      );
+    }
+    if (
+      detection.relatedRenderingTypes &&
+      detection.relatedRenderingTypes.length > 0
+    ) {
+      lines.push(
+        `- **伴随出图类型**: ${detection.relatedRenderingTypes
+          .slice(0, 5)
+          .map(
+            (candidate) =>
+              `${candidate.id} (${formatTeachingConfidence(candidate.confidence)}; ${candidate.docPath})`,
           )
           .join(', ')}`,
       );

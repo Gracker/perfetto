@@ -179,12 +179,23 @@ export interface TeachingPipelineResult {
 export interface TeachingDetection {
   detected?: boolean;
   primaryPipelineId?: string;
+  primaryRenderingTypeId?: string;
   primaryConfidence?: number;
   primary_pipeline?: {
     id: string;
     confidence: number;
   };
+  renderingType?: {
+    id: string;
+    docPath: string;
+  };
   candidates?: Array<{id: string; confidence: number}>;
+  renderingTypeCandidates?: Array<{id: string; confidence: number}>;
+  relatedRenderingTypes?: Array<{
+    id: string;
+    confidence: number;
+    docPath: string;
+  }>;
   features?: Array<{
     id?: string;
     name?: string;

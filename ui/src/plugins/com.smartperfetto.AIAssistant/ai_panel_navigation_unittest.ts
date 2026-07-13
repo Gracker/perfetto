@@ -512,7 +512,10 @@ describe('AIPanel teaching pipeline compatibility view', () => {
         detection: {
           primaryPipelineId: 'android_hwui',
           primaryConfidence: 0.91,
-          candidates: [{id: 'android_hwui', confidence: 0.91}],
+          candidates: [
+            {id: 'android_hwui', confidence: 0.91},
+            {id: 'compose', confidence: 0.67},
+          ],
           features: [{name: 'webview', confidence: 0.74}],
         },
         observedFlow: {
@@ -598,8 +601,55 @@ describe('AIPanel teaching pipeline compatibility view', () => {
     expect(markdown).toContain('wakes_to');
     expect(markdown).toContain('Binder:123 / system_server');
     expect(markdown).toContain('present fence not available');
+    expect(markdown).toContain('**候选类型**:');
+    expect(markdown).not.toContain('**候选子路径**:');
     expect(markdown).toContain('未命中的 pattern: ^RenderThread$');
     expect(markdown).toContain('已 pin 的 track: com.example.app > main');
+  });
+
+  it('shows the Android 17 rendering type separately from the detected subpath', () => {
+    const panel = new AIPanel() as any;
+    const result = {
+      success: true,
+      detection: {
+        primaryPipelineId: 'FLUTTER_SURFACEVIEW_IMPELLER',
+        primaryRenderingTypeId: 'S10_FLUTTER',
+        primaryConfidence: 0.93,
+        renderingType: {
+          id: 'S10_FLUTTER',
+          docPath: 'rendering_pipelines/S10_flutter_type.md',
+        },
+        renderingTypeCandidates: [{id: 'S10_FLUTTER', confidence: 0.93}],
+        relatedRenderingTypes: [
+          {
+            id: 'S06_MULTI_WINDOW',
+            confidence: 0.72,
+            docPath: 'rendering_pipelines/S06_multi_window_type.md',
+          },
+        ],
+        candidates: [
+          {id: 'FLUTTER_SURFACEVIEW_IMPELLER', confidence: 0.93},
+        ],
+      },
+      teaching: {
+        title: 'Android Perfetto 系列 - App 出图类型 - Flutter 类型',
+        summary: 'Flutter rendering.',
+      },
+    };
+    const markdown = panel.buildTeachingPipelineMarkdown(result);
+    const renderedSummary = JSON.stringify(
+      panel.renderTeachingPipelineSummary(result),
+    );
+
+    expect(markdown).toContain('**出图类型**: `S10_FLUTTER`');
+    expect(markdown).toContain('**检测子路径**: `FLUTTER_SURFACEVIEW_IMPELLER`');
+    expect(markdown).toContain('**伴随出图类型**: S06_MULTI_WINDOW');
+    expect(markdown).toContain('rendering_pipelines/S06_multi_window_type.md');
+    expect(markdown).not.toContain('**管线类型**: `FLUTTER_SURFACEVIEW_IMPELLER`');
+    expect(renderedSummary).toContain('出图类型');
+    expect(renderedSummary).toContain('S10_FLUTTER');
+    expect(renderedSummary).toContain('检测子路径');
+    expect(renderedSummary).toContain('伴随出图类型');
   });
 
   it('returns explicit pin execution failure when trace context is absent', async () => {
