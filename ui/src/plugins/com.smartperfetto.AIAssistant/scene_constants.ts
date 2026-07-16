@@ -8,6 +8,8 @@
  * presentational formatters used by the AI Assistant plugin.
  */
 
+import {uiText} from './ui_language';
+
 /**
  * Scene category → 中文显示名
  */
@@ -35,10 +37,51 @@ export const SCENE_DISPLAY_NAMES: Record<string, string> = {
   'home_key': 'Home键',
   'recents_key': '最近任务键',
   'anr': 'ANR',
+  'jank_region': '卡顿区间',
   'ime_show': '键盘弹出',
   'ime_hide': '键盘收起',
   'window_transition': '窗口转场',
 };
+
+export const SCENE_DISPLAY_NAMES_EN: Record<string, string> = {
+  'cold_start': 'Cold start',
+  'warm_start': 'Warm start',
+  'hot_start': 'Hot start',
+  'scroll_start': 'Scroll start',
+  'scroll': 'Scroll',
+  'inertial_scroll': 'Inertial scroll',
+  'navigation': 'Navigation',
+  'app_switch': 'App switch',
+  'home_screen': 'Home screen',
+  'app_foreground': 'App foreground',
+  'screen_on': 'Screen on',
+  'screen_off': 'Screen off',
+  'screen_sleep': 'Screen sleep',
+  'screen_unlock': 'Screen unlock',
+  'notification': 'Notification',
+  'split_screen': 'Split screen',
+  'tap': 'Tap',
+  'long_press': 'Long press',
+  'idle': 'Idle',
+  'back_key': 'Back key',
+  'home_key': 'Home key',
+  'recents_key': 'Recents key',
+  'anr': 'ANR',
+  'jank_region': 'Jank region',
+  'ime_show': 'Keyboard shown',
+  'ime_hide': 'Keyboard hidden',
+  'window_transition': 'Window transition',
+};
+
+export function getSceneDisplayName(
+  sceneType: string,
+  projectedLabel?: string,
+): string {
+  const zh = SCENE_DISPLAY_NAMES[sceneType];
+  const en = SCENE_DISPLAY_NAMES_EN[sceneType];
+  if (zh || en) return uiText(zh ?? sceneType, en ?? sceneType);
+  return projectedLabel?.trim() || sceneType;
+}
 
 /**
  * Pin instruction shape — 与 ai_panel.ts:pinTracksFromInstructions 的 input 结构兼容
@@ -159,10 +202,10 @@ export function getSceneResponseStatusLabel(
   metadata?: Record<string, any>,
 ): string {
   const rating = getScenePerformanceRating(sceneType, durationMs, metadata);
-  if (rating === '🟢') return '🟢 流畅';
-  if (rating === '🟡') return '🟡 轻微波动';
-  if (rating === '🔴') return '🔴 明显波动';
-  return '⚪ 未知';
+  if (rating === '🟢') return uiText('🟢 流畅', '🟢 Smooth');
+  if (rating === '🟡') return uiText('🟡 轻微波动', '🟡 Minor fluctuation');
+  if (rating === '🔴') return uiText('🔴 明显波动', '🔴 Significant fluctuation');
+  return uiText('⚪ 未知', '⚪ Unknown');
 }
 
 /**

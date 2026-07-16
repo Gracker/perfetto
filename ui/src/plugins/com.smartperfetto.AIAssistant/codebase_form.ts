@@ -25,10 +25,12 @@ import type {
   RegisterCodebaseInput,
 } from './codebase_api';
 import {previewCodebaseRoot, registerCodebase} from './codebase_api';
+import {uiText as text} from './ui_language';
 
 export interface CodebaseFormAttrs {
   backendUrl: string;
   apiKey?: string;
+  scopeKey: string;
   onRegistered: (codebase: CodebaseSummary) => void;
   onCancel: () => void;
 }
@@ -130,31 +132,95 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private licenseTag = '';
   private pathFilters = '';
   private excludeGlobs = '';
-  private symbolMapPaths = '';
   private sendToProvider = false;
   private preview: CodebasePreview | null = null;
   private loading = false;
   private error: string | null = null;
+  private requestEpoch = 0;
+  private mounted = false;
+  private backendUrl = '';
+  private apiKey?: string;
+  private scopeKey = '';
+  private onRegistered: CodebaseFormAttrs['onRegistered'] = () => {};
+
+  oninit(vnode: m.Vnode<CodebaseFormAttrs>) {
+    this.mounted = true;
+    this.syncAttrs(vnode.attrs);
+  }
+
+  onbeforeupdate(vnode: m.Vnode<CodebaseFormAttrs>) {
+    this.syncAttrs(vnode.attrs);
+    return true;
+  }
+
+  onremove() {
+    this.mounted = false;
+    this.requestEpoch += 1;
+    this.loading = false;
+  }
+
+  private syncAttrs(attrs: CodebaseFormAttrs) {
+    if (
+      attrs.backendUrl !== this.backendUrl ||
+      attrs.apiKey !== this.apiKey ||
+      attrs.scopeKey !== this.scopeKey
+    ) {
+      this.requestEpoch += 1;
+      this.loading = false;
+      this.preview = null;
+      this.error = null;
+    }
+    this.backendUrl = attrs.backendUrl;
+    this.apiKey = attrs.apiKey;
+    this.scopeKey = attrs.scopeKey;
+    this.onRegistered = attrs.onRegistered;
+  }
+
+  private requestIsCurrent(
+    epoch: number,
+    backendUrl: string,
+    apiKey: string | undefined,
+    scopeKey: string,
+  ): boolean {
+    return this.mounted &&
+      epoch === this.requestEpoch &&
+      backendUrl === this.backendUrl &&
+      apiKey === this.apiKey &&
+      scopeKey === this.scopeKey;
+  }
 
   private async previewRoot(attrs: CodebaseFormAttrs) {
+    const epoch = ++this.requestEpoch;
+    const backendUrl = attrs.backendUrl;
+    const apiKey = attrs.apiKey;
+    const scopeKey = attrs.scopeKey;
     this.loading = true;
     this.error = null;
     m.redraw();
     try {
-      this.preview = await previewCodebaseRoot(
-        attrs.backendUrl,
+      const preview = await previewCodebaseRoot(
+        backendUrl,
         this.rootPath,
-        attrs.apiKey,
+        apiKey,
       );
+      if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      this.preview = preview;
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : 'Preview failed';
+      if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      this.error = e instanceof Error ? e.message : text('预览失败', 'Preview failed');
     } finally {
-      this.loading = false;
-      m.redraw();
+      if (this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
+        this.loading = false;
+        m.redraw();
+      }
     }
   }
 
   private async register(attrs: CodebaseFormAttrs) {
+    const epoch = ++this.requestEpoch;
+    const backendUrl = attrs.backendUrl;
+    const apiKey = attrs.apiKey;
+    const scopeKey = attrs.scopeKey;
     this.loading = true;
     this.error = null;
     m.redraw();
@@ -169,20 +235,24 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       ...(optionalString(this.licenseTag) ? {licenseTag: optionalString(this.licenseTag)} : {}),
       ...(splitLines(this.pathFilters).length > 0 ? {pathFilters: splitLines(this.pathFilters)} : {}),
       ...(splitLines(this.excludeGlobs).length > 0 ? {excludeGlobs: splitLines(this.excludeGlobs)} : {}),
-      ...(splitLines(this.symbolMapPaths).length > 0 ? {symbolMapPaths: splitLines(this.symbolMapPaths)} : {}),
     };
     try {
-      const result = await registerCodebase(attrs.backendUrl, input, attrs.apiKey);
-      attrs.onRegistered(result.codebase);
+      const result = await registerCodebase(backendUrl, input, apiKey);
+      if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      this.onRegistered(result.codebase);
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : 'Registration failed';
+      if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      this.error = e instanceof Error ? e.message : text('注册失败', 'Registration failed');
     } finally {
-      this.loading = false;
-      m.redraw();
+      if (this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
+        this.loading = false;
+        m.redraw();
+      }
     }
   }
 
   private renderField(
+    id: string,
     label: string,
     value: string,
     oninput: (value: string) => void,
@@ -190,8 +260,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   ): m.Children {
     const hint = attrs?.hint;
     return m('div', {style: STYLES.field}, [
-      m('label', {style: STYLES.label}, label),
+      m('label', {for: id, style: STYLES.label}, label),
       m('input[type=text]', {
+        id,
         style: STYLES.input,
         value,
         placeholder: attrs?.placeholder || '',
@@ -204,22 +275,30 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private renderPreview(): m.Children {
     if (!this.preview) return null;
     return m('div', {style: STYLES.preview}, [
-      m('div', `Accepted files: ${this.preview.acceptedFileCount}`),
-      m('div', `Skipped files: ${this.preview.skippedFileCount}`),
+      m('div', text(
+        `可接受文件：${this.preview.acceptedFileCount}`,
+        `Accepted files: ${this.preview.acceptedFileCount}`,
+      )),
+      m('div', text(
+        `已跳过文件：${this.preview.skippedFileCount}`,
+        `Skipped files: ${this.preview.skippedFileCount}`,
+      )),
       this.preview.blocked
-        ? m('div', {style: STYLES.error}, this.preview.blockedReason || 'Blocked')
+        ? m('div', {style: STYLES.error}, this.preview.blockedReason || text('已阻止', 'Blocked'))
         : null,
     ]);
   }
 
   view(vnode: m.Vnode<CodebaseFormAttrs>): m.Children {
+    this.syncAttrs(vnode.attrs);
     return m('div', [
       m('div', {style: STYLES.row}, [
         m('div', {style: STYLES.field}, [
-          m('label', {style: STYLES.label}, 'Kind'),
+          m('label', {for: 'smartperfetto-codebase-kind', style: STYLES.label}, text('类型', 'Kind')),
           m(
             'select',
             {
+              id: 'smartperfetto-codebase-kind',
               style: STYLES.input,
               value: this.kind,
               onchange: (e: Event) => {
@@ -230,7 +309,8 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
           ),
         ]),
         this.renderField(
-          'Display name',
+          'smartperfetto-codebase-display-name',
+          text('显示名称', 'Display name'),
           this.displayName,
           (value) => {
             this.displayName = value;
@@ -239,7 +319,8 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         ),
       ]),
       this.renderField(
-        'Root path',
+        'smartperfetto-codebase-root-path',
+        text('源码根路径', 'Root path'),
         this.rootPath,
         (value) => {
           this.rootPath = value;
@@ -247,35 +328,38 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         {placeholder: '/Users/me/MyApp'},
       ),
       m('div', {style: STYLES.row}, [
-        this.renderField('Vendor', this.vendor, (value) => {
+        this.renderField('smartperfetto-codebase-vendor', text('厂商', 'Vendor'), this.vendor, (value) => {
           this.vendor = value;
         }),
-        this.renderField('Build ID', this.buildId, (value) => {
+        this.renderField('smartperfetto-codebase-build-id', text('构建 ID', 'Build ID'), this.buildId, (value) => {
           this.buildId = value;
         }),
       ]),
       m('div', {style: STYLES.row}, [
-        this.renderField('Commit', this.commitHash, (value) => {
+        this.renderField('smartperfetto-codebase-commit', text('提交版本', 'Commit'), this.commitHash, (value) => {
           this.commitHash = value;
         }),
-        this.renderField('License tag', this.licenseTag, (value) => {
+        this.renderField('smartperfetto-codebase-license', text('许可证标记', 'License tag'), this.licenseTag, (value) => {
           this.licenseTag = value;
         }),
       ]),
       this.renderField(
-        'Path filters',
+        'smartperfetto-codebase-path-filters',
+        text('路径过滤', 'Path filters'),
         this.pathFilters,
         (value) => {
           this.pathFilters = value;
         },
-        {hint: 'Comma or newline separated relative prefixes.'},
+        {hint: text('使用逗号或换行分隔相对路径前缀。', 'Comma or newline separated relative prefixes.')},
       ),
-      this.renderField('Exclude globs', this.excludeGlobs, (value) => {
+      this.renderField('smartperfetto-codebase-exclude-globs', text('排除规则', 'Exclude globs'), this.excludeGlobs, (value) => {
         this.excludeGlobs = value;
       }),
-      this.renderField('Symbol maps', this.symbolMapPaths, (value) => {
-        this.symbolMapPaths = value;
-      }),
+      m('div', {style: STYLES.hint},
+        text(
+          '原生符号产物导入尚未配置；当前符号查询来自已索引源码文本中提取的符号。',
+          'Native symbol artifact ingestion is not configured. Symbol lookup currently uses symbols derived from the indexed source text.',
+        )),
       m('label', {style: {...STYLES.label, display: 'flex', gap: '8px'}}, [
         m('input[type=checkbox]', {
           checked: this.sendToProvider,
@@ -283,7 +367,10 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             this.sendToProvider = (e.target as HTMLInputElement).checked;
           },
         }),
-        'Allow selected excerpts to be sent to the configured model provider',
+        text(
+          '允许将选中的脱敏源码片段发送给已配置的模型提供商',
+          'Allow selected redacted excerpts to be sent to the configured model provider',
+        ),
       ]),
       this.renderPreview(),
       this.error ? m('div', {style: STYLES.error}, this.error) : null,
@@ -296,7 +383,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             onclick: () => vnode.attrs.onCancel(),
             disabled: this.loading,
           },
-          'Cancel',
+          text('取消', 'Cancel'),
         ),
         m(
           'button',
@@ -306,7 +393,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             onclick: () => this.previewRoot(vnode.attrs),
             disabled: this.loading || !this.rootPath.trim(),
           },
-          'Preview',
+          text('预览', 'Preview'),
         ),
         m(
           'button',
@@ -316,7 +403,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             onclick: () => this.register(vnode.attrs),
             disabled: this.loading || !this.rootPath.trim() || !this.displayName.trim(),
           },
-          'Register',
+          text('注册', 'Register'),
         ),
       ]),
     ]);

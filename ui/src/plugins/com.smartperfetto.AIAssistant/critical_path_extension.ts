@@ -4,10 +4,13 @@
 
 import {Trace} from '../../public/trace';
 import {getBackendUploadState} from '../../core/backend_upload_state';
+import {
+  backendUploadSourceKey,
+  getBackendUploadIdentityKey,
+} from '../../core/backend_uploader';
 import {THREAD_STATE_TRACK_KIND} from '../../public/track_kinds';
 import {
   buildSmartPerfettoContextHeaders,
-  buildSmartPerfettoWorkspaceApiUrl,
 } from '../../core/smartperfetto_request_context';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 import {SETTINGS_KEY} from './types';
@@ -116,51 +119,18 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return data;
 }
 
-async function resolveCurrentTraceId(): Promise<string> {
+async function resolveCurrentTraceId(sourceKey: string): Promise<string> {
   const backendUploadState = getBackendUploadState();
-  if (backendUploadState.state === 'ready' && backendUploadState.traceId) {
+  const backendUrl = getBackendUrl();
+  if (
+    backendUploadState.state === 'ready' &&
+    backendUploadState.traceId &&
+    backendUploadState.sourceKey === sourceKey &&
+    backendUploadState.backendIdentityKey === getBackendUploadIdentityKey(backendUrl, sourceKey)
+  ) {
     return backendUploadState.traceId;
   }
-
-  const backendUrl = getBackendUrl();
-
-  try {
-    const stats = await fetchJson<{
-      stats?: {
-        traces?: {items?: Array<{id?: string; status?: string; uploadedAt?: string; uploadTime?: string}>};
-        processors?: {traceIds?: string[]};
-      };
-    }>(
-      buildSmartPerfettoWorkspaceApiUrl(backendUrl, 'traces', '/stats'),
-    );
-    const items = stats.stats?.traces?.items ?? [];
-    const readyItems = items
-      .filter((trace) => trace.status === 'ready' && trace.id)
-      .sort(
-        (a, b) =>
-          new Date(b.uploadedAt || b.uploadTime || 0).getTime() -
-          new Date(a.uploadedAt || a.uploadTime || 0).getTime(),
-      );
-    if (readyItems[0]?.id) return readyItems[0].id;
-
-    const traceIds = stats.stats?.processors?.traceIds ?? [];
-    if (traceIds.length > 0) return traceIds[traceIds.length - 1];
-  } catch {
-    // Fall through to the workspace trace list.
-  }
-
-  const traces = await fetchJson<{
-    traces?: Array<{id?: string; status?: string; uploadedAt?: string; uploadTime?: string}>;
-  }>(buildSmartPerfettoWorkspaceApiUrl(backendUrl, 'traces'));
-  const ready = (traces.traces ?? [])
-    .filter((trace) => trace.status === 'ready' && trace.id)
-    .sort(
-      (a, b) =>
-        new Date(b.uploadedAt || b.uploadTime || 0).getTime() -
-        new Date(a.uploadedAt || a.uploadTime || 0).getTime(),
-    );
-  if (ready[0]?.id) return ready[0].id;
-  throw new Error('当前网页还没有可用的后端 traceId，请先等待 AI Assistant 显示 RPC 已连接。');
+  throw new Error('当前 Trace 尚未完成后端绑定，请等待 AI Assistant 显示当前 Trace 已连接后再试。');
 }
 
 function numericString(value: unknown): string {
@@ -425,7 +395,11 @@ export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} 
     renderDrawer();
     try {
       const backendUrl = getBackendUrl();
-      const traceId = await resolveCurrentTraceId();
+      const traceSource = (trace.traceInfo as unknown as {source?: Parameters<typeof backendUploadSourceKey>[0]}).source;
+      if (!traceSource) {
+        throw new Error('当前 Trace 缺少可验证的来源标识，无法安全选择后端 Trace。');
+      }
+      const traceId = await resolveCurrentTraceId(backendUploadSourceKey(traceSource));
       state.traceId = traceId;
       const selectedTask = getSelectedTask(trace);
       const result = await fetchJson<{

@@ -19,6 +19,8 @@
 import m from 'mithril';
 import {Trace} from '../../public/trace';
 import {Time} from '../../base/time';
+import {getSceneDisplayName} from './scene_constants';
+import {uiText} from './ui_language';
 
 /**
  * Detected scene from trace analysis
@@ -29,6 +31,7 @@ export interface DetectedScene {
   endTs: string;
   durationMs: number;
   confidence: number;
+  label?: string;
   appPackage?: string;
   activityName?: string;
   metadata?: Record<string, any>;
@@ -41,36 +44,6 @@ export interface SceneNavigationBarAttrs {
   onSceneClick?: (scene: DetectedScene, index: number) => void;
   onRefresh?: () => void;
 }
-
-// Scene type display names
-const SCENE_DISPLAY_NAMES: Record<string, string> = {
-  'cold_start': '冷启动',
-  'warm_start': '温启动',
-  'hot_start': '热启动',
-  'scroll_start': '滑动起点',
-  'scroll': '滑动',
-  'inertial_scroll': '惯性滑动',
-  'navigation': '跳转',
-  'app_switch': '切换',
-  'home_screen': '桌面',
-  'app_foreground': '应用内',
-  'screen_on': '亮屏',
-  'screen_off': '熄屏',
-  'screen_sleep': '休眠',
-  'screen_unlock': '解锁',
-  'notification': '通知',
-  'split_screen': '分屏',
-  'tap': '点击',
-  'long_press': '长按',
-  'idle': '空闲',
-  'back_key': '返回',
-  'home_key': 'Home',
-  'recents_key': '最近',
-  'anr': 'ANR',
-  'ime_show': '弹出键盘',
-  'ime_hide': '收起键盘',
-  'window_transition': '转场',
-};
 
 // Scene type icons
 const SCENE_ICONS: Record<string, string> = {
@@ -127,14 +100,14 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
       m('div.scene-nav-header', [
         m('span.scene-nav-label', [
           m('i.pf-icon', 'movie'),
-          ' 场景导航',
+          uiText(' 场景导航', ' Scene navigation'),
         ]),
         isLoading
           ? m('span.scene-nav-loading', [
               m('i.pf-icon.spinning', 'sync'),
-              ' 检测中...',
+              uiText(' 检测中...', ' Detecting...'),
             ])
-          : m('span.scene-nav-count', `${scenes.length} 个场景`),
+          : m('span.scene-nav-count', uiText(`${scenes.length} 个场景`, `${scenes.length} scenes`)),
       ]),
 
       m(
@@ -144,7 +117,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
               m('button.scene-nav-arrow', {
                 onclick: () => this.jumpToPrevious(scenes, trace, onSceneClick),
                 disabled: this.currentIndex <= 0,
-                title: '上一个场景',
+                title: uiText('上一个场景', 'Previous scene'),
               }, m('i.pf-icon', 'chevron_left')),
               m('div.scene-nav-chips-scroll',
                 scenes.map((scene, index) => this.renderSceneChip(scene, index, scenes, trace, onSceneClick))
@@ -152,19 +125,19 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
               m('button.scene-nav-arrow', {
                 onclick: () => this.jumpToNext(scenes, trace, onSceneClick),
                 disabled: this.currentIndex >= scenes.length - 1,
-                title: '下一个场景',
+                title: uiText('下一个场景', 'Next scene'),
               }, m('i.pf-icon', 'chevron_right')),
             ])
           : isLoading
-            ? m('div.scene-nav-empty', '正在检测操作场景...')
-            : m('div.scene-nav-empty', '未检测到场景'),
+            ? m('div.scene-nav-empty', uiText('正在检测操作场景...', 'Detecting interaction scenes...'))
+            : m('div.scene-nav-empty', uiText('未检测到场景', 'No scenes detected')),
       ),
 
       onRefresh
         ? m('button.scene-nav-refresh', {
             onclick: onRefresh,
             disabled: isLoading,
-            title: '刷新场景检测',
+            title: uiText('刷新场景检测', 'Refresh scene detection'),
           }, m('i.pf-icon', 'refresh'))
         : null,
     ]);
@@ -177,7 +150,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
     trace: Trace,
     onSceneClick?: (scene: DetectedScene, index: number) => void
   ): m.Children {
-    const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+    const displayName = getSceneDisplayName(scene.type, scene.label);
     const icon = SCENE_ICONS[scene.type] || '📍';
     const rating = this.getPerformanceRating(scene);
     const isActive = index === this.currentIndex;
@@ -220,20 +193,23 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
   }
 
   private getSceneTooltip(scene: DetectedScene): string {
-    const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+    const displayName = getSceneDisplayName(scene.type, scene.label);
     const parts = [displayName];
 
     if (scene.appPackage) {
       parts.push(`App: ${scene.appPackage}`);
     }
 
-    parts.push(`时长: ${scene.durationMs}ms`);
+    parts.push(uiText(`时长: ${scene.durationMs}ms`, `Duration: ${scene.durationMs}ms`));
 
     if ((scene.type === 'scroll' || scene.type === 'inertial_scroll') && scene.metadata?.averageFps !== undefined) {
       parts.push(`FPS: ${scene.metadata.averageFps}`);
     }
 
-    parts.push(`置信度: ${(scene.confidence * 100).toFixed(0)}%`);
+    parts.push(uiText(
+      `置信度: ${(scene.confidence * 100).toFixed(0)}%`,
+      `Confidence: ${(scene.confidence * 100).toFixed(0)}%`,
+    ));
 
     return parts.join('\n');
   }

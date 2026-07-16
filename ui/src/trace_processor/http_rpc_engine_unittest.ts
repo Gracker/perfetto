@@ -23,6 +23,7 @@ function okResponse(): Response {
     ok: true,
     status: 200,
     statusText: 'OK',
+    json: async () => ({}),
   } as Response;
 }
 
@@ -74,6 +75,7 @@ describe('HttpRpcEngine target selection', () => {
     globalThis.fetch = originalFetch;
     setDocumentVisibility('visible');
     setNavigatorOnline(true);
+    vi.unstubAllGlobals();
   });
 
   it('uses direct port targets by default', () => {
@@ -152,6 +154,63 @@ describe('HttpRpcEngine target selection', () => {
     expect((init.headers as Headers).get('X-Window-Id')).toBe('window-a');
     expect((init.headers as Headers).get('Content-Type')).toBe('application/json');
     expect(heartbeatBody(0)).toEqual({visibility: 'visible'});
+  });
+
+  it('rotates the WebSocket capability returned by an authenticated heartbeat', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ...okResponse(),
+      json: async () => ({
+        websocketCapability: {
+          protocol: 'smartperfetto.tp.rotated',
+          expiresAt: 5000,
+        },
+      }),
+    } as Response);
+    const target = {
+      mode: 'backend-lease-proxy' as const,
+      leaseId: 'lease-a',
+      statusUrl: 'http://backend/api/tp/lease-a/status',
+      websocketUrl: 'ws://backend/api/tp/lease-a/websocket',
+      heartbeatUrl: 'http://backend/api/tp/lease-a/heartbeat',
+      websocketProtocols: ['smartperfetto.tp.initial'],
+    };
+
+    HttpRpcEngine.setRpcTarget(target);
+    await flushAsyncWork();
+
+    expect(target.websocketProtocols).toEqual(['smartperfetto.tp.rotated']);
+    expect(target).toMatchObject({websocketCapabilityExpiresAt: 5000});
+  });
+
+  it('passes the scoped capability as a WebSocket subprotocol', () => {
+    const socket = {
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+    };
+    const websocket = vi.fn(function () {
+      return socket;
+    });
+    vi.stubGlobal('WebSocket', websocket);
+    HttpRpcEngine.setRpcTarget({
+      mode: 'backend-lease-proxy',
+      leaseId: 'lease-a',
+      statusUrl: 'http://backend/api/tp/lease-a/status',
+      websocketUrl: 'ws://backend/api/tp/lease-a/websocket',
+      websocketProtocols: ['smartperfetto.tp.signed'],
+    });
+    const engine = new HttpRpcEngine('test-engine');
+
+    engine.rpcSendRequestBytes(new Uint8Array([1]));
+
+    expect(websocket).toHaveBeenCalledWith(
+      'ws://backend/api/tp/lease-a/websocket',
+      ['smartperfetto.tp.signed'],
+    );
+    engine[Symbol.dispose]();
   });
 
   it('updates frontend lease heartbeat visibility from page and network state', async () => {

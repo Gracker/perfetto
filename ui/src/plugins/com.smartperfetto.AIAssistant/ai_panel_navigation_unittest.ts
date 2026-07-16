@@ -30,6 +30,9 @@ import {sessionManager} from './session_manager';
 import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import type {TracePairWorkspaceScope} from './trace_pair_workspace_state_model';
 import type {AIPanelState} from './types';
+import {uiText} from './ui_language';
+import {saveAnalysisContext} from './analysis_context';
+import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
 
 type TestAIPanel = {
   state: AIPanelState;
@@ -38,6 +41,7 @@ type TestAIPanel = {
       traceTitle: string;
       start: bigint;
       end: bigint;
+      source?: {type: 'HTTP_RPC'};
     };
     notes?: {
       removeNote: () => void;
@@ -152,6 +156,71 @@ describe('AIPanel analysis mode menu', () => {
   });
 });
 
+describe('AIPanel backend binding reset', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('loads the destination partition for a URL-only change', () => {
+    const panel = createMutableTestPanel();
+    const original = {
+      ...panel.state.settings,
+      backendUrl: 'http://old-backend',
+      backendApiKey: 'same-key',
+    };
+    panel.state.settings = original;
+    saveAnalysisContext('http://new-backend', getSmartPerfettoRequestContext(), {
+      codeAwareMode: 'metadata_only',
+      codebaseIds: ['new-backend-source'],
+      knowledgeSourceIds: [],
+    });
+
+    panel.saveSettings({...original, backendUrl: 'http://new-backend'});
+
+    expect(panel.state.analysisContext).toEqual({
+      codeAwareMode: 'metadata_only',
+      codebaseIds: ['new-backend-source'],
+      knowledgeSourceIds: [],
+    });
+  });
+
+  it.each([
+    ['credential-only', 'http://old-backend'],
+    ['URL and credential', 'http://new-backend'],
+  ])('clears private selection for a %s change', (_label, nextUrl) => {
+    const panel = createMutableTestPanel();
+    const original = {
+      ...panel.state.settings,
+      backendUrl: 'http://old-backend',
+      backendApiKey: 'old-key',
+    };
+    panel.state.settings = original;
+    panel.state.analysisContext = {
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['old-credential-source'],
+      knowledgeSourceIds: ['old-credential-rag'],
+    };
+    saveAnalysisContext(nextUrl, getSmartPerfettoRequestContext(), {
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['destination-old-credential-source'],
+      knowledgeSourceIds: ['destination-old-credential-rag'],
+    });
+
+    panel.saveSettings({
+      ...original,
+      backendUrl: nextUrl,
+      backendApiKey: 'new-key',
+    });
+
+    expect(panel.state.analysisContext).toEqual({
+      codeAwareMode: 'off',
+      codebaseIds: [],
+      knowledgeSourceIds: [],
+    });
+  });
+});
+
 describe('AIPanel header tool panels', () => {
   it('opens the dual-trace shell before a history trace is selected', () => {
     const panel = createMutableTestPanel();
@@ -167,7 +236,10 @@ describe('AIPanel header tool panels', () => {
     panel.fetchAvailableTraces = vi.fn(async () => {});
 
     const header = panel.renderHeaderActions(true, true, true);
-    findVNodeByTitle(header, '打开双 Trace 工作区').attrs.onclick();
+    findVNodeByTitle(
+      header,
+      uiText('打开双 Trace 工作区', 'Open dual-trace workspace'),
+    ).attrs.onclick();
 
     expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
       open: true,
@@ -184,9 +256,18 @@ describe('AIPanel header tool panels', () => {
     panel.state.isLoading = true;
 
     const header = panel.renderHeaderActions(true, true, true);
-    const button = findVNodeByTitle(header, '打开双 Trace 工作区');
+    const button = findVNodeByTitle(
+      header,
+      uiText('打开双 Trace 工作区', 'Open dual-trace workspace'),
+    );
     const newChatButton = findVNodeByTitle(header, 'New Chat');
-    const settingsButton = findVNodeByTitle(header, '分析运行中，设置保持只读');
+    const settingsButton = findVNodeByTitle(
+      header,
+      uiText(
+        '分析运行中，设置保持只读',
+        'Settings are read-only while analysis is running',
+      ),
+    );
 
     expect(button.attrs.disabled).toBe(true);
     expect(button.attrs.onclick).toBeUndefined();
@@ -208,6 +289,28 @@ describe('AIPanel header tool panels', () => {
 
     expect(panel.state.showSettings).toBe(false);
     expect(panel.state.settings).toBe(originalSettings);
+    expect(saveSettings).not.toHaveBeenCalled();
+    saveSettings.mockRestore();
+  });
+
+  it('does not silently rebind an HTTP RPC-only trace to a new backend', () => {
+    const panel = createMutableTestPanel();
+    const originalSettings = panel.state.settings;
+    const saveSettings = vi.spyOn(sessionManager, 'saveSettings');
+    panel.engine = {mode: 'HTTP_RPC'};
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'rpc-only.trace',
+        start: 0n,
+        end: 10n,
+        source: {type: 'HTTP_RPC'},
+      },
+    };
+
+    panel.saveSettings({...originalSettings, backendUrl: 'http://other-backend'});
+
+    expect(panel.state.settings).toBe(originalSettings);
+    expect(panel.state.retryError).toContain('cannot be migrated safely');
     expect(saveSettings).not.toHaveBeenCalled();
     saveSettings.mockRestore();
   });
@@ -252,7 +355,10 @@ describe('AIPanel header tool panels', () => {
     panel.tracePairWorkspaceController.close();
 
     const header = panel.renderHeaderActions(true, true, true);
-    const button = findVNodeByTitle(header, '打开双 Trace 工作区');
+    const button = findVNodeByTitle(
+      header,
+      uiText('打开双 Trace 工作区', 'Open dual-trace workspace'),
+    );
     expect(button.attrs.disabled).not.toBe(true);
     button.attrs.onclick();
 
@@ -1190,11 +1296,13 @@ describe('AIPanel trace-pair session restore', () => {
 
     await Promise.all([analysisPromise, cancellationPromise]);
 
-    expect(fetchBackend).toHaveBeenCalledTimes(2);
+    expect(fetchBackend).toHaveBeenCalledTimes(3);
     expect(fetchBackend.mock.calls[1][0]).toContain('/agent-late/cancel');
     expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
       runId: 'run-late',
     });
+    expect(fetchBackend.mock.calls[2][0]).toContain('/agent-late');
+    expect(fetchBackend.mock.calls[2][1]?.method).toBe('DELETE');
     expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
     expect(panel.state.agentSessionId).toBeNull();
     expect(panel.state.isLoading).toBe(false);
@@ -1272,10 +1380,12 @@ describe('AIPanel trace-pair session restore', () => {
     );
     await Promise.all([analysisPromise, cancellationPromise]);
 
-    expect(fetchBackend).toHaveBeenCalledTimes(2);
+    expect(fetchBackend).toHaveBeenCalledTimes(3);
     expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
       runId: 'run-current',
     });
+    expect(fetchBackend.mock.calls[2][0]).toContain('/agent-existing');
+    expect(fetchBackend.mock.calls[2][1]?.method).toBe('DELETE');
     expect(
       panel.state.messages.find(
         (message: {id: string}) => message.id === 'prior-progress',
@@ -1381,7 +1491,7 @@ describe('AIPanel trace-pair session restore', () => {
 
     await panel.handleStoryCancel();
 
-    expect(panel.fetchBackend).toHaveBeenCalledTimes(1);
+    expect(panel.fetchBackend).toHaveBeenCalledTimes(2);
     expect(panel.fetchBackend.mock.calls[0][0]).toContain(
       '/agent-story/cancel',
     );
@@ -1390,6 +1500,8 @@ describe('AIPanel trace-pair session restore', () => {
     ).toEqual({
       runId: 'run-story',
     });
+    expect(panel.fetchBackend.mock.calls[1][0]).toContain('/agent-story');
+    expect(panel.fetchBackend.mock.calls[1][1]?.method).toBe('DELETE');
     expect(panel.state.agentSessionId).toBeNull();
     expect(panel.state.agentRunId).toBeNull();
     expect(getAISharedState().status).toBe('cancelled');

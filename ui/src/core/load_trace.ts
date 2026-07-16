@@ -60,8 +60,17 @@ import {
   StartupCommandNotAllowedError,
 } from './command_manager';
 import {HighPrecisionTimeSpan} from '../base/high_precision_time_span';
-import {getBackendUploader} from './backend_uploader';
-import {getBackendUploadState, setBackendUploadState} from './backend_upload_state';
+import {
+  backendUploadSourceKey,
+  getBackendUploadIdentityKey,
+  getBackendUploader,
+} from './backend_uploader';
+export {backendUploadSourceKey} from './backend_uploader';
+import {
+  getBackendUploadState,
+  isBackendUploadOperationCurrent,
+  setBackendUploadState,
+} from './backend_upload_state';
 import {sha1} from '../base/hash';
 import {showModal} from '../widgets/modal';
 import m from 'mithril';
@@ -137,18 +146,6 @@ async function defineMaxLayoutDepthSqlFunction(engine: Engine): Promise<void> {
 }
 
 let lastEngineId = 0;
-let nextTraceSourceObjectId = 0;
-const traceSourceObjectIds = new WeakMap<object, number>();
-
-function getTraceSourceObjectId(value: object): number {
-  let id = traceSourceObjectIds.get(value);
-  if (id === undefined) {
-    id = ++nextTraceSourceObjectId;
-    traceSourceObjectIds.set(value, id);
-  }
-  return id;
-}
-
 export function shouldProbeHttpRpcForTraceSource(
   newEngineMode: NewEngineMode,
   traceSource: TraceSource,
@@ -157,47 +154,6 @@ export function shouldProbeHttpRpcForTraceSource(
   if (newEngineMode !== 'USE_HTTP_RPC_IF_AVAILABLE') return false;
   if (traceSource.type === 'HTTP_RPC') return true;
   return !HttpRpcEngine.isSmartPerfettoBackendTarget(target);
-}
-
-export function backendUploadSourceKey(traceSource: TraceSource): string {
-  switch (traceSource.type) {
-    case 'FILE':
-      return [
-        traceSource.type,
-        getTraceSourceObjectId(traceSource.file),
-        traceSource.file.name,
-        traceSource.file.size,
-        traceSource.file.lastModified,
-      ].join(':');
-    case 'ARRAY_BUFFER':
-      return [
-        traceSource.type,
-        getTraceSourceObjectId(traceSource.buffer),
-        traceSource.fileName ?? '',
-        traceSource.title ?? '',
-        traceSource.buffer.byteLength,
-      ].join(':');
-    case 'URL':
-      return `${traceSource.type}:${traceSource.url}`;
-    case 'MULTIPLE_FILES':
-      return [
-        traceSource.type,
-        ...traceSource.files.map((file) =>
-          [
-            getTraceSourceObjectId(file),
-            file.name,
-            file.size,
-            file.lastModified,
-          ].join(':'),
-        ),
-      ].join('|');
-    case 'STREAM':
-      return `${traceSource.type}:${Date.now()}:${Math.random()}`;
-    case 'HTTP_RPC':
-      return traceSource.type;
-    default:
-      return JSON.stringify(traceSource);
-  }
 }
 
 function isSmartPerfettoDualTracePane(app: AppImpl): boolean {
@@ -232,6 +188,8 @@ async function createEngine(
       console.log('[AutoRPC] Skipping backend upload for embedded dual-trace pane');
     }
     setBackendUploadState({
+      backendIdentityKey: getBackendUploadIdentityKey(undefined, 'no-upload'),
+      sourceKey: 'no-upload',
       state: 'idle',
     });
   } else {
@@ -239,42 +197,50 @@ async function createEngine(
     // (Perfetto lifecycle can call createEngine multiple times for the same trace)
     const currentUploadState = getBackendUploadState();
     const sourceKey = backendUploadSourceKey(traceSource);
+    const backendIdentityKey = getBackendUploadIdentityKey(undefined, sourceKey);
     if (
       currentUploadState.state === 'uploading' &&
-      currentUploadState.sourceKey === sourceKey
+      currentUploadState.sourceKey === sourceKey &&
+      currentUploadState.backendIdentityKey === backendIdentityKey
     ) {
       console.log('[AutoRPC] Upload already in progress, skipping duplicate');
     } else {
       const uploadToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       setBackendUploadState({
+        backendIdentityKey,
         uploadToken,
         sourceKey,
         state: 'uploading',
       });
 
       const uploader = getBackendUploader();
-      const notifyUploadFailed = (error: string): void => {
+      const notifyUploadFailed = (error: string, errorCode?: string): void => {
+        if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
         setBackendUploadState({
+          backendIdentityKey,
+          uploadToken,
+          sourceKey,
           state: 'failed',
           error,
+          errorCode,
         });
       };
 
       void (async () => {
         try {
           const backendAvailable = await uploader.checkAvailable();
-          if (getBackendUploadState().uploadToken !== uploadToken) {
+          if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) {
             console.log('[AutoRPC] Ignoring stale backend availability result');
             return;
           }
           if (!backendAvailable) {
-            notifyUploadFailed('AI backend unavailable');
+            notifyUploadFailed('AI backend unavailable', 'BACKEND_UNAVAILABLE');
             return;
           }
 
           console.log('[AutoRPC] Starting background upload...');
           const result = await uploader.upload(traceSource);
-          if (getBackendUploadState().uploadToken !== uploadToken) {
+          if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) {
             console.log('[AutoRPC] Ignoring stale backend upload result');
             return;
           }
@@ -291,6 +257,7 @@ async function createEngine(
                 + `leaseMode=${result.leaseMode ?? 'n/a'}, queue=${result.leaseQueueLength ?? 'n/a'}`,
             );
             setBackendUploadState({
+              backendIdentityKey,
               uploadToken,
               sourceKey,
               state: 'ready',
@@ -305,10 +272,10 @@ async function createEngine(
           } else {
             const error = result.error ?? 'Background upload failed';
             console.warn('[AutoRPC] Background upload failed:', error);
-            notifyUploadFailed(error);
+            notifyUploadFailed(error, result.errorCode ?? 'UPLOAD_FAILED');
           }
         } catch (error) {
-          if (getBackendUploadState().uploadToken !== uploadToken) {
+          if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) {
             console.log('[AutoRPC] Ignoring stale backend upload error');
             return;
           }

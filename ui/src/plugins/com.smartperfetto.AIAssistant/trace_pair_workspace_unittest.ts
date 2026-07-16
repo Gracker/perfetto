@@ -21,7 +21,11 @@ describe('TracePairWorkspace', () => {
         key: 'tenant/user/workspace/current',
         backendUrl: 'http://127.0.0.1:3000',
       },
-      currentTrace: {id: 'current', filename: 'current.pftrace'},
+      currentTrace: {
+        id: 'current',
+        filename: 'current.pftrace',
+        size: 11 * 1024 * 1024,
+      },
     });
     controller.setCatalog([
       {
@@ -47,6 +51,18 @@ describe('TracePairWorkspace', () => {
   afterEach(() => {
     m.mount(root, null);
     root.remove();
+  });
+
+  it('exposes the splitter to keyboard users', () => {
+    controller.selectTrace({pane: 'second', traceId: 'history-a'});
+    m.mount(root, {view: () => m(TracePairWorkspace, {controller})});
+    const splitter = root.querySelector<HTMLElement>('[role="separator"]');
+
+    expect(splitter?.tabIndex).toBe(0);
+    expect(splitter?.getAttribute('aria-orientation')).toBe('vertical');
+    splitter?.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+
+    expect(controller.getState().splitPercent).toBe(52);
   });
 
   it('keeps both iframe nodes alive across layout-only changes', () => {
@@ -165,7 +181,9 @@ describe('TracePairWorkspace', () => {
     expect(selectors.every((selector) => selector.disabled)).toBe(true);
     expect(
       selectors.every(
-        (selector) => selector.title === '分析运行中，Trace 选择已锁定',
+        (selector) =>
+          selector.title ===
+          'Trace selection is locked while analysis is running',
       ),
     ).toBe(true);
 
@@ -173,8 +191,10 @@ describe('TracePairWorkspace', () => {
       'button[data-trace-pair-exit]',
     );
     expect(exitButton?.disabled).toBe(true);
-    expect(exitButton?.title).toBe('分析运行中，停止后可退出双窗');
-    expect(exitButton?.textContent).toContain('退出双窗');
+    expect(exitButton?.title).toBe(
+      'Stop the analysis before exiting the dual-trace workspace',
+    );
+    expect(exitButton?.textContent).toContain('Exit');
 
     controller.close();
     m.redraw.sync();

@@ -83,6 +83,24 @@ describe('buildHorizontalTracePairContext', () => {
 });
 
 describe('buildTracePairContext', () => {
+  it('uses a language-neutral fallback name for the reference trace', () => {
+    const context = buildTracePairContext({
+      currentTraceId: 'trace-current',
+      currentTraceName: 'current.trace',
+      referenceTraceId: 'trace-reference',
+      referenceTraceName: null,
+      activeTraceSide: 'current',
+      currentPane: 'first',
+      layout: 'horizontal',
+      workspaceOpen: true,
+      splitPercent: 50,
+      maximizedTraceSide: null,
+      minimizedTraceSides: new Set<TracePairTraceSide>(),
+    });
+
+    expect(context?.panes[1].traceName).toBe('Reference Trace');
+  });
+
   it('marks both panes live when the same-page workspace is open', () => {
     const context = buildTracePairContext({
       currentTraceId: 'trace-current',

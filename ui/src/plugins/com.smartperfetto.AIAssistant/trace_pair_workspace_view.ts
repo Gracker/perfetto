@@ -12,43 +12,71 @@ import {
 import type {TracePairLayout} from './types';
 import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {renderTracePairPane} from './trace_pair_workspace_pane_view';
+import {uiOutputLanguage, uiText} from './ui_language';
 
 interface LayoutButton {
   readonly layout: TracePairLayout;
   readonly icon: string;
-  readonly label: string;
+  readonly zhLabel: string;
+  readonly enLabel: string;
 }
 
 const LAYOUT_BUTTONS: ReadonlyArray<LayoutButton> = [
-  {layout: 'horizontal', icon: 'view_column', label: '左右'},
-  {layout: 'vertical', icon: 'view_stream', label: '上下'},
+  {layout: 'horizontal', icon: 'view_column', zhLabel: '左右', enLabel: 'Side by side'},
+  {layout: 'vertical', icon: 'view_stream', zhLabel: '上下', enLabel: 'Stacked'},
 ];
 
 function renderLayoutButton(
   controller: TracePairWorkspaceController,
   button: LayoutButton,
 ): m.Children {
+  const label = uiText(button.zhLabel, button.enLabel);
   return m(
     'button.ai-trace-pair-tool-btn',
     {
       type: 'button',
       class: controller.getState().layout === button.layout ? 'active' : '',
       onclick: () => controller.setLayout(button.layout),
-      title: `${button.label}排列`,
+      title: uiText(`${button.zhLabel}排列`, `${button.enLabel} layout`),
     },
-    [m('i.pf-icon', button.icon), button.label],
+    [m('i.pf-icon', button.icon), label],
   );
 }
 
 function renderSplitter(
+  controller: TracePairWorkspaceController,
   startResize: (event: PointerEvent) => void,
 ): m.Children {
+  const state = controller.getState();
   return m(
     'div.ai-trace-pair-splitter',
     {
       role: 'separator',
-      title: '拖动调整两侧窗口大小',
+      tabindex: 0,
+      'aria-orientation': state.layout === 'horizontal' ? 'vertical' : 'horizontal',
+      'aria-valuemin': 20,
+      'aria-valuemax': 80,
+      'aria-valuenow': Math.round(state.splitPercent),
+      title: uiText(
+        '拖动或使用方向键调整两侧窗口大小',
+        'Drag or use the arrow keys to resize the trace panes',
+      ),
       onpointerdown: (event: PointerEvent) => startResize(event),
+      onkeydown: (event: KeyboardEvent) => {
+        const horizontal = state.layout === 'horizontal';
+        let next: number | undefined;
+        if (event.key === 'Home') next = 20;
+        if (event.key === 'End') next = 80;
+        if ((horizontal && event.key === 'ArrowLeft') || (!horizontal && event.key === 'ArrowUp')) {
+          next = state.splitPercent - 2;
+        }
+        if ((horizontal && event.key === 'ArrowRight') || (!horizontal && event.key === 'ArrowDown')) {
+          next = state.splitPercent + 2;
+        }
+        if (next === undefined) return;
+        event.preventDefault();
+        controller.setSplitPercent(next);
+      },
     },
     m('span.ai-trace-pair-splitter-handle'),
   );
@@ -95,19 +123,22 @@ export function renderTracePairWorkspace(
     .filter(Boolean)
     .join(' ');
 
-  return m('div.ai-trace-pair-workspace', {class: workspaceClass}, [
+  return m('div.ai-trace-pair-workspace', {
+    class: workspaceClass,
+    lang: uiOutputLanguage() === 'zh-CN' ? 'zh-CN' : 'en',
+  }, [
     m('div.ai-trace-pair-header', [
       m('div.ai-trace-pair-title', [
         m('i.pf-icon', 'view_column'),
-        m('span', '双 Trace 工作区'),
+        m('span', uiText('双 Trace 工作区', 'Dual-Trace Workspace')),
       ]),
       m('div.ai-trace-pair-summary', [
         m('span', state.currentTrace.filename),
         m('span.ai-trace-pair-summary-separator', 'vs'),
-        m('span', state.referenceTrace?.filename || '请选择历史 Trace'),
+        m('span', state.referenceTrace?.filename || uiText('请选择历史 Trace', 'Select a historical trace')),
       ]),
       state.catalogLoading
-        ? m('span.ai-trace-pair-catalog-status', '正在加载 Trace...')
+        ? m('span.ai-trace-pair-catalog-status', uiText('正在加载 Trace...', 'Loading traces...'))
         : null,
       state.catalogError
         ? m('span.ai-trace-pair-catalog-status.is-error', state.catalogError)
@@ -119,12 +150,16 @@ export function renderTracePairWorkspace(
             'type': 'button',
             'class': assistantExpanded ? 'active' : '',
             'onclick': toggleWorkspaceAssistant,
-            'title': assistantExpanded ? '收起 AI 助手' : '打开 AI 助手',
-            'aria-label': assistantExpanded ? '收起 AI 助手' : '打开 AI 助手',
+            'title': assistantExpanded
+              ? uiText('收起 AI 助手', 'Collapse AI assistant')
+              : uiText('打开 AI 助手', 'Open AI assistant'),
+            'aria-label': assistantExpanded
+              ? uiText('收起 AI 助手', 'Collapse AI assistant')
+              : uiText('打开 AI 助手', 'Open AI assistant'),
             'aria-pressed': assistantExpanded ? 'true' : 'false',
             'data-trace-pair-assistant': '',
           },
-          [m('i.pf-icon', 'smart_toy'), 'AI 助手'],
+          [m('i.pf-icon', 'smart_toy'), uiText('AI 助手', 'AI Assistant')],
         ),
         ...LAYOUT_BUTTONS.map((button) =>
           renderLayoutButton(controller, button),
@@ -134,9 +169,9 @@ export function renderTracePairWorkspace(
           {
             type: 'button',
             onclick: () => controller.resetLayout(),
-            title: '恢复 50/50 布局',
+            title: uiText('恢复 50/50 布局', 'Restore the 50/50 layout'),
           },
-          [m('i.pf-icon', 'fit_screen'), '重置'],
+          [m('i.pf-icon', 'fit_screen'), uiText('重置', 'Reset')],
         ),
         m(
           'button.ai-trace-pair-tool-btn.ai-trace-pair-tool-btn--primary',
@@ -145,11 +180,11 @@ export function renderTracePairWorkspace(
             'disabled': state.selectionLocked,
             'onclick': () => controller.close(),
             'title': state.selectionLocked
-              ? '分析运行中，停止后可退出双窗'
-              : '退出双 Trace 工作区',
+              ? uiText('分析运行中，停止后可退出双窗', 'Stop the analysis before exiting the dual-trace workspace')
+              : uiText('退出双 Trace 工作区', 'Exit the dual-trace workspace'),
             'data-trace-pair-exit': '',
           },
-          [m('i.pf-icon', 'close'), '退出双窗'],
+          [m('i.pf-icon', 'close'), uiText('退出双窗', 'Exit')],
         ),
       ]),
     ]),
@@ -161,7 +196,7 @@ export function renderTracePairWorkspace(
       },
       [
         renderTracePairPane(controller, 'current'),
-        renderSplitter(startResize),
+        renderSplitter(controller, startResize),
         renderTracePairPane(controller, 'reference'),
       ],
     ),

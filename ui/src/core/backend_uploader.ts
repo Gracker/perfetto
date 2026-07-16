@@ -13,6 +13,7 @@ import {
 } from './smartperfetto_request_context';
 import type {HttpRpcTarget} from '../trace_processor/http_rpc_engine';
 import {getDefaultSmartPerfettoBackendUrl} from './smartperfetto_backend_url';
+import {getSmartPerfettoRequestContext} from './smartperfetto_request_context';
 
 const BACKEND_CHECK_TIMEOUT_MS = 1000; // Fast timeout for health check
 const BACKEND_UPLOAD_MIN_TIMEOUT_MS = 60000;
@@ -27,6 +28,71 @@ function computeUploadTimeoutMs(byteSize: number): number {
   return Math.max(BACKEND_UPLOAD_MIN_TIMEOUT_MS, Math.ceil(byteSize / bytesPerMs));
 }
 
+let nextTraceSourceObjectId = 0;
+const traceSourceObjectIds = new WeakMap<object, number>();
+
+function getTraceSourceObjectId(value: object): number {
+  let id = traceSourceObjectIds.get(value);
+  if (id === undefined) {
+    id = ++nextTraceSourceObjectId;
+    traceSourceObjectIds.set(value, id);
+  }
+  return id;
+}
+
+function opaqueSourceKey(parts: readonly unknown[]): string {
+  const text = parts.map((part) => String(part)).join('\0');
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= BigInt(text.charCodeAt(index));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `source-${hash.toString(16).padStart(16, '0')}`;
+}
+
+/** Stable, opaque identity for one frontend trace source during its lifetime. */
+export function backendUploadSourceKey(traceSource: TraceSource): string {
+  switch (traceSource.type) {
+    case 'FILE':
+      return opaqueSourceKey([
+        traceSource.type,
+        getTraceSourceObjectId(traceSource.file),
+        traceSource.file.name,
+        traceSource.file.size,
+        traceSource.file.lastModified,
+      ]);
+    case 'ARRAY_BUFFER':
+      return opaqueSourceKey([
+        traceSource.type,
+        getTraceSourceObjectId(traceSource.buffer),
+        traceSource.fileName ?? '',
+        traceSource.title ?? '',
+        traceSource.buffer.byteLength,
+      ]);
+    case 'URL':
+      return opaqueSourceKey([traceSource.type, traceSource.url]);
+    case 'MULTIPLE_FILES':
+      return opaqueSourceKey([
+        traceSource.type,
+        ...traceSource.files.flatMap((file) => [
+          getTraceSourceObjectId(file),
+          file.name,
+          file.size,
+          file.lastModified,
+        ]),
+      ]);
+    case 'STREAM':
+      return opaqueSourceKey([
+        traceSource.type,
+        getTraceSourceObjectId(traceSource.stream),
+      ]);
+    case 'HTTP_RPC':
+      return opaqueSourceKey([traceSource.type]);
+    default:
+      return opaqueSourceKey([JSON.stringify(traceSource)]);
+  }
+}
+
 export interface BackendUploadResult {
   success: boolean;
   traceId?: string;
@@ -37,13 +103,33 @@ export interface BackendUploadResult {
   leaseQueueLength?: number;
   rpcTarget?: HttpRpcTarget;
   error?: string;
+  errorCode?:
+    | 'STREAM_SOURCE_UNSUPPORTED'
+    | 'MULTIPLE_FILES_SOURCE_UNSUPPORTED'
+    | 'TRACE_SOURCE_CONVERSION_FAILED'
+    | 'UPLOAD_FAILED';
 }
 
 export class BackendUploader {
   private backendUrl: string;
+  private readonly apiKey: string;
 
-  constructor(backendUrl: string = getDefaultSmartPerfettoBackendUrl()) {
+  constructor(
+    backendUrl: string = getDefaultSmartPerfettoBackendUrl(),
+    apiKey = configuredBackendApiKey,
+  ) {
     this.backendUrl = backendUrl;
+    this.apiKey = apiKey.trim();
+  }
+
+  private requestHeaders(headers?: HeadersInit): Record<string, string> {
+    const normalized = buildSmartPerfettoContextHeaders(headers);
+    if (!this.apiKey) return normalized;
+    return {
+      ...normalized,
+      Authorization: `Bearer ${this.apiKey}`,
+      'x-api-key': this.apiKey,
+    };
   }
 
   /**
@@ -56,7 +142,7 @@ export class BackendUploader {
         {
           method: 'GET',
           cache: 'no-cache',
-          headers: buildSmartPerfettoContextHeaders(),
+          headers: this.requestHeaders(),
         },
         BACKEND_CHECK_TIMEOUT_MS,
       );
@@ -141,11 +227,26 @@ export class BackendUploader {
     if (source.type === 'URL') {
       return this.uploadUrl(source.url, this.getFilename(source));
     }
+    if (source.type === 'STREAM') {
+      return {
+        success: false,
+        errorCode: 'STREAM_SOURCE_UNSUPPORTED',
+        error: 'Streaming traces cannot be uploaded for AI analysis. Reopen the captured trace as a file.',
+      };
+    }
+    if (source.type === 'MULTIPLE_FILES') {
+      return {
+        success: false,
+        errorCode: 'MULTIPLE_FILES_SOURCE_UNSUPPORTED',
+        error: 'Multi-file traces cannot be uploaded for AI analysis as one trace.',
+      };
+    }
 
     const blob = await this.getTraceBlob(source);
     if (!blob) {
       return {
         success: false,
+        errorCode: 'TRACE_SOURCE_CONVERSION_FAILED',
         error: 'Cannot convert trace source to blob for upload',
       };
     }
@@ -161,7 +262,7 @@ export class BackendUploader {
         buildSmartPerfettoWorkspaceApiUrl(this.backendUrl, 'traces', '/upload'),
         {
           method: 'POST',
-          headers: buildSmartPerfettoContextHeaders(),
+          headers: this.requestHeaders(),
           body: formData,
         },
         computeUploadTimeoutMs(blob.size),
@@ -208,7 +309,7 @@ export class BackendUploader {
         ),
         {
           method: 'POST',
-          headers: buildSmartPerfettoContextHeaders({
+          headers: this.requestHeaders({
             'Content-Type': 'application/json',
           }),
           body: JSON.stringify({url, filename}),
@@ -252,6 +353,10 @@ export class BackendUploader {
     leaseMode?: string;
     leaseModeReason?: string;
     leaseQueueLength?: number;
+    websocketCapability?: {
+      protocol?: string;
+      expiresAt?: number;
+    };
   }, label: string): BackendUploadResult {
     const {
       id: traceId,
@@ -260,6 +365,7 @@ export class BackendUploader {
       leaseMode,
       leaseModeReason,
       leaseQueueLength,
+      websocketCapability,
     } = trace;
     if (!port && !leaseId) {
       return {
@@ -274,7 +380,8 @@ export class BackendUploader {
         leaseMode,
         leaseModeReason,
         leaseQueueLength,
-      });
+        websocketCapability,
+      }, this.requestHeaders());
     } else if (port) {
       rpcTarget = this.buildBackendDirectPortTarget(port);
     }
@@ -313,16 +420,64 @@ export class BackendUploader {
 // Singleton instance with configurable backend URL
 let uploaderInstance: BackendUploader | undefined;
 let configuredBackendUrl: string | undefined;
+let configuredBackendApiKey = '';
+let backendCredentialGeneration = 0;
+
+function normalizeBackendUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
 
 /** Set the default backend URL BEFORE any trace is loaded (call at module init). */
 export function setDefaultBackendUrl(url: string) {
-  configuredBackendUrl = url;
+  const normalized = normalizeBackendUrl(url);
+  if (configuredBackendUrl !== undefined && configuredBackendUrl !== normalized) {
+    backendCredentialGeneration += 1;
+    uploaderInstance = undefined;
+  }
+  configuredBackendUrl = normalized;
+}
+
+/** Configure the API credential used by upload and lease-proxy HTTP calls. */
+export function setDefaultBackendCredential(apiKey?: string): void {
+  const normalized = (apiKey ?? '').trim();
+  if (configuredBackendApiKey === normalized) return;
+  configuredBackendApiKey = normalized;
+  backendCredentialGeneration += 1;
+  uploaderInstance = undefined;
+}
+
+/** Invalidate upload identity after an API credential changes without retaining the secret. */
+export function invalidateBackendUploaderCredentials(): void {
+  backendCredentialGeneration += 1;
+  uploaderInstance = undefined;
+}
+
+export function getBackendUploadIdentityKey(
+  backendUrl?: string,
+  sourceKey?: string,
+): string {
+  const url = normalizeBackendUrl(
+    backendUrl ?? configuredBackendUrl ?? getDefaultSmartPerfettoBackendUrl(),
+  );
+  const context = getSmartPerfettoRequestContext();
+  const sourcePartition = opaqueSourceKey(['upload-identity', sourceKey ?? 'no-source']);
+  return [
+    url,
+    `credential-generation-${backendCredentialGeneration}`,
+    context.tenantId,
+    context.userId,
+    context.workspaceId,
+    context.windowId,
+    sourcePartition,
+  ].join('::');
 }
 
 export function getBackendUploader(backendUrl?: string): BackendUploader {
-  const url = backendUrl ?? configuredBackendUrl ?? getDefaultSmartPerfettoBackendUrl();
+  const url = normalizeBackendUrl(
+    backendUrl ?? configuredBackendUrl ?? getDefaultSmartPerfettoBackendUrl(),
+  );
   if (!uploaderInstance || uploaderInstance['backendUrl'] !== url) {
-    uploaderInstance = new BackendUploader(url);
+    uploaderInstance = new BackendUploader(url, configuredBackendApiKey);
   }
   return uploaderInstance;
 }

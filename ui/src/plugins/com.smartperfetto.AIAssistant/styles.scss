@@ -5039,6 +5039,34 @@ tr.detail-row {
   flex: 0 0 auto;
 }
 
+@media (max-width: 640px) {
+  .ai-trace-pair-header {
+    height: auto;
+    min-height: 44px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .ai-trace-pair-summary {
+    order: 3;
+    flex: 1 0 100%;
+  }
+
+  .ai-trace-pair-toolbar {
+    min-width: 0;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .ai-trace-pair-tool-btn {
+    min-width: 32px;
+    max-width: 100%;
+  }
+}
+
 .ai-trace-pair-tool-btn,
 .ai-trace-pair-icon-btn {
   display: inline-flex;

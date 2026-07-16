@@ -38,6 +38,7 @@ import {isTimelineRouteActive} from '../../frontend/timeline_route';
 import {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {AIPanel} from './ai_panel';
+import {uiText} from './ui_language';
 import {
   applyFloatingSnapLayout,
   clamp,
@@ -434,7 +435,10 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
               'button',
               {
                 style: STYLES.iconBtn,
-                title: '重置位置和大小（恢复默认）',
+                title: uiText(
+                  '重置位置和大小（恢复默认）',
+                  'Reset position and size to defaults',
+                ),
                 onclick: () => resetFloatingGeometry(),
                 onmouseover: (e: MouseEvent) => {
                   (e.currentTarget as HTMLElement).style.background =
@@ -452,8 +456,11 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
               {
                 style: STYLES.iconBtn,
                 title: identityLocked
-                  ? '分析运行中，完成或停止后可切换挂载位置'
-                  : '收回到 AI Dock',
+                  ? uiText(
+                      '分析运行中，完成或停止后可切换挂载位置',
+                      'Finish or stop the analysis before changing the window location',
+                    )
+                  : uiText('收回到 AI Dock', 'Return to AI Dock'),
                 onclick: identityLocked
                   ? undefined
                   : () => switchFloatingMode('sidebar'),

@@ -46,6 +46,8 @@ export interface HttpRpcTarget {
   displayName?: string;
   headers?: HeadersInit;
   credentials?: RequestCredentials;
+  websocketProtocols?: string[];
+  websocketCapabilityExpiresAt?: number;
 }
 
 function directPortTarget(port: string): HttpRpcTarget {
@@ -89,7 +91,10 @@ export class HttpRpcEngine extends EngineBase {
     if (this.websocket === undefined) {
       if (this.disposed) return;
       const wsUrl = HttpRpcEngine.getCurrentTarget().websocketUrl;
-      this.websocket = new WebSocket(wsUrl);
+      const protocols = HttpRpcEngine.getCurrentTarget().websocketProtocols;
+      this.websocket = protocols?.length
+        ? new WebSocket(wsUrl, protocols)
+        : new WebSocket(wsUrl);
       this.websocket.onopen = () => this.onWebsocketConnected();
       this.websocket.onmessage = (e) => this.onWebsocketMessage(e);
       this.websocket.onclose = (e) => this.onWebsocketClosed(e);
@@ -309,6 +314,20 @@ export class HttpRpcEngine extends EngineBase {
           `SmartPerfetto lease heartbeat failed: ${response.status} ${response.statusText}`,
         );
         HttpRpcEngine.maybeReloadForStaleLease(response);
+      } else {
+        let payload: {
+          websocketCapability?: {protocol?: string; expiresAt?: number};
+        } | null = null;
+        try {
+          payload = await response.json();
+        } catch {
+          // Older/dev backends may return an empty heartbeat response.
+        }
+        const capability = payload?.websocketCapability;
+        if (capability?.protocol) {
+          target.websocketProtocols = [capability.protocol];
+          target.websocketCapabilityExpiresAt = capability.expiresAt;
+        }
       }
     } catch (err) {
       if (HttpRpcEngine.leaseVisibility() !== 'offline') {

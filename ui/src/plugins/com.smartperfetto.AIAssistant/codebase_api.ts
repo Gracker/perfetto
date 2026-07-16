@@ -22,6 +22,7 @@ export type CodebaseKind = 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk';
 
 export interface CodebaseSummary {
   codebaseId: string;
+  lifecycleState?: 'active' | 'deleting';
   kind: CodebaseKind;
   displayName: string;
   commitHash?: string;
@@ -32,7 +33,12 @@ export interface CodebaseSummary {
   symbolMapPaths?: string[];
   licenseTag?: string;
   indexGeneration: number;
-  lastIngestAt?: string;
+  activeGeneration?: string;
+  contentFingerprint?: string;
+  indexedRevision?: string;
+  indexedDirty?: boolean;
+  commitProvenance?: 'clean_git_revision' | 'dirty_git_worktree' | 'content_only';
+  lastIngestAt?: number | string;
   lastIngestStatus?: string;
   lastIngestError?: string;
   chunkCount?: number;
@@ -41,10 +47,26 @@ export interface CodebaseSummary {
   eligibleForSendToProvider?: boolean;
   consent?: {
     sendToProvider: boolean;
-    consentedAt?: string;
+    consentedAt?: number | string;
     consentedBy?: string;
     consentHash?: string;
   };
+}
+
+export interface ExternalKnowledgeSourceSummary {
+  sourceId: string;
+  kind: 'android_internals_wiki';
+  displayName: string;
+  revision: string;
+  contentFingerprint: string;
+  dirty: boolean;
+  license: string;
+  rightsAcknowledged: boolean;
+  sendToProvider: boolean;
+  activeGeneration?: string;
+  indexGeneration: number;
+  indexedArticleCount?: number;
+  indexedChunkCount?: number;
 }
 
 export interface CodebasePreview {
@@ -60,7 +82,12 @@ export interface CodebaseAudit {
   codebaseId: string;
   kind: CodebaseKind;
   indexGeneration: number;
-  lastIngestAt?: string;
+  activeGeneration?: string;
+  contentFingerprint?: string;
+  indexedRevision?: string;
+  indexedDirty?: boolean;
+  commitProvenance?: 'clean_git_revision' | 'dirty_git_worktree' | 'content_only';
+  lastIngestAt?: number | string;
   lastIngestStatus?: string;
   lastIngestError?: string;
   chunkCount: number;
@@ -100,6 +127,13 @@ export interface ReindexCodebaseResult {
   blockedFiles?: number;
   redactionHitCount?: number;
   success?: boolean;
+}
+
+export interface RegisterExternalKnowledgeSourceInput {
+  rootPath: string;
+  displayName: string;
+  rightsAcknowledged: true;
+  sendToProvider: boolean;
 }
 
 function trimTrailingSlash(value: string): string {
@@ -150,6 +184,50 @@ export async function listCodebases(
   };
 }
 
+export async function listExternalKnowledgeSources(
+  backendUrl: string,
+  apiKey?: string,
+): Promise<ExternalKnowledgeSourceSummary[]> {
+  const res = await fetch(
+    buildCodebaseApiUrl(backendUrl, '/android-internals/sources'),
+    {headers: buildHeaders(apiKey)},
+  );
+  const body = await readJsonOrThrow<{
+    sources?: ExternalKnowledgeSourceSummary[];
+  }>(res);
+  return body.sources || [];
+}
+
+export async function registerExternalKnowledgeSource(
+  backendUrl: string,
+  input: RegisterExternalKnowledgeSourceInput,
+  apiKey?: string,
+): Promise<ExternalKnowledgeSourceSummary> {
+  const res = await fetch(buildCodebaseApiUrl(backendUrl, '/android-internals/sources'), {
+    method: 'POST',
+    headers: buildHeaders(apiKey),
+    body: JSON.stringify(input),
+  });
+  const body = await readJsonOrThrow<{source: ExternalKnowledgeSourceSummary}>(res);
+  return body.source;
+}
+
+export async function reindexExternalKnowledgeSource(
+  backendUrl: string,
+  sourceId: string,
+  apiKey?: string,
+): Promise<void> {
+  const res = await fetch(buildCodebaseApiUrl(
+    backendUrl,
+    `/android-internals/sources/${encodeURIComponent(sourceId)}/reindex`,
+  ), {
+    method: 'POST',
+    headers: buildHeaders(apiKey),
+    body: JSON.stringify({}),
+  });
+  await readJsonOrThrow(res);
+}
+
 export async function previewCodebaseRoot(
   backendUrl: string,
   rootPath: string,
@@ -192,6 +270,64 @@ export async function reindexCodebase(
   );
   const body = await readJsonOrThrow<{result: ReindexCodebaseResult}>(res);
   return body.result;
+}
+
+export async function deleteCodebase(
+  backendUrl: string,
+  codebaseId: string,
+  apiKey?: string,
+): Promise<{codebaseId: string; removedChunkCount: number; alreadyDeleted?: boolean}> {
+  const res = await fetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}`),
+    {
+      method: 'DELETE',
+      headers: buildHeaders(apiKey),
+    },
+  );
+  return readJsonOrThrow<{
+    codebaseId: string;
+    removedChunkCount: number;
+    alreadyDeleted?: boolean;
+  }>(res);
+}
+
+export async function updateCodebaseConsent(
+  backendUrl: string,
+  codebaseId: string,
+  sendToProvider: boolean,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await fetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
+    {
+      method: 'PATCH',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({sendToProvider}),
+    },
+  );
+  const body = await readJsonOrThrow<{codebase: CodebaseSummary}>(res);
+  return body.codebase;
+}
+
+export async function updateExternalKnowledgeSourceConsent(
+  backendUrl: string,
+  sourceId: string,
+  sendToProvider: boolean,
+  apiKey?: string,
+): Promise<ExternalKnowledgeSourceSummary> {
+  const res = await fetch(
+    buildCodebaseApiUrl(
+      backendUrl,
+      `/android-internals/sources/${encodeURIComponent(sourceId)}/consent`,
+    ),
+    {
+      method: 'PATCH',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({sendToProvider}),
+    },
+  );
+  const body = await readJsonOrThrow<{source: ExternalKnowledgeSourceSummary}>(res);
+  return body.source;
 }
 
 export async function loadCodebaseAudit(

@@ -14,6 +14,7 @@ export interface BuildTracePairContextInput {
   currentTraceFingerprint?: string | null;
   referenceTraceId: string | null;
   referenceTraceName?: string | null;
+  referenceTraceFallbackName?: string;
   activeTraceSide: TracePairTraceSide;
   currentPane: 'first' | 'second';
   layout: TracePairLayout;
@@ -105,7 +106,10 @@ export function buildTracePairContext(
     side: referenceSide,
     traceSide: 'reference',
     traceId: input.referenceTraceId,
-    traceName: input.referenceTraceName || '参考 Trace',
+    traceName:
+      input.referenceTraceName ||
+      input.referenceTraceFallbackName ||
+      'Reference Trace',
     active: input.activeTraceSide === 'reference',
     visualState: isTracePaneLive(input, 'reference') ? 'live' : 'context_only',
   };

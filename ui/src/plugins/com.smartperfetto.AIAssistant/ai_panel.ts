@@ -35,8 +35,13 @@ import {LONG, NUM_NULL, STR_NULL} from '../../trace_processor/query_result';
 import type {Trace} from '../../public/trace';
 import type {Track} from '../../public/track';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
-import {AppImpl} from '../../core/app_impl';
-import {getBackendUploader} from '../../core/backend_uploader';
+import {
+  backendUploadSourceKey,
+  getBackendUploadIdentityKey,
+  getBackendUploader,
+  setDefaultBackendCredential,
+  setDefaultBackendUrl,
+} from '../../core/backend_uploader';
 import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoWorkspaceApiUrl,
@@ -45,6 +50,10 @@ import {
 } from '../../core/smartperfetto_request_context';
 import {
   getBackendUploadState,
+  backendUploadSnapshotMatchesIdentity,
+  invalidateBackendUploadState,
+  isBackendUploadOperationCurrent,
+  setBackendUploadState,
   subscribeBackendUploadState,
   type BackendUploadSnapshot,
 } from '../../core/backend_upload_state';
@@ -61,6 +70,7 @@ import type {
   AIPanelState,
   PinnedResult,
   AISettings,
+  AnalysisContextSelection,
   AISession,
   ServerStatus,
   AiCapabilityPolicy,
@@ -156,7 +166,7 @@ import {
   type AnalysisRequestToken,
 } from './analysis_request_coordinator';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
-import {SCENE_DISPLAY_NAMES} from './scene_constants';
+import {getSceneDisplayName} from './scene_constants';
 import {StoryController} from './story_controller';
 import type {StoryControllerContext} from './story_controller';
 // AI Everywhere: cross-component shared state + timeline notes
@@ -181,6 +191,16 @@ import {
   updateFloatingState,
 } from './ai_floating_state';
 import {providerRuntimeLabel} from './provider_types';
+import {uiOutputLanguage, uiText} from './ui_language';
+import {
+  analysisContextAfterBackendError,
+  analysisContextRequiresFullMode,
+  EMPTY_ANALYSIS_CONTEXT,
+  loadAnalysisContext,
+  normalizeAnalysisContext,
+  sameAnalysisContext,
+  saveAnalysisContext,
+} from './analysis_context';
 import type {
   SmartDisplayedScene,
   SmartScenePreviewPayload,
@@ -379,14 +399,18 @@ interface SmartSceneSelectionRequest {
 }
 
 const SMART_SCENE_SELECTION_GROUPS: Array<{
-  label: string;
+  labelZh: string;
+  labelEn: string;
+  icon: string;
   sceneTypes: string[];
 }> = [
-  {label: '启动', sceneTypes: ['cold_start', 'warm_start', 'hot_start']},
-  {label: '滑动', sceneTypes: ['scroll', 'inertial_scroll']},
-  {label: '点击', sceneTypes: ['tap', 'long_press', 'screen_unlock']},
+  {labelZh: '启动', labelEn: 'Startup', icon: 'rocket_launch', sceneTypes: ['cold_start', 'warm_start', 'hot_start']},
+  {labelZh: '滑动', labelEn: 'Scroll', icon: 'swipe', sceneTypes: ['scroll', 'inertial_scroll']},
+  {labelZh: '点击', labelEn: 'Input', icon: 'touch_app', sceneTypes: ['tap', 'long_press', 'screen_unlock']},
   {
-    label: '导航',
+    labelZh: '导航',
+    labelEn: 'Navigation',
+    icon: 'navigation',
     sceneTypes: [
       'back_key',
       'home_key',
@@ -397,10 +421,12 @@ const SMART_SCENE_SELECTION_GROUPS: Array<{
     ],
   },
   {
-    label: '设备',
+    labelZh: '设备',
+    labelEn: 'Device',
+    icon: 'power_settings_new',
     sceneTypes: ['screen_on', 'screen_off', 'screen_sleep', 'idle'],
   },
-  {label: 'ANR', sceneTypes: ['anr', 'jank_region']},
+  {labelZh: 'ANR', labelEn: 'ANR', icon: 'warning', sceneTypes: ['anr', 'jank_region']},
 ];
 
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
@@ -480,6 +506,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // Analysis mode is workspace-scoped so different workspaces keep separate
     // quick/full/auto preferences.
     analysisMode: sessionManager.loadAnalysisMode(),
+    analysisContext: {...EMPTY_ANALYSIS_CONTEXT},
     showAnalysisModeMenu: false,
     showSessionSidebar: false,
     showStorySidebar: false,
@@ -1202,12 +1229,30 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // Load settings from localStorage
     this.loadSettings();
+    const sourceKey = this.getBackendUploadSourceKey();
+    const backendIdentityKey = getBackendUploadIdentityKey(
+      this.state.settings.backendUrl,
+      sourceKey,
+    );
+    if (!backendUploadSnapshotMatchesIdentity(getBackendUploadState(), backendIdentityKey, sourceKey)) {
+      invalidateBackendUploadState(backendIdentityKey, sourceKey);
+    }
+    this.loadAnalysisContextSelection();
 
     // Initialize backend status - must happen before first render
     this.initBackendStatus();
 
     // 检测 Trace 变化并加载对应的历史
     this.handleTraceChange();
+    const uploadState = getBackendUploadState();
+    if (
+      this.trace &&
+      this.engine?.mode !== 'HTTP_RPC' &&
+      uploadState.state === 'idle' &&
+      backendUploadSnapshotMatchesIdentity(uploadState, backendIdentityKey, sourceKey)
+    ) {
+      void this.retryBackendConnection();
+    }
     this.syncTracePairStateFromController();
   }
 
@@ -1220,6 +1265,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const info = this.trace.traceInfo;
     // 使用 start + end + title 生成指纹
     return `${info.start}_${info.end}_${info.traceTitle || 'untitled'}`;
+  }
+
+  private getBackendUploadSourceKey(): string {
+    const traceSource = (this.trace?.traceInfo as unknown as {source?: TraceSource})?.source;
+    return traceSource ? backendUploadSourceKey(traceSource) : 'no-trace-source';
   }
 
   private getCurrentTraceName(): string {
@@ -1270,9 +1320,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       }
       return;
     }
-    this.cancelSSEConnection();
-    this.state.agentSessionId = null;
-    this.clearAgentObservability();
+    this.retireBackendAgentSession();
     this.state.pendingTraceContext = null;
     this.state.sseLastEventId = null;
     this.saveCurrentSession();
@@ -1328,12 +1376,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const location =
       layout === 'vertical'
         ? pane === 'first'
-          ? '上'
-          : '下'
+          ? uiText('上', 'Top')
+          : uiText('下', 'Bottom')
         : pane === 'first'
-          ? '左'
-          : '右';
-    return `${location}/${traceSide === 'current' ? '主' : '参考'}`;
+          ? uiText('左', 'Left')
+          : uiText('右', 'Right');
+    const role = traceSide === 'current'
+      ? uiText('主', 'Primary')
+      : uiText('参考', 'Reference');
+    return `${location}/${role}`;
   }
 
   private buildTracePairContext(): TracePairContext | undefined {
@@ -1351,6 +1402,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       referenceTraceName: useWorkspace
         ? workspace.referenceTrace?.filename || null
         : this.state.referenceTraceName,
+      referenceTraceFallbackName: uiText('参考 Trace', 'Reference Trace'),
       activeTraceSide: useWorkspace
         ? workspace.activeTraceSide
         : this.state.isReferenceActive
@@ -1490,7 +1542,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         },
         referenceTrace: {
           id: referenceTraceId,
-          filename: session.referenceTraceName || '参考 Trace',
+          filename:
+            session.referenceTraceName || uiText('参考 Trace', 'Reference Trace'),
         },
         currentPane:
           session.tracePairCurrentPane === 'second' ? 'second' : 'first',
@@ -1517,7 +1570,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private handleTraceChange(): void {
     const newFingerprint = this.getTraceFingerprint();
     const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
-    const backendUploadState = getBackendUploadState();
+    const sourceKey = this.getBackendUploadSourceKey();
+    const expectedBackendIdentityKey = getBackendUploadIdentityKey(
+      this.state.settings.backendUrl,
+      sourceKey,
+    );
+    const sharedBackendUploadState = getBackendUploadState();
+    const backendUploadState = backendUploadSnapshotMatchesIdentity(
+      sharedBackendUploadState,
+      expectedBackendIdentityKey,
+      sourceKey,
+    )
+      ? sharedBackendUploadState
+      : {state: 'idle' as const};
 
     // Auto-RPC: Try to get backendTraceId from shared backend upload state.
     const appBackendTraceId = backendUploadState.traceId;
@@ -1560,6 +1625,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.autoRegisterWithBackend();
       }
       return;
+    }
+
+    if (
+      this.state.currentTraceFingerprint &&
+      newFingerprint !== this.state.currentTraceFingerprint
+    ) {
+      this.flushSessionSave();
+      this.retireBackendAgentSession();
+      this.saveCurrentSession();
     }
 
     // 更新当前指纹
@@ -1758,11 +1832,29 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.retryError = null;
     m.redraw();
 
+    const sourceKey = this.getBackendUploadSourceKey();
+    const backendIdentityKey = getBackendUploadIdentityKey(
+      this.state.settings.backendUrl,
+      sourceKey,
+    );
+    const uploadToken = `manual-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
       const uploader = getBackendUploader(this.state.settings.backendUrl);
 
+      const traceInfo = this.trace.traceInfo as unknown as {
+        source: TraceSource;
+      };
+      const traceSource = traceInfo.source;
+      setBackendUploadState({
+        backendIdentityKey,
+        uploadToken,
+        sourceKey,
+        state: 'uploading',
+      });
+
       // 首先检查后端是否可用
       const backendAvailable = await uploader.checkAvailable();
+      if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
       if (!backendAvailable) {
         throw new Error(
           'AI 后端服务未启动。请先运行 `cd backend && npm run dev` 启动后端服务。',
@@ -1770,10 +1862,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       }
 
       // 获取当前 Trace 的 source
-      const traceInfo = this.trace.traceInfo as unknown as {
-        source: TraceSource;
-      };
-      const traceSource = traceInfo.source;
       if (DEBUG_AI_PANEL)
         console.log(
           '[AIPanel] Retrying with trace source type:',
@@ -1782,6 +1870,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
       // 尝试上传 Trace
       const uploadResult = await uploader.upload(traceSource);
+      if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
 
       if (
         !uploadResult.success ||
@@ -1793,12 +1882,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       if (DEBUG_AI_PANEL)
         console.log('[AIPanel] Upload successful:', uploadResult);
 
-      // 上传成功，需要重新加载 Trace 以使用新的 RPC 端口
-      // 显示提示信息
+      // The local UI engine remains on its original source. The backend RPC
+      // target is a separate AI-analysis asset and can be rebound safely.
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: '🔄 正在切换到 RPC 模式...',
+        content: uiText(
+          '✅ 后端 Trace 已就绪，可以开始 AI 分析。',
+          '✅ The backend trace is ready for AI analysis.',
+        ),
         timestamp: Date.now(),
       });
 
@@ -1818,18 +1910,35 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           uploadResult.leaseId,
         );
       }
-
-      // The backend has already loaded the trace into trace_processor_shell.
-      // Reopen as HTTP_RPC so URL traces do not trigger another browser fetch.
-      AppImpl.instance.openTraceFromHttpRpc();
+      setBackendUploadState({
+        backendIdentityKey,
+        uploadToken,
+        sourceKey,
+        state: 'ready',
+        traceId: uploadResult.traceId,
+        port: uploadResult.port,
+        leaseId: uploadResult.leaseId,
+        leaseMode: uploadResult.leaseMode,
+        leaseModeReason: uploadResult.leaseModeReason,
+        leaseQueueLength: uploadResult.leaseQueueLength,
+        rpcTarget: uploadResult.rpcTarget,
+      });
 
       // 重置重试状态
       this.state.isRetryingBackend = false;
       m.redraw();
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
+      if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
       console.error('[AIPanel] Retry backend connection failed:', errorMsg);
       this.state.retryError = errorMsg;
+      setBackendUploadState({
+        backendIdentityKey,
+        uploadToken,
+        sourceKey,
+        state: 'failed',
+        error: errorMsg,
+      });
       this.state.isRetryingBackend = false;
       m.redraw();
     }
@@ -1884,13 +1993,39 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 后端不可用时的提示消息
    */
   private addBackendUnavailableMessage(errorDetail?: string): void {
-    const errorSection = errorDetail
-      ? `\n\n**错误详情：**\n- ${errorDetail}`
-      : '';
+    const errorSection = errorDetail ? `\n\n${uiText('**错误详情：**', '**Error details:**')}\n- ${errorDetail}` : '';
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `⚠️ **AI 后端未连接**\n\n无法连接到 AI 分析后端 (${this.state.settings.backendUrl})。\n\n**可能的原因：**\n- 后端服务未启动\n- 网络连接问题${errorSection}\n\n**解决方法：**\n1. 确保后端服务正在运行：\n   \`\`\`bash\n   cd backend && npm run dev\n   \`\`\`\n2. 重新打开 Trace 文件\n\nTrace 已加载到 WASM 引擎，但 AI 分析功能不可用。`,
+      content: uiText(
+        `⚠️ **AI 后端未连接**\n\n无法连接到 AI 分析后端 (${this.state.settings.backendUrl})。\n\n**可能的原因：**\n- 后端服务未启动\n- 网络连接问题${errorSection}\n\n请确保后端服务正在运行，然后使用“重试连接”。Trace 已加载到 WASM 引擎，但 AI 分析功能暂不可用。`,
+        `⚠️ **AI backend unavailable**\n\nCould not connect to the AI analysis backend (${this.state.settings.backendUrl}).\n\n**Possible causes:**\n- The backend service is not running\n- A network connection failed${errorSection}\n\nConfirm that the backend is running, then use Retry connection. The trace remains available in the WASM engine, but AI analysis is temporarily unavailable.`,
+      ),
+      timestamp: Date.now(),
+    });
+    m.redraw();
+  }
+
+  private addBackendUploadFailureMessage(snapshot: BackendUploadSnapshot): void {
+    if (
+      snapshot.errorCode !== 'STREAM_SOURCE_UNSUPPORTED' &&
+      snapshot.errorCode !== 'MULTIPLE_FILES_SOURCE_UNSUPPORTED'
+    ) {
+      this.addBackendUnavailableMessage(snapshot.error);
+      return;
+    }
+    this.addMessage({
+      id: this.generateId(),
+      role: 'assistant',
+      content: snapshot.errorCode === 'STREAM_SOURCE_UNSUPPORTED'
+        ? uiText(
+            '⚠️ **当前流式 Trace 不支持 AI 分析**\n\n请将捕获结果保存或重新打开为单个 Trace 文件。这是输入类型限制，不是后端连接故障。',
+            '⚠️ **Streaming traces are not supported for AI analysis**\n\nSave or reopen the capture as a single trace file. This is an input capability limit, not a backend connection failure.',
+          )
+        : uiText(
+            '⚠️ **多文件 Trace 不能合并上传用于 AI 分析**\n\n请打开一个独立 Trace 文件。这是输入类型限制，不是后端连接故障。',
+            '⚠️ **Multi-file traces cannot be uploaded as one AI analysis trace**\n\nOpen one standalone trace file. This is an input capability limit, not a backend connection failure.',
+          ),
       timestamp: Date.now(),
     });
     m.redraw();
@@ -1920,6 +2055,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
 
     const handleSnapshot = (snapshot: BackendUploadSnapshot): void => {
+      const sourceKey = this.getBackendUploadSourceKey();
+      const expectedBackendIdentityKey = getBackendUploadIdentityKey(
+        this.state.settings.backendUrl,
+        sourceKey,
+      );
+      if (!backendUploadSnapshotMatchesIdentity(snapshot, expectedBackendIdentityKey, sourceKey)) {
+        return;
+      }
       const previous = this.lastBackendUploadState;
       this.lastBackendUploadState = snapshot;
 
@@ -1960,7 +2103,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           '[AIPanel] Backend upload failed:',
           snapshot.error ?? 'unknown error',
         );
-        this.addBackendUnavailableMessage(snapshot.error);
+        this.addBackendUploadFailureMessage(snapshot);
         if (this.unsubscribeBackendUpload) {
           this.unsubscribeBackendUpload();
           this.unsubscribeBackendUpload = undefined;
@@ -1969,6 +2112,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     };
 
     const current = getBackendUploadState();
+    const sourceKey = this.getBackendUploadSourceKey();
+    const expectedBackendIdentityKey = getBackendUploadIdentityKey(
+      this.state.settings.backendUrl,
+      sourceKey,
+    );
+    if (!backendUploadSnapshotMatchesIdentity(current, expectedBackendIdentityKey, sourceKey)) {
+      this.lastBackendUploadState = {state: 'idle'};
+      this.unsubscribeBackendUpload = subscribeBackendUploadState(handleSnapshot);
+      return;
+    }
     this.lastBackendUploadState = current;
     if (current.state === 'ready' || current.state === 'failed') {
       handleSnapshot(current);
@@ -2202,12 +2355,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     return m('div.ai-header-actions', [
       m('div.ai-header-action-group.ai-header-action-group--analysis', [
-        m('span.ai-header-action-group-label', '分析'),
+        m('span.ai-header-action-group-label', uiText('分析', 'Analysis')),
         isInRpcMode && hasBackendTrace
           ? this.renderHeaderIconButton({
               icon: 'compare_arrows',
-              title: '打开双 Trace 工作区',
-              label: '双窗',
+              title: uiText('打开双 Trace 工作区', 'Open dual-trace workspace'),
+              label: uiText('双窗', 'Dual'),
               prominent: true,
               active: this.tracePairWorkspaceController.getState().open,
               disabled:
@@ -2301,7 +2454,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         }),
       ]),
       m('div.ai-header-action-group.ai-header-action-group--window', [
-        m('span.ai-header-action-group-label', '窗口'),
+        m('span.ai-header-action-group-label', uiText('窗口', 'Window')),
         isDockedSidebar
           ? this.renderSidebarLayoutSwitch(floatingState.sidebar.layout)
           : null,
@@ -2309,8 +2462,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           ? this.renderHeaderIconButton({
               icon: 'open_in_new',
               title: this.isAnalysisIdentityLocked()
-                ? '分析运行中，完成或停止后可切换挂载位置'
-                : '弹出为浮动窗口（可拖动、可调整大小、跨标签页保持可见）',
+                ? uiText(
+                    '分析运行中，完成或停止后可切换挂载位置',
+                    'Finish or stop the analysis before changing the window location',
+                  )
+                : uiText(
+                    '弹出为浮动窗口（可拖动、可调整大小、跨标签页保持可见）',
+                    'Open as a draggable, resizable floating window that stays visible across tabs',
+                  ),
               disabled: this.isAnalysisIdentityLocked(),
               onclick: () => this.popOutToFloatingWindow(),
             })
@@ -2318,7 +2477,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.renderHeaderIconButton({
           icon: 'settings',
           title: this.isAnalysisIdentityLocked()
-            ? '分析运行中，设置保持只读'
+            ? uiText(
+                '分析运行中，设置保持只读',
+                'Settings are read-only while analysis is running',
+              )
             : 'Settings',
           disabled: this.isAnalysisIdentityLocked(),
           onclick: () => this.openSettings(),
@@ -2703,12 +2865,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     return m(
       'div.ai-panel',
-      {'data-theme': this.isDarkMode ? 'dark' : 'light'},
+      {
+        'data-theme': this.isDarkMode ? 'dark' : 'light',
+        'lang': uiOutputLanguage() === 'zh-CN' ? 'zh-CN' : 'en',
+      },
       [
         // Settings Modal
         this.state.showSettings
           ? m(SettingsModal, {
               settings: this.state.settings,
+              analysisContext: this.state.analysisContext,
               workspaceContext,
               readOnly: this.isAnalysisIdentityLocked(),
               onClose: () => this.closeSettings(),
@@ -2719,6 +2885,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               onCheckStatus: (url: string, key: string) =>
                 this.checkServerStatus(url, key),
               onProviderSelectionChange: () => this.onProviderSelectionChange(),
+              onAnalysisContextChange: (selection: AnalysisContextSelection) =>
+                this.onAnalysisContextChange(selection),
               initialStatus: this.serverStatus.connected
                 ? this.serverStatus
                 : undefined,
@@ -2817,7 +2985,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     {style: 'font-size: 14px; margin-right: 4px;'},
                     'compare_arrows',
                   ),
-                  'Trace 对比',
+                  uiText('Trace 对比', 'Trace comparison'),
                 ]),
                 m('div.ai-comparison-panes', [
                   m('span.ai-comparison-pane.primary', [
@@ -2838,7 +3006,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     ),
                     m(
                       'span.ai-comparison-pane-name',
-                      this.state.referenceTraceName || '参考 Trace',
+                      this.state.referenceTraceName ||
+                        uiText('参考 Trace', 'Reference Trace'),
                     ),
                   ]),
                 ]),
@@ -2849,8 +3018,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   {
                     onclick: () => this.openTracePairWorkspace(),
                     title: this.state.tracePairWorkspaceOpen
-                      ? '双 Trace 工作区已打开'
-                      : '同页打开两个完整 Perfetto timeline',
+                      ? uiText(
+                          '双 Trace 工作区已打开',
+                          'Dual-trace workspace is open',
+                        )
+                      : uiText(
+                          '同页打开两个完整 Perfetto timeline',
+                          'Open two complete Perfetto timelines on this page',
+                        ),
                   },
                   [
                     m(
@@ -2859,7 +3034,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         ? 'visibility'
                         : 'splitscreen',
                     ),
-                    this.state.tracePairWorkspaceOpen ? '双窗已开' : '打开双窗',
+                    this.state.tracePairWorkspaceOpen
+                      ? uiText('双窗已开', 'Dual view open')
+                      : uiText('打开双窗', 'Open dual view'),
                   ],
                 ),
                 m(
@@ -2868,10 +3045,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     onclick: () => this.exitComparisonMode(),
                     disabled: this.isAnalysisIdentityLocked(),
                     title: this.isAnalysisIdentityLocked()
-                      ? '请先停止当前分析再退出对比'
-                      : '退出对比模式',
+                      ? uiText(
+                          '请先停止当前分析再退出对比',
+                          'Stop the current analysis before exiting comparison mode',
+                        )
+                      : uiText('退出对比模式', 'Exit comparison mode'),
                   },
-                  [m('i.pf-icon', 'close'), '退出'],
+                  [m('i.pf-icon', 'close'), uiText('退出', 'Exit')],
                 ),
               ]),
             ])
@@ -3739,7 +3919,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       !this.state.isLoading
                       ? m('div.ai-connecting-indicator', [
                           m('i.pf-icon', 'cloud_upload'),
-                          m('span', '正在连接 AI 后端...'),
+                          m('span', uiText('正在连接 AI 后端...', 'Connecting to AI backend...')),
                           m('div.ai-upload-progress'),
                         ])
                       : null,
@@ -3748,15 +3928,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     !isInRpcMode && this.state.messages.length > 0
                       ? m('div.ai-disconnect-banner', [
                           m('i.pf-icon', 'cloud_off'),
-                          m('span', 'AI 后端连接已断开'),
+                          m('span', uiText('AI 后端连接已断开', 'AI backend connection lost')),
                           this.state.isRetryingBackend
-                            ? m('span.ai-disconnect-retrying', '重试中...')
+                            ? m('span.ai-disconnect-retrying', uiText('重试中...', 'Retrying...'))
                             : m(
                                 'button.ai-disconnect-retry-btn',
                                 {
                                   onclick: () => this.retryBackendConnection(),
                                 },
-                                '重试连接',
+                                uiText('重试连接', 'Retry connection'),
                               ),
                         ])
                       : null,
@@ -3766,11 +3946,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               // Input Area - always show (disabled when disconnected)
               isInRpcMode || this.state.messages.length > 0
                 ? m('div.ai-input-area', [
+                    this.renderAnalysisContextIndicator(),
                     // Conversation context indicator
                     this.state.messages.length > 0 && this.state.agentSessionId
                       ? m(
                           'div.ai-context-indicator',
-                          `第 ${this.state.messages.filter((msg) => msg.role === 'user').length} 轮对话 | 会话 ${this.state.agentSessionId.substring(0, 8)}...`,
+                          uiText(
+                            `第 ${this.state.messages.filter((msg) => msg.role === 'user').length} 轮对话 | 会话 ${this.state.agentSessionId.substring(0, 8)}...`,
+                            `Turn ${this.state.messages.filter((msg) => msg.role === 'user').length} | Session ${this.state.agentSessionId.substring(0, 8)}...`,
+                          ),
                         )
                       : null,
                     this.renderSliceCard(),
@@ -3781,12 +3965,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           this.state.isLoading || !isInRpcMode
                             ? 'disabled'
                             : '',
-                        'aria-label': '\u8F93\u5165\u5206\u6790\u95EE\u9898',
+                        'aria-label': uiText('输入分析问题', 'Enter an analysis question'),
                         'placeholder': !isInRpcMode
-                          ? 'AI 后端未连接...'
+                          ? uiText('AI 后端未连接...', 'AI backend is not connected...')
                           : aiDisabled
-                            ? 'AI 已禁用；可继续输入 /sql、/goto、/anr、/jank 等确定性命令'
-                            : 'Ask anything about your trace...',
+                            ? uiText(
+                                'AI 已禁用；可继续输入 /sql、/goto、/anr、/jank 等确定性命令',
+                                'AI is disabled; deterministic commands such as /sql, /goto, /anr, and /jank remain available.',
+                              )
+                            : uiText('询问任何关于当前 Trace 的问题...', 'Ask anything about your trace...'),
                         'value': this.state.input,
                         'oninput': (e: Event) => {
                           this.state.input = (
@@ -3816,7 +4003,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                               'button.ai-send-btn.ai-stop-btn',
                               {
                                 onclick: () => this.cancelAnalysis(),
-                                title: 'Stop analysis',
+                                title: uiText('停止分析', 'Stop analysis'),
                               },
                               m('i.pf-icon', 'stop_circle'),
                             )
@@ -3826,8 +4013,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                 'class': !isInRpcMode ? 'disabled' : '',
                                 'onclick': () => this.sendMessage(),
                                 'disabled': !isInRpcMode,
-                                'title': 'Send (Enter)',
-                                'aria-label': '\u53D1\u9001',
+                                'title': uiText('发送（Enter）', 'Send (Enter)'),
+                                'aria-label': uiText('发送', 'Send'),
                               },
                               m('i.pf-icon', 'send'),
                             ),
@@ -3836,8 +4023,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m(
                       'div.ai-input-hint',
                       aiDisabled
-                        ? 'AI disabled by backend policy. Deterministic commands still run locally or through non-AI backend APIs.'
-                        : 'Press Enter to send, Shift+Enter for new line',
+                        ? uiText(
+                            'AI 已被后端策略禁用；确定性命令仍可在本地或非 AI 后端 API 中运行。',
+                            'AI is disabled by backend policy. Deterministic commands still run locally or through non-AI backend APIs.',
+                          )
+                        : uiText('按 Enter 发送，Shift+Enter 换行', 'Press Enter to send, Shift+Enter for a new line'),
                     ),
                   ])
                 : null,
@@ -3936,19 +4126,25 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           onclick: () =>
             this.handleSmartAnalysisCommand({
               scope: 'all',
-              label: '全部场景',
+              label: uiText('全部场景', 'All scenes'),
               ...(payload?.reportId ? {reportId: payload.reportId} : {}),
             }),
-          title: `深钻全部 ${scenes.length} 个可分析场景`,
+          title: uiText(
+            `深钻全部 ${scenes.length} 个可分析场景`,
+            `Analyze all ${scenes.length} eligible scenes`,
+          ),
         },
         [
           m('i.pf-icon', 'select_all'),
-          surface === 'preset' ? '全部' : `全部 (${scenes.length})`,
+          surface === 'preset'
+            ? uiText('全部', 'All')
+            : `${uiText('全部', 'All')} (${scenes.length})`,
         ],
       ),
     ];
 
     for (const group of SMART_SCENE_SELECTION_GROUPS) {
+      const groupLabel = uiText(group.labelZh, group.labelEn);
       const count = group.sceneTypes.reduce(
         (sum, type) => sum + (sceneTypeCounts[type] || 0),
         0,
@@ -3962,14 +4158,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               this.handleSmartAnalysisCommand({
                 scope: 'scene_types',
                 sceneTypes: group.sceneTypes,
-                label: group.label,
+                label: groupLabel,
                 ...(payload?.reportId ? {reportId: payload.reportId} : {}),
               }),
-            title: `只深钻 ${group.label} 相关的 ${count} 个场景`,
+            title: uiText(
+              `只深钻 ${groupLabel} 相关的 ${count} 个场景`,
+              `Analyze ${count} ${groupLabel.toLowerCase()} scenes`,
+            ),
           },
           [
-            m('i.pf-icon', this.smartSelectionIcon(group.label)),
-            surface === 'preset' ? group.label : `${group.label} (${count})`,
+            m('i.pf-icon', group.icon),
+            surface === 'preset' ? groupLabel : `${groupLabel} (${count})`,
           ],
         ),
       );
@@ -3990,7 +4189,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return m('div.ai-smart-inline-actions', [
       m('div.ai-smart-inline-actions-title', [
         m('i.pf-icon', 'account_tree'),
-        m('span', '选择深钻范围'),
+        m('span', uiText('选择深钻范围', 'Choose analysis scope')),
       ]),
       actions,
     ]);
@@ -4012,11 +4211,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m('div.ai-smart-scene-preview-header', [
         m('div.ai-smart-scene-preview-title', [
           m('i.pf-icon', 'account_tree'),
-          m('span', '场景时间线'),
+          m('span', uiText('场景时间线', 'Scene timeline')),
         ]),
         m('div.ai-smart-scene-preview-counts', [
-          m('span', `${scenes.length} 个场景`),
-          m('span', `${eligibleCount} 个可深钻`),
+          m('span', uiText(`${scenes.length} 个场景`, `${scenes.length} scenes`)),
+          m('span', uiText(`${eligibleCount} 个可深钻`, `${eligibleCount} eligible`)),
           verification?.status
             ? m(
                 `span.ai-smart-scene-preview-status.ai-smart-scene-preview-status--${verification.status}`,
@@ -4034,7 +4233,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             'thead',
             m(
               'tr',
-              ['#', '类型', '时间', '时长', '进程', '角色', '置信度'].map(
+              [
+                '#',
+                uiText('类型', 'Type'),
+                uiText('时间', 'Time'),
+                uiText('时长', 'Duration'),
+                uiText('进程', 'Process'),
+                uiText('角色', 'Role'),
+                uiText('置信度', 'Confidence'),
+              ].map(
                 (title) => m('th', title),
               ),
             ),
@@ -4056,7 +4263,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m('span.ai-smart-scene-dot', {
                       class: `ai-smart-scene-dot--${scene.severity || 'unknown'}`,
                     }),
-                    SCENE_DISPLAY_NAMES[scene.sceneType] ?? scene.sceneType,
+                    getSceneDisplayName(scene.sceneType, scene.label),
                   ]),
                   m('td.col-range', this.formatSmartSceneRange(scene)),
                   m(
@@ -4078,7 +4285,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       scenes.length > previewRows.length
         ? m(
             'div.ai-smart-scene-preview-more',
-            `另有 ${scenes.length - previewRows.length} 个场景在 Story 面板中展示。`,
+            uiText(
+              `另有 ${scenes.length - previewRows.length} 个场景在 Story 面板中展示。`,
+              `${scenes.length - previewRows.length} more scenes are available in the Story panel.`,
+            ),
           )
         : null,
     ]);
@@ -4088,8 +4298,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return (
       msg.role === 'assistant' &&
       (!!msg.smartScenePreview ||
-        (msg.content.includes('# 智能分析报告：场景盘点') &&
-          msg.content.includes('## 下一步')))
+        ((msg.content.includes('# 智能分析报告：场景盘点') &&
+          msg.content.includes('## 下一步')) ||
+          (msg.content.includes('# Smart Analysis Report: Scene Inventory') &&
+            msg.content.includes('## Next Step'))))
     );
   }
 
@@ -4143,15 +4355,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   ): string {
     switch (verification.status) {
       case 'passed':
-        return '复核通过';
+        return uiText('复核通过', 'Verified');
       case 'needs_review':
-        return '需复核';
+        return uiText('需复核', 'Needs review');
       case 'failed':
-        return '复核失败';
+        return uiText('复核失败', 'Verification failed');
       case 'skipped':
-        return '已跳过复核';
+        return uiText('已跳过复核', 'Verification skipped');
       default:
-        return verification.status || '未复核';
+        return verification.status || uiText('未复核', 'Not verified');
     }
   }
 
@@ -4183,9 +4395,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private smartSceneRoleLabel(scene: SmartDisplayedScene): string {
-    if (scene.sceneRole === 'marker') return '标记';
-    if (scene.sceneRole === 'context') return '上下文';
-    return scene.analysisEligible === false ? '上下文' : '动作';
+    if (scene.sceneRole === 'marker') return uiText('标记', 'Marker');
+    if (scene.sceneRole === 'context') return uiText('上下文', 'Context');
+    return scene.analysisEligible === false
+      ? uiText('上下文', 'Context')
+      : uiText('动作', 'Action');
   }
 
   private countSceneTypes(scenes: any[]): Record<string, number> {
@@ -4196,25 +4410,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       counts[type] = (counts[type] || 0) + 1;
     }
     return counts;
-  }
-
-  private smartSelectionIcon(label: string): string {
-    switch (label) {
-      case '启动':
-        return 'rocket_launch';
-      case '滑动':
-        return 'swipe';
-      case '点击':
-        return 'touch_app';
-      case '导航':
-        return 'navigation';
-      case '设备':
-        return 'power_settings_new';
-      case 'ANR':
-        return 'warning';
-      default:
-        return 'filter_alt';
-    }
   }
 
   private renderQuickRunReceipt(quickRun?: Message['quickRun']): m.Children {
@@ -4541,31 +4736,69 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     });
   }
 
-  /** Render the analysis mode selector inside the input bar.
-   *  Disables 'fast' when comparison mode is active because the lightweight
-   *  MCP registration skips comparison tools. Selection context is supported
-   *  by the quick prompt and should remain fast by default. */
+  private renderAnalysisContextIndicator(): m.Children {
+    const selection = normalizeAnalysisContext(this.state.analysisContext);
+    const sourceIds = selection.codeAwareMode === 'off' ? [] : selection.codebaseIds;
+    const parts = [
+      sourceIds.length > 0
+        ? uiText(
+            `源码 ${sourceIds.length}（${selection.codeAwareMode === 'provider_send' ? '脱敏正文' : '仅元数据'}）`,
+            `${sourceIds.length} source codebase(s) (${selection.codeAwareMode === 'provider_send' ? 'redacted content' : 'metadata only'})`,
+          )
+        : '',
+      selection.knowledgeSourceIds.length > 0
+        ? uiText(
+            `外部知识 ${selection.knowledgeSourceIds.length}`,
+            `${selection.knowledgeSourceIds.length} external knowledge source(s)`,
+          )
+        : '',
+    ].filter(Boolean);
+    if (parts.length === 0) return null;
+    const identifiers = [...sourceIds, ...selection.knowledgeSourceIds].join(', ');
+    return m(
+      'div.ai-context-indicator.ai-analysis-context-indicator',
+      {
+        title: uiText(
+          `本次请求将使用：${identifiers}。源码模式：${selection.codeAwareMode}`,
+          `This request will use: ${identifiers}. Source mode: ${selection.codeAwareMode}.`,
+        ),
+      },
+      [
+        m('i.pf-icon', 'verified_user'),
+        uiText('分析上下文：', 'Analysis context: '),
+        parts.join(' · '),
+      ],
+    );
+  }
+
+  /** Render the analysis mode selector inside the input bar. */
   private renderAnalysisModeSelector(): m.Vnode {
     const current = this.state.analysisMode;
-    const fastDisabled = !!this.state.referenceTraceId;
+    const privateContextRequiresFull = analysisContextRequiresFullMode(
+      this.state.analysisContext,
+    );
+    const fastDisabled = !!this.state.referenceTraceId || privateContextRequiresFull;
     const modes = [
       {
         id: 'fast',
         icon: '⚡',
-        label: '快速',
-        title: '目标 5 turns，最多 50 turns 保护；适合局部事实和选区问题',
+        label: uiText('快速', 'Fast'),
+        title: uiText(
+          '目标 5 turns，最多 50 turns 保护；适合局部事实和选区问题',
+          'Targets 5 turns with a 50-turn guard; suited to local facts and selection questions.',
+        ),
       },
       {
         id: 'full',
         icon: '🔍',
-        label: '完整',
-        title: '完整多轮分析流水线',
+        label: uiText('完整', 'Full'),
+        title: uiText('完整多轮分析流水线', 'Full multi-turn analysis pipeline.'),
       },
       {
         id: 'auto',
         icon: '🤖',
-        label: '智能',
-        title: '按查询复杂度自动选择',
+        label: uiText('智能', 'Auto'),
+        title: uiText('按查询复杂度自动选择', 'Select automatically based on query complexity.'),
       },
     ] as const;
     const currentMode = modes.find((mode) => mode.id === current) ?? modes[2];
@@ -4573,7 +4806,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m(
         'button.ai-mode-trigger',
         {
-          title: '选择分析模式',
+          title: uiText('选择分析模式', 'Select analysis mode'),
           onclick: (e: MouseEvent) => {
             e.preventDefault();
             e.stopPropagation();
@@ -4599,7 +4832,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     .filter(Boolean)
                     .join(' '),
                   title: disabled
-                    ? '对比模式下需完整分析才能利用参考 Trace 上下文'
+                    ? privateContextRequiresFull
+                      ? uiText(
+                          '源码或外部知识需要完整分析，以执行证据校验和权限边界检查',
+                          'Source code or external knowledge requires full analysis for evidence and authorization checks.',
+                        )
+                      : uiText(
+                          '对比模式下需完整分析才能利用参考 Trace 上下文',
+                          'Comparison mode requires full analysis to use the reference trace context.',
+                        )
                     : mode.title,
                   disabled,
                   onclick: (e: MouseEvent) => {
@@ -4632,13 +4873,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.analysisMode = newMode;
     sessionManager.saveAnalysisMode(newMode);
     if (hadSession) {
-      this.state.agentSessionId = null;
-      this.clearAgentObservability();
-      const label = {fast: '快速', full: '完整', auto: '智能'}[newMode];
+      this.retireBackendAgentSession();
+      const label = {
+        fast: uiText('快速', 'Fast'),
+        full: uiText('完整', 'Full'),
+        auto: uiText('智能', 'Auto'),
+      }[newMode];
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: `已切换到「${label}」模式，将开始新会话。`,
+        content: uiText(
+          `已切换到「${label}」模式，将开始新会话。`,
+          `Switched to “${label}” mode. A new session will start.`,
+        ),
         timestamp: Date.now(),
       });
     }
@@ -4649,13 +4896,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.isAnalysisIdentityLocked()) return;
     const hadSession = !!this.state.agentSessionId;
     if (hadSession) {
-      this.state.agentSessionId = null;
-      this.state.agentRunId = null;
-      this.clearAgentObservability();
+      this.retireBackendAgentSession();
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: '已切换 AI Provider / SDK Runtime，将开始新会话。',
+        content: uiText(
+          '已切换 AI Provider / SDK Runtime，将开始新会话。',
+          'The AI provider or SDK runtime changed. A new session will start.',
+        ),
         timestamp: Date.now(),
       });
     }
@@ -4670,12 +4918,22 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.flushSessionSave();
     this.saveCurrentSession();
     this.cancelSSEConnection();
+    this.deleteBackendSessionBestEffort(
+      this.state.agentSessionId,
+      this.state.settings.backendUrl,
+    );
     const nextWorkspaceId = setSmartPerfettoWorkspaceId(
       workspaceId,
       previousContext.tenantId,
       previousContext.userId,
     );
     if (nextWorkspaceId === previousContext.workspaceId) return;
+    const sourceKey = this.getBackendUploadSourceKey();
+    const nextBackendIdentityKey = getBackendUploadIdentityKey(
+      this.state.settings.backendUrl,
+      sourceKey,
+    );
+    invalidateBackendUploadState(nextBackendIdentityKey, sourceKey);
 
     this.tracePairWorkspaceController.resetScope();
     resetTransientState();
@@ -4684,16 +4942,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.showTracePicker = false;
     this.clearTracePairSessionState();
     this.state.analysisMode = sessionManager.loadAnalysisMode();
+    this.loadAnalysisContextSelection();
 
     this.resetStateForNewTrace();
     this.addMessage({
       id: this.generateId(),
       role: 'system',
-      content: `已切换到 Workspace: ${nextWorkspaceId}。当前窗口的 Trace、AI 会话和临时运行状态已按新 Workspace 隔离。`,
+      content: uiText(
+        `已切换到 Workspace: ${nextWorkspaceId}。当前窗口的 Trace、AI 会话和临时运行状态已按新 Workspace 隔离。`,
+        `Switched to workspace ${nextWorkspaceId}. This window's trace, AI session, and transient run state are isolated in the new workspace.`,
+      ),
       timestamp: Date.now(),
     });
     this.saveCurrentSession();
     this.refreshServerStatus();
+    if (this.trace && this.engine?.mode !== 'HTTP_RPC') {
+      void this.retryBackendConnection();
+    }
     m.redraw();
   }
 
@@ -4757,14 +5022,180 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private saveSettings(newSettings: AISettings) {
     if (this.isAnalysisIdentityLocked()) return;
+    const backendUrlChanged =
+      newSettings.backendUrl.replace(/\/+$/, '') !==
+      this.state.settings.backendUrl.replace(/\/+$/, '');
+    const backendCredentialChanged =
+      newSettings.backendApiKey !== this.state.settings.backendApiKey;
+    const backendIdentityChanged = backendUrlChanged || backendCredentialChanged;
+    if (
+      backendIdentityChanged &&
+      this.engine?.mode === 'HTTP_RPC' &&
+      (this.trace?.traceInfo as unknown as {source?: TraceSource})?.source?.type === 'HTTP_RPC'
+    ) {
+      this.state.retryError = uiText(
+        '当前 Trace 仅保留了 HTTP RPC 连接，无法安全迁移到另一个后端。请用原始 Trace 文件或 URL 重新打开后再切换后端。',
+        'This trace only retains an HTTP RPC connection and cannot be migrated safely. Reopen the original trace file or URL before switching backend identity.',
+      );
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: this.state.retryError,
+        timestamp: Date.now(),
+      });
+      m.redraw();
+      return;
+    }
+    if (backendIdentityChanged) {
+      this.flushSessionSave();
+      this.retireBackendAgentSession(this.state.settings.backendUrl);
+      this.tracePairWorkspaceController.resetScope();
+      this.state.backendTraceId = null;
+      this.state.pendingTraceContext = null;
+      this.clearTracePairSessionState();
+      if (backendUrlChanged) setDefaultBackendUrl(newSettings.backendUrl);
+      setDefaultBackendCredential(newSettings.backendApiKey);
+      invalidateBackendUploadState(
+        getBackendUploadIdentityKey(
+          newSettings.backendUrl,
+          this.getBackendUploadSourceKey(),
+        ),
+        this.getBackendUploadSourceKey(),
+      );
+      this.state.isRetryingBackend = false;
+    }
     this.state.settings = newSettings;
     sessionManager.saveSettings(newSettings);
+    if (backendCredentialChanged) {
+      this.state.analysisContext = normalizeAnalysisContext(EMPTY_ANALYSIS_CONTEXT);
+      saveAnalysisContext(
+        this.state.settings.backendUrl,
+        getSmartPerfettoRequestContext(),
+        this.state.analysisContext,
+      );
+    } else if (backendUrlChanged) {
+      this.loadAnalysisContextSelection();
+    }
     this.initBackendStatus();
+    if (backendIdentityChanged && this.trace) {
+      void this.retryBackendConnection();
+    }
     m.redraw();
   }
 
   private loadSettings() {
     this.state.settings = sessionManager.loadSettings();
+    setDefaultBackendUrl(this.state.settings.backendUrl);
+    setDefaultBackendCredential(this.state.settings.backendApiKey);
+  }
+
+  private loadAnalysisContextSelection(): void {
+    this.state.analysisContext = loadAnalysisContext(
+      this.state.settings.backendUrl,
+      getSmartPerfettoRequestContext(),
+    );
+    if (
+      analysisContextRequiresFullMode(this.state.analysisContext) &&
+      this.state.analysisMode === 'fast'
+    ) {
+      this.state.analysisMode = 'full';
+      sessionManager.saveAnalysisMode('full');
+    }
+  }
+
+  private onAnalysisContextChange(selection: AnalysisContextSelection): void {
+    if (this.isAnalysisIdentityLocked()) return;
+    const normalized = normalizeAnalysisContext(selection);
+    if (sameAnalysisContext(normalized, this.state.analysisContext)) return;
+    const hadSession = !!this.state.agentSessionId;
+    this.state.analysisContext = normalized;
+    const promotedToFull = analysisContextRequiresFullMode(normalized) &&
+      this.state.analysisMode === 'fast';
+    if (promotedToFull) {
+      this.state.analysisMode = 'full';
+      sessionManager.saveAnalysisMode('full');
+    }
+    saveAnalysisContext(
+      this.state.settings.backendUrl,
+      getSmartPerfettoRequestContext(),
+      normalized,
+    );
+    if (hadSession) {
+      this.retireBackendAgentSession();
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: uiText(
+          '分析上下文已变更；为避免混用旧的源码或知识权限，下一次分析将开始新会话。',
+          'The analysis context changed. The next analysis will start a new session so source and knowledge permissions are not mixed.',
+        ),
+        timestamp: Date.now(),
+      });
+    } else if (promotedToFull) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: uiText(
+          '已切换到完整分析：源码或外部知识需要证据校验和权限边界检查。',
+          'Switched to full analysis because source code or external knowledge requires evidence and authorization checks.',
+        ),
+        timestamp: Date.now(),
+      });
+    }
+    this.saveCurrentSession();
+    m.redraw();
+  }
+
+  private analysisContextRequestOptions(): Record<string, unknown> {
+    const selection = normalizeAnalysisContext(this.state.analysisContext);
+    return {
+      outputLanguage: uiOutputLanguage(),
+      codeAwareMode: selection.codeAwareMode,
+      ...(selection.codeAwareMode !== 'off' && selection.codebaseIds.length > 0
+        ? {codebaseIds: selection.codebaseIds}
+        : {}),
+      ...(selection.knowledgeSourceIds.length > 0
+        ? {knowledgeSourceIds: selection.knowledgeSourceIds}
+        : {}),
+    };
+  }
+
+  private async postAnalysisRequestWithContextFallback(
+    apiUrl: string,
+    requestBody: Record<string, any>,
+  ): Promise<Response> {
+    const dispatch = () => this.fetchBackend(apiUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(requestBody),
+    });
+    const response = await dispatch();
+    if (response.status !== 409) return response;
+
+    const errorData = await response.clone().json().catch(() => ({}));
+    const fallback = analysisContextAfterBackendError(
+      this.state.analysisContext,
+      errorData?.code,
+    );
+    if (!fallback) return response;
+
+    this.onAnalysisContextChange(fallback);
+    delete requestBody.sessionId;
+    requestBody.options = {
+      ...(requestBody.options || {}),
+      codeAwareMode: 'off',
+    };
+    delete requestBody.options.codebaseIds;
+    this.addMessage({
+      id: this.generateId(),
+      role: 'system',
+      content: uiText(
+        '此后端已禁用注册源码分析；已清除源码选择并保留外部知识库，正在重试。',
+        'Registered source analysis is disabled on this backend. Source selection was cleared, external knowledge was preserved, and the request is being retried.',
+      ),
+      timestamp: Date.now(),
+    });
+    return dispatch();
   }
 
   private buildBackendHeaders(headers?: HeadersInit): Record<string, string> {
@@ -4849,6 +5280,32 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       ...init,
       headers: this.buildBackendHeaders(init.headers),
     });
+  }
+
+  private deleteBackendSessionBestEffort(
+    sessionId: string | null,
+    backendUrl: string,
+  ): void {
+    if (!sessionId || !backendUrl) return;
+    const url = buildAssistantApiV1Url(
+      backendUrl,
+      `/${encodeURIComponent(sessionId)}`,
+    );
+    void this.fetchBackend(url, {method: 'DELETE'}).catch(() => {
+      // Context revocation is already enforced locally and by the backend
+      // fingerprint. Deletion is best-effort for immediate runtime cleanup.
+    });
+  }
+
+  /** Retire both frontend transport state and the backend runtime session. */
+  private retireBackendAgentSession(backendUrl = this.state.settings.backendUrl): boolean {
+    const sessionId = this.state.agentSessionId;
+    this.cancelSSEConnection();
+    this.deleteBackendSessionBestEffort(sessionId, backendUrl);
+    this.state.agentSessionId = null;
+    this.state.sseLastEventId = null;
+    this.clearAgentObservability();
+    return !!sessionId;
   }
 
   private isSseStatusMessage(message: Message | undefined): boolean {
@@ -5082,7 +5539,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       session.backendTraceId &&
       this.state.backendTraceId !== session.backendTraceId
     ) {
-      this.state.agentSessionId = null;
+      this.retireBackendAgentSession();
     }
 
     const tracePairRestored = this.restoreTracePairStateFromSession(
@@ -5090,11 +5547,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       options.preserveLiveTracePair === true,
     );
     if (session.type === 'comparison' && !tracePairRestored) {
-      this.state.agentSessionId = null;
-      this.state.agentRunId = null;
-      this.state.agentRequestId = null;
-      this.state.agentRunSequence = 0;
-      this.clearAgentObservability();
+      this.retireBackendAgentSession();
     }
 
     // 恢复命令历史
@@ -5131,6 +5584,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 删除指定 Session
    */
   deleteSession(sessionId: string): boolean {
+    const session = sessionManager.loadSession(sessionId);
+    if (session?.agentSessionId) {
+      this.deleteBackendSessionBestEffort(
+        session.agentSessionId,
+        this.state.settings.backendUrl,
+      );
+    }
     const deleted = sessionManager.deleteSession(sessionId);
     if (deleted) {
       // 如果删除的是当前 session，重置状态
@@ -5270,11 +5730,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       id: this.generateId(),
       role: 'assistant',
       content: [
-        '**AI 已禁用**',
+        uiText('**AI 已禁用**', '**AI is disabled**'),
         '',
-        `${surface} 当前被后端 policy 阻断：${this.aiDisabledReason()}`,
+        uiText(
+          `${surface} 当前被后端 policy 阻断：${this.aiDisabledReason()}`,
+          `${surface} is blocked by backend policy: ${this.aiDisabledReason()}`,
+        ),
         '',
-        '仍可继续使用 SQL 查询、时间跳转、ANR/Jank 检测、Pin、Provider 配置/切换，以及已有报告读取。',
+        uiText(
+          '仍可继续使用 SQL 查询、时间跳转、ANR/Jank 检测、Pin、Provider 配置/切换，以及已有报告读取。',
+          'SQL queries, timeline navigation, ANR/Jank detection, pins, provider configuration/switching, and existing reports remain available.',
+        ),
       ].join('\n'),
       timestamp: Date.now(),
     });
@@ -5289,7 +5755,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   /**
-   * Check backend server status by calling /health with optional auth headers.
+   * Check backend runtime status through the authenticated diagnostics endpoint.
    * Used by SettingsModal to test with potentially unsaved URL/key values.
    */
   private async checkServerStatus(
@@ -5303,8 +5769,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         headers['x-api-key'] = trimmedKey;
         headers['Authorization'] = `Bearer ${trimmedKey}`;
       }
-      const response = await fetch(`${backendUrl.replace(/\/+$/, '')}/health`, {
+      const response = await fetch(`${backendUrl.replace(/\/+$/, '')}/api/runtime-health`, {
         headers: buildSmartPerfettoContextHeaders(headers),
+        credentials: 'include',
       });
       if (!response.ok) return {connected: false};
       const data = await response.json();
@@ -5357,7 +5824,32 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private getWelcomeMessage(): string {
-    return `**Welcome to AI Assistant!** 🤖
+    return uiText(
+      `**欢迎使用 AI 助手！** 🤖
+
+我可以帮助你分析 Perfetto Trace，例如：
+
+* “这个 Trace 的主线程发生了什么？”
+* “查找所有 ANR”
+* “定位卡顿帧”
+* “为什么应用变慢？”
+
+**命令：**
+* \`/sql <查询>\` - 执行 SQL
+* \`/goto <时间戳>\` - 跳转到时间点
+* \`/analyze\` - 分析当前选区
+* \`/anr\` - 查找 ANR
+* \`/jank\` - 查找卡顿帧
+* \`/slow\` - 分析慢操作（后端）
+* \`/memory\` - 分析内存（后端）
+* \`/pins\` - 查看固定的查询结果
+* \`/clear\` - 清空对话
+* \`/help\` - 显示帮助
+
+**后端：** ${this.state.settings.backendUrl}
+
+点击 ⚙️ 配置后端连接。`,
+      `**Welcome to AI Assistant!** 🤖
 
 I can help you analyze Perfetto traces. Here are some things you can ask:
 
@@ -5380,7 +5872,8 @@ I can help you analyze Perfetto traces. Here are some things you can ask:
 
 **Backend:** ${this.state.settings.backendUrl}
 
-Click ⚙️ to configure backend connection.`;
+Click ⚙️ to configure backend connection.`,
+    );
   }
 
   private handleKeyDown(e: KeyboardEvent) {
@@ -5839,10 +6332,19 @@ Click ⚙️ to configure backend connection.`;
       const etaSec = typeof payload.etaSec === 'number' ? payload.etaSec : 0;
       this.state.loadingPhase =
         payload.selectionMode === 'selection_required'
-          ? `智能分析已识别 ${expectedDeepDives} 个可深钻场景`
+          ? uiText(
+              `智能分析已识别 ${expectedDeepDives} 个可深钻场景`,
+              `Smart Analysis found ${expectedDeepDives} scenes eligible for deep analysis`,
+            )
           : expectedDeepDives > 0
-            ? `智能分析预计深钻 ${expectedDeepDives} 个场景，约 ${etaSec}s`
-            : '智能分析正在生成报告';
+            ? uiText(
+                `智能分析预计深钻 ${expectedDeepDives} 个场景，约 ${etaSec}s`,
+                `Smart Analysis will inspect ${expectedDeepDives} scenes in about ${etaSec}s`,
+              )
+            : uiText(
+                '智能分析正在生成报告',
+                'Smart Analysis is generating the report',
+              );
       this.state.storyState = {
         ...this.state.storyState,
         preview: {
@@ -5886,7 +6388,10 @@ Click ⚙️ to configure backend connection.`;
         typeof payload.sceneCount === 'number'
           ? payload.sceneCount
           : this.getSmartPreviewScenes().length;
-      this.state.loadingPhase = `智能分析已识别 ${sceneCount} 个场景，等待选择范围`;
+      this.state.loadingPhase = uiText(
+        `智能分析已识别 ${sceneCount} 个场景，等待选择范围`,
+        `Smart Analysis found ${sceneCount} scenes; choose an analysis scope`,
+      );
       this.state.storyState = {
         ...this.state.storyState,
         status: 'selection_ready',
@@ -5957,7 +6462,7 @@ Click ⚙️ to configure backend connection.`;
           payload.scope === 'session' ? 'failed' : this.state.storyState.status,
         lastError:
           payload.scope === 'session'
-            ? '智能分析已取消'
+            ? uiText('智能分析已取消', 'Smart Analysis was cancelled')
             : this.state.storyState.lastError,
       };
     }
@@ -8054,11 +8559,8 @@ Click ⚙️ to configure backend connection.`;
         query: message,
         traceId: this.state.backendTraceId,
         options: {
-          maxRounds: 3, // Reduced to avoid unnecessary iterations
-          confidenceThreshold: 0.5, // Match backend default
-          maxNoProgressRounds: 2,
-          maxFailureRounds: 2,
           analysisMode: this.state.analysisMode,
+          ...this.analysisContextRequestOptions(),
         },
       };
 
@@ -8122,11 +8624,10 @@ Click ⚙️ to configure backend connection.`;
         return;
       }
 
-      const response = await this.fetchBackend(apiUrl, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(requestBody),
-      });
+      const response = await this.postAnalysisRequestWithContextFallback(
+        apiUrl,
+        requestBody,
+      );
 
       if (DEBUG_AI_PANEL)
         console.log('[AIPanel] Agent API response status:', response.status);
@@ -8145,9 +8646,7 @@ Click ⚙️ to configure backend connection.`;
             timestamp: Date.now(),
           });
           this.state.backendTraceId = null;
-          // P1-F6: Also clear stale agentSessionId when trace is gone
-          this.state.agentSessionId = null;
-          this.clearAgentObservability();
+          this.retireBackendAgentSession();
           // Note: Don't return early - let finally block handle cleanup
           const error = new Error('TRACE_NOT_FOUND');
           (error as any).code = 'TRACE_NOT_FOUND';
@@ -8283,7 +8782,7 @@ Click ⚙️ to configure backend connection.`;
     selection?: SmartSceneSelectionRequest,
   ) {
     if (this.isAiDisabled()) {
-      this.addAiDisabledMessage('智能分析');
+      this.addAiDisabledMessage(uiText('智能分析', 'Smart Analysis'));
       m.redraw();
       return;
     }
@@ -8292,8 +8791,10 @@ Click ⚙️ to configure backend connection.`;
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content:
+        content: uiText(
           '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。',
+          '⚠️ **The trace is not connected to the AI backend**\n\nConfirm that the backend is running, then use Retry connection in the upper-right corner.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -8303,7 +8804,10 @@ Click ⚙️ to configure backend connection.`;
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: '智能分析暂不支持对比模式。请先退出 Trace 对比后再运行。',
+        content: uiText(
+          '智能分析暂不支持对比模式。请先退出 Trace 对比后再运行。',
+          'Smart Analysis is not available in comparison mode yet. Exit trace comparison and try again.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -8328,7 +8832,10 @@ Click ⚙️ to configure backend connection.`;
       this.addMessage({
         id: this.generateId(),
         role: 'user',
-        content: `智能分析：${boundSelection?.label || '所选场景'}`,
+        content: uiText(
+          `智能分析：${boundSelection?.label || '所选场景'}`,
+          `Smart Analysis: ${boundSelection?.label || 'selected scenes'}`,
+        ),
         timestamp: Date.now(),
       });
     }
@@ -8349,8 +8856,11 @@ Click ⚙️ to configure backend connection.`;
       status: 'analyzing',
       findings: [],
       currentPhase: boundSelection
-        ? `智能分析：${boundSelection.label || '所选场景'}`
-        : '智能分析场景盘点',
+        ? uiText(
+            `智能分析：${boundSelection.label || '所选场景'}`,
+            `Smart Analysis: ${boundSelection.label || 'selected scenes'}`,
+          )
+        : uiText('智能分析场景盘点', 'Smart Analysis scene inventory'),
       issueCount: 0,
     });
     if (this.trace) clearAIFindingNotes(this.trace);
@@ -8370,10 +8880,7 @@ Click ⚙️ to configure backend connection.`;
         return;
       }
 
-      const response = await this.fetchBackend(apiUrl, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
+      const requestBody: Record<string, any> = {
           query: '/smart',
           traceId: this.state.backendTraceId,
           ...(boundSelection && this.state.agentSessionId
@@ -8381,12 +8888,16 @@ Click ⚙️ to configure backend connection.`;
             : {}),
           options: {
             analysisMode: this.state.analysisMode,
+            ...this.analysisContextRequestOptions(),
             preset: 'smart',
             smartAction,
             ...(boundSelection ? {smartSelection: boundSelection} : {}),
           },
-        }),
-      });
+        };
+      const response = await this.postAnalysisRequestWithContextFallback(
+        apiUrl,
+        requestBody,
+      );
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -8567,8 +9078,7 @@ Click ⚙️ to configure backend connection.`;
         terminalRunStatus: 'cancelled',
       },
     });
-    this.state.agentSessionId = null;
-    this.clearAgentObservability();
+    this.retireBackendAgentSession();
     this.saveCurrentSession();
     m.redraw();
   }
@@ -9560,7 +10070,7 @@ Click ⚙️ to configure backend connection.`;
     if (this.isAiDisabled()) {
       this.state.storyState.status = 'failed';
       this.state.storyState.lastError = this.aiDisabledReason();
-      this.addAiDisabledMessage('场景还原');
+      this.addAiDisabledMessage(uiText('场景还原', 'Scene Story'));
       m.redraw();
       return;
     }
@@ -9618,7 +10128,10 @@ Click ⚙️ to configure backend connection.`;
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `停止分析失败：${detail}。请重试。`,
+        content: uiText(
+          `停止分析失败：${detail}。请重试。`,
+          `Failed to stop analysis: ${detail}. Please retry.`,
+        ),
         timestamp: Date.now(),
       });
       m.redraw();
@@ -9654,7 +10167,7 @@ Click ⚙️ to configure backend connection.`;
               this.state.showStorySidebar = false;
               m.redraw();
             },
-            title: '隐藏 Story',
+            title: uiText('隐藏 Story', 'Hide Story'),
           },
           m('i.pf-icon', 'close'),
         ),
@@ -9677,54 +10190,63 @@ Click ⚙️ to configure backend connection.`;
     }
 
     return m('div.ai-story-body', [
-      m('h2', {style: 'margin: 0 0 8px 0;'}, '🎬 场景还原'),
+      m('h2', {style: 'margin: 0 0 8px 0;'}, uiText('🎬 场景还原', '🎬 Scene Story')),
       m(
         'p',
         {style: 'color: var(--chat-text-secondary); margin: 0 0 16px 0;'},
-        '从 Trace 中自动检测用户操作场景并分析性能问题。',
+        uiText(
+          '从 Trace 中自动检测用户操作场景并分析性能问题。',
+          'Detect user-interaction scenes in the trace and analyze performance problems.',
+        ),
       ),
 
       !hasTrace
         ? m(
             'div.ai-story-card.ai-story-card--warn',
-            '⚠ 请先把 Trace 上传到后端(打开文件后自动完成)',
+            uiText(
+              '⚠ 请先把 Trace 上传到后端（打开文件后自动完成）',
+              '⚠ Upload the trace to the backend first (this happens automatically after opening a file).',
+            ),
           )
         : null,
 
       s.status === 'previewing'
         ? m(
             'div.ai-story-card.ai-story-card--info',
-            '⏳ 正在检查缓存与估算成本...',
+            uiText('⏳ 正在检查缓存与估算成本...', '⏳ Checking cache and estimating cost...'),
           )
         : null,
 
       s.status === 'preview_cached'
         ? m(
             'div.ai-story-card.ai-story-card--success',
-            '✅ 发现历史缓存报告,正在加载...',
+            uiText('✅ 发现历史缓存报告，正在加载...', '✅ Cached report found; loading...'),
           )
         : null,
 
       // Preview: cold path — show estimate + confirm button.
       s.status === 'preview_cold' && s.preview
         ? m('div.ai-story-card.ai-story-card--cold-preview', [
-            m('div.ai-story-cold-preview-title', '预估分析成本'),
+            m('div.ai-story-cold-preview-title', uiText('预估分析成本', 'Estimated analysis cost')),
             m('div.ai-story-cold-preview-metrics', [
               this.renderEstimateMetric(
                 `${s.preview.estimate.expectedScenes}`,
-                '预估场景数',
+                uiText('预估场景数', 'Estimated scenes'),
               ),
               this.renderEstimateMetric(
                 `~${s.preview.estimate.etaSec}s`,
-                '预估耗时',
+                uiText('预估耗时', 'Estimated time'),
               ),
               this.renderEstimateMetric(
                 `$${s.preview.estimate.estimatedUsd}`,
-                '预估费用',
+                uiText('预估费用', 'Estimated cost'),
               ),
             ]),
             s.preview.estimate.confidence === 'low'
-              ? m('div.ai-story-hint', '* 预估基于启发式公式,实际可能有所偏差')
+              ? m('div.ai-story-hint', uiText(
+                  '* 预估基于启发式公式，实际可能有所偏差',
+                  '* This heuristic estimate may differ from actual usage.',
+                ))
               : null,
             m('div.ai-story-cold-preview-actions', [
               m(
@@ -9732,7 +10254,7 @@ Click ⚙️ to configure backend connection.`;
                 {
                   onclick: () => this.handleStoryConfirm(),
                 },
-                '▶ 开始分析',
+                uiText('▶ 开始分析', '▶ Start analysis'),
               ),
               m(
                 'button.ai-story-btn-secondary',
@@ -9742,7 +10264,7 @@ Click ⚙️ to configure backend connection.`;
                     m.redraw();
                   },
                 },
-                '取消',
+                uiText('取消', 'Cancel'),
               ),
             ]),
           ])
@@ -9750,32 +10272,35 @@ Click ⚙️ to configure backend connection.`;
 
       s.status === 'running'
         ? m('div.ai-story-card.ai-story-card--info', [
-            m('div', {style: 'margin-bottom: 8px;'}, '🎬 场景还原进行中...'),
+            m('div', {style: 'margin-bottom: 8px;'}, uiText('🎬 场景还原进行中...', '🎬 Scene reconstruction in progress...')),
             m(
               'div',
               {style: 'font-size: 13px; color: var(--chat-text-secondary);'},
-              '进度消息同步显示在 Chat 视图中。',
+              uiText('进度消息同步显示在 Chat 视图中。', 'Progress is also shown in the Chat view.'),
             ),
             m(
               'button.ai-story-btn-ghost-danger',
               {
                 onclick: () => this.handleStoryCancel(),
               },
-              '取消分析',
+              uiText('取消分析', 'Cancel analysis'),
             ),
           ])
         : null,
 
       s.status === 'selection_ready'
         ? m('div.ai-story-card.ai-story-card--cold-preview', [
-            m('div.ai-story-cold-preview-title', '选择智能分析范围'),
+            m('div.ai-story-cold-preview-title', uiText('选择智能分析范围', 'Choose Smart analysis scope')),
             m(
               'div',
               {
                 style:
                   'font-size: 13px; color: var(--chat-text-secondary); margin-bottom: 12px;',
               },
-              `已识别 ${this.getSmartPreviewScenes().length} 个场景。选择后才会开始深钻分析。`,
+              uiText(
+                `已识别 ${this.getSmartPreviewScenes().length} 个场景。选择后才会开始深钻分析。`,
+                `${this.getSmartPreviewScenes().length} scenes detected. Deep analysis starts after you choose a scope.`,
+              ),
             ),
             this.renderSmartSelectionButtons('story'),
           ])
@@ -9785,13 +10310,13 @@ Click ⚙️ to configure backend connection.`;
 
       s.status === 'failed'
         ? m('div.ai-story-card.ai-story-card--error', [
-            m('div', `❌ ${s.lastError || '场景还原失败'}`),
+            m('div', `❌ ${s.lastError || uiText('场景还原失败', 'Scene reconstruction failed')}`),
             m(
               'button.ai-story-btn-retry',
               {
                 onclick: () => this.handleStoryPreview(),
               },
-              '重试',
+              uiText('重试', 'Retry'),
             ),
           ])
         : null,
@@ -9820,7 +10345,10 @@ Click ⚙️ to configure backend connection.`;
               m(
                 'div',
                 {style: 'font-weight: 600; margin-bottom: 4px;'},
-                `✅ 场景还原完成 — ${scenes.length} 个场景`,
+                uiText(
+                  `✅ 场景还原完成 — ${scenes.length} 个场景`,
+                  `✅ Scene reconstruction complete — ${scenes.length} scenes`,
+                ),
               ),
               report.summary
                 ? m(
@@ -9839,11 +10367,17 @@ Click ⚙️ to configure backend connection.`;
                       style:
                         'margin-top: 8px; font-size: 12px; color: var(--chat-text-secondary);',
                     },
-                    `来自缓存 (${new Date(report.createdAt).toLocaleString()})`,
+                    uiText(
+                      `来自缓存 (${new Date(report.createdAt).toLocaleString()})`,
+                      `From cache (${new Date(report.createdAt).toLocaleString()})`,
+                    ),
                   )
                 : null,
             ])
-          : '✅ 场景还原完成。切换到 Chat 视图查看完整结果。',
+          : uiText(
+              '✅ 场景还原完成。切换到 Chat 视图查看完整结果。',
+              '✅ Scene reconstruction complete. Switch to Chat for the full result.',
+            ),
       ]),
 
       scenes.length > 0
@@ -9853,7 +10387,13 @@ Click ⚙️ to configure backend connection.`;
                 'thead',
                 m(
                   'tr',
-                  ['#', '类型', '时长', '应用/进程', '状态'].map((h) =>
+                  [
+                    '#',
+                    uiText('类型', 'Type'),
+                    uiText('时长', 'Duration'),
+                    uiText('应用/进程', 'App/Process'),
+                    uiText('状态', 'Status'),
+                  ].map((h) =>
                     m('th', h),
                   ),
                 ),
@@ -9861,8 +10401,10 @@ Click ⚙️ to configure backend connection.`;
               m(
                 'tbody',
                 scenes.map((scene: any, i: number) => {
-                  const displayName =
-                    SCENE_DISPLAY_NAMES[scene.sceneType] ?? scene.sceneType;
+                  const displayName = getSceneDisplayName(
+                    scene.sceneType,
+                    scene.label,
+                  );
                   const dur =
                     scene.durationMs >= 1000
                       ? `${(scene.durationMs / 1000).toFixed(2)}s`
@@ -9885,7 +10427,10 @@ Click ⚙️ to configure backend connection.`;
                     'tr',
                     {
                       key: scene.id,
-                      title: `点击跳转到 ${scene.startTs}`,
+                      title: uiText(
+                        `点击跳转到 ${scene.startTs}`,
+                        `Jump to ${scene.startTs}`,
+                      ),
                     },
                     [
                       m('td.col-index', `${i + 1}`),
@@ -9918,7 +10463,7 @@ Click ⚙️ to configure backend connection.`;
             this.handleStoryConfirm({forceRefresh: true});
           },
         },
-        '重新分析',
+        uiText('重新分析', 'Analyze again'),
       ),
     ]);
   }
@@ -10573,13 +11118,11 @@ Click ⚙️ to configure backend connection.`;
           disabled: this.isAnalysisIdentityLocked(),
           onclick: () => {
             if (this.isAnalysisIdentityLocked()) return;
-            this.cancelSSEConnection();
             // 保存当前 session 再创建新的
             this.saveCurrentSession();
+            this.retireBackendAgentSession();
             this.createNewSession();
             this.state.messages = [];
-            this.state.agentSessionId = null; // Reset Agent session for new conversation
-            this.clearAgentObservability();
             if (this.state.backendTraceId || this.engine?.mode === 'HTTP_RPC') {
               this.addRpcModeWelcomeMessage();
             } else {
@@ -10657,12 +11200,12 @@ Click ⚙️ to configure backend connection.`;
 
   private async clearChat() {
     if (this.isAnalysisIdentityLocked()) return;
-    this.cancelSSEConnection();
     this.setLoadingState(false);
 
     // Persist current conversation before wiping
     this.flushSessionSave();
     this.saveCurrentSession();
+    this.retireBackendAgentSession();
 
     // Do not delete backend trace resources when clearing chat.
     // Clear-chat resets conversation state only and preserves trace continuity.
@@ -10672,13 +11215,11 @@ Click ⚙️ to configure backend connection.`;
     this.state.commandHistory = [];
     this.state.historyIndex = -1;
     this.state.pinnedResults = []; // Clear pinned results
-    this.state.agentSessionId = null; // Clear Agent session for multi-turn dialogue
     this.revealedBlockCounts.clear();
     this.state.completionHandled = false;
     this.state.displayedSkillProgress = new Set();
     this.state.collectedErrors = [];
     this.state.collapsedTables = new Set();
-    this.clearAgentObservability();
     this.resetStreamingFlow();
     this.resetStreamingAnswer();
     this.saveHistory();
@@ -11183,7 +11724,10 @@ Click ⚙️ to configure backend connection.`;
       );
       const response = await this.fetchBackend(url);
       if (!response.ok) {
-        throw new Error(`Trace 列表请求失败 (${response.status})`);
+        throw new Error(uiText(
+          `Trace 列表请求失败 (${response.status})`,
+          `Trace catalog request failed (${response.status})`,
+        ));
       }
       const parsed = parseWorkspaceTraceCatalogResponse(await response.json());
       if (!parsed.ok) throw new Error(parsed.error);
@@ -11200,7 +11744,9 @@ Click ⚙️ to configure backend connection.`;
       if (
         this.tracePairWorkspaceController.failCatalogLoad(
           request,
-          e instanceof Error ? e.message : '无法加载 Trace 列表',
+          e instanceof Error
+            ? e.message
+            : uiText('无法加载 Trace 列表', 'Unable to load trace catalog'),
         )
       ) {
         this.availableTraces = [];
@@ -12329,7 +12875,7 @@ Click ⚙️ to configure backend connection.`;
     return m('aside.ai-trace-picker-sidebar', [
       m('div.ai-trace-picker-sidebar-header', [
         m('i.pf-icon', 'compare_arrows'),
-        m('span', '选择对比 Trace'),
+        m('span', uiText('选择对比 Trace', 'Choose a comparison trace')),
         m(
           'button.ai-trace-picker-sidebar-close',
           {
@@ -12337,7 +12883,7 @@ Click ⚙️ to configure backend connection.`;
               this.state.showTracePicker = false;
               m.redraw();
             },
-            title: '关闭',
+            title: uiText('关闭', 'Close'),
           },
           m('i.pf-icon', 'close'),
         ),
@@ -12345,7 +12891,10 @@ Click ⚙️ to configure backend connection.`;
       m('div.ai-trace-picker-sidebar-body', [
         m('div.ai-trace-picker', [
           this.state.comparisonTraceLoading
-            ? m('div.ai-trace-picker-loading', '加载 Trace 列表中...')
+            ? m(
+                'div.ai-trace-picker-loading',
+                uiText('加载 Trace 列表中...', 'Loading trace catalog...'),
+              )
             : m('div.ai-trace-picker-list', [
                 // Show available traces from backend
                 this.availableTraces.length > 0
@@ -12389,7 +12938,10 @@ Click ⚙️ to configure backend connection.`;
                       )
                   : m(
                       'div.ai-trace-picker-empty',
-                      '没有可用的参考 Trace。请先上传另一个 Trace 文件到后端。',
+                      uiText(
+                        '没有可用的参考 Trace。请先上传另一个 Trace 文件到后端。',
+                        'No reference trace is available. Upload another trace to the backend first.',
+                      ),
                     ),
               ]),
         ]),
@@ -12401,7 +12953,7 @@ Click ⚙️ to configure backend connection.`;
                   onclick: () => this.exitComparisonMode(),
                   disabled: this.isAnalysisIdentityLocked(),
                 },
-                '退出对比',
+                uiText('退出对比', 'Exit comparison'),
               ),
             ])
           : null,
@@ -12438,11 +12990,16 @@ Click ⚙️ to configure backend connection.`;
     this.addMessage({
       id: this.generateId(),
       role: 'system',
-      content:
+      content: uiText(
         `**对比模式已激活**\n\n` +
-        `- ${this.getTracePairPaneTitle('current')} Trace: ${this.getCurrentTraceName()}\n` +
-        `- ${this.getTracePairPaneTitle('reference')} Trace: ${refTraceName}\n\n` +
-        `已在同页双 Trace 工作区中打开。`,
+          `- ${this.getTracePairPaneTitle('current')} Trace: ${this.getCurrentTraceName()}\n` +
+          `- ${this.getTracePairPaneTitle('reference')} Trace: ${refTraceName}\n\n` +
+          '已在同页双 Trace 工作区中打开。',
+        `**Comparison mode is active**\n\n` +
+          `- ${this.getTracePairPaneTitle('current')} trace: ${this.getCurrentTraceName()}\n` +
+          `- ${this.getTracePairPaneTitle('reference')} trace: ${refTraceName}\n\n` +
+          'The dual-trace workspace is open on this page.',
+      ),
       timestamp: Date.now(),
     });
     this.saveCurrentSession();
@@ -12452,24 +13009,23 @@ Click ⚙️ to configure backend connection.`;
   /** Exit comparison mode. */
   private exitComparisonMode(): void {
     if (this.isAnalysisIdentityLocked()) return;
-    const hadComparisonSession = !!this.state.agentSessionId;
+    const hadComparisonSession = this.retireBackendAgentSession();
     this.tracePairWorkspaceController.close();
     this.tracePairWorkspaceController.clearReference();
     this.clearTracePairSessionState();
-    this.state.agentSessionId = null;
-    this.state.agentRunId = null;
-    this.state.agentRequestId = null;
-    this.state.agentRunSequence = 0;
-    if (hadComparisonSession) {
-      this.clearAgentObservability();
-    }
 
     this.addMessage({
       id: this.generateId(),
       role: 'system',
       content: hadComparisonSession
-        ? '已退出对比模式，回到单 Trace 分析。后续问题将开始新的单 Trace 会话。'
-        : '已退出对比模式，回到单 Trace 分析。',
+        ? uiText(
+            '已退出对比模式，回到单 Trace 分析。后续问题将开始新的单 Trace 会话。',
+            'Exited comparison mode and returned to single-trace analysis. The next question will start a new single-trace session.',
+          )
+        : uiText(
+            '已退出对比模式，回到单 Trace 分析。',
+            'Exited comparison mode and returned to single-trace analysis.',
+          ),
       timestamp: Date.now(),
     });
     this.saveCurrentSession();

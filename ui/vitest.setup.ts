@@ -26,9 +26,9 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
   } as unknown as typeof ResizeObserver;
 }
 
-function installMemoryLocalStorage(target: typeof globalThis) {
+function createMemoryLocalStorage(): Storage {
   const store = new Map<string, string>();
-  const memoryLocalStorage: Storage = {
+  const storageMethods: Storage = {
     get length() {
       return store.size;
     },
@@ -48,17 +48,60 @@ function installMemoryLocalStorage(target: typeof globalThis) {
       store.set(key, String(value));
     },
   };
+  const memoryLocalStorage = new Proxy(storageMethods, {
+    get(storageTarget, property, receiver) {
+      if (typeof property === 'string' && !(property in storageTarget)) {
+        return store.get(property);
+      }
+      return Reflect.get(storageTarget, property, receiver);
+    },
+    set(storageTarget, property, value, receiver) {
+      if (typeof property === 'string' && !(property in storageTarget)) {
+        store.set(property, String(value));
+        return true;
+      }
+      return Reflect.set(storageTarget, property, value, receiver);
+    },
+    deleteProperty(storageTarget, property) {
+      if (typeof property === 'string' && !(property in storageTarget)) {
+        store.delete(property);
+        return true;
+      }
+      return Reflect.deleteProperty(storageTarget, property);
+    },
+    ownKeys(storageTarget) {
+      const targetKeys = Reflect.ownKeys(storageTarget);
+      const targetStringKeys = new Set(
+        targetKeys.filter((key): key is string => typeof key === 'string'),
+      );
+      return [
+        ...targetKeys,
+        ...Array.from(store.keys()).filter((key) => !targetStringKeys.has(key)),
+      ];
+    },
+    getOwnPropertyDescriptor(storageTarget, property) {
+      if (typeof property === 'string' && store.has(property) && !(property in storageTarget)) {
+        return {configurable: true, enumerable: true, writable: true, value: store.get(property)};
+      }
+      return Reflect.getOwnPropertyDescriptor(storageTarget, property);
+    },
+  });
 
+  return memoryLocalStorage;
+}
+
+function installMemoryLocalStorage(target: typeof globalThis, storage: Storage) {
   Object.defineProperty(target, 'localStorage', {
     configurable: true,
-    value: memoryLocalStorage,
+    value: storage,
   });
 }
 
-if (typeof globalThis.localStorage?.getItem !== 'function') {
-  installMemoryLocalStorage(globalThis);
-}
-
-if (typeof window !== 'undefined' && typeof window.localStorage?.getItem !== 'function') {
-  installMemoryLocalStorage(window as unknown as typeof globalThis);
+// Always use one deterministic test Storage. Accessing Node 24/25's native
+// experimental localStorage getter can warn or throw when workers have no
+// backing file, while older bundled Node versions rely on jsdom instead.
+const testLocalStorage = createMemoryLocalStorage();
+installMemoryLocalStorage(globalThis, testLocalStorage);
+if (typeof window !== 'undefined' && window !== globalThis) {
+  installMemoryLocalStorage(window as unknown as typeof globalThis, testLocalStorage);
 }

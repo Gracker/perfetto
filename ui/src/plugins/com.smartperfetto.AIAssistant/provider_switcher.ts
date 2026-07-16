@@ -8,6 +8,7 @@ import {
   ProviderQuickSwitcherAttrs,
   HealthStatus,
   providerRuntimeLabel,
+  providerRuntimeShortLabel,
   providerSupportsRuntime,
   resolveProviderRuntime,
   buildHeaders,
@@ -22,6 +23,7 @@ import {
   subscribeProviderCatalogChanged,
   type ProviderCatalogChangeReason,
 } from './provider_events';
+import {uiText} from './ui_language';
 
 export class ProviderQuickSwitcher
   implements m.ClassComponent<ProviderQuickSwitcherAttrs>
@@ -346,7 +348,10 @@ export class ProviderQuickSwitcher
             }
           },
           title: identityLocked
-            ? '分析运行中，Provider 保持锁定'
+            ? uiText(
+                '分析运行中，Provider 保持锁定',
+                'Provider is locked while analysis is running',
+              )
             : active
               ? `${active.name} · ${providerRuntimeLabel(resolveProviderRuntime(active))}`
               : 'System Default · .env',
@@ -377,11 +382,7 @@ export class ProviderQuickSwitcher
                     whiteSpace: 'nowrap',
                   },
                 },
-                resolveProviderRuntime(active) === 'openai-agents-sdk'
-                  ? 'OA'
-                  : resolveProviderRuntime(active) === 'pi-agent-core'
-                    ? 'PI'
-                    : 'CL',
+                providerRuntimeShortLabel(resolveProviderRuntime(active)),
               )
             : null,
           m(

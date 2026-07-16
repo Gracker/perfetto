@@ -409,6 +409,13 @@ export function providerRuntimeLabel(runtime: ServerRuntimeKind): string {
   return 'Claude SDK';
 }
 
+export function providerRuntimeShortLabel(runtime: ServerRuntimeKind): string {
+  if (runtime === 'openai-agents-sdk') return 'OA';
+  if (runtime === 'pi-agent-core' || runtime === 'experimental-pi-agent-core') return 'PI';
+  if (runtime === 'opencode' || runtime === 'experimental-opencode') return 'OC';
+  return 'CL';
+}
+
 export type BedrockAuthMethod = 'bearer' | 'accessKey' | 'profile';
 
 export interface FormState {

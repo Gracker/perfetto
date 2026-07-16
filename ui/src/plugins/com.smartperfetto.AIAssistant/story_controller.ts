@@ -15,12 +15,13 @@
 import m from 'mithril';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
 import {
-  SCENE_DISPLAY_NAMES,
   SCENE_PIN_MAPPING,
   ScenePinInstruction,
   formatSceneTimestamp,
+  getSceneDisplayName,
   getSceneResponseStatusLabel,
 } from './scene_constants';
+import {uiOutputLanguage, uiText, uiTextForLanguage} from './ui_language';
 import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
 import {Message, StoryPreviewResult} from './types';
 
@@ -55,6 +56,45 @@ export interface StoryControllerContext {
 
   /** Optional debug flag — when true, verbose console.log() messages are emitted */
   debug?: boolean;
+}
+
+function sceneProgressFallback(
+  phase: unknown,
+  language: string | undefined,
+): string {
+  switch (phase) {
+    case 'detecting':
+    case 'scene_detection':
+      return uiTextForLanguage(language, '正在检测场景', 'Detecting scenes');
+    case 'analyzing':
+    case 'deep_analysis':
+      return uiTextForLanguage(language, '正在分析场景', 'Analyzing scenes');
+    case 'summarizing':
+    case 'finalizing':
+      return uiTextForLanguage(language, '正在生成场景摘要', 'Summarizing scenes');
+    default:
+      return uiTextForLanguage(language, '正在分析', 'Analyzing');
+  }
+}
+
+/** Prefer the backend-localized message; never expose an internal phase code. */
+export function buildSceneProgressContent(input: {
+  eventType: 'progress' | 'phase_start';
+  data: any;
+  rawData?: any;
+  language?: string;
+}): string | undefined {
+  const message = input.data?.message ?? input.rawData?.message;
+  const phase = input.data?.phase ?? input.rawData?.phase;
+  if (input.eventType === 'progress' && !message && !phase) return undefined;
+  const detail = typeof message === 'string' && message.trim()
+    ? message.trim()
+    : sceneProgressFallback(phase, input.language);
+  return uiTextForLanguage(
+    input.language,
+    `🎬 **场景还原中...**\n\n${detail}`,
+    `🎬 **Reconstructing scenes...**\n\n${detail}`,
+  );
 }
 
 /**
@@ -112,7 +152,7 @@ export class StoryController {
   async loadReport(reportId: string): Promise<any> {
     const url = buildAssistantApiV1Url(
       this.ctx.getBackendUrl(),
-      `/scene-reconstruct/report/${encodeURIComponent(reportId)}`,
+      `/scene-reconstruct/report/${encodeURIComponent(reportId)}?outputLanguage=${encodeURIComponent(uiOutputLanguage())}`,
     );
     const response = await this.ctx.fetchBackend(url);
     if (!response.ok) {
@@ -138,7 +178,10 @@ export class StoryController {
       this.ctx.addMessage({
         id: this.ctx.generateId(),
         role: 'assistant',
-        content: '⚠️ **无法执行场景还原**\n\n请先确保 Trace 已上传到后端。',
+        content: uiText(
+          '⚠️ **无法执行场景还原**\n\n请先确保 Trace 已上传到后端。',
+          '⚠️ **Cannot reconstruct scenes**\n\nMake sure the trace has been uploaded to the backend.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -152,7 +195,10 @@ export class StoryController {
     this.ctx.addMessage({
       id: progressMessageId,
       role: 'assistant',
-      content: '🎬 **场景还原中...**\n\n正在回放 Trace 中的用户操作与设备响应...',
+      content: uiText(
+        '🎬 **场景还原中...**\n\n正在回放 Trace 中的用户操作与设备响应...',
+        '🎬 **Reconstructing scenes...**\n\nReplaying user interactions and device responses from the trace...',
+      ),
       timestamp: Date.now(),
     });
 
@@ -171,6 +217,7 @@ export class StoryController {
               deepAnalysis: false,
               generateTracks: true,
               forceRefresh: opts?.forceRefresh ?? false,
+              outputLanguage: uiOutputLanguage(),
             },
           }),
         },
@@ -199,7 +246,10 @@ export class StoryController {
     } catch (error: any) {
       console.error('[StoryController] Scene reconstruction error:', error);
       this.ctx.updateMessage(progressMessageId, {
-        content: `❌ **场景还原失败**\n\n${error.message || '未知错误'}`,
+        content: uiText(
+          `❌ **场景还原失败**\n\n${error.message || '未知错误'}`,
+          `❌ **Scene reconstruction failed**\n\n${error.message || 'Unknown error'}`,
+        ),
       });
       this.ctx.setLoadingState(false);
       m.redraw();
@@ -389,11 +439,16 @@ export class StoryController {
         break;
 
       case 'progress': {
-        const phase = data.phase || rawData.phase;
-        if (!phase) break;
-        this.debugLog('Scene progress:', phase, data);
+        const content = buildSceneProgressContent({
+          eventType: 'progress',
+          data,
+          rawData,
+          language: uiOutputLanguage(),
+        });
+        if (!content) break;
+        this.debugLog('Scene progress:', data.message ?? data.phase, data);
         this.ctx.updateMessage(progressMessageId, {
-          content: `🎬 **场景还原中...**\n\n${phase}...`,
+          content,
         });
         m.redraw();
         break;
@@ -402,7 +457,12 @@ export class StoryController {
       case 'phase_start':
         this.debugLog('Scene phase start:', data);
         this.ctx.updateMessage(progressMessageId, {
-          content: `🎬 **场景还原中...**\n\n${data.phase || '正在分析'}...`,
+          content: buildSceneProgressContent({
+            eventType: 'phase_start',
+            data,
+            rawData,
+            language: uiOutputLanguage(),
+          }),
         });
         m.redraw();
         break;
@@ -413,7 +473,10 @@ export class StoryController {
           scenes.push(data.scene);
         }
         this.ctx.updateMessage(progressMessageId, {
-          content: `🎬 **场景还原中...**\n\n已检测到 ${scenes.length} 个场景...`,
+          content: uiText(
+            `🎬 **场景还原中...**\n\n已检测到 ${scenes.length} 个场景...`,
+            `🎬 **Reconstructing scenes...**\n\nDetected ${scenes.length} scenes...`,
+          ),
         });
         m.redraw();
         break;
@@ -495,7 +558,10 @@ export class StoryController {
         const queuedCount = Number(data.analysisIntervals ?? 0);
         this.debugLog('Story scenes detected:', sceneCount, 'queued:', queuedCount);
         this.ctx.updateMessage(progressMessageId, {
-          content: `🎬 **场景还原中...**\n\n已检测到 ${sceneCount} 个场景,排队深度分析 ${queuedCount} 个`,
+          content: uiText(
+            `🎬 **场景还原中...**\n\n已检测到 ${sceneCount} 个场景，排队深度分析 ${queuedCount} 个`,
+            `🎬 **Reconstructing scenes...**\n\nDetected ${sceneCount} scenes; ${queuedCount} queued for deep analysis`,
+          ),
         });
         m.redraw();
         break;
@@ -518,7 +584,10 @@ export class StoryController {
         this.debugLog('Story cancelled:', scope, data);
         if (scope === 'session') {
           this.ctx.updateMessage(progressMessageId, {
-            content: '🎬 **场景还原已取消**\n\n部分结果可能尚未生成。',
+            content: uiText(
+              '🎬 **场景还原已取消**\n\n部分结果可能尚未生成。',
+              '🎬 **Scene reconstruction cancelled**\n\nSome results may not have been generated.',
+            ),
           });
           m.redraw();
         }
@@ -556,24 +625,33 @@ export class StoryController {
   ): void {
     if (scenes.length === 0) {
       this.ctx.updateMessage(messageId, {
-        content: '🎬 **场景还原完成**\n\n未检测到明显的用户操作场景。',
+        content: uiText(
+          '🎬 **场景还原完成**\n\n未检测到明显的用户操作场景。',
+          '🎬 **Scene reconstruction complete**\n\nNo clear user-interaction scenes were detected.',
+        ),
       });
       m.redraw();
       return;
     }
 
     // Build scene cards content
-    let content = '## 🎬 场景还原结果\n\n';
+    let content = uiText('## 🎬 场景还原结果\n\n', '## 🎬 Scene reconstruction result\n\n');
 
     // Scene summary
-    content += `共还原 **${scenes.length}** 个操作场景（仅回放，不含根因诊断）：\n\n`;
+    content += uiText(
+      `共还原 **${scenes.length}** 个操作场景（仅回放，不含根因诊断）：\n\n`,
+      `Reconstructed **${scenes.length}** interaction scenes (replay only; no root-cause diagnosis):\n\n`,
+    );
 
     // Scene timeline as a table
-    content += '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 响应状态 |\n';
+    content += uiText(
+      '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 响应状态 |\n',
+      '| # | Type | Start time | Duration | App/Activity | Response |\n',
+    );
     content += '|------|------|----------|------|-----------|-----------|\n';
 
     scenes.forEach((scene, index) => {
-      const displayName = SCENE_DISPLAY_NAMES[scene.type] || scene.type;
+      const displayName = getSceneDisplayName(scene.type, scene.label);
       const durationStr = scene.durationMs >= 1000
         ? `${(scene.durationMs / 1000).toFixed(2)}s`
         : `${scene.durationMs.toFixed(0)}ms`;
@@ -591,11 +669,17 @@ export class StoryController {
 
     // Add narrative if available
     if (narrative) {
-      content += `\n---\n\n### 📝 操作回放摘要\n\n${narrative}\n`;
+      content += uiText(
+        `\n---\n\n### 📝 操作回放摘要\n\n${narrative}\n`,
+        `\n---\n\n### 📝 Interaction replay summary\n\n${narrative}\n`,
+      );
     }
 
     // Add navigation tips
-    content += `\n---\n\n💡 **提示**: 点击时间戳可跳转到对应位置，相关泳道已自动 Pin 到顶部。`;
+    content += uiText(
+      '\n---\n\n💡 **提示**：点击时间戳可跳转到对应位置，相关泳道已自动 Pin 到顶部。',
+      '\n---\n\n💡 **Tip**: Select a timestamp to navigate there. Relevant tracks are pinned automatically.',
+    );
 
     this.ctx.updateMessage(messageId, {content});
     m.redraw();

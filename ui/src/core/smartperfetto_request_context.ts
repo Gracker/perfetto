@@ -223,7 +223,12 @@ export function buildSmartPerfettoTraceProcessorProxyTarget(
     leaseMode?: 'shared' | 'isolated' | string;
     leaseModeReason?: string;
     leaseQueueLength?: number;
+    websocketCapability?: {
+      protocol?: string;
+      expiresAt?: number;
+    };
   } = {},
+  headers?: HeadersInit,
 ) {
   const context = getSmartPerfettoRequestContext();
   const encodedLeaseId = encodeURIComponent(leaseId);
@@ -251,7 +256,11 @@ export function buildSmartPerfettoTraceProcessorProxyTarget(
     websocketUrl: `${websocketBase}/api/tp/${encodedLeaseId}/websocket${suffix}`,
     heartbeatUrl: `${httpBase}/heartbeat${suffix}`,
     displayName: `backend ${leaseStatus.leaseMode ?? 'unknown'} lease ${leaseId.slice(0, 8)}`,
-    headers: buildSmartPerfettoContextHeaders(),
+    headers: buildSmartPerfettoContextHeaders(headers),
     credentials: 'include' as const,
+    websocketProtocols: leaseStatus.websocketCapability?.protocol
+      ? [leaseStatus.websocketCapability.protocol]
+      : undefined,
+    websocketCapabilityExpiresAt: leaseStatus.websocketCapability?.expiresAt,
   };
 }

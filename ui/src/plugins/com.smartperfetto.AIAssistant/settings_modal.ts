@@ -17,15 +17,22 @@
 // limitations under the License.
 
 import m from 'mithril';
-import type {AISettings, ServerStatus} from './types';
+import type {
+  AISettings,
+  AnalysisContextSelection,
+  ServerStatus,
+} from './types';
 import {ProviderPanel} from './provider_panel';
 import {CodebasePanel} from './codebase_panel';
 import {providerRuntimeLabel} from './provider_types';
 import type {SmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
+import {analysisContextScopeKey} from './analysis_context';
+import {uiText} from './ui_language';
 
 export interface SettingsModalAttrs {
   settings: AISettings;
+  analysisContext?: AnalysisContextSelection;
   workspaceContext: SmartPerfettoRequestContext;
   readOnly?: boolean;
   onClose: () => void;
@@ -33,6 +40,7 @@ export interface SettingsModalAttrs {
   onWorkspaceChange: (workspaceId: string) => void;
   onCheckStatus: (backendUrl: string, apiKey: string) => Promise<ServerStatus>;
   onProviderSelectionChange: () => void;
+  onAnalysisContextChange?: (selection: AnalysisContextSelection) => void;
   initialStatus?: ServerStatus;
 }
 
@@ -339,6 +347,14 @@ const TAB_STYLES = {
 
 type SettingsTab = 'connection' | 'providers' | 'codebases';
 
+export function settingsBackendBindingChanged(
+  committed: AISettings,
+  draft: AISettings,
+): boolean {
+  return committed.backendUrl.replace(/\/+$/, '') !== draft.backendUrl.replace(/\/+$/, '') ||
+    committed.backendApiKey !== draft.backendApiKey;
+}
+
 function formatRuntimeSource(source: ServerStatus['source']): string {
   switch (source) {
     case 'provider':
@@ -371,6 +387,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   private currentTab: SettingsTab = 'connection';
   private workspaceId = '';
   private showBackendAuth = false;
+  private dialogElement?: HTMLElement;
+  private previouslyFocusedElement?: HTMLElement;
 
   oninit(vnode: m.Vnode<SettingsModalAttrs>) {
     this.settings = {...vnode.attrs.settings};
@@ -386,6 +404,67 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     if (vnode.attrs.readOnly && this.currentTab === 'providers') {
       this.currentTab = 'connection';
     }
+  }
+
+  oncreate(vnode: m.VnodeDOM<SettingsModalAttrs>) {
+    this.previouslyFocusedElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : undefined;
+    this.dialogElement = vnode.dom.querySelector<HTMLElement>('[role="dialog"]') ?? undefined;
+    this.dialogElement
+      ?.querySelector<HTMLElement>('button, input, select, textarea, [tabindex="0"]')
+      ?.focus();
+  }
+
+  onremove() {
+    this.previouslyFocusedElement?.focus();
+    this.dialogElement = undefined;
+    this.previouslyFocusedElement = undefined;
+  }
+
+  private handleDialogKeyDown(event: KeyboardEvent, onClose: () => void): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab' || !this.dialogElement) return;
+    const focusable = Array.from(this.dialogElement.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ));
+    if (focusable.length === 0) {
+      event.preventDefault();
+      this.dialogElement.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  private handleTabKeyDown(
+    event: KeyboardEvent,
+    providersDisabled: boolean,
+  ): void {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const tabs: SettingsTab[] = providersDisabled
+      ? ['connection', 'codebases']
+      : ['connection', 'providers', 'codebases'];
+    const currentIndex = Math.max(0, tabs.indexOf(this.currentTab));
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? tabs.length - 1
+        : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    this.currentTab = tabs[nextIndex];
+    setTimeout(() => document.getElementById(`smartperfetto-settings-tab-${this.currentTab}`)?.focus(), 0);
   }
 
   private async checkStatus() {
@@ -706,29 +785,56 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
 
   view(vnode: m.Vnode<SettingsModalAttrs>) {
     const readOnly = vnode.attrs.readOnly === true;
+    const backendBindingDirty = settingsBackendBindingChanged(
+      vnode.attrs.settings,
+      this.settings,
+    );
     return m(
       'div',
       {style: MODAL_STYLES.overlay},
-      m('div', {style: MODAL_STYLES.modal}, [
+      m('div', {
+        style: MODAL_STYLES.modal,
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-labelledby': 'smartperfetto-settings-title',
+        tabindex: -1,
+        onkeydown: (event: KeyboardEvent) => this.handleDialogKeyDown(event, vnode.attrs.onClose),
+      }, [
         m('div', {style: MODAL_STYLES.header}, [
           m('div', {style: MODAL_STYLES.headerLeft}, [
             m('span', {style: MODAL_STYLES.headerIcon}, '⚙️'),
-            m('h3', {style: MODAL_STYLES.title}, 'AI Assistant Settings'),
+            m('h3', {
+              id: 'smartperfetto-settings-title',
+              style: MODAL_STYLES.title,
+            }, uiText('AI 助手设置', 'AI Assistant Settings')),
           ]),
           m(
             'button',
             {
+              type: 'button',
               style: MODAL_STYLES.closeBtn,
               onclick: () => vnode.attrs.onClose(),
+              title: uiText('关闭设置', 'Close settings'),
+              'aria-label': uiText('关闭设置', 'Close settings'),
             },
             '×',
           ),
         ]),
 
-        m('div', {style: TAB_STYLES.tabBar}, [
+        m('div', {
+          style: TAB_STYLES.tabBar,
+          role: 'tablist',
+          'aria-label': uiText('设置分类', 'Settings sections'),
+        }, [
           m(
             'button',
             {
+              type: 'button',
+              id: 'smartperfetto-settings-tab-connection',
+              role: 'tab',
+              'aria-selected': this.currentTab === 'connection' ? 'true' : 'false',
+              'aria-controls': 'smartperfetto-settings-panel-connection',
+              tabindex: this.currentTab === 'connection' ? 0 : -1,
               style: {
                 ...TAB_STYLES.tab,
                 ...(this.currentTab === 'connection'
@@ -738,12 +844,20 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               onclick: () => {
                 this.currentTab = 'connection';
               },
+              onkeydown: (event: KeyboardEvent) =>
+                this.handleTabKeyDown(event, readOnly || backendBindingDirty),
             },
-            '\u{1F50C} Connection',
+            uiText('\u{1F50C} 连接', '\u{1F50C} Connection'),
           ),
           m(
             'button',
             {
+              type: 'button',
+              id: 'smartperfetto-settings-tab-providers',
+              role: 'tab',
+              'aria-selected': this.currentTab === 'providers' ? 'true' : 'false',
+              'aria-controls': 'smartperfetto-settings-panel-providers',
+              tabindex: this.currentTab === 'providers' ? 0 : -1,
               style: {
                 ...TAB_STYLES.tab,
                 ...(this.currentTab === 'providers'
@@ -753,14 +867,32 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               onclick: () => {
                 this.currentTab = 'providers';
               },
-              disabled: readOnly,
-              title: readOnly ? '分析运行中，Provider 配置保持只读' : undefined,
+              disabled: readOnly || backendBindingDirty,
+              title: readOnly
+                ? uiText(
+                    '分析运行中，Provider 配置保持只读',
+                    'Provider settings are read-only while analysis is running',
+                  )
+                : backendBindingDirty
+                  ? uiText(
+                      '请先保存连接地址或凭证，再管理 Provider',
+                      'Save backend URL or credential changes before managing providers',
+                    )
+                : undefined,
+              onkeydown: (event: KeyboardEvent) =>
+                this.handleTabKeyDown(event, readOnly || backendBindingDirty),
             },
-            '\u{1F916} Providers',
+            uiText('\u{1F916} 提供商', '\u{1F916} Providers'),
           ),
           m(
             'button',
             {
+              type: 'button',
+              id: 'smartperfetto-settings-tab-codebases',
+              role: 'tab',
+              'aria-selected': this.currentTab === 'codebases' ? 'true' : 'false',
+              'aria-controls': 'smartperfetto-settings-panel-codebases',
+              tabindex: this.currentTab === 'codebases' ? 0 : -1,
               style: {
                 ...TAB_STYLES.tab,
                 ...(this.currentTab === 'codebases'
@@ -770,16 +902,42 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               onclick: () => {
                 this.currentTab = 'codebases';
               },
+              onkeydown: (event: KeyboardEvent) =>
+                this.handleTabKeyDown(event, readOnly || backendBindingDirty),
             },
-            'Codebases',
+            uiText('源码库', 'Codebases'),
           ),
         ]),
 
         this.currentTab === 'providers'
-          ? readOnly
+          ? backendBindingDirty
             ? m(
                 'div',
-                {style: MODAL_STYLES.content},
+                {
+                  style: MODAL_STYLES.content,
+                  role: 'tabpanel',
+                  id: 'smartperfetto-settings-panel-providers',
+                  'aria-labelledby': 'smartperfetto-settings-tab-providers',
+                },
+                m('div', {
+                  style: {
+                    ...MODAL_STYLES.alertBox,
+                    ...MODAL_STYLES.alertWarning,
+                  },
+                }, uiText(
+                  '连接地址或凭证有未保存的修改。请先保存连接设置，再管理 Provider。',
+                  'Backend URL or credentials have unsaved changes. Save connection settings before managing providers.',
+                )),
+              )
+            : readOnly
+            ? m(
+                'div',
+                {
+                  style: MODAL_STYLES.content,
+                  role: 'tabpanel',
+                  id: 'smartperfetto-settings-panel-providers',
+                  'aria-labelledby': 'smartperfetto-settings-tab-providers',
+                },
                 m(
                   'div',
                   {
@@ -788,13 +946,21 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                       ...MODAL_STYLES.alertWarning,
                     },
                   },
-                  '分析运行中，Provider 配置与切换保持只读。',
+                  uiText(
+                    '分析运行中，Provider 配置与切换保持只读。',
+                    'Provider settings and switching are read-only while analysis is running.',
+                  ),
                 ),
               )
-            : m('div', {style: {...MODAL_STYLES.content, padding: 0}}, [
+            : m('div', {
+                style: {...MODAL_STYLES.content, padding: 0},
+                role: 'tabpanel',
+                id: 'smartperfetto-settings-panel-providers',
+                'aria-labelledby': 'smartperfetto-settings-tab-providers',
+              }, [
                 m(ProviderPanel, {
-                  backendUrl: this.settings.backendUrl,
-                  apiKey: this.settings.backendApiKey || undefined,
+                  backendUrl: vnode.attrs.settings.backendUrl,
+                  apiKey: vnode.attrs.settings.backendApiKey || undefined,
                   aiEnabled: this.serverStatus?.aiEnabled,
                   aiDisabledReason:
                     this.serverStatus?.disabledReason ||
@@ -805,13 +971,46 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                 }),
               ])
           : this.currentTab === 'codebases'
-            ? m('div', {style: {...MODAL_STYLES.content, padding: 0}}, [
+            ? m('div', {
+                style: {...MODAL_STYLES.content, padding: 0},
+                role: 'tabpanel',
+                id: 'smartperfetto-settings-panel-codebases',
+                'aria-labelledby': 'smartperfetto-settings-tab-codebases',
+              }, [
+                backendBindingDirty
+                  ? m('div', {
+                      style: {
+                        ...MODAL_STYLES.alertBox,
+                        ...MODAL_STYLES.alertWarning,
+                        margin: '16px 16px 0',
+                      },
+                    }, uiText(
+                      '连接地址或凭证有未保存的修改。请先保存连接设置，再管理该后端的源码库。',
+                      'Backend URL or credentials have unsaved changes. Save connection settings before managing codebases for that backend.',
+                    ))
+                  : null,
                 m(CodebasePanel, {
-                  backendUrl: this.settings.backendUrl,
-                  apiKey: this.settings.backendApiKey || undefined,
+                  backendUrl: vnode.attrs.settings.backendUrl,
+                  apiKey: vnode.attrs.settings.backendApiKey || undefined,
+                  scopeKey: analysisContextScopeKey(
+                    vnode.attrs.settings.backendUrl,
+                    vnode.attrs.workspaceContext,
+                  ),
+                  selection: vnode.attrs.analysisContext ?? {
+                    codeAwareMode: 'off',
+                    codebaseIds: [],
+                    knowledgeSourceIds: [],
+                  },
+                  readOnly: readOnly || backendBindingDirty,
+                  onSelectionChange: vnode.attrs.onAnalysisContextChange ?? (() => {}),
                 }),
               ])
-            : m('div', {style: MODAL_STYLES.content}, [
+            : m('div', {
+                style: MODAL_STYLES.content,
+                role: 'tabpanel',
+                id: 'smartperfetto-settings-panel-connection',
+                'aria-labelledby': 'smartperfetto-settings-tab-connection',
+              }, [
                 readOnly
                   ? m(
                       'div',
@@ -822,21 +1021,25 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                           marginBottom: '16px',
                         },
                       },
-                      '分析运行中，Workspace、Backend URL、访问凭据与 Provider 保持只读。',
+                      uiText(
+                        '分析运行中，Workspace、Backend URL、访问凭据与 Provider 保持只读。',
+                        'Workspace, backend URL, credentials, and provider are read-only while analysis is running.',
+                      ),
                     )
                   : null,
                 m('div', {style: MODAL_STYLES.section}, [
                   m(
                     'h4',
                     {style: MODAL_STYLES.sectionTitle},
-                    'Backend Connection',
+                    uiText('后端连接', 'Backend Connection'),
                   ),
                   m('div', {style: MODAL_STYLES.field}, [
-                    m('label', {style: MODAL_STYLES.fieldLabel}, [
+                    m('label', {for: 'smartperfetto-workspace-id', style: MODAL_STYLES.fieldLabel}, [
                       m('span', {style: MODAL_STYLES.fieldIcon}, '🏢'),
-                      'Workspace ID',
+                      uiText('工作区 ID', 'Workspace ID'),
                     ]),
                     m('input[type=text]', {
+                      id: 'smartperfetto-workspace-id',
                       style: MODAL_STYLES.input,
                       value: this.workspaceId,
                       onchange: (e: Event) => {
@@ -853,11 +1056,12 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                     ),
                   ]),
                   m('div', {style: MODAL_STYLES.field}, [
-                    m('label', {style: MODAL_STYLES.fieldLabel}, [
+                    m('label', {for: 'smartperfetto-backend-url', style: MODAL_STYLES.fieldLabel}, [
                       m('span', {style: MODAL_STYLES.fieldIcon}, '🖥️'),
-                      'Backend URL',
+                      uiText('后端 URL', 'Backend URL'),
                     ]),
                     m('input[type=text]', {
+                      id: 'smartperfetto-backend-url',
                       style: MODAL_STYLES.input,
                       value: this.settings.backendUrl,
                       onchange: (e: Event) => {
@@ -889,23 +1093,27 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                         disabled: readOnly,
                       },
                       [
-                        m('span', 'Advanced backend auth'),
+                        m('span', uiText('高级后端认证', 'Advanced backend auth')),
                         m('span', this.showBackendAuth ? '▲' : '▼'),
                       ],
                     ),
                     m(
                       'div',
                       {style: {...MODAL_STYLES.hint, marginTop: '6px'}},
-                      'Leave this empty for local single-user runs. Only fill it when the backend was started with SMARTPERFETTO_API_KEY.',
+                      uiText(
+                        '本地单用户运行请留空。仅在后端使用 SMARTPERFETTO_API_KEY 启动时填写。',
+                        'Leave this empty for local single-user runs. Only fill it when the backend was started with SMARTPERFETTO_API_KEY.',
+                      ),
                     ),
                   ]),
                   this.showBackendAuth
                     ? m('div', {style: MODAL_STYLES.field}, [
-                        m('label', {style: MODAL_STYLES.fieldLabel}, [
+                        m('label', {for: 'smartperfetto-backend-token', style: MODAL_STYLES.fieldLabel}, [
                           m('span', {style: MODAL_STYLES.fieldIcon}, '🔐'),
-                          'Backend Access Token',
+                          uiText('后端访问令牌', 'Backend Access Token'),
                         ]),
                         m('input[type=password]', {
+                          id: 'smartperfetto-backend-token',
                           style: MODAL_STYLES.input,
                           value: this.settings.backendApiKey || '',
                           onchange: (e: Event) => {
@@ -920,14 +1128,17 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                         m(
                           'div',
                           {style: MODAL_STYLES.hint},
-                          'This protects SmartPerfetto backend APIs. It is not a model provider key; model provider keys belong on the Providers tab.',
+                          uiText(
+                            '该令牌用于保护 SmartPerfetto 后端 API，不是模型提供商密钥；模型密钥应在“提供商”页签中配置。',
+                            'This protects SmartPerfetto backend APIs. It is not a model provider key; model provider keys belong on the Providers tab.',
+                          ),
                         ),
                       ])
                     : null,
                 ]),
 
                 m('div', {style: MODAL_STYLES.section}, [
-                  m('h4', {style: MODAL_STYLES.sectionTitle}, 'Server Status'),
+                  m('h4', {style: MODAL_STYLES.sectionTitle}, uiText('服务状态', 'Server Status')),
                   m(
                     'div',
                     {
@@ -967,14 +1178,10 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                   },
                   [
                     m('span', {style: MODAL_STYLES.alertIcon}, 'ℹ️'),
-                    m('div', [
-                      m('span', 'Use the '),
-                      m('strong', 'Providers'),
-                      m(
-                        'span',
-                        ' tab to add, test, activate, and switch AI provider profiles. Saving a provider is not enough; the active profile is what overrides backend/.env.',
-                      ),
-                    ]),
+                    m('div', uiText(
+                      '在“提供商”页签中添加、测试、激活和切换 AI 提供商。仅保存配置不会生效；当前激活的配置才会覆盖 backend/.env。',
+                      'Use the Providers tab to add, test, activate, and switch AI provider profiles. Saving a provider is not enough; the active profile is what overrides backend/.env.',
+                    )),
                   ],
                 ),
               ]),
@@ -987,7 +1194,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                   style: {...MODAL_STYLES.btn, ...MODAL_STYLES.btnSecondary},
                   onclick: () => vnode.attrs.onClose(),
                 },
-                'Cancel',
+                uiText('取消', 'Cancel'),
               ),
               m(
                 'button',
@@ -1000,10 +1207,13 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                   },
                   disabled: readOnly,
                   title: readOnly
-                    ? '分析运行中无法保存身份相关设置'
+                    ? uiText(
+                        '分析运行中无法保存身份相关设置',
+                        'Identity settings cannot be saved while analysis is running',
+                      )
                     : undefined,
                 },
-                '\u{1F4BE} Save Settings',
+                uiText('\u{1F4BE} 保存设置', '\u{1F4BE} Save Settings'),
               ),
             ])
           : null,

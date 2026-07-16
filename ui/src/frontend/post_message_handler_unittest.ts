@@ -15,6 +15,14 @@
 import {isTrustedOrigin, parsePostedTrace} from './post_message_handler';
 
 describe('postMessageHandler', () => {
+  test('test local storage preserves Web Storage named-property semantics', () => {
+    window.localStorage['namedPropertyProbe'] = 'value';
+    expect(window.localStorage.getItem('namedPropertyProbe')).toBe('value');
+    expect(delete window.localStorage['missingPropertyProbe']).toBe(true);
+    delete window.localStorage['namedPropertyProbe'];
+    expect(window.localStorage.getItem('namedPropertyProbe')).toBeNull();
+  });
+
   test('baked-in trusted origins are trusted', () => {
     expect(isTrustedOrigin('https://chrometto.googleplex.com')).toBeTruthy();
     expect(isTrustedOrigin('https://uma.googleplex.com')).toBeTruthy();

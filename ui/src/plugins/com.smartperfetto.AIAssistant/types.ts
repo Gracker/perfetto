@@ -903,6 +903,15 @@ export interface CaptureConfigSuggestionState {
   proposal: TraceConfigProposalV1 | null;
 }
 
+export type CodeAwareAnalysisMode = 'off' | 'metadata_only' | 'provider_send';
+
+/** Workspace-scoped private context explicitly selected for future analysis turns. */
+export interface AnalysisContextSelection {
+  codeAwareMode: CodeAwareAnalysisMode;
+  codebaseIds: string[];
+  knowledgeSourceIds: string[];
+}
+
 /**
  * AI panel internal state.
  */
@@ -980,6 +989,8 @@ export interface AIPanelState {
   /** Analysis mode toggle: 'fast' (quick path) / 'full' (pipeline) / 'auto' (classifier-driven).
    *  Persisted in localStorage under ANALYSIS_MODE_KEY. */
   analysisMode: 'fast' | 'full' | 'auto';
+  /** Source/RAG authorization boundary; changing it always starts a new agent session. */
+  analysisContext: AnalysisContextSelection;
   /** Whether the compact analysis mode menu in the input bar is open. */
   showAnalysisModeMenu: boolean;
   /** Whether the conversation history sidebar is visible. */
@@ -1095,7 +1106,7 @@ export interface AISettings {
 }
 
 /**
- * Server status returned from backend /health endpoint.
+ * Server status returned from backend /api/runtime-health endpoint.
  */
 export interface ServerStatusActiveProvider {
   id: string;

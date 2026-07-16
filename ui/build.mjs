@@ -797,7 +797,11 @@ function buildSyntaqlitePerfettoDialect() {
   const prevEmConfig = process.env.EM_CONFIG;
   process.env.EM_CONFIG = emConfig;
   try {
-    exec(emcc, [
+    // emcc is a POSIX shell entrypoint. Invoke it through the system shell so
+    // macOS can run hermetic toolchains whose downloaded script carries local
+    // provenance metadata; direct child_process execution is otherwise killed
+    // before the script can delegate to Python.
+    exec('/bin/sh', [emcc,
       '-O2',
       '-sSIDE_MODULE=2',
       '-sEXPORTED_FUNCTIONS=_syntaqlite_perfetto_dialect_template',
@@ -1333,6 +1337,21 @@ function scanDir(dir, regex) {
 }
 
 function exec(cmd, args, opts) {
+  if (process.platform === 'darwin') {
+    let isPythonEntrypoint = cmd.endsWith('.py');
+    if (!isPythonEntrypoint && cmd !== 'python3') {
+      try {
+        isPythonEntrypoint = fs.readFileSync(cmd, 'utf8')
+          .startsWith('#!/usr/bin/env python3');
+      } catch {
+        // Native binaries and PATH commands are handled normally.
+      }
+    }
+    if (cmd === 'python3' || isPythonEntrypoint) {
+      if (isPythonEntrypoint) args = [cmd, ...args];
+      cmd = '/usr/bin/python3';
+    }
+  }
   opts = opts || {};
   opts.stdout = opts.stdout || 'inherit';
   if (cfg.verbose) console.log(`${cmd} ${args.join(' ')}\n`);

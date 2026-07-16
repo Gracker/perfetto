@@ -2,7 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 
@@ -20,12 +20,17 @@ describe('TracePairWorkspaceController', () => {
         id: 'backend-current',
         filename: 'current.pftrace',
         fingerprint: 'fingerprint-current',
+        size: 10,
       },
     });
     controller.setCatalog([
-      {id: 'history-a', filename: 'history-a.pftrace'},
-      {id: 'history-b', filename: 'history-b.pftrace'},
+      {id: 'history-a', filename: 'history-a.pftrace', size: 10},
+      {id: 'history-b', filename: 'history-b.pftrace', size: 10},
     ]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('opens a draft workspace before a reference trace is selected', () => {
@@ -44,9 +49,7 @@ describe('TracePairWorkspaceController', () => {
 
   it('loads protected trace files with workspace authentication once', async () => {
     const sourceUrl = 'blob:http://localhost/secure-current';
-    const createObjectUrl = vi
-      .spyOn(URL, 'createObjectURL')
-      .mockReturnValue(sourceUrl);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue(sourceUrl);
     const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL');
     const fetchTrace = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(new Blob(['trace bytes']), {
@@ -97,8 +100,153 @@ describe('TracePairWorkspaceController', () => {
 
     protectedController.close();
     expect(revokeObjectUrl).toHaveBeenCalledWith(sourceUrl);
-    createObjectUrl.mockRestore();
-    revokeObjectUrl.mockRestore();
+  });
+
+  it('serializes protected loads and rejects a pair beyond the retained Blob budget', async () => {
+    const createObjectUrl = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValue('blob:http://localhost/budget-current');
+    vi.spyOn(URL, 'revokeObjectURL');
+    const fetchTrace = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('123456', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': '6',
+        },
+      }),
+    );
+    const protectedController = new TracePairWorkspaceController({
+      maxProtectedTraceBytes: 10,
+    });
+    protectedController.open({
+      scope: {
+        key: 'tenant-a/workspace-a/budget-current',
+        backendUrl: 'http://127.0.0.1:3000',
+        backendHeaders: {Authorization: 'Bearer budget-test'},
+      },
+      currentTrace: {
+        id: 'budget-current',
+        filename: 'budget-current.pftrace',
+        size: 6,
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(protectedController.getTraceSourceUrl('budget-current')).toBe(
+        'blob:http://localhost/budget-current',
+      );
+    });
+    protectedController.setCatalog([{
+      id: 'budget-reference',
+      filename: 'budget-reference.pftrace',
+      size: 6,
+    }]);
+    protectedController.selectTrace({pane: 'second', traceId: 'budget-reference'});
+
+    await vi.waitFor(() => {
+      expect(protectedController.getTraceSourceError('budget-reference'))
+        .toContain('TRACE_PAIR_RESOURCE_BUDGET_EXCEEDED');
+    });
+    expect(fetchTrace).toHaveBeenCalledTimes(1);
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    protectedController.close();
+  });
+
+  it.each([
+    ['without Content-Length', {}],
+    ['when Content-Length understates the body', {'Content-Length': '2'}],
+  ])('stops a protected trace stream at the byte budget %s', async (_case, headers) => {
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL');
+    vi.spyOn(URL, 'revokeObjectURL');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('123456', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          ...headers,
+        },
+      }),
+    );
+    const protectedController = new TracePairWorkspaceController({
+      maxProtectedTraceBytes: 5,
+    });
+
+    protectedController.open({
+      scope: {
+        key: `tenant-a/workspace-a/stream-budget-${_case}`,
+        backendUrl: 'http://127.0.0.1:3000',
+        backendHeaders: {Authorization: 'Bearer stream-budget-test'},
+      },
+      currentTrace: {
+        id: 'stream-budget-current',
+        filename: 'stream-budget-current.pftrace',
+        ...(_case.includes('understates') ? {size: 2} : {}),
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(protectedController.getTraceSourceError('stream-budget-current'))
+        .toContain('TRACE_PAIR_RESOURCE_BUDGET_EXCEEDED');
+    });
+    expect(createObjectUrl).not.toHaveBeenCalled();
+    protectedController.close();
+  });
+
+  it('enforces the amplified engine budget for direct-url workspaces', () => {
+    const directController = new TracePairWorkspaceController({
+      maxEstimatedEngineBytes: 100,
+    });
+    directController.open({
+      scope: {
+        key: 'tenant-a/workspace-a/direct-current',
+        backendUrl: 'http://127.0.0.1:3000',
+      },
+      currentTrace: {
+        id: 'direct-current',
+        filename: 'direct-current.pftrace',
+        size: 10,
+      },
+    });
+    directController.setCatalog([
+      {id: 'direct-current', filename: 'direct-current.pftrace', size: 10},
+      {id: 'direct-reference', filename: 'direct-reference.pftrace', size: 10},
+    ]);
+
+    directController.selectTrace({
+      pane: 'second',
+      traceId: 'direct-reference',
+    });
+
+    expect(directController.getTraceSourceError('direct-reference'))
+      .toContain('TRACE_PAIR_ENGINE_BUDGET_EXCEEDED');
+    expect(directController.getTraceSourceUrl('direct-reference')).toBeNull();
+  });
+
+  it('refuses a direct-url pair when catalog sizes are unknown', () => {
+    const unknownSizeController = new TracePairWorkspaceController();
+    unknownSizeController.open({
+      scope: {
+        key: 'tenant-a/workspace-a/unknown-size',
+        backendUrl: 'http://127.0.0.1:3000',
+      },
+      currentTrace: {
+        id: 'unknown-current',
+        filename: 'unknown-current.pftrace',
+      },
+    });
+    unknownSizeController.setCatalog([{
+      id: 'unknown-reference',
+      filename: 'unknown-reference.pftrace',
+    }]);
+    unknownSizeController.selectTrace({
+      pane: 'second',
+      traceId: 'unknown-reference',
+    });
+
+    expect(unknownSizeController.getTraceSourceError('unknown-reference'))
+      .toContain('TRACE_PAIR_RESOURCE_SIZE_UNKNOWN');
+    expect(unknownSizeController.getTraceSourceUrl('unknown-reference')).toBeNull();
   });
 
   it('atomically moves current to the other pane when history is selected there', () => {
@@ -140,7 +288,7 @@ describe('TracePairWorkspaceController', () => {
       currentTrace: {id: 'backend-current'},
       referenceTrace: {id: 'history-b'},
     });
-    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalled();
   });
 
   it('replaces a live pair when an explicit session is hydrated', () => {

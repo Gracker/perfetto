@@ -11,6 +11,7 @@ import type {
   TracePairWorkspaceController,
 } from './trace_pair_workspace_state';
 import {formatWorkspaceTraceCatalogMeta} from './workspace_trace_catalog';
+import {uiText} from './ui_language';
 
 function getPaneSlot(
   controller: TracePairWorkspaceController,
@@ -29,12 +30,12 @@ function getPaneTitle(
   const location =
     layout === 'vertical'
       ? pane === 'first'
-        ? '上'
-        : '下'
+        ? uiText('上', 'Top')
+        : uiText('下', 'Bottom')
       : pane === 'first'
-        ? '左'
-        : '右';
-  return `${location}/${traceSide === 'current' ? '当前' : '参考'}`;
+        ? uiText('左', 'Left')
+        : uiText('右', 'Right');
+  return `${location}/${traceSide === 'current' ? uiText('当前', 'Current') : uiText('参考', 'Reference')}`;
 }
 
 function buildFrameUrl(
@@ -70,10 +71,10 @@ function renderTraceSelector(
     );
   }
   const selectorTitle = state.selectionLocked
-    ? '分析运行中，Trace 选择已锁定'
+    ? uiText('分析运行中，Trace 选择已锁定', 'Trace selection is locked while analysis is running')
     : state.catalogLoading
-      ? '正在加载 Trace 列表'
-      : '选择此窗口中显示的 Trace';
+      ? uiText('正在加载 Trace 列表', 'Loading the trace list')
+      : uiText('选择此窗口中显示的 Trace', 'Choose the trace shown in this pane');
   return m(
     Select,
     {
@@ -90,12 +91,12 @@ function renderTraceSelector(
     [
       selectedTraceId
         ? null
-        : m('option', {value: '', disabled: true}, '选择 Trace'),
+        : m('option', {value: '', disabled: true}, uiText('选择 Trace', 'Select a trace')),
       state.currentTrace
         ? m(
             'option',
             {value: state.currentTrace.id},
-            `${state.currentTrace.filename} · 当前`,
+            `${state.currentTrace.filename} · ${uiText('当前', 'Current')}`,
           )
         : null,
       ...history.map((trace) => {
@@ -167,7 +168,7 @@ export function renderTracePairPane(
               disabled: frameUrl === null,
               onclick: () =>
                 frameUrl && window.open(frameUrl, '_blank', 'noopener'),
-              title: '在新标签页打开此 Trace',
+              title: uiText('在新标签页打开此 Trace', 'Open this trace in a new tab'),
             },
             m('i.pf-icon', 'open_in_new'),
           ),
@@ -177,7 +178,9 @@ export function renderTracePairPane(
               type: 'button',
               disabled: frameUrl === null,
               onclick: () => controller.toggleMinimized(traceSide),
-              title: minimized ? '还原窗口' : '最小化窗口',
+              title: minimized
+                ? uiText('还原窗口', 'Restore pane')
+                : uiText('最小化窗口', 'Minimize pane'),
             },
             m('i.pf-icon', minimized ? 'open_in_full' : 'minimize'),
           ),
@@ -187,7 +190,9 @@ export function renderTracePairPane(
               type: 'button',
               disabled: frameUrl === null,
               onclick: () => controller.toggleMaximized(traceSide),
-              title: maximized ? '恢复分屏' : '最大化窗口',
+              title: maximized
+                ? uiText('恢复分屏', 'Restore split view')
+                : uiText('最大化窗口', 'Maximize pane'),
             },
             m('i.pf-icon', maximized ? 'close_fullscreen' : 'open_in_full'),
           ),
@@ -197,7 +202,7 @@ export function renderTracePairPane(
         ? m('iframe.ai-trace-pair-frame', {
             'src': frameUrl,
             'title': `${title} ${trace?.filename || 'Trace'}`,
-            'loading': 'eager',
+            'loading': 'lazy',
             'data-trace-side': traceSide,
           })
         : m('div.ai-trace-pair-empty', [
@@ -207,8 +212,8 @@ export function renderTracePairPane(
               traceSourceError
                 ? traceSourceError
                 : traceSourceLoading
-                  ? '正在安全加载 Trace…'
-                  : '在上方选择一个历史 Trace',
+                  ? uiText('正在安全加载 Trace…', 'Loading trace securely…')
+                  : uiText('在上方选择一个历史 Trace', 'Select a historical trace above'),
             ),
             traceSourceError && trace
               ? m(
@@ -216,9 +221,9 @@ export function renderTracePairPane(
                   {
                     type: 'button',
                     onclick: () => controller.retryTraceSource(trace.id),
-                    title: '重新加载 Trace',
+                    title: uiText('重新加载 Trace', 'Reload trace'),
                   },
-                  '重试',
+                  uiText('重试', 'Retry'),
                 )
               : null,
           ]),
@@ -228,7 +233,7 @@ export function renderTracePairPane(
             {
               type: 'button',
               onclick: () => controller.toggleMinimized(traceSide),
-              title: '还原窗口',
+              title: uiText('还原窗口', 'Restore pane'),
             },
             [m('i.pf-icon', 'open_in_full'), m('span', trace?.filename)],
           )

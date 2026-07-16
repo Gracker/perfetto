@@ -38,17 +38,23 @@ import {
   toggleSidebarCollapsedWithTransientState,
 } from './ai_transient_state';
 import {setupCriticalPathExtension} from './critical_path_extension';
-import {setDefaultBackendUrl} from '../../core/backend_uploader';
+import {
+  setDefaultBackendCredential,
+  setDefaultBackendUrl,
+} from '../../core/backend_uploader';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {installTracePairFrameRedrawListener} from './trace_pair_workspace';
 import {getAIAssistantSurfacePolicy} from './ai_surface_policy';
+import {sessionManager} from './session_manager';
 
 // Inject smart-detected backend URL at module load time, BEFORE any trace
 // auto-upload kicks in.
 (function injectBackendUrl() {
   try {
-    setDefaultBackendUrl(getDefaultSmartPerfettoBackendUrl());
+    const settings = sessionManager.loadSettings();
+    setDefaultBackendUrl(settings.backendUrl || getDefaultSmartPerfettoBackendUrl());
+    setDefaultBackendCredential(settings.backendApiKey);
   } catch {}
 })();
 

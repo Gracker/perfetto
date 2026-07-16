@@ -104,12 +104,25 @@ export function reconcileTracePairCatalog(
   state: TracePairWorkspaceState,
   catalog: ReadonlyArray<WorkspaceTraceCatalogItem>,
 ): TracePairWorkspaceState {
+  const currentCatalogItem = state.currentTrace
+    ? catalog.find((item) => item.id === state.currentTrace?.id)
+    : undefined;
+  const currentTrace = state.currentTrace && currentCatalogItem
+    ? {
+        ...currentCatalogItem,
+        filename: state.currentTrace.filename || currentCatalogItem.filename,
+        ...(state.currentTrace.fingerprint
+          ? {fingerprint: state.currentTrace.fingerprint}
+          : {}),
+      }
+    : state.currentTrace;
   const referenceTrace = state.referenceTrace
     ? catalog.find((item) => item.id === state.referenceTrace?.id) ??
       state.referenceTrace
     : null;
   return {
     ...state,
+    currentTrace,
     catalog: [...catalog],
     referenceTrace,
     catalogLoading: false,

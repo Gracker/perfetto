@@ -3,7 +3,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {MockedFunction} from 'vitest';
 
-import {BackendUploader} from './backend_uploader';
+import {backendUploadSourceKey, BackendUploader} from './backend_uploader';
 import {getSmartPerfettoBackendCspSources} from './smartperfetto_backend_url';
 
 let originalFetch: typeof fetch;
@@ -37,6 +37,28 @@ afterEach(() => {
 });
 
 describe('BackendUploader request context', () => {
+  it('keeps a stream source stable without conflating different streams', () => {
+    const streamA = {};
+    const streamB = {};
+    const sourceA = {type: 'STREAM', stream: streamA} as any;
+
+    expect(backendUploadSourceKey(sourceA)).toBe(backendUploadSourceKey(sourceA));
+    expect(backendUploadSourceKey(sourceA)).not.toBe(
+      backendUploadSourceKey({type: 'STREAM', stream: streamB} as any),
+    );
+  });
+
+  it('returns an actionable error for unsupported streaming uploads', async () => {
+    await expect(new BackendUploader('http://backend').upload({
+      type: 'STREAM',
+      stream: {},
+    } as any)).resolves.toEqual({
+      success: false,
+      errorCode: 'STREAM_SOURCE_UNSUPPORTED',
+      error: 'Streaming traces cannot be uploaded for AI analysis. Reopen the captured trace as a file.',
+    });
+  });
+
   it('exposes the runtime backend origin for the page CSP', () => {
     window.__SMARTPERFETTO_CONFIG__ = {
       backendUrl: 'http://127.0.0.1:43123/private/base/',
@@ -82,6 +104,30 @@ describe('BackendUploader request context', () => {
     expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
   });
 
+  it('sends the configured API key on health and upload requests', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({available: true}))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        trace: {id: 'trace-auth', port: 9817},
+      }));
+    const uploader = new BackendUploader('http://backend', 'spak_test-secret');
+
+    await expect(uploader.checkAvailable()).resolves.toBe(true);
+    await expect(uploader.upload({
+      type: 'ARRAY_BUFFER',
+      buffer: new Uint8Array([1]).buffer,
+      fileName: 'trace.perfetto',
+    } as any)).resolves.toMatchObject({success: true});
+
+    for (const index of [0, 1]) {
+      expect(requestHeaders(index)).toMatchObject({
+        Authorization: 'Bearer spak_test-secret',
+        'x-api-key': 'spak_test-secret',
+      });
+    }
+  });
+
   it('sends X-Window-Id on file uploads', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
@@ -93,6 +139,10 @@ describe('BackendUploader request context', () => {
           leaseMode: 'shared',
           leaseModeReason: 'frontend_interactive',
           leaseQueueLength: 2,
+          websocketCapability: {
+            protocol: 'smartperfetto.tp.signed-capability',
+            expiresAt: 123456,
+          },
         },
       }),
     );
@@ -120,9 +170,14 @@ describe('BackendUploader request context', () => {
         statusUrl: expect.stringContaining('/api/tp/lease-a/status?'),
         websocketUrl: expect.stringContaining('/api/tp/lease-a/websocket?'),
         heartbeatUrl: expect.stringContaining('/api/tp/lease-a/heartbeat?'),
+        websocketProtocols: ['smartperfetto.tp.signed-capability'],
+        websocketCapabilityExpiresAt: 123456,
       },
     });
     expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
+    expect(result.rpcTarget?.headers).toMatchObject({
+      'X-Window-Id': 'window-upload',
+    });
   });
 
   it('sends X-Window-Id on URL uploads without dropping JSON content type', async () => {
