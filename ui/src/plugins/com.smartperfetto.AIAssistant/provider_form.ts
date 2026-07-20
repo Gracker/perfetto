@@ -235,6 +235,9 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       if (conn.agentRuntime === 'pi-agent-core') {
         // Pi Agent Core uses explicit Pi fields; do not infer Claude/OpenAI
         // connection fields from the legacy shared key.
+      } else if (conn.agentRuntime === 'qoder-agent-sdk') {
+        // Qoder uses explicit qoderAccessToken/qoderCliPath; do not infer
+        // Claude/OpenAI connection fields from the legacy shared key.
       } else if (conn.agentRuntime === 'opencode') {
         conn.openaiApiKey ??= conn.apiKey;
         conn.openaiBaseUrl ??= conn.baseUrl;
@@ -303,6 +306,9 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               conn.openaiBaseUrl ||
               conn.baseUrl
             );
+          }
+          if (this.currentRuntime() === 'qoder-agent-sdk') {
+            return !!(conn.qoderAccessToken || conn.qoderCliPath);
           }
           return !!(conn.claudeBaseUrl || conn.baseUrl);
         }
@@ -788,7 +794,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       runtime === 'openai-agents-sdk' ||
       runtime === 'claude-agent-sdk' ||
       runtime === 'pi-agent-core' ||
-      runtime === 'opencode'
+      runtime === 'opencode' ||
+      runtime === 'qoder-agent-sdk'
     ) {
       return runtime;
     }
@@ -806,9 +813,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         ? this.renderPiAgentCoreConnectionFields(s)
         : runtime === 'opencode'
           ? this.renderOpenCodeConnectionFields(s)
-          : runtime === 'openai-agents-sdk'
-            ? this.renderOpenAIConnectionFields(s, {includeApiKey: true})
-            : this.renderClaudeConnectionFields(s, {includeApiKey: true}),
+          : runtime === 'qoder-agent-sdk'
+            ? this.renderQoderConnectionFields(s)
+            : runtime === 'openai-agents-sdk'
+              ? this.renderOpenAIConnectionFields(s, {includeApiKey: true})
+              : this.renderClaudeConnectionFields(s, {includeApiKey: true}),
     ]);
   }
 
@@ -904,6 +913,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         ? [
             {value: 'pi-agent-core' as const, label: 'Pi Agent Core'},
             {value: 'opencode' as const, label: 'OpenCode'},
+            {value: 'qoder-agent-sdk' as const, label: 'Qoder SDK'},
           ]
         : []),
     ];
@@ -999,6 +1009,25 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         text(
           'OpenCode 通过隔离服务器运行，只使用请求范围内的 SmartPerfetto MCP 工具；内置 Shell、文件和项目发现工具仍保持禁用。',
           'OpenCode runs through an isolated server with request-scoped SmartPerfetto MCP tools. Built-in shell/file/project discovery tools remain disabled.',
+        ),
+      ),
+    ]);
+  }
+
+  private renderQoderConnectionFields(
+    s: ReturnType<typeof getStyles>,
+  ): m.Children {
+    return m('div', [
+      this.renderConnectionInput(s, 'qoderAccessToken'),
+      this.renderConnectionInput(s, 'qoderCliPath'),
+      this.renderConnectionInput(s, 'qoderModel'),
+      this.renderConnectionTextarea(s, 'qoderSystemPrompt'),
+      m(
+        'div',
+        {key: 'qoderCapabilityHint', style: s.formHint},
+        text(
+          'Qoder SDK 通过隔离进程运行，只使用请求范围内的 SmartPerfetto MCP 工具；内置 Shell、文件、编辑和 Web 工具全部禁用。需要 Personal Access Token 或本地 CLI 路径。',
+          'Qoder SDK runs through an isolated process with request-scoped SmartPerfetto MCP tools. Built-in shell/file/edit/web tools are all disabled. Requires a Personal Access Token or local CLI path.',
         ),
       ),
     ]);

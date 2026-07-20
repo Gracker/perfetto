@@ -1082,7 +1082,8 @@ export type AnalysisReceiptRuntime =
   | 'claude-agent-sdk'
   | 'openai-agents-sdk'
   | 'pi-agent-core'
-  | 'opencode';
+  | 'opencode'
+  | 'qoder-agent-sdk';
 
 export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
 
