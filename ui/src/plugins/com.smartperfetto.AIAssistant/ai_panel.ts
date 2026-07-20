@@ -59,6 +59,7 @@ import {
 } from '../../core/backend_upload_state';
 import type {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
+import {download} from '../../base/download_utils';
 import {getCanonicalTraceName} from './trace_name';
 // Note: generated types are used by SSE event handlers module
 // import {FullAnalysis, ExpandableSections, isFrameDetailData} from './generated';
@@ -165,6 +166,11 @@ import {
   AnalysisRequestCoordinator,
   type AnalysisRequestToken,
 } from './analysis_request_coordinator';
+import {
+  ReportDownloadError,
+  resolveReportDownloadTarget,
+  suggestedReportFilename,
+} from './report_download';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
 import {getSceneDisplayName} from './scene_constants';
 import {StoryController} from './story_controller';
@@ -3759,7 +3765,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     msg.sourceContext,
                                   ),
 
-                                  // HTML Report Link (问题1修复)
+                                  // Detailed HTML report link and authenticated download action.
                                   msg.reportUrl
                                     ? m('div.ai-report-link', [
                                         m('i.pf-icon', 'description'),
@@ -3771,6 +3777,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                             rel: 'noopener noreferrer',
                                           },
                                           reportLinkLabel,
+                                        ),
+                                        m(
+                                          'button.ai-report-save-btn',
+                                          {
+                                            'type': 'button',
+                                            'title': uiText(
+                                              '选择路径并保存 HTML 报告',
+                                              'Choose a location and save the HTML report',
+                                            ),
+                                            'aria-label': uiText(
+                                              `保存详细分析报告 #${reportSequence}`,
+                                              `Save detailed analysis report #${reportSequence}`,
+                                            ),
+                                            'onclick': (e: MouseEvent) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              void this.saveReport(
+                                                msg.reportUrl!,
+                                              );
+                                            },
+                                          },
+                                          uiText('保存 HTML', 'Save HTML'),
                                         ),
                                       ])
                                     : null,
@@ -12458,6 +12486,77 @@ Click ⚙️ to configure backend connection.`,
   }
 
   // NOTE: uploadTraceToBackend() method removed - auto-upload now happens in load_trace.ts
+
+  private async saveReport(reportUrl: string): Promise<void> {
+    try {
+      const target = resolveReportDownloadTarget(
+        reportUrl,
+        this.state.settings.backendUrl,
+      );
+      const response = await this.fetchBackend(target.exportUrl);
+      if (!response.ok) {
+        throw new Error(
+          uiText(
+            `报告导出请求失败：HTTP ${response.status}`,
+            `Report export request failed: HTTP ${response.status}`,
+          ),
+        );
+      }
+
+      const blob = await response.blob();
+      await download({
+        content: blob,
+        fileName: suggestedReportFilename(
+          response.headers.get('Content-Disposition'),
+          target.reportId,
+        ),
+        mimeType: 'text/html',
+        filePicker: {
+          throwOnError: true,
+          types: [
+            {
+              description: uiText('HTML 网页报告', 'HTML report'),
+              accept: {'text/html': ['.html', '.htm']},
+            },
+          ],
+        },
+      });
+    } catch (error: unknown) {
+      const detail =
+        error instanceof ReportDownloadError
+          ? {
+              invalid_backend: uiText(
+                '后端地址无效，必须是没有账号、查询参数或片段的 HTTP(S) 地址',
+                'The backend URL must be an HTTP(S) address without credentials, query parameters, or fragments',
+              ),
+              backend_mismatch: uiText(
+                '报告链接不属于当前配置的后端',
+                'The report link does not belong to the configured backend',
+              ),
+              query_or_fragment: uiText(
+                '报告链接不能包含查询参数或片段',
+                'The report link must not contain a query or fragment',
+              ),
+              unsafe_report_id: uiText(
+                '报告链接没有安全、有效的报告 ID',
+                'The report link does not contain a safe report ID',
+              ),
+            }[error.code]
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: uiText(
+          `**保存报告失败：** ${detail}`,
+          `**Failed to save report:** ${detail}`,
+        ),
+        timestamp: Date.now(),
+      });
+      m.redraw();
+    }
+  }
 
   /**
    * Export SQL result to CSV or JSON

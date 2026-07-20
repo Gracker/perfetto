@@ -38,7 +38,21 @@ type Content = string | Uint8Array<ArrayBuffer> | ArrayBuffer | File | Blob;
 
 export type FilePickerOptions = {
   types?: FilePickerAcceptType[];
+  // Preserve the historical best-effort behavior unless a caller needs to
+  // distinguish a real write failure from a user-cancelled picker.
+  throwOnError?: boolean;
 };
+
+export type DownloadResult = 'saved' | 'cancelled' | 'failed';
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    error.name === 'AbortError'
+  );
+}
 
 /**
  * Downloads some content to a file.
@@ -59,7 +73,7 @@ export async function download({
   fileName: string;
   mimeType?: string;
   filePicker?: FilePickerOptions;
-}) {
+}): Promise<DownloadResult> {
   let blob: Blob;
   if (content instanceof File || content instanceof Blob) {
     blob = content;
@@ -81,14 +95,17 @@ export async function download({
       await writable.write(blob);
       await writable.close();
     } catch (e) {
+      if (isAbortError(e)) return 'cancelled';
       console.error(e);
-      // The user pressed cancel, do nothing.
+      if (filePicker.throwOnError) throw e;
+      return 'failed';
     }
   } else {
     // No file picker available or requested, fallback to the old method.
     using url = createUrl(blob);
     downloadUrl({url: url.value, fileName});
   }
+  return 'saved';
 }
 
 /**
