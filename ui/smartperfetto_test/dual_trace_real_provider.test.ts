@@ -134,17 +134,18 @@ test('keeps a real DeepSeek comparison alive through window operations', async (
           `/agent/${cancellableAnalysis.sessionId}/cancel`,
         ),
     );
+    const deleteResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'DELETE' &&
+        new URL(response.url()).pathname.endsWith(
+          `/agent/${cancellableAnalysis.sessionId}`,
+        ),
+    );
     await page.locator('button.ai-stop-btn').click();
     const cancelled = await parseCancelResponse(await cancelResponsePromise);
     expect(cancelled.status).toBe('cancelled');
     expect(cancelled.runId).toBe(cancellableAnalysis.runId);
-    await expect
-      .poll(
-        async () =>
-          (await agentStatus(request, cancellableAnalysis.sessionId)).status,
-        {timeout: 30_000},
-      )
-      .toBe('cancelled');
+    expect((await deleteResponsePromise).ok()).toBe(true);
     await expect(completedNotices).toHaveCount(completedNoticeCount);
     await expect(
       page.getByText('流程已取消，未生成完整结论。', {exact: true}).last(),

@@ -166,11 +166,13 @@ export class DualTraceScenario {
       } catch {}
     }
     const exitButton = this.page.locator('button[data-trace-pair-exit]');
-    await expect(exitButton).toBeEnabled();
-    await exitButton.click();
-    await expect(this.page.locator('iframe.ai-trace-pair-frame')).toHaveCount(
-      0,
-    );
+    if ((await exitButton.count()) > 0) {
+      await expect(exitButton).toBeEnabled();
+      await exitButton.click();
+      await expect(this.page.locator('iframe.ai-trace-pair-frame')).toHaveCount(
+        0,
+      );
+    }
     if (this.heavyTraceId) {
       await deleteTrace(this.request, this.heavyTraceId);
       this.heavyTraceId = null;

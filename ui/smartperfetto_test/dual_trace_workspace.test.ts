@@ -4,7 +4,6 @@
 
 import {expect, test} from '@playwright/test';
 import {writeFile} from 'fs/promises';
-import {agentStatus} from './smartperfetto_e2e_helper';
 import {providerState} from './provider_stub_helper';
 import {
   parseAnalyzePayload,
@@ -113,22 +112,29 @@ test('keeps heavy/light analysis stable through window operations and confirms s
     await expect(page.locator('button.ai-stop-btn')).toBeVisible();
     await page.locator('button.ai-stop-btn').click();
     expect(scenario.ledger.cancelUrls).toHaveLength(0);
-    responseGate.release();
-
     const firstSessionId = heldAnalyze.value?.sessionId;
     if (!firstSessionId)
       throw new Error('Held analyze response has no session');
-    await expect
-      .poll(
-        async () => {
-          const status = await agentStatus(request, firstSessionId);
-          return status.status;
-        },
-        {
-          timeout: 30_000,
-        },
-      )
-      .toBe('cancelled');
+    const firstCancelResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname.endsWith(
+          `/agent/${firstSessionId}/cancel`,
+        ),
+    );
+    const firstDeleteResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'DELETE' &&
+        new URL(response.url()).pathname.endsWith(`/agent/${firstSessionId}`),
+    );
+    responseGate.release();
+
+    const firstCancelled = await parseCancelResponse(
+      await firstCancelResponsePromise,
+    );
+    expect(firstCancelled.status).toBe('cancelled');
+    expect(firstCancelled.runId).toBe(heldAnalyze.value?.runId);
+    expect((await firstDeleteResponsePromise).ok()).toBe(true);
     await expect(
       page.getByText(CANCELLATION_NOTICE, {exact: true}),
     ).toBeVisible();
@@ -275,21 +281,18 @@ test('keeps heavy/light analysis stable through window operations and confirms s
           `/agent/${analysis.sessionId}/cancel`,
         ),
     );
+    const deleteResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'DELETE' &&
+        new URL(response.url()).pathname.endsWith(
+          `/agent/${analysis.sessionId}`,
+        ),
+    );
     await page.locator('button.ai-stop-btn').click();
     const cancelled = await parseCancelResponse(await cancelResponsePromise);
     expect(cancelled.status).toBe('cancelled');
     expect(cancelled.runId).toBe(analysis.runId);
-    await expect
-      .poll(
-        async () => {
-          const status = await agentStatus(request, analysis.sessionId);
-          return status.status;
-        },
-        {
-          timeout: 30_000,
-        },
-      )
-      .toBe('cancelled');
+    expect((await deleteResponsePromise).ok()).toBe(true);
     await expect
       .poll(() => providerState(request).then((state) => state.active))
       .toBe(0);

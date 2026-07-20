@@ -13,6 +13,7 @@ const ConfigEnvironmentSchema = z.object({
   artifactDir: z.string().trim().min(1).optional(),
   chromeChannel: z.string().trim().min(1),
   backendApiKey: z.string().trim().min(1),
+  locale: z.string().trim().min(1),
 });
 
 const configEnvironment = ConfigEnvironmentSchema.parse({
@@ -23,6 +24,7 @@ const configEnvironment = ConfigEnvironmentSchema.parse({
   backendApiKey:
     process.env.SMARTPERFETTO_E2E_BACKEND_API_KEY ??
     'smartperfetto-e2e-backend',
+  locale: process.env.SMARTPERFETTO_E2E_LOCALE ?? 'zh-CN',
 });
 
 const artifactDir = configEnvironment.artifactDir
@@ -56,6 +58,7 @@ export default defineConfig({
     baseURL: configEnvironment.frontendUrl,
     channel: configEnvironment.chromeChannel,
     headless: process.env.SMARTPERFETTO_E2E_HEADLESS !== '0',
+    locale: configEnvironment.locale,
     viewport: {width: 1920, height: 1080},
     actionTimeout: 30_000,
     navigationTimeout: 120_000,
