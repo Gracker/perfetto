@@ -28,19 +28,19 @@
  */
 
 import {
-  AISettings,
-  AISession,
-  SessionsStorage,
-  Message,
-  PinnedResult,
-  LatestAnalysisSnapshot,
+  type AISettings,
+  type AISession,
+  type SessionsStorage,
+  type Message,
+  type PinnedResult,
+  type LatestAnalysisSnapshot,
   DEFAULT_SETTINGS,
   SETTINGS_KEY,
   HISTORY_KEY,
   SESSIONS_KEY,
   PENDING_BACKEND_TRACE_KEY,
 } from './types';
-import {NavigationBookmark} from './navigation_bookmark_bar';
+import type {NavigationBookmark} from './navigation_bookmark_bar';
 import {
   buildSmartPerfettoStorageKey,
   getSmartPerfettoWindowId,
@@ -49,6 +49,7 @@ import {
   getDefaultSmartPerfettoBackendUrl,
   isDefaultSmartPerfettoBackendUrl,
 } from '../../core/smartperfetto_backend_url';
+import {normalizeUiLanguagePreference} from './ui_language';
 
 export {getSmartPerfettoWindowId};
 
@@ -73,11 +74,9 @@ interface SessionsStorageEnvelope extends SessionsStorage {
 export function getPendingBackendTraceStorageKey(
   windowId = getSmartPerfettoWindowId(),
 ): string {
-  return buildSmartPerfettoStorageKey(
-    PENDING_BACKEND_TRACE_KEY,
-    'window',
-    {windowId},
-  );
+  return buildSmartPerfettoStorageKey(PENDING_BACKEND_TRACE_KEY, 'window', {
+    windowId,
+  });
 }
 
 export function getSettingsStorageKey(): string {
@@ -124,14 +123,34 @@ export class SessionManager {
       if (stored) {
         // Merge stored settings with defaults to handle new properties
         const storedSettings = JSON.parse(stored);
-        const merged = {...DEFAULT_SETTINGS, backendUrl: getDefaultSmartPerfettoBackendUrl(), ...storedSettings};
+        const normalizedUiLanguage = normalizeUiLanguagePreference(
+          storedSettings.uiLanguage,
+        );
+        if (storedSettings.uiLanguage !== normalizedUiLanguage) {
+          localStorage.setItem(
+            getSettingsStorageKey(),
+            JSON.stringify({
+              ...storedSettings,
+              uiLanguage: normalizedUiLanguage,
+            }),
+          );
+        }
+        const merged = {
+          ...DEFAULT_SETTINGS,
+          backendUrl: getDefaultSmartPerfettoBackendUrl(),
+          ...storedSettings,
+          uiLanguage: normalizedUiLanguage,
+        };
         // Keep user's explicit backend URL, otherwise auto-detect for remote access
         return this.applySmartBackendUrl(merged, storedSettings.backendUrl);
       }
     } catch {
       // Use default settings on error
     }
-    return {...DEFAULT_SETTINGS, backendUrl: getDefaultSmartPerfettoBackendUrl()};
+    return {
+      ...DEFAULT_SETTINGS,
+      backendUrl: getDefaultSmartPerfettoBackendUrl(),
+    };
   }
 
   /**
@@ -139,8 +158,14 @@ export class SessionManager {
    * runtime config plus the page origin. So remote access via
    * http://<ip>:10000 automatically connects to the configured backend port.
    */
-  private applySmartBackendUrl(settings: AISettings, storedBackendUrl?: string): AISettings {
-    if (storedBackendUrl && !isDefaultSmartPerfettoBackendUrl(storedBackendUrl)) {
+  private applySmartBackendUrl(
+    settings: AISettings,
+    storedBackendUrl?: string,
+  ): AISettings {
+    if (
+      storedBackendUrl &&
+      !isDefaultSmartPerfettoBackendUrl(storedBackendUrl)
+    ) {
       return settings; // User set a truly custom backend URL — respect it
     }
     return {...settings, backendUrl: getDefaultSmartPerfettoBackendUrl()};
@@ -151,7 +176,13 @@ export class SessionManager {
    */
   saveSettings(settings: AISettings): void {
     try {
-      localStorage.setItem(getSettingsStorageKey(), JSON.stringify(settings));
+      localStorage.setItem(
+        getSettingsStorageKey(),
+        JSON.stringify({
+          ...settings,
+          uiLanguage: normalizeUiLanguagePreference(settings.uiLanguage),
+        }),
+      );
     } catch {
       // Ignore errors
     }
@@ -173,7 +204,7 @@ export class SessionManager {
       if (!stored) return null;
 
       const parsed = JSON.parse(stored);
-      const messages = Array.isArray(parsed) ? parsed : (parsed.messages || []);
+      const messages = Array.isArray(parsed) ? parsed : parsed.messages || [];
       return {
         messages,
         backendTraceId: parsed.backendTraceId,
@@ -190,7 +221,7 @@ export class SessionManager {
   saveHistory(
     messages: Message[],
     backendTraceId: string | null,
-    traceFingerprint: string | null
+    traceFingerprint: string | null,
   ): void {
     try {
       const data = {
@@ -261,10 +292,12 @@ export class SessionManager {
     try {
       if (!raw) return {storage: {byTrace: {}}, mtimeMs: 0, revision: 0};
       const parsed = JSON.parse(raw) as SessionsStorageEnvelope | null;
-      const byTrace = parsed && typeof parsed.byTrace === 'object' && parsed.byTrace
-        ? parsed.byTrace
-        : {};
-      const meta = parsed && typeof parsed === 'object' ? parsed._meta : undefined;
+      const byTrace =
+        parsed && typeof parsed.byTrace === 'object' && parsed.byTrace
+          ? parsed.byTrace
+          : {};
+      const meta =
+        parsed && typeof parsed === 'object' ? parsed._meta : undefined;
       return {
         storage: {byTrace},
         mtimeMs: Number(meta?.mtimeMs) || 0,
@@ -283,7 +316,7 @@ export class SessionManager {
    */
   private trimStorageMessages(messages: Message[]): Message[] {
     const MAX_ROWS_PERSISTED = 50;
-    return messages.map(msg => {
+    return messages.map((msg) => {
       // P2-9: Strip large data fields that are not essential for session restore
       const trimmed: Message = {
         ...msg,
@@ -294,9 +327,12 @@ export class SessionManager {
       if (trimmed.sqlResult) {
         trimmed.sqlResult = {
           ...trimmed.sqlResult,
-          expandableData: undefined,  // P2-9: expandableData can be very large
+          expandableData: undefined, // P2-9: expandableData can be very large
         };
-        if (trimmed.sqlResult.rows && trimmed.sqlResult.rows.length > MAX_ROWS_PERSISTED) {
+        if (
+          trimmed.sqlResult.rows &&
+          trimmed.sqlResult.rows.length > MAX_ROWS_PERSISTED
+        ) {
           trimmed.sqlResult = {
             ...trimmed.sqlResult,
             rows: trimmed.sqlResult.rows.slice(0, MAX_ROWS_PERSISTED),
@@ -309,7 +345,10 @@ export class SessionManager {
     });
   }
 
-  private mergeSessionsStorage(base: SessionsStorage, incoming: SessionsStorage): SessionsStorage {
+  private mergeSessionsStorage(
+    base: SessionsStorage,
+    incoming: SessionsStorage,
+  ): SessionsStorage {
     const merged: SessionsStorage = {byTrace: {}};
     for (const fingerprint in base.byTrace) {
       merged.byTrace[fingerprint] = [...base.byTrace[fingerprint]];
@@ -322,7 +361,7 @@ export class SessionManager {
 
       for (const session of incoming.byTrace[fingerprint]) {
         const index = merged.byTrace[fingerprint].findIndex(
-          existing => existing.sessionId === session.sessionId,
+          (existing) => existing.sessionId === session.sessionId,
         );
         if (index === -1) {
           merged.byTrace[fingerprint].push(session);
@@ -355,19 +394,26 @@ export class SessionManager {
   saveSessionsStorage(storage: SessionsStorage): void {
     try {
       const storageKey = getSessionsStorageKey();
-      const current = this.parseSessionsStorage(localStorage.getItem(storageKey));
+      const current = this.parseSessionsStorage(
+        localStorage.getItem(storageKey),
+      );
       const hasConcurrentWrite =
         current.revision > this.sessionsStorageRevision ||
         current.mtimeMs > this.sessionsStorageMtimeMs;
       const storageToSave = hasConcurrentWrite
         ? this.mergeSessionsStorage(current.storage, storage)
         : storage;
-      const revisionBase = Math.max(current.revision, this.sessionsStorageRevision);
+      const revisionBase = Math.max(
+        current.revision,
+        this.sessionsStorageRevision,
+      );
 
       // F4: Create a trimmed copy to reduce storage size
-      const trimmedStorage: SessionsStorage = { byTrace: {} };
+      const trimmedStorage: SessionsStorage = {byTrace: {}};
       for (const fingerprint in storageToSave.byTrace) {
-        trimmedStorage.byTrace[fingerprint] = storageToSave.byTrace[fingerprint].map(session => ({
+        trimmedStorage.byTrace[fingerprint] = storageToSave.byTrace[
+          fingerprint
+        ].map((session) => ({
           ...session,
           messages: this.trimStorageMessages(session.messages),
         }));
@@ -380,19 +426,27 @@ export class SessionManager {
         this.sessionsStorageRevision = envelope._meta?.revision || 0;
       };
 
-      let serialized = serialize();
+      const serialized = serialize();
       const sizeBytes = new Blob([serialized]).size;
       const MAX_STORAGE_BYTES = 4 * 1024 * 1024; // 4MB safety limit
 
       if (sizeBytes > MAX_STORAGE_BYTES) {
         console.warn(
-          `[SessionManager] Storage size ${(sizeBytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_STORAGE_BYTES / 1024 / 1024}MB limit, trimming old sessions`
+          `[SessionManager] Storage size ${(sizeBytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_STORAGE_BYTES / 1024 / 1024}MB limit, trimming old sessions`,
         );
         // Collect all sessions across traces with their fingerprints
-        const allSessions: Array<{fingerprint: string; sessionId: string; lastActiveAt: number}> = [];
+        const allSessions: Array<{
+          fingerprint: string;
+          sessionId: string;
+          lastActiveAt: number;
+        }> = [];
         for (const fingerprint in trimmedStorage.byTrace) {
           trimmedStorage.byTrace[fingerprint].forEach((session) => {
-            allSessions.push({fingerprint, sessionId: session.sessionId, lastActiveAt: session.lastActiveAt});
+            allSessions.push({
+              fingerprint,
+              sessionId: session.sessionId,
+              lastActiveAt: session.lastActiveAt,
+            });
           });
         }
         // Sort oldest first
@@ -403,7 +457,7 @@ export class SessionManager {
           const sessions = trimmedStorage.byTrace[entry.fingerprint];
           if (!sessions) continue;
           const sessionIdx = sessions.findIndex(
-            s => s.sessionId === entry.sessionId
+            (s) => s.sessionId === entry.sessionId,
           );
           if (sessionIdx !== -1) {
             sessions.splice(sessionIdx, 1);
@@ -443,7 +497,7 @@ export class SessionManager {
   createSession(
     fingerprint: string,
     traceName: string,
-    backendTraceId?: string
+    backendTraceId?: string,
   ): AISession {
     const session: AISession = {
       sessionId: generateId(),
@@ -494,13 +548,13 @@ export class SessionManager {
       tracePairSplitPercent?: number;
       tracePairActiveTraceSide?: AISession['tracePairActiveTraceSide'];
       tracePairCurrentPane?: AISession['tracePairCurrentPane'];
-    }
+    },
   ): boolean {
     const storage = this.loadSessionsStorage();
     const sessions = storage.byTrace[fingerprint];
     if (!sessions) return false;
 
-    const sessionIndex = sessions.findIndex(s => s.sessionId === sessionId);
+    const sessionIndex = sessions.findIndex((s) => s.sessionId === sessionId);
     if (sessionIndex === -1) return false;
 
     // Update session data
@@ -525,7 +579,7 @@ export class SessionManager {
     // Search all traces for the session
     for (const fingerprint in storage.byTrace) {
       const sessions = storage.byTrace[fingerprint];
-      const session = sessions.find(s => s.sessionId === sessionId);
+      const session = sessions.find((s) => s.sessionId === sessionId);
       if (session) {
         return session;
       }
@@ -543,7 +597,7 @@ export class SessionManager {
 
     for (const fingerprint in storage.byTrace) {
       const sessions = storage.byTrace[fingerprint];
-      const index = sessions.findIndex(s => s.sessionId === sessionId);
+      const index = sessions.findIndex((s) => s.sessionId === sessionId);
       if (index !== -1) {
         sessions.splice(index, 1);
         this.saveSessionsStorage(storage);
@@ -565,13 +619,13 @@ export class SessionManager {
    */
   migrateOldHistoryToSession(
     currentFingerprint: string,
-    traceName: string
+    traceName: string,
   ): boolean {
     try {
       const legacyData = this.loadLegacyHistory();
       if (!legacyData) return false;
 
-      const { messages, backendTraceId, traceFingerprint } = legacyData;
+      const {messages, backendTraceId, traceFingerprint} = legacyData;
       const fingerprint = traceFingerprint || currentFingerprint;
 
       // If no messages or no fingerprint, don't migrate
@@ -585,7 +639,9 @@ export class SessionManager {
       }
 
       // Create migrated session
-      console.log('[SessionManager] Migrating old history to new session format');
+      console.log(
+        '[SessionManager] Migrating old history to new session format',
+      );
       const session: AISession = {
         sessionId: generateId(),
         traceFingerprint: fingerprint,
@@ -604,7 +660,10 @@ export class SessionManager {
       storage.byTrace[fingerprint].push(session);
       this.saveSessionsStorage(storage);
 
-      console.log('[SessionManager] Migration complete, session:', session.sessionId);
+      console.log(
+        '[SessionManager] Migration complete, session:',
+        session.sessionId,
+      );
       return true;
     } catch {
       return false;
@@ -614,7 +673,11 @@ export class SessionManager {
   /**
    * Store pending backend trace ID for recovery after reload.
    */
-  storePendingBackendTrace(traceId: string, port?: number, leaseId?: string): void {
+  storePendingBackendTrace(
+    traceId: string,
+    port?: number,
+    leaseId?: string,
+  ): void {
     try {
       sessionStorage.setItem(
         getPendingBackendTraceStorageKey(),
@@ -623,7 +686,7 @@ export class SessionManager {
           port,
           leaseId,
           timestamp: Date.now(),
-        })
+        }),
       );
       localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
     } catch {
@@ -636,7 +699,10 @@ export class SessionManager {
    * Returns the traceId if valid, null otherwise.
    * Clears the pending data after recovery.
    */
-  recoverPendingBackendTrace(currentPort?: number, currentLeaseId?: string): string | null {
+  recoverPendingBackendTrace(
+    currentPort?: number,
+    currentLeaseId?: string,
+  ): string | null {
     try {
       const scopedKey = getPendingBackendTraceStorageKey();
       const legacyWindowKey = `${PENDING_BACKEND_TRACE_KEY}:${getSmartPerfettoWindowId()}`;
@@ -659,20 +725,24 @@ export class SessionManager {
         localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
       };
 
-      const isRecent = (Date.now() - data.timestamp) < 60000;
-      const portMatches = currentPort !== undefined && data.port === currentPort;
-      const leaseMatches = currentLeaseId !== undefined && data.leaseId === currentLeaseId;
+      const isRecent = Date.now() - data.timestamp < 60000;
+      const portMatches =
+        currentPort !== undefined && data.port === currentPort;
+      const leaseMatches =
+        currentLeaseId !== undefined && data.leaseId === currentLeaseId;
 
       // Check if the stored data matches current target and is recent (within 60 seconds)
       if ((portMatches || leaseMatches) && isRecent) {
         // Clear the pending data after recovery
         clearPending();
-        console.log('[SessionManager] Recovered and cleared pending backend trace');
+        console.log(
+          '[SessionManager] Recovered and cleared pending backend trace',
+        );
         return data.traceId;
       }
 
       // If too old or port mismatch, clear it
-      if ((Date.now() - data.timestamp) > 60000 || legacyStorage) {
+      if (Date.now() - data.timestamp > 60000 || legacyStorage) {
         clearPending();
         console.log('[SessionManager] Cleared stale pending backend trace');
       }
@@ -699,7 +769,7 @@ export class SessionManager {
 
       // Filter out old sessions
       storage.byTrace[fingerprint] = sessions.filter(
-        s => (now - s.lastActiveAt) < maxAgeMs
+        (s) => now - s.lastActiveAt < maxAgeMs,
       );
 
       deletedCount += originalLength - storage.byTrace[fingerprint].length;
@@ -724,10 +794,12 @@ export class SessionManager {
   getSessionSummary(session: AISession): string {
     if (session.summary) return session.summary;
 
-    const userMessages = session.messages.filter(m => m.role === 'user');
+    const userMessages = session.messages.filter((m) => m.role === 'user');
     if (userMessages.length > 0) {
       const firstMessage = userMessages[0].content;
-      return firstMessage.length > 30 ? firstMessage.slice(0, 30) + '...' : firstMessage;
+      return firstMessage.length > 30
+        ? firstMessage.slice(0, 30) + '...'
+        : firstMessage;
     }
 
     return '新对话';

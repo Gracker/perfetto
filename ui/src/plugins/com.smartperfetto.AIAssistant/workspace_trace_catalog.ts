@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {z} from 'zod';
+import {uiText} from './ui_language';
 
 const WorkspaceTraceEnvelopeSchema = z.object({
   traces: z.array(z.unknown()),
@@ -40,7 +41,13 @@ export function parseWorkspaceTraceCatalogResponse(
 ): WorkspaceTraceCatalogParseResult {
   const envelope = WorkspaceTraceEnvelopeSchema.safeParse(value);
   if (!envelope.success) {
-    return {ok: false, error: 'Trace 列表响应格式无效'};
+    return {
+      ok: false,
+      error: uiText(
+        'Trace 列表响应格式无效',
+        'Invalid trace catalog response',
+      ),
+    };
   }
 
   const items: WorkspaceTraceCatalogItem[] = [];

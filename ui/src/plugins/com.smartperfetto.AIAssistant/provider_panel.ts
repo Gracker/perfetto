@@ -23,6 +23,7 @@ import {
   subscribeProviderCatalogChanged,
   type ProviderCatalogChangeReason,
 } from './provider_events';
+import {uiText as text} from './ui_language';
 
 export type {ProviderPanelAttrs};
 
@@ -117,10 +118,22 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         }),
       ]);
 
-      if (!providersRes.ok)
-        throw new Error(`Failed to load providers: ${providersRes.status}`);
-      if (!templatesRes.ok)
-        throw new Error(`Failed to load templates: ${templatesRes.status}`);
+      if (!providersRes.ok) {
+        throw new Error(
+          text(
+            `加载提供商失败：${providersRes.status}`,
+            `Failed to load providers: ${providersRes.status}`,
+          ),
+        );
+      }
+      if (!templatesRes.ok) {
+        throw new Error(
+          text(
+            `加载模板失败：${templatesRes.status}`,
+            `Failed to load templates: ${templatesRes.status}`,
+          ),
+        );
+      }
 
       const providersData = await providersRes.json();
       const templatesData = await templatesRes.json();
@@ -133,7 +146,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       }
     } catch (e: unknown) {
       this.error =
-        e instanceof Error ? e.message : 'Failed to load provider data';
+        e instanceof Error
+          ? e.message
+          : text('加载提供商数据失败', 'Failed to load provider data');
     } finally {
       this.loading = false;
       m.redraw();
@@ -165,14 +180,19 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });
-      if (!res.ok) throw new Error(`Activation failed: ${res.status}`);
-      this.success = 'Provider activated successfully';
+      if (!res.ok) {
+        throw new Error(
+          text(`激活失败：${res.status}`, `Activation failed: ${res.status}`),
+        );
+      }
+      this.success = text('提供商已激活', 'Provider activated successfully');
       await this.loadData();
       this.publishProviderCatalogChanged('activated');
       this.onProviderSelectionChange?.();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : 'Activation failed';
+      this.error =
+        e instanceof Error ? e.message : text('激活失败', 'Activation failed');
       m.redraw();
     }
   }
@@ -183,14 +203,24 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });
-      if (!res.ok) throw new Error(`Deactivation failed: ${res.status}`);
-      this.success = 'Switched to system default (.env)';
+      if (!res.ok) {
+        throw new Error(
+          text(`停用失败：${res.status}`, `Deactivation failed: ${res.status}`),
+        );
+      }
+      this.success = text(
+        '已切换到系统默认配置（.env）',
+        'Switched to system default (.env)',
+      );
       await this.loadData();
       this.publishProviderCatalogChanged('deactivated');
       this.onProviderSelectionChange?.();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : 'Deactivation failed';
+      this.error =
+        e instanceof Error
+          ? e.message
+          : text('停用失败', 'Deactivation failed');
       m.redraw();
     }
   }
@@ -204,14 +234,19 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         method: 'DELETE',
         headers: buildHeaders(this.apiKey),
       });
-      if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
-      this.success = 'Provider deleted';
+      if (!res.ok) {
+        throw new Error(
+          text(`删除失败：${res.status}`, `Delete failed: ${res.status}`),
+        );
+      }
+      this.success = text('提供商已删除', 'Provider deleted');
       this.deleting = null;
       await this.loadData();
       this.publishProviderCatalogChanged('deleted');
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : 'Delete failed';
+      this.error =
+        e instanceof Error ? e.message : text('删除失败', 'Delete failed');
       this.deleting = null;
       m.redraw();
     }
@@ -252,7 +287,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     } catch (e: unknown) {
       this.testResult = {
         success: false,
-        error: e instanceof Error ? e.message : 'Connection test failed',
+        error:
+          e instanceof Error
+            ? e.message
+            : text('连接测试失败', 'Connection test failed'),
       };
       this.healthMap.set(id, 'failed');
     } finally {
@@ -312,7 +350,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private aiDisabledReasonForDisplay(): string {
     return (
       this.aiDisabledReason ||
-      'AI model-backed features are disabled by backend policy.'
+      text(
+        '后端策略已禁用由 AI 模型支持的功能。',
+        'AI model-backed features are disabled by backend policy.',
+      )
     );
   }
 
@@ -329,13 +370,18 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         cloneSource: this.cloneSource || undefined,
         templates: this.templates,
         onSaved: () => {
-          const reason =
-            this.view_mode === 'edit' ? 'updated' : 'created';
+          const reason = this.view_mode === 'edit' ? 'updated' : 'created';
           const activeProviderWasEdited = editProvider?.isActive === true;
           this.success =
             this.view_mode === 'edit'
-              ? 'Provider updated. Test it again if credentials changed.'
-              : 'Provider created. You can select it from the switcher now.';
+              ? text(
+                  '提供商已更新；如果凭据有变化，请重新测试。',
+                  'Provider updated. Test it again if credentials changed.',
+                )
+              : text(
+                  '提供商已创建，现在可以在切换器中选择。',
+                  'Provider created. You can select it from the switcher now.',
+                );
           this.view_mode = 'list';
           this.editingId = null;
           this.cloneSource = null;
@@ -390,11 +436,18 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
         m('div', {style: s.header}, [
           m('div', [
-            m('h3', {style: s.title}, 'Provider Management'),
+            m(
+              'h3',
+              {style: s.title},
+              text('提供商管理', 'Provider Management'),
+            ),
             m(
               'p',
               {style: s.subtitle},
-              'Model provider credentials live here; backend auth stays on the Connection tab',
+              text(
+                '模型提供商凭据在这里管理；后端认证仍位于“连接”页签。',
+                'Model provider credentials live here; backend auth stays on the Connection tab',
+              ),
             ),
           ]),
           m(
@@ -403,14 +456,14 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
               style: s.addBtn,
               onclick: () => this.startAdd(),
             },
-            '+ Add Provider',
+            text('+ 添加提供商', '+ Add Provider'),
           ),
         ]),
 
         this.renderProviderGuide(),
         this.isAiDisabled()
           ? m('div', {style: s.warningBanner}, [
-              m('span', 'AI disabled: '),
+              m('span', text('AI 已禁用：', 'AI disabled: ')),
               m('span', this.aiDisabledReasonForDisplay()),
             ])
           : null,
@@ -428,7 +481,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
             this.loading
               ? m('div', {style: s.loadingState}, [
                   m('span', '⏳'),
-                  'Loading providers...',
+                  text('正在加载提供商……', 'Loading providers...'),
                 ])
               : this.providers.length === 0
                 ? this.renderEmpty()
@@ -459,8 +512,15 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         },
       },
       [
-        m('strong', {style: {color: t.text}}, 'Provider Manager priority: '),
-        'a saved profile only affects analysis after it is active. Active profiles override backend/.env or Docker .env; System Default returns to env or local Claude Code config.',
+        m(
+          'strong',
+          {style: {color: t.text}},
+          text('Provider Manager 优先级：', 'Provider Manager priority: '),
+        ),
+        text(
+          '已保存的配置只有激活后才会影响分析。激活配置会覆盖 backend/.env 或 Docker .env；系统默认配置会回到环境变量或本地 Claude Code 配置。',
+          'a saved profile only affects analysis after it is active. Active profiles override backend/.env or Docker .env; System Default returns to env or local Claude Code config.',
+        ),
       ],
     );
   }
@@ -473,12 +533,15 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       m(
         'h4',
         {style: {margin: '0 0 8px', color: t.text}},
-        'No providers configured',
+        text('尚未配置提供商', 'No providers configured'),
       ),
       m(
         'p',
         {style: {margin: 0, fontSize: '14px'}},
-        'Add a UI provider profile, or use System Default for backend/.env, Docker .env, or local Claude Code config.',
+        text(
+          '添加一个 UI 提供商配置，或使用系统默认配置读取 backend/.env、Docker .env 或本地 Claude Code 配置。',
+          'Add a UI provider profile, or use System Default for backend/.env, Docker .env, or local Claude Code config.',
+        ),
       ),
       m(
         'button',
@@ -486,7 +549,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
           style: {...s.btn, ...s.btnPrimary, marginTop: '16px'},
           onclick: () => this.startAdd(),
         },
-        '+ Add Your First Provider',
+        text('+ 添加第一个提供商', '+ Add Your First Provider'),
       ),
     ]);
   }
@@ -588,7 +651,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                           color: t.text,
                         },
                       },
-                      'System Default',
+                      text('系统默认', 'System Default'),
                     ),
                     isActive
                       ? m('span', {
@@ -614,7 +677,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                       marginTop: '2px',
                     },
                   },
-                  'Uses local Claude Code, backend/.env, or Docker .env. Select this to ignore active UI providers.',
+                  text(
+                    '使用本地 Claude Code、backend/.env 或 Docker .env。选择此项会忽略已激活的 UI 提供商。',
+                    'Uses local Claude Code, backend/.env, or Docker .env. Select this to ignore active UI providers.',
+                  ),
                 ),
               ],
             ),
@@ -765,7 +831,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                                   fontWeight: 500,
                                 },
                               },
-                              'Official',
+                              text('官方', 'Official'),
                             )
                           : null,
                         m(
@@ -780,7 +846,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                               fontWeight: 500,
                             },
                           },
-                          providerRuntimeLabel(resolveProviderRuntime(provider)),
+                          providerRuntimeLabel(
+                            resolveProviderRuntime(provider),
+                          ),
                         ),
                         isActive
                           ? m(
@@ -795,7 +863,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                                   fontWeight: 600,
                                 },
                               },
-                              'Active',
+                              text('已激活', 'Active'),
                             )
                           : null,
                       ],
@@ -814,51 +882,55 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                 m(
                   'button',
                   {
-                    style: {
+                    'style': {
                       ...this.listActionBtnStyle(t),
                       ...(this.isAiDisabled()
                         ? {cursor: 'not-allowed', opacity: 0.55}
                         : {}),
                     },
-                    onclick: () => this.testConnection(provider.id),
-                    disabled: this.testingId === provider.id || this.isAiDisabled(),
-                    title: this.isAiDisabled()
+                    'onclick': () => this.testConnection(provider.id),
+                    'disabled':
+                      this.testingId === provider.id || this.isAiDisabled(),
+                    'title': this.isAiDisabled()
                       ? this.aiDisabledReasonForDisplay()
-                      : 'Test Connection',
-                    'aria-label': 'Test Connection',
+                      : text('测试连接', 'Test Connection'),
+                    'aria-label': text('测试连接', 'Test Connection'),
                   },
                   this.testingId === provider.id ? '⏳' : '\u{1F50C}',
                 ),
                 m(
                   'button',
                   {
-                    style: this.listActionBtnStyle(t),
-                    onclick: () => this.startEdit(provider),
-                    title: 'Edit Provider',
-                    'aria-label': 'Edit Provider',
+                    'style': this.listActionBtnStyle(t),
+                    'onclick': () => this.startEdit(provider),
+                    'title': text('编辑提供商', 'Edit Provider'),
+                    'aria-label': text('编辑提供商', 'Edit Provider'),
                   },
                   '✏️',
                 ),
                 m(
                   'button',
                   {
-                    style: this.listActionBtnStyle(t),
-                    onclick: () => this.cloneProvider(provider),
-                    title: 'Clone Provider',
-                    'aria-label': 'Clone Provider',
+                    'style': this.listActionBtnStyle(t),
+                    'onclick': () => this.cloneProvider(provider),
+                    'title': text('克隆提供商', 'Clone Provider'),
+                    'aria-label': text('克隆提供商', 'Clone Provider'),
                   },
                   '📋',
                 ),
                 m(
                   'button',
                   {
-                    style: {...this.listActionBtnStyle(t), color: t.error},
-                    onclick: () => this.deleteProvider(provider.id),
-                    disabled: this.deleting === provider.id || isActive,
-                    title: isActive
-                      ? 'Cannot delete active provider'
-                      : 'Delete Provider',
-                    'aria-label': 'Delete Provider',
+                    'style': {...this.listActionBtnStyle(t), color: t.error},
+                    'onclick': () => this.deleteProvider(provider.id),
+                    'disabled': this.deleting === provider.id || isActive,
+                    'title': isActive
+                      ? text(
+                          '不能删除当前激活的提供商',
+                          'Cannot delete active provider',
+                        )
+                      : text('删除提供商', 'Delete Provider'),
+                    'aria-label': text('删除提供商', 'Delete Provider'),
                   },
                   this.deleting === provider.id ? '⏳' : '\u{1F5D1}️',
                 ),
@@ -883,7 +955,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   e.stopPropagation();
                   this.expandedId = isExpanded ? null : provider.id;
                 },
-                title: 'Show model details',
+                title: text('显示模型详情', 'Show model details'),
               },
               '▶',
             ),
@@ -909,17 +981,53 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                 onclick: (e: Event) => e.stopPropagation(),
               },
               [
-                m('div', `Runtime: ${providerRuntimeLabel(resolveProviderRuntime(provider))}`),
-                m('div', `Primary: ${provider.models.primary}`),
-                m('div', `Light: ${provider.models.light}`),
+                m(
+                  'div',
+                  text(
+                    `运行时：${providerRuntimeLabel(resolveProviderRuntime(provider))}`,
+                    `Runtime: ${providerRuntimeLabel(resolveProviderRuntime(provider))}`,
+                  ),
+                ),
+                m(
+                  'div',
+                  text(
+                    `主模型：${provider.models.primary}`,
+                    `Primary: ${provider.models.primary}`,
+                  ),
+                ),
+                m(
+                  'div',
+                  text(
+                    `轻量模型：${provider.models.light}`,
+                    `Light: ${provider.models.light}`,
+                  ),
+                ),
                 provider.models.subAgent
-                  ? m('div', `Sub-agent: ${provider.models.subAgent}`)
+                  ? m(
+                      'div',
+                      text(
+                        `子代理模型：${provider.models.subAgent}`,
+                        `Sub-agent: ${provider.models.subAgent}`,
+                      ),
+                    )
                   : null,
                 provider.connection.claudeBaseUrl
-                  ? m('div', `Claude URL: ${provider.connection.claudeBaseUrl}`)
+                  ? m(
+                      'div',
+                      text(
+                        `Claude URL：${provider.connection.claudeBaseUrl}`,
+                        `Claude URL: ${provider.connection.claudeBaseUrl}`,
+                      ),
+                    )
                   : null,
                 provider.connection.openaiBaseUrl
-                  ? m('div', `OpenAI URL: ${provider.connection.openaiBaseUrl}`)
+                  ? m(
+                      'div',
+                      text(
+                        `OpenAI URL：${provider.connection.openaiBaseUrl}`,
+                        `OpenAI URL: ${provider.connection.openaiBaseUrl}`,
+                      ),
+                    )
                   : null,
                 provider.tuning && Object.keys(provider.tuning).length > 0
                   ? m(
@@ -1034,7 +1142,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
             m(
               'span',
               {style: {fontSize: '13px', fontWeight: 600, color: t.text}},
-              'Active Provider Env Override',
+              text('当前提供商环境变量覆盖', 'Active Provider Env Override'),
             ),
             m(
               'span',
@@ -1075,7 +1183,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                       lineHeight: '1.4',
                     },
                   },
-                  'These values are what the active Provider Manager profile sends to the backend runtime. They override backend/.env until you switch to System Default.',
+                  text(
+                    '这些值由当前 Provider Manager 配置发送给后端运行时；在切换到系统默认配置前，它们会覆盖 backend/.env。',
+                    'These values are what the active Provider Manager profile sends to the backend runtime. They override backend/.env until you switch to System Default.',
+                  ),
                 ),
                 this.renderEffectiveBody(),
               ],
@@ -1100,14 +1211,14 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
             fontSize: '13px',
           },
         },
-        '⏳ Loading...',
+        text('⏳ 加载中……', '⏳ Loading...'),
       );
     }
     if (!this.effectiveConfig) {
       return m(
         'div',
         {style: {padding: '16px', color: t.textMuted, fontSize: '13px'}},
-        'No active provider',
+        text('没有激活的提供商', 'No active provider'),
       );
     }
 

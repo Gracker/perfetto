@@ -191,7 +191,7 @@ import {
   updateFloatingState,
 } from './ai_floating_state';
 import {providerRuntimeLabel} from './provider_types';
-import {uiOutputLanguage, uiText} from './ui_language';
+import {setUiLanguagePreference, uiOutputLanguage, uiText} from './ui_language';
 import {
   analysisContextAfterBackendError,
   analysisContextRequiresFullMode,
@@ -294,8 +294,9 @@ function metricStatusStyle(status: string | undefined): {
 }
 
 function formatTeachingConfidence(confidence: number | undefined): string {
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence))
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence)) {
     return '-';
+  }
   return `${Math.round(confidence * 100)}%`;
 }
 
@@ -351,6 +352,50 @@ function teachingFeatureName(feature: {
   return feature.id || feature.name || feature.feature || 'unknown';
 }
 
+function teachingEnumLabel(value: string | undefined): string {
+  if (!value) return '-';
+  const labels: Record<string, [string, string]> = {
+    app: ['应用', 'App'],
+    render_thread: ['渲染线程', 'Render thread'],
+    producer: ['生产者', 'Producer'],
+    buffer_queue: ['BufferQueue', 'BufferQueue'],
+    surfaceflinger: ['SurfaceFlinger', 'SurfaceFlinger'],
+    hwc_present: ['HWC 显示', 'HWC present'],
+    critical_task: ['关键任务', 'Critical task'],
+    unknown: ['未知', 'Unknown'],
+    planned: ['已规划', 'Planned'],
+    ready: ['就绪', 'Ready'],
+    empty: ['无数据', 'Empty'],
+    partial: ['部分完成', 'Partial'],
+    failed: ['失败', 'Failed'],
+    direct_wakeup: ['直接唤醒', 'Direct wakeup'],
+    critical_path_segment: ['关键路径片段', 'Critical-path segment'],
+    produces_to: ['生产到', 'Produces to'],
+    composes_to: ['合成到', 'Composes to'],
+    presents_to: ['显示到', 'Presents to'],
+    overlaps_with: ['时间重叠', 'Overlaps with'],
+    wakes_to: ['唤醒', 'Wakes'],
+    critical_path_to: ['关键路径指向', 'Critical path to'],
+    app_frame: ['应用帧', 'App frame'],
+    buffer_queue_transaction: [
+      'BufferQueue / 事务',
+      'BufferQueue / transaction',
+    ],
+    surfaceflinger_composition: [
+      'SurfaceFlinger 合成',
+      'SurfaceFlinger composition',
+    ],
+    present: ['显示', 'Present'],
+  };
+  const localized = labels[value];
+  return localized ? uiText(...localized) : value;
+}
+
+function teachingEnumEvidenceLabel(value: string | undefined): string {
+  const stable = value || 'unknown';
+  return `${teachingEnumLabel(stable)} (\`${stable}\`)`;
+}
+
 function escapeTeachingRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -404,9 +449,24 @@ const SMART_SCENE_SELECTION_GROUPS: Array<{
   icon: string;
   sceneTypes: string[];
 }> = [
-  {labelZh: '启动', labelEn: 'Startup', icon: 'rocket_launch', sceneTypes: ['cold_start', 'warm_start', 'hot_start']},
-  {labelZh: '滑动', labelEn: 'Scroll', icon: 'swipe', sceneTypes: ['scroll', 'inertial_scroll']},
-  {labelZh: '点击', labelEn: 'Input', icon: 'touch_app', sceneTypes: ['tap', 'long_press', 'screen_unlock']},
+  {
+    labelZh: '启动',
+    labelEn: 'Startup',
+    icon: 'rocket_launch',
+    sceneTypes: ['cold_start', 'warm_start', 'hot_start'],
+  },
+  {
+    labelZh: '滑动',
+    labelEn: 'Scroll',
+    icon: 'swipe',
+    sceneTypes: ['scroll', 'inertial_scroll'],
+  },
+  {
+    labelZh: '点击',
+    labelEn: 'Input',
+    icon: 'touch_app',
+    sceneTypes: ['tap', 'long_press', 'screen_unlock'],
+  },
   {
     labelZh: '导航',
     labelEn: 'Navigation',
@@ -426,7 +486,12 @@ const SMART_SCENE_SELECTION_GROUPS: Array<{
     icon: 'power_settings_new',
     sceneTypes: ['screen_on', 'screen_off', 'screen_sleep', 'idle'],
   },
-  {labelZh: 'ANR', labelEn: 'ANR', icon: 'warning', sceneTypes: ['anr', 'jank_region']},
+  {
+    labelZh: 'ANR',
+    labelEn: 'ANR',
+    icon: 'warning',
+    sceneTypes: ['anr', 'jank_region'],
+  },
 ];
 
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
@@ -642,17 +707,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const kindLabel = (kind: DataSourceContext['kind']) => {
       switch (kind) {
         case 'summary':
-          return '摘要';
+          return uiText('摘要', 'Summary');
         case 'metric':
-          return '指标';
+          return uiText('指标', 'Metric');
         case 'chart':
-          return '图表';
+          return uiText('图表', 'Chart');
         case 'text':
-          return '文本';
+          return uiText('文本', 'Text');
         case 'timeline':
-          return '时间线';
+          return uiText('时间线', 'Timeline');
         case 'table':
-          return '表格';
+          return uiText('表格', 'Table');
         default:
           return '';
       }
@@ -667,18 +732,40 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const planPhase = [context.planPhaseId, context.planPhaseTitle]
       .filter(Boolean)
       .join(' · ');
-    if (planPhase) chips.push(`阶段 ${planPhase}`);
+    if (planPhase) {
+      chips.push(uiText(`阶段 ${planPhase}`, `Phase ${planPhase}`));
+    }
     if (context.planPhaseAttribution) {
-      chips.push(`阶段归因 ${context.planPhaseAttribution}`);
+      chips.push(
+        uiText(
+          `阶段归因 ${context.planPhaseAttribution}`,
+          `Phase attribution ${context.planPhaseAttribution}`,
+        ),
+      );
     }
     if (typeof context.rowCount === 'number') {
-      chips.push(`${context.rowCount.toLocaleString()} 行`);
+      chips.push(
+        uiText(
+          `${context.rowCount.toLocaleString()} 行`,
+          `${context.rowCount.toLocaleString()} rows`,
+        ),
+      );
     }
     if (context.sourceToolCallId) {
-      chips.push(`工具 ${compactId(context.sourceToolCallId)}`);
+      chips.push(
+        uiText(
+          `工具 ${compactId(context.sourceToolCallId)}`,
+          `Tool ${compactId(context.sourceToolCallId)}`,
+        ),
+      );
     }
     if (context.evidenceRefId) {
-      chips.push(`证据 ${compactId(context.evidenceRefId)}`);
+      chips.push(
+        uiText(
+          `证据 ${compactId(context.evidenceRefId)}`,
+          `Evidence ${compactId(context.evidenceRefId)}`,
+        ),
+      );
     }
     if (context.source) chips.push(context.source);
 
@@ -744,21 +831,27 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       [
         m('div.sp-teaching-header', [
           m('div', [
-            m('div.sp-teaching-eyebrow', '出图教学'),
+            m(
+              'div.sp-teaching-eyebrow',
+              uiText('出图教学', 'Rendering Tutorial'),
+            ),
             m('h3', content?.title || pipelineId),
           ]),
           m('div.sp-teaching-actions', [
             m(
               'button.sp-teaching-copy',
               {
-                title: '复制诊断摘要',
+                title: uiText('复制诊断摘要', 'Copy diagnostic summary'),
                 onclick: () => {
                   void this.copyTextToClipboard(
                     this.buildTeachingPipelineMarkdown(result, pinExecution),
                   );
                 },
               },
-              [m('i.pf-icon', 'content_copy'), m('span', '复制摘要')],
+              [
+                m('i.pf-icon', 'content_copy'),
+                m('span', uiText('复制摘要', 'Copy summary')),
+              ],
             ),
           ]),
         ]),
@@ -783,20 +876,26 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       value: string | undefined;
     }> = renderingTypeId
       ? [
-          {label: '出图类型', value: renderingTypeId},
-          {label: '检测子路径', value: pipelineId},
+          {
+            label: uiText('出图类型', 'Rendering type'),
+            value: renderingTypeId,
+          },
+          {
+            label: uiText('检测子路径', 'Detected subpath'),
+            value: pipelineId,
+          },
         ]
-      : [{label: 'Pipeline', value: pipelineId}];
+      : [{label: uiText('管线', 'Pipeline'), value: pipelineId}];
     const chips: Array<{label: string; value: string | undefined}> = [
       ...identityChips,
       {
-        label: 'Confidence',
+        label: uiText('置信度', 'Confidence'),
         value: formatTeachingConfidence(teachingPrimaryConfidence(result)),
       },
-      {label: 'Buffer', value: subvariants.buffer_mode},
+      {label: uiText('缓冲区', 'Buffer'), value: subvariants.buffer_mode},
       {label: 'Flutter', value: subvariants.flutter_engine},
       {label: 'WebView', value: subvariants.webview_mode},
-      {label: 'Game', value: subvariants.game_engine},
+      {label: uiText('游戏', 'Game'), value: subvariants.game_engine},
     ];
     const visibleChips = chips.filter(
       (chip) => chip.value && chip.value !== 'UNKNOWN' && chip.value !== 'N/A',
@@ -815,7 +914,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       detection.renderingTypeCandidates &&
       detection.renderingTypeCandidates.length > 1
         ? m('div.sp-teaching-inline-list', [
-            m('span', '候选出图类型'),
+            m('span', uiText('候选出图类型', 'Rendering candidates')),
             ...detection.renderingTypeCandidates
               .slice(0, 5)
               .map((candidate) =>
@@ -828,7 +927,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : null,
       detection.candidates && detection.candidates.length > 1
         ? m('div.sp-teaching-inline-list', [
-            m('span', renderingTypeId ? '候选子路径' : '候选类型'),
+            m(
+              'span',
+              renderingTypeId
+                ? uiText('候选子路径', 'Subpath candidates')
+                : uiText('候选类型', 'Type candidates'),
+            ),
             ...detection.candidates
               .slice(0, 5)
               .map((candidate) =>
@@ -842,7 +946,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       detection.relatedRenderingTypes &&
       detection.relatedRenderingTypes.length > 0
         ? m('div.sp-teaching-inline-list', [
-            m('span', '伴随出图类型'),
+            m('span', uiText('伴随出图类型', 'Related rendering types')),
             ...detection.relatedRenderingTypes
               .slice(0, 5)
               .map((candidate) =>
@@ -855,7 +959,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : null,
       detection.features && detection.features.length > 0
         ? m('div.sp-teaching-inline-list', [
-            m('span', '伴随特性'),
+            m('span', uiText('伴随特性', 'Related features')),
             ...detection.features
               .slice(0, 8)
               .map((feature) => m('code', teachingFeatureName(feature))),
@@ -866,7 +970,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private renderTeachingWarnings(warnings: TeachingWarning[]): m.Children {
     return m('div.sp-teaching-warning-list', [
-      m('div.sp-teaching-section-title', 'Warnings'),
+      m('div.sp-teaching-section-title', uiText('警告', 'Warnings')),
       ...warnings
         .slice(0, 8)
         .map((warning) =>
@@ -876,14 +980,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           ]),
         ),
       warnings.length > 8
-        ? m('div.sp-teaching-more', `还有 ${warnings.length - 8} 条提示未展开`)
+        ? m(
+            'div.sp-teaching-more',
+            uiText(
+              `还有 ${warnings.length - 8} 条提示未展开`,
+              `${warnings.length - 8} more warnings`,
+            ),
+          )
         : null,
     ]);
   }
 
   private renderTeachingObservedFlow(flow: TeachingObservedFlow): m.Children {
     return m('div.sp-teaching-observed', [
-      m('div.sp-teaching-section-title', '当前 Trace 实际链路'),
+      m(
+        'div.sp-teaching-section-title',
+        uiText('当前 Trace 实际链路', 'Observed trace flow'),
+      ),
       this.renderTeachingContext(flow),
       this.renderTeachingLanes(flow.lanes || []),
       this.renderTeachingDependencies(flow),
@@ -891,7 +1004,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.renderTeachingEvents(flow.events || []),
       flow.completeness?.missingSignals?.length
         ? m('div.sp-teaching-missing', [
-            m('div.sp-teaching-subtitle', '采集/观测缺口'),
+            m(
+              'div.sp-teaching-subtitle',
+              uiText('采集/观测缺口', 'Capture and observation gaps'),
+            ),
             m(
               'ul',
               flow.completeness.missingSignals.map((signal) => m('li', signal)),
@@ -906,28 +1022,46 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return m('div.sp-teaching-context', [
       range
         ? m('span', [
-            m('b', '时间窗 '),
+            m('b', uiText('时间窗 ', 'Time range ')),
             `${formatTeachingNs(range.startTs)} - ${formatTeachingNs(range.endTs)} ns (${range.source})`,
           ])
         : null,
       flow.context?.packageName
-        ? m('span', [m('b', 'Package '), flow.context.packageName])
+        ? m('span', [
+            m('b', uiText('包名 ', 'Package ')),
+            flow.context.packageName,
+          ])
         : null,
       flow.context?.processName
-        ? m('span', [m('b', 'Process '), flow.context.processName])
+        ? m('span', [
+            m('b', uiText('进程 ', 'Process ')),
+            flow.context.processName,
+          ])
         : null,
       flow.context?.fallbackUsed
-        ? m('span', [m('b', 'Fallback '), flow.context.fallbackUsed])
+        ? m('span', [
+            m('b', uiText('回退路径 ', 'Fallback ')),
+            flow.context.fallbackUsed,
+          ])
         : null,
       flow.completeness?.level
-        ? m('span', [m('b', 'Completeness '), flow.completeness.level])
+        ? m('span', [
+            m('b', uiText('完整性 ', 'Completeness ')),
+            flow.completeness.level,
+          ])
         : null,
     ]);
   }
 
   private renderTeachingLanes(lanes: TeachingObservedLane[]): m.Children {
     if (lanes.length === 0) {
-      return m('div.sp-teaching-empty', '当前上下文没有观测到可展示泳道。');
+      return m(
+        'div.sp-teaching-empty',
+        uiText(
+          '当前上下文没有观测到可展示泳道。',
+          'No displayable lanes were observed in the current context.',
+        ),
+      );
     }
     return m(
       'div.sp-teaching-lanes',
@@ -935,7 +1069,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         .slice(0, 12)
         .map((lane) =>
           m('div.sp-teaching-lane', [
-            m('div.sp-teaching-lane-role', lane.role),
+            m('div.sp-teaching-lane-role', teachingEnumLabel(lane.role)),
             m('div.sp-teaching-lane-title', lane.title || lane.id),
             m(
               'div.sp-teaching-lane-meta',
@@ -957,14 +1091,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       (flow.lanes || []).map((lane) => [lane.id, lane]),
     );
     return m('div.sp-teaching-dependencies', [
-      m('div.sp-teaching-subtitle', `调度/链路依赖 (${dependencies.length})`),
+      m(
+        'div.sp-teaching-subtitle',
+        uiText(
+          `调度/链路依赖 (${dependencies.length})`,
+          `Scheduling and flow dependencies (${dependencies.length})`,
+        ),
+      ),
       m('table.sp-teaching-table', [
         m('thead', [
           m('tr', [
-            m('th', 'From'),
-            m('th', 'Relation'),
-            m('th', 'To'),
-            m('th', 'Evidence'),
+            m('th', uiText('来源', 'From')),
+            m('th', uiText('关系', 'Relation')),
+            m('th', uiText('目标', 'To')),
+            m('th', uiText('证据', 'Evidence')),
           ]),
         ]),
         m(
@@ -974,7 +1114,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             const to = lanesById.get(dependency.toLaneId);
             return m('tr', [
               m('td', from?.title || dependency.fromLaneId),
-              m('td', dependency.relation),
+              m('td', teachingEnumLabel(dependency.relation)),
               m('td', to?.title || dependency.toLaneId),
               m('td', dependency.evidenceSource || dependency.detail || '-'),
             ]);
@@ -984,7 +1124,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       dependencies.length > 16
         ? m(
             'div.sp-teaching-more',
-            `还有 ${dependencies.length - 16} 条依赖未展开`,
+            uiText(
+              `还有 ${dependencies.length - 16} 条依赖未展开`,
+              `${dependencies.length - 16} more dependencies`,
+            ),
           )
         : null,
     ]);
@@ -997,14 +1140,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return m('div.sp-teaching-critical-tasks', [
       m(
         'div.sp-teaching-subtitle',
-        `Critical task / Wakeup (${criticalTasks.length})`,
+        uiText(
+          `关键任务 / 唤醒 (${criticalTasks.length})`,
+          `Critical task / Wakeup (${criticalTasks.length})`,
+        ),
       ),
       m('table.sp-teaching-table', [
         m('thead', [
           m('tr', [
-            m('th', 'Kind'),
-            m('th', 'Task'),
-            m('th', 'Waker'),
+            m('th', uiText('类型', 'Kind')),
+            m('th', uiText('任务', 'Task')),
+            m('th', uiText('唤醒方', 'Waker')),
             m('th', 'ts'),
             m('th', 'dur'),
           ]),
@@ -1024,7 +1170,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 '-'
               : '-';
             return m('tr', [
-              m('td', task.kind),
+              m('td', teachingEnumLabel(task.kind)),
               m('td', [
                 m('div', owner),
                 task.state ? m('code', task.state) : null,
@@ -1042,7 +1188,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       criticalTasks.length > 16
         ? m(
             'div.sp-teaching-more',
-            `还有 ${criticalTasks.length - 16} 个 task 未展开`,
+            uiText(
+              `还有 ${criticalTasks.length - 16} 个任务未展开`,
+              `${criticalTasks.length - 16} more tasks`,
+            ),
           )
         : null,
     ]);
@@ -1050,16 +1199,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private renderTeachingEvents(events: TeachingObservedEvent[]): m.Children {
     if (events.length === 0) {
-      return m('div.sp-teaching-empty', '当前上下文没有观测到关键出图事件。');
+      return m(
+        'div.sp-teaching-empty',
+        uiText(
+          '当前上下文没有观测到关键出图事件。',
+          'No key rendering events were observed in the current context.',
+        ),
+      );
     }
     return m('div.sp-teaching-events', [
-      m('div.sp-teaching-subtitle', `实际事件 (${events.length})`),
+      m(
+        'div.sp-teaching-subtitle',
+        uiText(
+          `实际事件 (${events.length})`,
+          `Observed events (${events.length})`,
+        ),
+      ),
       m('table.sp-teaching-table', [
         m('thead', [
           m('tr', [
-            m('th', 'Stage'),
+            m('th', uiText('阶段', 'Stage')),
             m('th', 'Slice'),
-            m('th', 'Thread / Process'),
+            m('th', uiText('线程 / 进程', 'Thread / Process')),
             m('th', 'ts'),
             m('th', 'dur'),
           ]),
@@ -1072,21 +1233,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 .filter(Boolean)
                 .join(' / ') || '-';
             return m('tr', [
-              m('td', event.stage),
+              m('td', teachingEnumLabel(event.stage)),
               m('td', event.name),
               m('td', owner),
               m('td', [
                 m(
                   'button.sp-teaching-ts',
                   {
-                    title: '跳转到该事件',
+                    title: uiText('跳转到该事件', 'Jump to this event'),
                     onclick: () => {
                       const navigation = this.jumpToTimestamp(BigInt(event.ts));
                       if (!navigation.ok) {
                         this.addMessage({
                           id: this.generateId(),
                           role: 'assistant',
-                          content: `Failed to navigate to timestamp ${event.ts}ns: ${navigation.error}`,
+                          content: uiText(
+                            `无法跳转到时间戳 ${event.ts}ns：${navigation.error}`,
+                            `Failed to navigate to timestamp ${event.ts}ns: ${navigation.error}`,
+                          ),
                           timestamp: Date.now(),
                         });
                       }
@@ -1101,7 +1265,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
       ]),
       events.length > 16
-        ? m('div.sp-teaching-more', `还有 ${events.length - 16} 个事件未展开`)
+        ? m(
+            'div.sp-teaching-more',
+            uiText(
+              `还有 ${events.length - 16} 个事件未展开`,
+              `${events.length - 16} more events`,
+            ),
+          )
         : null,
     ]);
   }
@@ -1113,15 +1283,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return m('div.sp-teaching-execution', [
       result.pinPlan
         ? m('div.sp-teaching-plan-state', [
-            m('span.sp-teaching-state-label', 'Pin plan'),
-            m('span.sp-teaching-state-value', result.pinPlan.status),
+            m('span.sp-teaching-state-label', uiText('Pin 计划', 'Pin plan')),
+            m(
+              'span.sp-teaching-state-value',
+              teachingEnumLabel(result.pinPlan.status),
+            ),
             result.pinPlan.summary ? m('span', result.pinPlan.summary) : null,
           ])
         : null,
       result.overlayPlan
         ? m('div.sp-teaching-plan-state', [
-            m('span.sp-teaching-state-label', 'Overlay plan'),
-            m('span.sp-teaching-state-value', result.overlayPlan.status),
+            m(
+              'span.sp-teaching-state-label',
+              uiText('Overlay 计划', 'Overlay plan'),
+            ),
+            m(
+              'span.sp-teaching-state-value',
+              teachingEnumLabel(result.overlayPlan.status),
+            ),
             result.overlayPlan.summary
               ? m('span', result.overlayPlan.summary)
               : null,
@@ -1130,16 +1309,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       pinExecution
         ? [
             m('div.sp-teaching-plan-state', [
-              m('span.sp-teaching-state-label', 'Pin result'),
-              m('span.sp-teaching-state-value', `${pinExecution.count} pinned`),
+              m(
+                'span.sp-teaching-state-label',
+                uiText('Pin 结果', 'Pin result'),
+              ),
+              m(
+                'span.sp-teaching-state-value',
+                uiText(
+                  `${pinExecution.count} 个已固定`,
+                  `${pinExecution.count} pinned`,
+                ),
+              ),
               m(
                 'span',
-                `${pinExecution.skipped} skipped / ${pinExecution.failed} failed`,
+                uiText(
+                  `${pinExecution.skipped} 个跳过 / ${pinExecution.failed} 个失败`,
+                  `${pinExecution.skipped} skipped / ${pinExecution.failed} failed`,
+                ),
               ),
             ]),
             pinExecution.pinnedTrackNames?.length > 0
               ? m('div.sp-teaching-inline-list', [
-                  m('span', '已 pin'),
+                  m('span', uiText('已固定', 'Pinned')),
                   ...pinExecution.pinnedTrackNames
                     .slice(0, 8)
                     .map((trackName) => m('code', trackName)),
@@ -1147,7 +1338,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               : null,
             pinExecution.missingPatterns?.length > 0
               ? m('div.sp-teaching-inline-list', [
-                  m('span', '未命中'),
+                  m('span', uiText('未命中', 'Not matched')),
                   ...pinExecution.missingPatterns
                     .slice(0, 8)
                     .map((pattern) => m('code', pattern)),
@@ -1161,17 +1352,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private renderTeachingKnowledge(content: TeachingContent): m.Children {
     const mermaid = content.mermaidBlocks?.[0];
     return m('div.sp-teaching-knowledge', [
-      m('div.sp-teaching-section-title', '知识点'),
+      m('div.sp-teaching-section-title', uiText('知识点', 'Key concepts')),
       content.summary ? m('p', content.summary) : null,
       content.threadRoles?.length
         ? m('div', [
-            m('div.sp-teaching-subtitle', '关键线程角色'),
+            m(
+              'div.sp-teaching-subtitle',
+              uiText('关键线程角色', 'Key thread roles'),
+            ),
             m('table.sp-teaching-table', [
               m('thead', [
                 m('tr', [
-                  m('th', '线程'),
-                  m('th', '职责'),
-                  m('th', 'Trace 标签'),
+                  m('th', uiText('线程', 'Thread')),
+                  m('th', uiText('职责', 'Responsibility')),
+                  m('th', uiText('Trace 标签', 'Trace label')),
                 ]),
               ]),
               m(
@@ -1189,7 +1383,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : null,
       content.keySlices?.length
         ? m('div.sp-teaching-inline-list', [
-            m('span', '关键 Slice'),
+            m('span', uiText('关键 Slice', 'Key slices')),
             ...content.keySlices.map((sliceName) => m('code', sliceName)),
           ])
         : null,
@@ -1199,7 +1393,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               'data-mermaid-b64': encodeBase64Unicode(mermaid),
             }),
             m('details.ai-mermaid-details', [
-              m('summary', '查看 Mermaid 源码'),
+              m('summary', uiText('查看 Mermaid 源码', 'View Mermaid source')),
               m('div.ai-mermaid-actions', [
                 m(
                   'button.ai-mermaid-copy',
@@ -1207,7 +1401,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     'type': 'button',
                     'data-mermaid-b64': encodeBase64Unicode(mermaid),
                   },
-                  '复制代码',
+                  uiText('复制代码', 'Copy code'),
                 ),
               ]),
               m('pre.ai-mermaid-source', {
@@ -1234,7 +1428,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.settings.backendUrl,
       sourceKey,
     );
-    if (!backendUploadSnapshotMatchesIdentity(getBackendUploadState(), backendIdentityKey, sourceKey)) {
+    if (
+      !backendUploadSnapshotMatchesIdentity(
+        getBackendUploadState(),
+        backendIdentityKey,
+        sourceKey,
+      )
+    ) {
       invalidateBackendUploadState(backendIdentityKey, sourceKey);
     }
     this.loadAnalysisContextSelection();
@@ -1249,7 +1449,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.trace &&
       this.engine?.mode !== 'HTTP_RPC' &&
       uploadState.state === 'idle' &&
-      backendUploadSnapshotMatchesIdentity(uploadState, backendIdentityKey, sourceKey)
+      backendUploadSnapshotMatchesIdentity(
+        uploadState,
+        backendIdentityKey,
+        sourceKey,
+      )
     ) {
       void this.retryBackendConnection();
     }
@@ -1268,12 +1472,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private getBackendUploadSourceKey(): string {
-    const traceSource = (this.trace?.traceInfo as unknown as {source?: TraceSource})?.source;
-    return traceSource ? backendUploadSourceKey(traceSource) : 'no-trace-source';
+    const traceSource = (
+      this.trace?.traceInfo as unknown as {source?: TraceSource}
+    )?.source;
+    return traceSource
+      ? backendUploadSourceKey(traceSource)
+      : 'no-trace-source';
   }
 
   private getCurrentTraceName(): string {
-    return getCanonicalTraceName(this.trace?.traceInfo, '当前 Trace');
+    return getCanonicalTraceName(
+      this.trace?.traceInfo,
+      uiText('当前 Trace', 'Current trace'),
+    );
   }
 
   private getTracePairWorkspaceScope() {
@@ -1331,8 +1542,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (
       !currentTraceId ||
       (this.isAnalysisIdentityLocked() && !this.state.referenceTraceId)
-    )
+    ) {
       return;
+    }
     const restoredReferenceTraceId = this.state.referenceTraceId;
     this.tracePairWorkspaceController.open({
       scope: this.getTracePairWorkspaceScope(),
@@ -1381,9 +1593,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : pane === 'first'
           ? uiText('左', 'Left')
           : uiText('右', 'Right');
-    const role = traceSide === 'current'
-      ? uiText('主', 'Primary')
-      : uiText('参考', 'Reference');
+    const role =
+      traceSide === 'current'
+        ? uiText('主', 'Primary')
+        : uiText('参考', 'Reference');
     return `${location}/${role}`;
   }
 
@@ -1543,7 +1756,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         referenceTrace: {
           id: referenceTraceId,
           filename:
-            session.referenceTraceName || uiText('参考 Trace', 'Reference Trace'),
+            session.referenceTraceName ||
+            uiText('参考 Trace', 'Reference Trace'),
         },
         currentPane:
           session.tracePairCurrentPane === 'second' ? 'second' : 'first',
@@ -1589,7 +1803,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const appBackendUploadState = backendUploadState.state;
     const appBackendUploadError = backendUploadState.error;
 
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] Trace fingerprint check:', {
         new: newFingerprint,
         current: this.state.currentTraceFingerprint,
@@ -1600,14 +1814,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         engineMode: this.engine?.mode,
         engineInRpcMode,
       });
+    }
 
     // If upload already completed, reuse the backend trace id.
     if (appBackendTraceId && !this.state.backendTraceId) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Using backendTraceId from auto-upload:',
           appBackendTraceId,
         );
+      }
       this.state.backendTraceId = appBackendTraceId;
       // Don't call detectScenesQuick() here — defer to after welcome message below
     }
@@ -1618,8 +1834,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       newFingerprint === this.state.currentTraceFingerprint &&
       this.state.currentSessionId
     ) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Same trace, keeping current session');
+      }
       // 如果在 RPC 模式但没有 backendTraceId，尝试自动注册
       if (engineInRpcMode && !this.state.backendTraceId) {
         this.autoRegisterWithBackend();
@@ -1665,11 +1882,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       );
 
     if (restorable.length > 0) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Auto-restoring recent session:',
           restorable[0].sessionId,
         );
+      }
       // Preserve backendTraceId from upload state — loadSession may clear it
       const savedBackendTraceId = this.state.backendTraceId;
       this.loadSession(restorable[0].sessionId, {preserveLiveTracePair: true});
@@ -1726,11 +1944,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private async autoRegisterWithBackend(): Promise<void> {
     const rpcTarget = HttpRpcEngine.getCurrentTarget();
     const rpcPort = rpcTarget.port ?? HttpRpcEngine.rpcPort;
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log(
         '[AIPanel] Auto-registering with backend, RPC target:',
         rpcTarget,
       );
+    }
 
     // First, check if there's a pending backendTraceId from a recent upload
     const pendingTraceId = this.recoverPendingBackendTrace(
@@ -1738,17 +1957,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       rpcTarget.leaseId,
     );
     if (pendingTraceId) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Recovered pending backend traceId:',
           pendingTraceId,
         );
+      }
       this.state.backendTraceId = pendingTraceId;
 
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `✅ **已进入 RPC 模式**\n\nTrace 已成功上传并通过 ${this.rpcModeDescription()} 加载。\nAI 助手已就绪，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+        content: uiText(
+          `✅ **已进入 RPC 模式**\n\nTrace 已成功上传并通过 ${this.rpcModeDescription()} 加载。\nAI 助手已就绪，可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+          `✅ **RPC mode is active**\n\nThe trace was uploaded and loaded through ${this.rpcModeDescription()}.\nAI Assistant is ready for analysis.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
+        ),
         timestamp: Date.now(),
       });
 
@@ -1784,16 +2007,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         const data = await response.json();
         if (data.success && data.traceId) {
           this.state.backendTraceId = data.traceId;
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               '[AIPanel] Auto-registered with backend, traceId:',
               data.traceId,
             );
+          }
 
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: `✅ **已连接到 RPC 模式**\n\n检测到当前 Trace 已通过 ${this.rpcModeDescription()} 加载。\nAI 助手现在可以分析这份 Trace 数据了。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+            content: uiText(
+              `✅ **已连接到 RPC 模式**\n\n检测到当前 Trace 已通过 ${this.rpcModeDescription()} 加载。\nAI 助手现在可以分析这份 Trace 数据了。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+              `✅ **Connected in RPC mode**\n\nThe current trace is loaded through ${this.rpcModeDescription()}.\nAI Assistant can now analyze it.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
+            ),
             timestamp: Date.now(),
           });
 
@@ -1805,14 +2032,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       }
 
       // 注册失败时，显示基本欢迎消息
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Auto-registration failed, showing welcome message',
         );
+      }
       this.addRpcModeWelcomeMessage();
     } catch (error) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Auto-registration error:', error);
+      }
       this.addRpcModeWelcomeMessage();
     }
   }
@@ -1826,8 +2055,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] Manually retrying backend connection...');
+    }
     this.state.isRetryingBackend = true;
     this.state.retryError = null;
     m.redraw();
@@ -1854,33 +2084,57 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
       // 首先检查后端是否可用
       const backendAvailable = await uploader.checkAvailable();
-      if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
+      if (
+        !isBackendUploadOperationCurrent(
+          uploadToken,
+          backendIdentityKey,
+          sourceKey,
+        )
+      ) {
+        return;
+      }
       if (!backendAvailable) {
         throw new Error(
-          'AI 后端服务未启动。请先运行 `cd backend && npm run dev` 启动后端服务。',
+          uiText(
+            'AI 后端服务未启动。请先运行 `cd backend && npm run dev` 启动后端服务。',
+            'The AI backend is not running. Start it with `cd backend && npm run dev`.',
+          ),
         );
       }
 
       // 获取当前 Trace 的 source
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Retrying with trace source type:',
           traceSource.type,
         );
+      }
 
       // 尝试上传 Trace
       const uploadResult = await uploader.upload(traceSource);
-      if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
+      if (
+        !isBackendUploadOperationCurrent(
+          uploadToken,
+          backendIdentityKey,
+          sourceKey,
+        )
+      ) {
+        return;
+      }
 
       if (
         !uploadResult.success ||
         (!uploadResult.rpcTarget && !uploadResult.port)
       ) {
-        throw new Error(uploadResult.error || '上传 Trace 失败');
+        throw new Error(
+          uploadResult.error ||
+            uiText('上传 Trace 失败', 'Failed to upload the trace'),
+        );
       }
 
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Upload successful:', uploadResult);
+      }
 
       // The local UI engine remains on its original source. The backend RPC
       // target is a separate AI-analysis asset and can be rebound safely.
@@ -1929,7 +2183,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m.redraw();
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
+      if (
+        !isBackendUploadOperationCurrent(
+          uploadToken,
+          backendIdentityKey,
+          sourceKey,
+        )
+      ) {
+        return;
+      }
       console.error('[AIPanel] Retry backend connection failed:', errorMsg);
       this.state.retryError = errorMsg;
       setBackendUploadState({
@@ -1965,7 +2227,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `✅ **AI 助手已就绪**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载。\n前后端共享同一个 trace_processor。\n\n可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+      content: uiText(
+        `✅ **AI 助手已就绪**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载。\n前后端共享同一个 trace_processor。\n\n可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+        `✅ **AI Assistant is ready**\n\nThe trace is loaded through ${this.rpcModeDescription()}.\nThe frontend and backend share the same trace_processor.\n\nYou can start analyzing it now.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
+      ),
       timestamp: Date.now(),
     });
     m.redraw();
@@ -1976,24 +2241,35 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (target.mode === 'backend-lease-proxy') {
       const modeText =
         target.leaseMode === 'isolated'
-          ? '独立'
+          ? uiText('独立', 'isolated')
           : target.leaseMode === 'shared'
-            ? '共享'
-            : '未知';
+            ? uiText('共享', 'shared')
+            : uiText('未知', 'unknown');
       const queueText =
         typeof target.leaseQueueLength === 'number'
-          ? `，队列 ${target.leaseQueueLength}`
+          ? uiText(
+              `，队列 ${target.leaseQueueLength}`,
+              `, queue ${target.leaseQueueLength}`,
+            )
           : '';
-      return `后端 ${modeText} Lease 代理 (${target.leaseId ?? 'unknown'}${queueText})`;
+      return uiText(
+        `后端 ${modeText} Lease 代理 (${target.leaseId ?? 'unknown'}${queueText})`,
+        `Backend ${modeText} lease proxy (${target.leaseId ?? 'unknown'}${queueText})`,
+      );
     }
-    return `HTTP RPC (端口 ${target.port ?? HttpRpcEngine.rpcPort})`;
+    return uiText(
+      `HTTP RPC（端口 ${target.port ?? HttpRpcEngine.rpcPort}）`,
+      `HTTP RPC (port ${target.port ?? HttpRpcEngine.rpcPort})`,
+    );
   }
 
   /**
    * 后端不可用时的提示消息
    */
   private addBackendUnavailableMessage(errorDetail?: string): void {
-    const errorSection = errorDetail ? `\n\n${uiText('**错误详情：**', '**Error details:**')}\n- ${errorDetail}` : '';
+    const errorSection = errorDetail
+      ? `\n\n${uiText('**错误详情：**', '**Error details:**')}\n- ${errorDetail}`
+      : '';
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
@@ -2006,7 +2282,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     m.redraw();
   }
 
-  private addBackendUploadFailureMessage(snapshot: BackendUploadSnapshot): void {
+  private addBackendUploadFailureMessage(
+    snapshot: BackendUploadSnapshot,
+  ): void {
     if (
       snapshot.errorCode !== 'STREAM_SOURCE_UNSUPPORTED' &&
       snapshot.errorCode !== 'MULTIPLE_FILES_SOURCE_UNSUPPORTED'
@@ -2017,15 +2295,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: snapshot.errorCode === 'STREAM_SOURCE_UNSUPPORTED'
-        ? uiText(
-            '⚠️ **当前流式 Trace 不支持 AI 分析**\n\n请将捕获结果保存或重新打开为单个 Trace 文件。这是输入类型限制，不是后端连接故障。',
-            '⚠️ **Streaming traces are not supported for AI analysis**\n\nSave or reopen the capture as a single trace file. This is an input capability limit, not a backend connection failure.',
-          )
-        : uiText(
-            '⚠️ **多文件 Trace 不能合并上传用于 AI 分析**\n\n请打开一个独立 Trace 文件。这是输入类型限制，不是后端连接故障。',
-            '⚠️ **Multi-file traces cannot be uploaded as one AI analysis trace**\n\nOpen one standalone trace file. This is an input capability limit, not a backend connection failure.',
-          ),
+      content:
+        snapshot.errorCode === 'STREAM_SOURCE_UNSUPPORTED'
+          ? uiText(
+              '⚠️ **当前流式 Trace 不支持 AI 分析**\n\n请将捕获结果保存或重新打开为单个 Trace 文件。这是输入类型限制，不是后端连接故障。',
+              '⚠️ **Streaming traces are not supported for AI analysis**\n\nSave or reopen the capture as a single trace file. This is an input capability limit, not a backend connection failure.',
+            )
+          : uiText(
+              '⚠️ **多文件 Trace 不能合并上传用于 AI 分析**\n\n请打开一个独立 Trace 文件。这是输入类型限制，不是后端连接故障。',
+              '⚠️ **Multi-file traces cannot be uploaded as one AI analysis trace**\n\nOpen one standalone trace file. This is an input capability limit, not a backend connection failure.',
+            ),
       timestamp: Date.now(),
     });
     m.redraw();
@@ -2038,7 +2317,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `⏳ **正在连接 AI 后端...**\n\nTrace 已加载到 WASM 引擎，AI 分析后端正在后台准备中。\n连接成功后将自动启用 AI 分析功能。`,
+      content: uiText(
+        '⏳ **正在连接 AI 后端…**\n\nTrace 已加载到 WASM 引擎，AI 分析后端正在后台准备中。\n连接成功后将自动启用 AI 分析功能。',
+        '⏳ **Connecting to the AI backend…**\n\nThe trace is loaded in the WASM engine while the AI backend prepares in the background.\nAI analysis will be enabled automatically after it connects.',
+      ),
       timestamp: Date.now(),
     });
     m.redraw();
@@ -2060,7 +2342,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.state.settings.backendUrl,
         sourceKey,
       );
-      if (!backendUploadSnapshotMatchesIdentity(snapshot, expectedBackendIdentityKey, sourceKey)) {
+      if (
+        !backendUploadSnapshotMatchesIdentity(
+          snapshot,
+          expectedBackendIdentityKey,
+          sourceKey,
+        )
+      ) {
         return;
       }
       const previous = this.lastBackendUploadState;
@@ -2072,15 +2360,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         if (!isNewReadyState) return;
 
         this.state.backendTraceId = snapshot.traceId;
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             '[AIPanel] Backend upload complete, traceId:',
             snapshot.traceId,
           );
+        }
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: `✅ **AI 后端已连接**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载，AI 分析后端已就绪。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+          content: uiText(
+            `✅ **AI 后端已连接**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载，AI 分析后端已就绪。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+            `✅ **AI backend connected**\n\nThe trace is loaded through ${this.rpcModeDescription()} and the AI backend is ready.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
+          ),
           timestamp: Date.now(),
         });
         this.saveCurrentSession();
@@ -2117,9 +2409,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.settings.backendUrl,
       sourceKey,
     );
-    if (!backendUploadSnapshotMatchesIdentity(current, expectedBackendIdentityKey, sourceKey)) {
+    if (
+      !backendUploadSnapshotMatchesIdentity(
+        current,
+        expectedBackendIdentityKey,
+        sourceKey,
+      )
+    ) {
       this.lastBackendUploadState = {state: 'idle'};
-      this.unsubscribeBackendUpload = subscribeBackendUploadState(handleSnapshot);
+      this.unsubscribeBackendUpload =
+        subscribeBackendUploadState(handleSnapshot);
       return;
     }
     this.lastBackendUploadState = current;
@@ -2377,7 +2676,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         isInRpcMode
           ? this.renderHeaderIconButton({
               icon: 'fact_check',
-              title: '分析结果对比...',
+              title: uiText('分析结果对比…', 'Compare analysis results…'),
               active: this.state.showResultPicker,
               onclick: () => {
                 this.state.showResultPicker = true;
@@ -2397,8 +2696,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.renderHeaderIconButton({
           icon: 'tune',
           title: isBackendConnected
-            ? 'Suggest capture config'
-            : 'Connect backend before suggesting capture config',
+            ? uiText('建议抓取配置', 'Suggest capture config')
+            : uiText(
+                '连接后端后才能建议抓取配置',
+                'Connect the backend before suggesting a capture config',
+              ),
           active: this.state.captureConfigSuggestion.visible,
           disabled: !isBackendConnected,
           onclick: () => this.toggleCaptureConfigSuggestion(),
@@ -2408,14 +2710,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           'span.ai-header-icon-btn.ai-header-icon-btn--readonly',
           {
             title: isInRpcMode
-              ? 'Connected to AI backend'
-              : 'AI backend not connected',
+              ? uiText('已连接 AI 后端', 'Connected to AI backend')
+              : uiText('AI 后端未连接', 'AI backend not connected'),
           },
           m('i.pf-icon', isInRpcMode ? 'cloud_done' : 'cloud_off'),
         ),
         this.renderHeaderIconButton({
           icon: 'movie',
-          title: this.state.showStorySidebar ? '隐藏 Story' : 'Story',
+          title: this.state.showStorySidebar
+            ? uiText('隐藏场景还原', 'Hide Scene Story')
+            : uiText('场景还原', 'Scene Story'),
           active: this.state.showStorySidebar,
           onclick: () => {
             this.state.showStorySidebar = !this.state.showStorySidebar;
@@ -2430,16 +2734,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         }),
       ]),
       m('div.ai-header-action-group.ai-header-action-group--session', [
-        m('span.ai-header-action-group-label', '会话'),
+        m('span.ai-header-action-group-label', uiText('会话', 'Session')),
         this.renderHeaderIconButton({
           icon: 'add_comment',
-          title: 'New Chat',
+          title: uiText('新对话', 'New chat'),
           disabled: this.isAnalysisIdentityLocked(),
           onclick: () => this.clearChat(),
         }),
         this.renderHeaderIconButton({
           icon: 'forum',
-          title: this.state.showSessionSidebar ? '隐藏历史对话' : '历史对话',
+          title: this.state.showSessionSidebar
+            ? uiText('隐藏历史对话', 'Hide chat history')
+            : uiText('历史对话', 'Chat history'),
           active: this.state.showSessionSidebar,
           onclick: () => {
             this.state.showSessionSidebar = !this.state.showSessionSidebar;
@@ -2481,7 +2787,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 '分析运行中，设置保持只读',
                 'Settings are read-only while analysis is running',
               )
-            : 'Settings',
+            : uiText('设置', 'Settings'),
           disabled: this.isAnalysisIdentityLocked(),
           onclick: () => this.openSettings(),
         }),
@@ -2539,19 +2845,25 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         'button',
         {
           class: layout === 'right' ? 'active' : '',
-          title: 'Right: AI Assistant 显示在 Timeline 右侧',
+          title: uiText(
+            '右侧：AI 助手显示在 Timeline 右侧',
+            'Right: show AI Assistant to the right of the timeline',
+          ),
           onclick: () => setLayout('right'),
         },
-        'Right',
+        uiText('右侧', 'Right'),
       ),
       m(
         'button',
         {
           class: layout === 'bottom' ? 'active' : '',
-          title: 'Bottom: AI Assistant 显示在 Timeline 底部',
+          title: uiText(
+            '底部：AI 助手显示在 Timeline 底部',
+            'Bottom: show AI Assistant below the timeline',
+          ),
           onclick: () => setLayout('bottom'),
         },
-        'Bottom',
+        uiText('底部', 'Bottom'),
       ),
     ]);
   }
@@ -2560,8 +2872,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const suggestion = this.state.captureConfigSuggestion;
     suggestion.visible = !suggestion.visible;
     if (suggestion.visible) {
-      if (!suggestion.request.trim())
+      if (!suggestion.request.trim()) {
         suggestion.request = this.state.input.trim();
+      }
       this.state.showTracePicker = false;
       this.state.showResultPicker = false;
       this.state.showSessionSidebar = false;
@@ -2576,12 +2889,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m('div.ai-capture-config-header', [
         m('div.ai-capture-config-title', [
           m('i.pf-icon', 'tune'),
-          m('span', 'Suggest capture config'),
+          m('span', uiText('建议抓取配置', 'Suggest capture config')),
         ]),
         m(
           'button.ai-capture-config-close',
           {
-            title: 'Close',
+            title: uiText('关闭', 'Close'),
             onclick: () => {
               suggestion.visible = false;
               m.redraw();
@@ -2600,11 +2913,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         },
         [
           m('label.ai-capture-config-field.ai-capture-config-field--wide', [
-            m('span', 'Intent'),
+            m('span', uiText('分析目标', 'Intent')),
             m('textarea', {
               value: suggestion.request,
               rows: 2,
-              placeholder: 'debug startup jank',
+              placeholder: uiText('排查启动卡顿', 'debug startup jank'),
               oninput: (event: Event) => {
                 suggestion.request = (
                   event.target as HTMLTextAreaElement
@@ -2613,7 +2926,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             }),
           ]),
           m('label.ai-capture-config-field', [
-            m('span', 'App package'),
+            m('span', uiText('应用包名', 'App package')),
             m('input', {
               type: 'text',
               value: suggestion.app,
@@ -2624,7 +2937,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             }),
           ]),
           m('label.ai-capture-config-field', [
-            m('span', 'Duration'),
+            m('span', uiText('时长', 'Duration')),
             m('input', {
               type: 'number',
               min: '1',
@@ -2639,7 +2952,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             }),
           ]),
           m('label.ai-capture-config-field.ai-capture-config-field--wide', [
-            m('span', 'Extra atrace categories'),
+            m('span', uiText('额外 atrace 分类', 'Extra atrace categories')),
             m('input', {
               type: 'text',
               value: suggestion.categories,
@@ -2663,7 +2976,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   'i.pf-icon',
                   suggestion.loading ? 'hourglass_empty' : 'preview',
                 ),
-                suggestion.loading ? 'Previewing...' : 'Preview',
+                suggestion.loading
+                  ? uiText('正在预览…', 'Previewing…')
+                  : uiText('预览', 'Preview'),
               ],
             ),
           ]),
@@ -2693,13 +3008,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         m('span.ai-capture-config-chip', `${proposal.config.durationSeconds}s`),
         m('span.ai-capture-config-chip', `${proposal.config.bufferSizeKb} KB`),
       ]),
-      this.renderCaptureConfigList('Rationale', proposal.rationale),
-      this.renderCaptureConfigList('Warnings', proposal.warnings, 'warning'),
+      this.renderCaptureConfigList(
+        uiText('配置依据', 'Rationale'),
+        proposal.rationale,
+      ),
+      this.renderCaptureConfigList(
+        uiText('警告', 'Warnings'),
+        proposal.warnings,
+        'warning',
+      ),
       proposal.blockedDangerousOptions.length > 0
         ? m('div.ai-capture-config-danger', [
             m('div.ai-capture-config-section-title', [
               m('i.pf-icon', 'gpp_bad'),
-              m('span', 'Blocked dangerous options'),
+              m(
+                'span',
+                uiText('已拦截的危险选项', 'Blocked dangerous options'),
+              ),
             ]),
             m(
               'div.ai-capture-config-danger-chips',
@@ -2709,29 +3034,41 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             ),
           ])
         : null,
-      this.renderCaptureConfigCommand('Config command', configCommand),
-      this.renderCaptureConfigCommand('Capture command', captureCommand),
+      this.renderCaptureConfigCommand(
+        uiText('配置命令', 'Config command'),
+        configCommand,
+      ),
+      this.renderCaptureConfigCommand(
+        uiText('抓取命令', 'Capture command'),
+        captureCommand,
+      ),
       m('details.ai-capture-config-textproto', {open: true}, [
         m('summary', [
-          m('span', 'Textproto preview'),
+          m('span', uiText('Textproto 预览', 'Textproto preview')),
           m(
             'button.ai-capture-config-copy',
             {
               type: 'button',
-              title: 'Copy textproto',
+              title: uiText('复制 textproto', 'Copy textproto'),
               onclick: (event: Event) => {
                 event.preventDefault();
                 void this.copyTextToClipboard(proposal.config.textproto);
               },
             },
-            [m('i.pf-icon', 'content_copy'), m('span', 'Copy')],
+            [m('i.pf-icon', 'content_copy'), m('span', uiText('复制', 'Copy'))],
           ),
         ]),
         m('pre', proposal.config.textproto),
       ]),
       m('div.ai-capture-config-preview-only', [
         m('i.pf-icon', 'verified_user'),
-        m('span', 'Preview only. No capture has been started.'),
+        m(
+          'span',
+          uiText(
+            '仅为预览，尚未开始抓取。',
+            'Preview only. No capture has been started.',
+          ),
+        ),
       ]),
     ]);
   }
@@ -2762,12 +3099,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         'button.ai-capture-config-copy',
         {
           type: 'button',
-          title: `Copy ${label.toLowerCase()}`,
+          title: uiText(`复制${label}`, `Copy ${label.toLowerCase()}`),
           onclick: () => {
             void this.copyTextToClipboard(command);
           },
         },
-        [m('i.pf-icon', 'content_copy'), m('span', 'Copy')],
+        [m('i.pf-icon', 'content_copy'), m('span', uiText('复制', 'Copy'))],
       ),
     ]);
   }
@@ -2784,7 +3121,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     const backendUrl = this.state.settings.backendUrl.trim();
     if (!backendUrl) {
-      suggestion.error = 'Backend URL is required';
+      suggestion.error = uiText('必须填写后端 URL', 'Backend URL is required');
       suggestion.proposal = null;
       m.redraw();
       return;
@@ -2813,7 +3150,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         .catch(() => null)) as TraceConfigProposalApiResponse | null;
       if (!response.ok || !data?.success || !data.proposal) {
         suggestion.error =
-          data?.error || `Request failed: HTTP ${response.status}`;
+          data?.error ||
+          uiText(
+            `请求失败：HTTP ${response.status}`,
+            `Request failed: HTTP ${response.status}`,
+          );
         return;
       }
       suggestion.proposal = data.proposal;
@@ -2835,7 +3176,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (pending && !this.state.isLoading) {
       updateAISharedState({pendingSelectionAnalysis: null});
       const durMs = ((pending.endNs - pending.startNs) / 1e6).toFixed(1);
-      this.state.input = `分析当前时间/轨道选区的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
+      this.state.input = uiText(
+        `分析当前时间/轨道选区的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`,
+        `Analyze the current time/track selection (${durMs}ms), including CPU scheduling, core type and frequency for key threads, plus the longest slices`,
+      );
       // Defer to avoid triggering async work inside view()
       setTimeout(() => this.sendMessage(), 0);
     }
@@ -2897,12 +3241,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         m('div.ai-header', [
           m('div.ai-header-left', [
             m('i.pf-icon.ai-header-icon', 'auto_awesome'),
-            m('span.ai-header-title', 'AI Assistant'),
+            m('span.ai-header-title', uiText('AI 助手', 'AI Assistant')),
             this.serverStatus.version
               ? m(
                   'span.ai-version-chip',
                   {
-                    title: `SmartPerfetto backend version: ${this.serverStatus.version}`,
+                    title: uiText(
+                      `SmartPerfetto 后端版本：${this.serverStatus.version}`,
+                      `SmartPerfetto backend version: ${this.serverStatus.version}`,
+                    ),
                   },
                   `v${this.serverStatus.version}`,
                 )
@@ -2915,13 +3262,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               ? m(
                   'span.ai-status-text.ai-disabled',
                   {title: this.aiDisabledReason()},
-                  [m('i.pf-icon', 'block'), 'AI off'],
+                  [m('i.pf-icon', 'block'), uiText('AI 已关闭', 'AI off')],
                 )
               : null,
             m(
               'button.ai-workspace-chip',
               {
-                title: `Workspace: ${workspaceContext.workspaceId}\nTenant: ${workspaceContext.tenantId}\nUser: ${workspaceContext.userId}\nWindow: ${workspaceContext.windowId}`,
+                title: uiText(
+                  `工作区：${workspaceContext.workspaceId}\n租户：${workspaceContext.tenantId}\n用户：${workspaceContext.userId}\n窗口：${workspaceContext.windowId}`,
+                  `Workspace: ${workspaceContext.workspaceId}\nTenant: ${workspaceContext.tenantId}\nUser: ${workspaceContext.userId}\nWindow: ${workspaceContext.windowId}`,
+                ),
                 onclick: this.isAnalysisIdentityLocked()
                   ? undefined
                   : () => this.openSettings(),
@@ -2938,9 +3288,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   class: `sse-${this.state.sseConnectionState}`,
                   title:
                     {
-                      connecting: 'Connecting to analysis stream...',
-                      connected: 'Streaming analysis results',
-                      reconnecting: `Reconnecting (${this.state.sseRetryCount}/${this.state.sseMaxRetries})...`,
+                      connecting: uiText(
+                        '正在连接分析流…',
+                        'Connecting to analysis stream…',
+                      ),
+                      connected: uiText(
+                        '正在流式接收分析结果',
+                        'Streaming analysis results',
+                      ),
+                      reconnecting: uiText(
+                        `正在重连（${this.state.sseRetryCount}/${this.state.sseMaxRetries}）…`,
+                        `Reconnecting (${this.state.sseRetryCount}/${this.state.sseMaxRetries})…`,
+                      ),
                     }[this.state.sseConnectionState] || '',
                 })
               : null,
@@ -2948,16 +3307,22 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               ? m(
                   'span.ai-status-text',
                   {
-                    connecting: 'Connecting...',
-                    connected: 'Streaming',
-                    reconnecting: `Retry ${this.state.sseRetryCount}/${this.state.sseMaxRetries}`,
+                    connecting: uiText('连接中…', 'Connecting…'),
+                    connected: uiText('流式接收中', 'Streaming'),
+                    reconnecting: uiText(
+                      `重试 ${this.state.sseRetryCount}/${this.state.sseMaxRetries}`,
+                      `Retry ${this.state.sseRetryCount}/${this.state.sseMaxRetries}`,
+                    ),
                   }[this.state.sseConnectionState] || '',
                 )
               : null,
             // Backend trace status
             isInRpcMode
               ? m('span.ai-status-dot.backend', {
-                  title: `Trace uploaded: ${this.state.backendTraceId}`,
+                  title: uiText(
+                    `Trace 已上传：${this.state.backendTraceId}`,
+                    `Trace uploaded: ${this.state.backendTraceId}`,
+                  ),
                 })
               : null,
             isInRpcMode ? m('span.ai-status-text.backend', 'RPC') : null,
@@ -3086,10 +3451,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     trace: this.trace,
                     isLoading: this.state.scenesLoading,
                     onSceneClick: (scene, index) => {
-                      if (DEBUG_AI_PANEL)
+                      if (DEBUG_AI_PANEL) {
                         console.log(
                           `[AIPanel] Jumped to scene ${index}: ${scene.type}`,
                         );
+                      }
                       this.analyzeScene(scene);
                     },
                     onRefresh: () => this.detectScenesQuick(),
@@ -3102,10 +3468,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     bookmarks: this.state.bookmarks,
                     trace: this.trace,
                     onBookmarkClick: (bookmark, index) => {
-                      if (DEBUG_AI_PANEL)
+                      if (DEBUG_AI_PANEL) {
                         console.log(
                           `Jumped to bookmark ${index}: ${bookmark.label}`,
                         );
+                      }
                     },
                   })
                 : null,
@@ -3126,13 +3493,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m(
                       'h3.ai-rpc-dialog-title',
                       this.state.isRetryingBackend
-                        ? '正在连接后端...'
-                        : 'AI 后端未连接',
+                        ? uiText('正在连接后端…', 'Connecting to backend…')
+                        : uiText('AI 后端未连接', 'AI backend not connected'),
                     ),
                     m('p.ai-rpc-dialog-desc', [
-                      'Trace 已加载到 WASM 引擎，但无法连接到 AI 后端。',
+                      uiText(
+                        'Trace 已加载到 WASM 引擎，但无法连接到 AI 后端。',
+                        'The trace is loaded in the WASM engine, but the AI backend is unavailable.',
+                      ),
                       m('br'),
-                      'AI 分析功能需要后端服务支持。',
+                      uiText(
+                        'AI 分析功能需要后端服务支持。',
+                        'AI analysis requires the backend service.',
+                      ),
                     ]),
                     this.state.retryError
                       ? m(
@@ -3145,12 +3518,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         )
                       : null,
                     m('p.ai-rpc-dialog-hint', [
-                      '请确保后端服务正在运行：',
+                      uiText(
+                        '请确保后端服务正在运行：',
+                        'Make sure the backend service is running:',
+                      ),
                       m('br'),
                       m('code', 'cd backend && npm run dev'),
                       m('br'),
                       m('br'),
-                      '然后点击下方按钮重试连接。',
+                      uiText(
+                        '然后点击下方按钮重试连接。',
+                        'Then use the button below to retry the connection.',
+                      ),
                     ]),
                     this.state.isRetryingBackend
                       ? m('div.ai-upload-progress')
@@ -3160,7 +3539,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                             {
                               onclick: () => this.retryBackendConnection(),
                             },
-                            [m('i.pf-icon', 'refresh'), '重试连接'],
+                            [
+                              m('i.pf-icon', 'refresh'),
+                              uiText('重试连接', 'Retry connection'),
+                            ],
                           ),
                         ]),
                   ])
@@ -3219,8 +3601,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           ]);
                         }
 
+                        const reportSequence = msg.reportUrl
+                          ? ++reportLinkSequence
+                          : 0;
                         const reportLinkLabel = msg.reportUrl
-                          ? `查看详细分析报告 #${++reportLinkSequence} (${new Date(msg.timestamp).toLocaleTimeString('zh-CN', {hour12: false})})`
+                          ? uiText(
+                              `查看详细分析报告 #${reportSequence} (${new Date(msg.timestamp).toLocaleTimeString('zh-CN', {hour12: false})})`,
+                              `View detailed analysis report #${reportSequence} (${new Date(msg.timestamp).toLocaleTimeString('en-US', {hour12: false})})`,
+                            )
                           : '';
                         const isProgressMessage =
                           msg.flowTag === 'streaming_flow' ||
@@ -3339,7 +3727,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                 this.addMessage({
                                                   id: this.generateId(),
                                                   role: 'assistant',
-                                                  content: `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+                                                  content: uiText(
+                                                    `无法跳转到时间戳 ${timestampNs.toString()}ns：${navigation.error}`,
+                                                    `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+                                                  ),
                                                   timestamp: Date.now(),
                                                 });
                                               }
@@ -3475,7 +3866,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                     fontWeight: '500',
                                                   },
                                                 },
-                                                `${sqlResult.sectionTitle} (${sqlResult.rowCount} 条)`,
+                                                uiText(
+                                                  `${sqlResult.sectionTitle}（${sqlResult.rowCount} 条）`,
+                                                  `${sqlResult.sectionTitle} (${sqlResult.rowCount} rows)`,
+                                                ),
                                               ),
                                             ],
                                           ),
@@ -3517,7 +3911,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                   {style: {fontSize: '12px'}},
                                                   'expand_less',
                                                 ),
-                                                m('span', '收起'),
+                                                m(
+                                                  'span',
+                                                  uiText('收起', 'Collapse'),
+                                                ),
                                               ],
                                             )
                                           : null,
@@ -3563,7 +3960,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                             m('i.pf-icon', 'table_chart'),
                                             m(
                                               'span',
-                                              `${sqlResult.rowCount.toLocaleString()} rows`,
+                                              uiText(
+                                                `${sqlResult.rowCount.toLocaleString()} 行`,
+                                                `${sqlResult.rowCount.toLocaleString()} rows`,
+                                              ),
                                             ),
                                           ]),
                                           m('div.ai-sql-actions', [
@@ -3577,12 +3977,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                 title:
                                                   formattedSql?.status ===
                                                   'failed'
-                                                    ? 'Copy SQL (formatter unavailable)'
-                                                    : 'Copy formatted SQL',
+                                                    ? uiText(
+                                                        '复制 SQL（格式化器不可用）',
+                                                        'Copy SQL (formatter unavailable)',
+                                                      )
+                                                    : uiText(
+                                                        '复制格式化后的 SQL',
+                                                        'Copy formatted SQL',
+                                                      ),
                                               },
                                               [
                                                 m('i.pf-icon', 'content_copy'),
-                                                m('span', 'Copy'),
+                                                m(
+                                                  'span',
+                                                  uiText('复制', 'Copy'),
+                                                ),
                                               ],
                                             ),
                                             query
@@ -3602,11 +4011,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                         ),
                                                         timestamp: Date.now(),
                                                       }),
-                                                    title: 'Pin result',
+                                                    title: uiText(
+                                                      '固定结果',
+                                                      'Pin result',
+                                                    ),
                                                   },
                                                   [
                                                     m('i.pf-icon', 'push_pin'),
-                                                    m('span', 'Pin'),
+                                                    m(
+                                                      'span',
+                                                      uiText('固定', 'Pin'),
+                                                    ),
                                                   ],
                                                 )
                                               : null,
@@ -3792,7 +4207,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                 ? m(
                                     'div.ai-model-badge',
                                     {
-                                      title: `Switched to: ${msg.model}`,
+                                      title: uiText(
+                                        `已切换到：${msg.model}`,
+                                        `Switched to: ${msg.model}`,
+                                      ),
                                     },
                                     [
                                       m(
@@ -3822,8 +4240,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         ? 'active'
                                         : '',
                                       title: this.copiedMessageIds.has(msg.id)
-                                        ? '已复制'
-                                        : '复制回复',
+                                        ? uiText('已复制', 'Copied')
+                                        : uiText('复制回复', 'Copy response'),
                                       onclick: () => {
                                         void this.copyMessageContent(msg);
                                       },
@@ -3846,7 +4264,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                             ] === 'positive'
                                               ? 'active'
                                               : '',
-                                          title: '有用',
+                                          title: uiText('有用', 'Helpful'),
                                           onclick: () => {
                                             (this.state as any)[
                                               `feedback_${msg.id}`
@@ -3871,7 +4289,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                             ] === 'negative'
                                               ? 'active'
                                               : '',
-                                          title: '不准确',
+                                          title: uiText('不准确', 'Inaccurate'),
                                           onclick: () => {
                                             (this.state as any)[
                                               `feedback_${msg.id}`
@@ -3919,7 +4337,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       !this.state.isLoading
                       ? m('div.ai-connecting-indicator', [
                           m('i.pf-icon', 'cloud_upload'),
-                          m('span', uiText('正在连接 AI 后端...', 'Connecting to AI backend...')),
+                          m(
+                            'span',
+                            uiText(
+                              '正在连接 AI 后端...',
+                              'Connecting to AI backend...',
+                            ),
+                          ),
                           m('div.ai-upload-progress'),
                         ])
                       : null,
@@ -3928,9 +4352,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     !isInRpcMode && this.state.messages.length > 0
                       ? m('div.ai-disconnect-banner', [
                           m('i.pf-icon', 'cloud_off'),
-                          m('span', uiText('AI 后端连接已断开', 'AI backend connection lost')),
+                          m(
+                            'span',
+                            uiText(
+                              'AI 后端连接已断开',
+                              'AI backend connection lost',
+                            ),
+                          ),
                           this.state.isRetryingBackend
-                            ? m('span.ai-disconnect-retrying', uiText('重试中...', 'Retrying...'))
+                            ? m(
+                                'span.ai-disconnect-retrying',
+                                uiText('重试中...', 'Retrying...'),
+                              )
                             : m(
                                 'button.ai-disconnect-retry-btn',
                                 {
@@ -3965,15 +4398,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           this.state.isLoading || !isInRpcMode
                             ? 'disabled'
                             : '',
-                        'aria-label': uiText('输入分析问题', 'Enter an analysis question'),
+                        'aria-label': uiText(
+                          '输入分析问题',
+                          'Enter an analysis question',
+                        ),
                         'placeholder': !isInRpcMode
-                          ? uiText('AI 后端未连接...', 'AI backend is not connected...')
+                          ? uiText(
+                              'AI 后端未连接...',
+                              'AI backend is not connected...',
+                            )
                           : aiDisabled
                             ? uiText(
                                 'AI 已禁用；可继续输入 /sql、/goto、/anr、/jank 等确定性命令',
                                 'AI is disabled; deterministic commands such as /sql, /goto, /anr, and /jank remain available.',
                               )
-                            : uiText('询问任何关于当前 Trace 的问题...', 'Ask anything about your trace...'),
+                            : uiText(
+                                '询问任何关于当前 Trace 的问题...',
+                                'Ask anything about your trace...',
+                              ),
                         'value': this.state.input,
                         'oninput': (e: Event) => {
                           this.state.input = (
@@ -4013,7 +4455,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                 'class': !isInRpcMode ? 'disabled' : '',
                                 'onclick': () => this.sendMessage(),
                                 'disabled': !isInRpcMode,
-                                'title': uiText('发送（Enter）', 'Send (Enter)'),
+                                'title': uiText(
+                                  '发送（Enter）',
+                                  'Send (Enter)',
+                                ),
                                 'aria-label': uiText('发送', 'Send'),
                               },
                               m('i.pf-icon', 'send'),
@@ -4027,7 +4472,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                             'AI 已被后端策略禁用；确定性命令仍可在本地或非 AI 后端 API 中运行。',
                             'AI is disabled by backend policy. Deterministic commands still run locally or through non-AI backend APIs.',
                           )
-                        : uiText('按 Enter 发送，Shift+Enter 换行', 'Press Enter to send, Shift+Enter for a new line'),
+                        : uiText(
+                            '按 Enter 发送，Shift+Enter 换行',
+                            'Press Enter to send, Shift+Enter for a new line',
+                          ),
                     ),
                   ])
                 : null,
@@ -4064,21 +4512,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ? COMPARISON_PRESET_QUESTIONS
         : PRESET_QUESTIONS
       ).map((preset) => {
-        const blocked = this.shouldBlockModelBackedRequest(preset.question);
+        const localizedQuestion = uiText(preset.question, preset.questionEn);
+        const blocked = this.shouldBlockModelBackedRequest(localizedQuestion);
         return m(
           `button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}${preset.isSmart ? '.ai-smart-btn' : ''}`,
           {
-            onclick: () => this.sendPresetQuestion(preset.question),
+            onclick: () => this.sendPresetQuestion(localizedQuestion),
             title: blocked
               ? this.aiDisabledReason()
               : preset.isTeaching
-                ? '检测当前 Trace 的渲染管线类型，自动 Pin 关键泳道'
+                ? uiText(
+                    '检测当前 Trace 的渲染管线类型，自动固定关键泳道',
+                    'Detect the rendering pipeline and pin key lanes automatically',
+                  )
                 : preset.isSmart
-                  ? '自动识别混合 Trace 中的启动、滑动、点击、导航、ANR 和设备状态'
-                  : preset.question,
+                  ? uiText(
+                      '自动识别混合 Trace 中的启动、滑动、点击、导航、ANR 和设备状态',
+                      'Detect startup, scroll, input, navigation, ANR, and device-state scenes in a mixed trace',
+                    )
+                  : localizedQuestion,
             disabled: this.state.isLoading || blocked,
           },
-          [m('i.pf-icon', preset.icon), preset.label],
+          [m('i.pf-icon', preset.icon), uiText(preset.label, preset.labelEn)],
         );
       }),
       this.renderSmartSelectionButtons('preset'),
@@ -4090,7 +4545,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               title: this.getSelectionButtonTitle(),
               disabled: this.state.isLoading || aiDisabled,
             },
-            [m('i.pf-icon', 'my_location'), '选区分析'],
+            [
+              m('i.pf-icon', 'my_location'),
+              uiText('选区分析', 'Analyze selection'),
+            ],
           )
         : null,
     ]);
@@ -4214,8 +4672,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           m('span', uiText('场景时间线', 'Scene timeline')),
         ]),
         m('div.ai-smart-scene-preview-counts', [
-          m('span', uiText(`${scenes.length} 个场景`, `${scenes.length} scenes`)),
-          m('span', uiText(`${eligibleCount} 个可深钻`, `${eligibleCount} eligible`)),
+          m(
+            'span',
+            uiText(`${scenes.length} 个场景`, `${scenes.length} scenes`),
+          ),
+          m(
+            'span',
+            uiText(`${eligibleCount} 个可深钻`, `${eligibleCount} eligible`),
+          ),
           verification?.status
             ? m(
                 `span.ai-smart-scene-preview-status.ai-smart-scene-preview-status--${verification.status}`,
@@ -4241,9 +4705,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 uiText('进程', 'Process'),
                 uiText('角色', 'Role'),
                 uiText('置信度', 'Confidence'),
-              ].map(
-                (title) => m('th', title),
-              ),
+              ].map((title) => m('th', title)),
             ),
           ),
           m(
@@ -4298,10 +4760,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return (
       msg.role === 'assistant' &&
       (!!msg.smartScenePreview ||
-        ((msg.content.includes('# 智能分析报告：场景盘点') &&
+        (msg.content.includes('# 智能分析报告：场景盘点') &&
           msg.content.includes('## 下一步')) ||
-          (msg.content.includes('# Smart Analysis Report: Scene Inventory') &&
-            msg.content.includes('## Next Step'))))
+        (msg.content.includes('# Smart Analysis Report: Scene Inventory') &&
+          msg.content.includes('## Next Step')))
     );
   }
 
@@ -4416,13 +4878,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (!quickRun) return null;
     const modeLabel =
       quickRun.requestedMode === 'auto'
-        ? `智能→${quickRun.resolvedMode === 'quick' ? '快速' : '完整'}`
+        ? uiText(
+            `智能→${quickRun.resolvedMode === 'quick' ? '快速' : '完整'}`,
+            `Auto→${quickRun.resolvedMode === 'quick' ? 'Fast' : 'Full'}`,
+          )
         : quickRun.resolvedMode === 'quick'
-          ? '快速'
-          : '完整';
+          ? uiText('快速', 'Fast')
+          : uiText('完整', 'Full');
     const profileLabel =
       quickRun.profile === 'extended'
-        ? '延展'
+        ? uiText('延展', 'Extended')
         : quickRun.profile === 'triage'
           ? 'Triage'
           : '';
@@ -4435,10 +4900,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       contextCounts.negativePatternHints +
       contextCounts.caseBackgroundCases;
     const verifierLabel = {
-      passed: '已核对',
-      issues: '核对有问题',
-      failed: '核对失败',
-      not_checked: '未核对',
+      passed: uiText('已核对', 'Verified'),
+      issues: uiText('核对有问题', 'Verification issues'),
+      failed: uiText('核对失败', 'Verification failed'),
+      not_checked: uiText('未核对', 'Not verified'),
     }[quickRun.verifierStatus];
     const verifierClass = {
       passed: 'ok',
@@ -4447,27 +4912,57 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       not_checked: 'muted',
     }[quickRun.verifierStatus];
     const contextTitle = [
-      `对话 ${contextCounts.conversationTurns}`,
-      `最近 SQL ${contextCounts.recentSqlResults}`,
-      `SQL 踩坑 ${contextCounts.sqlPitfallPairs}`,
-      `历史模式 ${contextCounts.patternHints}`,
-      `反例模式 ${contextCounts.negativePatternHints}`,
-      `案例背景 ${contextCounts.caseBackgroundCases}`,
+      uiText(
+        `对话 ${contextCounts.conversationTurns}`,
+        `Conversation ${contextCounts.conversationTurns}`,
+      ),
+      uiText(
+        `最近 SQL ${contextCounts.recentSqlResults}`,
+        `Recent SQL ${contextCounts.recentSqlResults}`,
+      ),
+      uiText(
+        `SQL 踩坑 ${contextCounts.sqlPitfallPairs}`,
+        `SQL pitfalls ${contextCounts.sqlPitfallPairs}`,
+      ),
+      uiText(
+        `历史模式 ${contextCounts.patternHints}`,
+        `Historical patterns ${contextCounts.patternHints}`,
+      ),
+      uiText(
+        `反例模式 ${contextCounts.negativePatternHints}`,
+        `Negative patterns ${contextCounts.negativePatternHints}`,
+      ),
+      uiText(
+        `案例背景 ${contextCounts.caseBackgroundCases}`,
+        `Case context ${contextCounts.caseBackgroundCases}`,
+      ),
     ].join(' · ');
     const chips: m.Children[] = [
       m('span.ai-quick-run-chip', modeLabel),
       profileLabel ? m('span.ai-quick-run-chip', profileLabel) : null,
       m(
         'span.ai-quick-run-chip',
-        `${quickRun.actualTurns}/${quickRun.hardCapTurns} turns`,
+        uiText(
+          `${quickRun.actualTurns}/${quickRun.hardCapTurns} 轮`,
+          `${quickRun.actualTurns}/${quickRun.hardCapTurns} turns`,
+        ),
       ),
-      m('span.ai-quick-run-chip', `目标 ${quickRun.targetTurns}`),
+      m(
+        'span.ai-quick-run-chip',
+        uiText(
+          `目标 ${quickRun.targetTurns}`,
+          `Target ${quickRun.targetTurns}`,
+        ),
+      ),
     ];
     if (quickRun.evidence.frontendPrequeryInjected > 0) {
       chips.push(
         m(
           'span.ai-quick-run-chip',
-          `已注入选区预查询 ${quickRun.evidence.frontendPrequeryInjected}`,
+          uiText(
+            `已注入选区预查询 ${quickRun.evidence.frontendPrequeryInjected}`,
+            `Selection prequeries injected ${quickRun.evidence.frontendPrequeryInjected}`,
+          ),
         ),
       );
     }
@@ -4475,7 +4970,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       chips.push(
         m(
           'span.ai-quick-run-chip.ok',
-          `已引用选区预查询 ${quickRun.evidence.frontendPrequeryCited}`,
+          uiText(
+            `已引用选区预查询 ${quickRun.evidence.frontendPrequeryCited}`,
+            `Selection prequeries cited ${quickRun.evidence.frontendPrequeryCited}`,
+          ),
         ),
       );
     }
@@ -4483,7 +4981,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       chips.push(
         m(
           'span.ai-quick-run-chip',
-          `已引用证据 ${quickRun.evidence.citedEvidenceRefs}`,
+          uiText(
+            `已引用证据 ${quickRun.evidence.citedEvidenceRefs}`,
+            `Evidence cited ${quickRun.evidence.citedEvidenceRefs}`,
+          ),
         ),
       );
     }
@@ -4492,7 +4993,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         m(
           'span.ai-quick-run-chip',
           {title: contextTitle},
-          `已注入上下文 ${injectedContextTotal}`,
+          uiText(
+            `已注入上下文 ${injectedContextTotal}`,
+            `Context injected ${injectedContextTotal}`,
+          ),
         ),
       );
     }
@@ -4502,8 +5006,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         m(
           'span.ai-quick-run-chip.muted',
           quickRun.enforcement === 'timeout_only'
-            ? 'Timeout 保护'
-            : '保护不可用',
+            ? uiText('超时保护', 'Timeout guard')
+            : uiText('保护不可用', 'Guard unavailable'),
         ),
       );
     }
@@ -4516,9 +5020,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   ): m.Children {
     if (!receipt) return null;
     const gateLabel = {
-      passed: '已通过',
-      partial: '部分通过',
-      not_applicable: '不适用',
+      passed: uiText('已通过', 'Passed'),
+      partial: uiText('部分通过', 'Partial'),
+      not_applicable: uiText('不适用', 'Not applicable'),
     } as const;
     const gateClass = {
       passed: 'ok',
@@ -4541,19 +5045,40 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       `unsupported_claims=${receipt.claimAudit.unsupportedClaims}`,
     ].join(' · ');
     return m('div.ai-quick-run-receipt', {title}, [
-      m('span.ai-quick-run-chip', `回执 v${receipt.schemaVersion}`),
+      m(
+        'span.ai-quick-run-chip',
+        uiText(
+          `回执 v${receipt.schemaVersion}`,
+          `Receipt v${receipt.schemaVersion}`,
+        ),
+      ),
       m('span.ai-quick-run-chip', `${receipt.mode}→${receipt.resolvedMode}`),
-      m('span.ai-quick-run-chip', `证据 ${traceEvidenceTotal}`),
+      m(
+        'span.ai-quick-run-chip',
+        uiText(`证据 ${traceEvidenceTotal}`, `Evidence ${traceEvidenceTotal}`),
+      ),
       contextTotal > 0
-        ? m('span.ai-quick-run-chip', `非证据上下文 ${contextTotal}`)
+        ? m(
+            'span.ai-quick-run-chip',
+            uiText(
+              `非证据上下文 ${contextTotal}`,
+              `Non-evidence context ${contextTotal}`,
+            ),
+          )
         : null,
       m(
         `span.ai-quick-run-chip.${gateClass[receipt.qualityGates.claimVerification]}`,
-        `声明核验 ${gateLabel[receipt.qualityGates.claimVerification]}`,
+        uiText(
+          `声明核验 ${gateLabel[receipt.qualityGates.claimVerification]}`,
+          `Claim verification ${gateLabel[receipt.qualityGates.claimVerification]}`,
+        ),
       ),
       m(
         `span.ai-quick-run-chip.${gateClass[receipt.qualityGates.finalReportContract]}`,
-        `报告 ${gateLabel[receipt.qualityGates.finalReportContract]}`,
+        uiText(
+          `报告 ${gateLabel[receipt.qualityGates.finalReportContract]}`,
+          `Report ${gateLabel[receipt.qualityGates.finalReportContract]}`,
+        ),
       ),
     ]);
   }
@@ -4578,7 +5103,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     );
     const outputs = (review.outputShape ?? []).map(
       (output) =>
-        `${output.name}${output.type ? `:${output.type}` : ''}${output.required ? ' required' : ''}`,
+        `${output.name}${output.type ? `:${output.type}` : ''}${
+          output.required ? uiText(' 必填', ' required') : ''
+        }`,
     );
     const guardrails = (review.guardrails ?? []).map(
       (guardrail) =>
@@ -4593,13 +5120,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : '',
       typeof observed.rowCount === 'number' ? `rows=${observed.rowCount}` : '',
       typeof observed.durationMs === 'number' ? `${observed.durationMs}ms` : '',
-      observed.truncated ? 'truncated' : '',
+      observed.truncated ? uiText('已截断', 'truncated') : '',
     ].filter(Boolean);
 
     return m('details.ai-query-review', [
       m('summary.ai-query-review-summary', [
         m('i.pf-icon', 'fact_check'),
-        m('span.ai-query-review-title', 'Query review'),
+        m('span.ai-query-review-title', uiText('查询审查', 'Query review')),
         m('span.ai-query-review-badge', review.allowedUse),
       ]),
       m('div.ai-query-review-body', [
@@ -4610,14 +5137,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               chips.map((chip) => m('span.ai-query-review-chip', chip)),
             )
           : null,
-        this.renderQueryReviewList('Reads', reads),
-        this.renderQueryReviewList('Filters', filters),
-        this.renderQueryReviewList('Output fields', outputs),
-        this.renderQueryReviewList('Guardrails', guardrails),
-        this.renderQueryReviewList('Limitations', review.limitations ?? []),
+        this.renderQueryReviewList(uiText('读取范围', 'Reads'), reads),
+        this.renderQueryReviewList(uiText('过滤条件', 'Filters'), filters),
+        this.renderQueryReviewList(uiText('输出字段', 'Output fields'), outputs),
+        this.renderQueryReviewList(uiText('防护规则', 'Guardrails'), guardrails),
+        this.renderQueryReviewList(
+          uiText('局限性', 'Limitations'),
+          review.limitations ?? [],
+        ),
         observed.executableSql
           ? m('details.ai-query-review-sql', [
-              m('summary', 'Executable SQL'),
+              m('summary', uiText('可执行 SQL', 'Executable SQL')),
               m('pre', observed.executableSql),
             ])
           : null,
@@ -4636,7 +5166,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           .map((item) => m('li', this.truncateQueryReviewText(item, 220))),
       ),
       items.length > 8
-        ? m('div.ai-query-review-more', `+${items.length - 8} more`)
+        ? m(
+            'div.ai-query-review-more',
+            uiText(`另有 ${items.length - 8} 项`, `+${items.length - 8} more`),
+          )
         : null,
     ]);
   }
@@ -4728,17 +5261,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private showUiActionError(proposal: UiActionProposalV1, error: string): void {
+    const localizedError =
+      error ===
+      'matching evidence table is not available in this conversation'
+        ? uiText('此对话中没有匹配的证据表', error)
+        : error === 'matching evidence message has no table payload'
+          ? uiText('匹配的证据消息没有表格数据', error)
+          : error;
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `UI action failed: ${proposal.title} (${error})`,
+      content: uiText(
+        `UI 操作失败：${proposal.title}（${localizedError}）`,
+        `UI action failed: ${proposal.title} (${localizedError})`,
+      ),
       timestamp: Date.now(),
     });
   }
 
   private renderAnalysisContextIndicator(): m.Children {
     const selection = normalizeAnalysisContext(this.state.analysisContext);
-    const sourceIds = selection.codeAwareMode === 'off' ? [] : selection.codebaseIds;
+    const sourceIds =
+      selection.codeAwareMode === 'off' ? [] : selection.codebaseIds;
     const parts = [
       sourceIds.length > 0
         ? uiText(
@@ -4754,7 +5298,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : '',
     ].filter(Boolean);
     if (parts.length === 0) return null;
-    const identifiers = [...sourceIds, ...selection.knowledgeSourceIds].join(', ');
+    const identifiers = [...sourceIds, ...selection.knowledgeSourceIds].join(
+      ', ',
+    );
     return m(
       'div.ai-context-indicator.ai-analysis-context-indicator',
       {
@@ -4777,7 +5323,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const privateContextRequiresFull = analysisContextRequiresFullMode(
       this.state.analysisContext,
     );
-    const fastDisabled = !!this.state.referenceTraceId || privateContextRequiresFull;
+    const fastDisabled =
+      !!this.state.referenceTraceId || privateContextRequiresFull;
     const modes = [
       {
         id: 'fast',
@@ -4792,13 +5339,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         id: 'full',
         icon: '🔍',
         label: uiText('完整', 'Full'),
-        title: uiText('完整多轮分析流水线', 'Full multi-turn analysis pipeline.'),
+        title: uiText(
+          '完整多轮分析流水线',
+          'Full multi-turn analysis pipeline.',
+        ),
       },
       {
         id: 'auto',
         icon: '🤖',
         label: uiText('智能', 'Auto'),
-        title: uiText('按查询复杂度自动选择', 'Select automatically based on query complexity.'),
+        title: uiText(
+          '按查询复杂度自动选择',
+          'Select automatically based on query complexity.',
+        ),
       },
     ] as const;
     const currentMode = modes.find((mode) => mode.id === current) ?? modes[2];
@@ -4864,8 +5417,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
-  /** Switch analysis mode. Changing mode mid-session clears agentSessionId so the backend
-   *  starts a fresh SDK session and avoids context mix between quick and full paths. */
+  /**
+   * Switch analysis mode. Changing mode mid-session clears agentSessionId so the backend
+   *  starts a fresh SDK session and avoids context mix between quick and full paths.
+   */
   private onAnalysisModeChange(newMode: 'fast' | 'full' | 'auto'): void {
     if (this.isAnalysisIdentityLocked()) return;
     if (newMode === this.state.analysisMode) return;
@@ -5022,16 +5577,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private saveSettings(newSettings: AISettings) {
     if (this.isAnalysisIdentityLocked()) return;
+    const uiLanguageChanged =
+      newSettings.uiLanguage !== this.state.settings.uiLanguage;
     const backendUrlChanged =
       newSettings.backendUrl.replace(/\/+$/, '') !==
       this.state.settings.backendUrl.replace(/\/+$/, '');
     const backendCredentialChanged =
       newSettings.backendApiKey !== this.state.settings.backendApiKey;
-    const backendIdentityChanged = backendUrlChanged || backendCredentialChanged;
+    const backendIdentityChanged =
+      backendUrlChanged || backendCredentialChanged;
     if (
       backendIdentityChanged &&
       this.engine?.mode === 'HTTP_RPC' &&
-      (this.trace?.traceInfo as unknown as {source?: TraceSource})?.source?.type === 'HTTP_RPC'
+      (this.trace?.traceInfo as unknown as {source?: TraceSource})?.source
+        ?.type === 'HTTP_RPC'
     ) {
       this.state.retryError = uiText(
         '当前 Trace 仅保留了 HTTP RPC 连接，无法安全迁移到另一个后端。请用原始 Trace 文件或 URL 重新打开后再切换后端。',
@@ -5064,10 +5623,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       );
       this.state.isRetryingBackend = false;
     }
+    if (uiLanguageChanged) {
+      this.flushSessionSave();
+      this.retireBackendAgentSession();
+      setUiLanguagePreference(newSettings.uiLanguage);
+    }
     this.state.settings = newSettings;
     sessionManager.saveSettings(newSettings);
+    if (uiLanguageChanged) {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: uiText(
+          '语言设置已更新；下一次分析将使用简体中文。',
+          'Language setting updated; the next analysis will use English.',
+        ),
+        timestamp: Date.now(),
+      });
+    }
     if (backendCredentialChanged) {
-      this.state.analysisContext = normalizeAnalysisContext(EMPTY_ANALYSIS_CONTEXT);
+      this.state.analysisContext = normalizeAnalysisContext(
+        EMPTY_ANALYSIS_CONTEXT,
+      );
       saveAnalysisContext(
         this.state.settings.backendUrl,
         getSmartPerfettoRequestContext(),
@@ -5085,6 +5662,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private loadSettings() {
     this.state.settings = sessionManager.loadSettings();
+    setUiLanguagePreference(this.state.settings.uiLanguage);
     setDefaultBackendUrl(this.state.settings.backendUrl);
     setDefaultBackendCredential(this.state.settings.backendApiKey);
   }
@@ -5109,7 +5687,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (sameAnalysisContext(normalized, this.state.analysisContext)) return;
     const hadSession = !!this.state.agentSessionId;
     this.state.analysisContext = normalized;
-    const promotedToFull = analysisContextRequiresFullMode(normalized) &&
+    const promotedToFull =
+      analysisContextRequiresFullMode(normalized) &&
       this.state.analysisMode === 'fast';
     if (promotedToFull) {
       this.state.analysisMode = 'full';
@@ -5164,15 +5743,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     apiUrl: string,
     requestBody: Record<string, any>,
   ): Promise<Response> {
-    const dispatch = () => this.fetchBackend(apiUrl, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(requestBody),
-    });
+    const dispatch = () =>
+      this.fetchBackend(apiUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(requestBody),
+      });
     const response = await dispatch();
     if (response.status !== 409) return response;
 
-    const errorData = await response.clone().json().catch(() => ({}));
+    const errorData = await response
+      .clone()
+      .json()
+      .catch(() => ({}));
     const fallback = analysisContextAfterBackendError(
       this.state.analysisContext,
       errorData?.code,
@@ -5298,7 +5881,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   /** Retire both frontend transport state and the backend runtime session. */
-  private retireBackendAgentSession(backendUrl = this.state.settings.backendUrl): boolean {
+  private retireBackendAgentSession(
+    backendUrl = this.state.settings.backendUrl,
+  ): boolean {
     const sessionId = this.state.agentSessionId;
     this.cancelSSEConnection();
     this.deleteBackendSessionBestEffort(sessionId, backendUrl);
@@ -5316,6 +5901,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       message.content.startsWith('正在恢复会话') ||
       message.content.startsWith('后端已重启') ||
       message.content.startsWith('后端连接') ||
+      message.content.startsWith('Connection interrupted') ||
+      message.content.startsWith('Restoring session') ||
+      message.content.startsWith('The backend restarted') ||
+      message.content.startsWith('Backend connection') ||
       message.content.startsWith('**Connection Error:**')
     );
   }
@@ -5373,20 +5962,22 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
       );
       if (!response.ok) {
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             `[AIPanel] Backend trace ${this.state.backendTraceId} no longer valid, clearing`,
           );
+        }
         this.state.backendTraceId = null;
         this.saveHistory();
         m.redraw();
       }
     } catch (error) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Failed to verify backend trace, clearing:',
           error,
         );
+      }
       this.state.backendTraceId = null;
       this.saveHistory();
       m.redraw();
@@ -5555,11 +6146,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       .filter((m) => m.role === 'user')
       .map((m) => m.content);
 
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] Loaded session:', sessionId, {
         engineInRpcMode,
         backendTraceId: this.state.backendTraceId,
       });
+    }
     m.redraw();
     return true;
   }
@@ -5633,7 +6225,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `📌 **Result Pinned!**\n\nYour query result has been saved. Use \`/pins\` to view all pinned results.`,
+      content: uiText(
+        '📌 **结果已固定！**\n\n查询结果已经保存。使用 `/pins` 查看全部固定结果。',
+        '📌 **Result pinned!**\n\nThe query result was saved. Use `/pins` to view all pinned results.',
+      ),
       timestamp: Date.now(),
     });
   }
@@ -5650,10 +6245,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // Only send if we have an active session
     if (!sessionId) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] No active session, skipping interaction capture',
         );
+      }
       return;
     }
 
@@ -5681,12 +6277,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             response.status,
           );
         } else {
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               '[AIPanel] Interaction captured:',
               interaction.type,
               interaction.target,
             );
+          }
         }
       })
       .catch((error) => {
@@ -5710,7 +6307,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return (
       this.serverStatus.disabledReason ||
       this.serverStatus.aiPolicy?.disabledReason ||
-      'AI model-backed features are disabled by backend policy.'
+      uiText(
+        '后端策略已禁用由 AI 模型驱动的功能。',
+        'AI model-backed features are disabled by backend policy.',
+      )
     );
   }
 
@@ -5769,10 +6369,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         headers['x-api-key'] = trimmedKey;
         headers['Authorization'] = `Bearer ${trimmedKey}`;
       }
-      const response = await fetch(`${backendUrl.replace(/\/+$/, '')}/api/runtime-health`, {
-        headers: buildSmartPerfettoContextHeaders(headers),
-        credentials: 'include',
-      });
+      const response = await fetch(
+        `${backendUrl.replace(/\/+$/, '')}/api/runtime-health`,
+        {
+          headers: buildSmartPerfettoContextHeaders(headers),
+          credentials: 'include',
+        },
+      );
       if (!response.ok) return {connected: false};
       const data = await response.json();
       const aiEngine = data.aiEngine || {};
@@ -5911,13 +6514,14 @@ Click ⚙️ to configure backend connection.`,
 
   private async sendMessage() {
     const input = this.state.input.trim();
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log(
         '[AIPanel] sendMessage called, input:',
         input,
         'isLoading:',
         this.state.isLoading,
       );
+    }
 
     if (!input || this.state.isLoading) return;
     if (this.shouldBlockModelBackedRequest(input)) {
@@ -5950,7 +6554,7 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: `Round #${roundNumber}`,
+        content: uiText(`第 ${roundNumber} 轮`, `Round #${roundNumber}`),
         timestamp: Date.now(),
         flowTag: 'round_separator',
       });
@@ -5976,8 +6580,9 @@ Click ⚙️ to configure backend connection.`,
       if (await this.tryStartNaturalLanguageResultComparison(input)) {
         return;
       }
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Calling handleChatMessage with:', input);
+      }
       await this.handleChatMessage(input);
       if (DEBUG_AI_PANEL) console.log('[AIPanel] handleChatMessage completed');
     }
@@ -6058,7 +6663,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: `加载分析结果失败，无法创建结果对比: ${this.state.resultPickerError}`,
+        content: uiText(
+          `加载分析结果失败，无法创建结果对比：${this.state.resultPickerError}`,
+          `Failed to load analysis results, so the comparison could not be created: ${this.state.resultPickerError}`,
+        ),
         timestamp: Date.now(),
       });
       return true;
@@ -6112,11 +6720,18 @@ Click ⚙️ to configure backend connection.`,
     this.addMessage({
       id: this.generateId(),
       role: 'system',
-      content: [
-        '这条请求需要选择要对比的分析结果。',
-        '我已经打开“分析结果对比”面板，并优先选中当前窗口结果。',
-        '每份结果标题旁都有 Result ID（如 AR-1234abcd），之后可以直接说“对比 AR-1234abcd”。',
-      ].join('\n'),
+      content: uiText(
+        [
+          '这条请求需要选择要对比的分析结果。',
+          '我已经打开“分析结果对比”面板，并优先选中当前窗口结果。',
+          '每份结果标题旁都有 Result ID（如 AR-1234abcd），之后可以直接说“对比 AR-1234abcd”。',
+        ].join('\n'),
+        [
+          'Choose the analysis results to compare.',
+          'The analysis-result comparison panel is open, with the current window result selected first.',
+          'Each result title includes a Result ID (for example, AR-1234abcd), so you can later say “compare AR-1234abcd”.',
+        ].join('\n'),
+      ),
       timestamp: Date.now(),
     });
     m.redraw();
@@ -6132,20 +6747,28 @@ Click ⚙️ to configure backend connection.`,
 
   /** Build a descriptive tooltip for the selection analysis button. */
   private getSelectionButtonTitle(): string {
-    if (!this.trace) return '分析当前选区';
+    if (!this.trace) {
+      return uiText('分析当前选区', 'Analyze current selection');
+    }
     const sel = this.trace.selection.selection;
     if (sel.kind === 'area') {
       const timeSpan = this.trace.selection.getTimeSpanOfSelection();
       if (timeSpan) {
         const durMs = (Number(timeSpan.duration) / 1e6).toFixed(1);
-        return `分析选中区间 (${durMs}ms, ${sel.trackUris.length} tracks)`;
+        return uiText(
+          `分析选中区间（${durMs}ms，${sel.trackUris.length} 条轨道）`,
+          `Analyze selected range (${durMs}ms, ${sel.trackUris.length} tracks)`,
+        );
       }
-      return `分析选中区间 (${sel.trackUris.length} tracks)`;
+      return uiText(
+        `分析选中区间（${sel.trackUris.length} 条轨道）`,
+        `Analyze selected range (${sel.trackUris.length} tracks)`,
+      );
     }
     if (sel.kind === 'track_event') {
-      return '分析选中的 Slice';
+      return uiText('分析选中的 Slice', 'Analyze selected slice');
     }
-    return '分析当前选区';
+    return uiText('分析当前选区', 'Analyze current selection');
   }
 
   /**
@@ -6162,10 +6785,16 @@ Click ⚙️ to configure backend connection.`,
       const durMs = timeSpan
         ? (Number(timeSpan.duration) / 1e6).toFixed(1)
         : '?';
-      return `分析当前时间/轨道选区的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`;
+      return uiText(
+        `分析当前时间/轨道选区的性能（${durMs}ms），包括关键线程的 CPU 调度、大小核分布和频率、主要耗时 Slice 诊断`,
+        `Analyze the current time/track selection (${durMs}ms), including CPU scheduling, core type and frequency for key threads, plus the longest slices`,
+      );
     }
     if (sel.kind === 'track_event') {
-      return '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常';
+      return uiText(
+        '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常',
+        'Quickly analyze the selected slice: what it is, its key timestamps and child-call costs, and whether it is clearly abnormal',
+      );
     }
     return null;
   }
@@ -6187,34 +6816,44 @@ Click ⚙️ to configure backend connection.`,
    */
   private analyzeScene(scene: import('./scene_navigation_bar').DetectedScene) {
     if (this.state.isLoading) return;
-    const typeNames: Record<string, string> = {
-      cold_start: '冷启动',
-      warm_start: '温启动',
-      hot_start: '热启动',
-      scroll: '滑动',
-      inertial_scroll: '惯性滑动',
-      scroll_start: '滑动',
-      app_switch: '应用切换',
-      home_screen: '桌面',
-      app_foreground: '应用内',
-      navigation: '页面跳转',
-      tap: '点击响应',
-      long_press: '长按响应',
-      screen_on: '亮屏',
-      screen_unlock: '解锁',
-      back_key: '返回键',
-      home_key: 'Home键',
-      recents_key: '最近任务键',
-      anr: 'ANR',
-      ime_show: '键盘弹出',
-      ime_hide: '键盘收起',
-      window_transition: '窗口转场',
+    const typeNames: Record<string, [string, string]> = {
+      cold_start: ['冷启动', 'cold start'],
+      warm_start: ['温启动', 'warm start'],
+      hot_start: ['热启动', 'hot start'],
+      scroll: ['滑动', 'scroll'],
+      inertial_scroll: ['惯性滑动', 'inertial scroll'],
+      scroll_start: ['滑动', 'scroll'],
+      app_switch: ['应用切换', 'app switch'],
+      home_screen: ['桌面', 'home screen'],
+      app_foreground: ['应用内', 'app foreground'],
+      navigation: ['页面跳转', 'navigation'],
+      tap: ['点击响应', 'tap response'],
+      long_press: ['长按响应', 'long-press response'],
+      screen_on: ['亮屏', 'screen-on'],
+      screen_unlock: ['解锁', 'screen unlock'],
+      back_key: ['返回键', 'Back key'],
+      home_key: ['Home 键', 'Home key'],
+      recents_key: ['最近任务键', 'Recents key'],
+      anr: ['ANR', 'ANR'],
+      ime_show: ['键盘弹出', 'IME show'],
+      ime_hide: ['键盘收起', 'IME hide'],
+      window_transition: ['窗口转场', 'window transition'],
     };
-    const typeName = typeNames[scene.type] || scene.type;
+    const typeName = typeNames[scene.type]
+      ? uiText(...typeNames[scene.type])
+      : scene.type;
     const appHint = scene.appPackage ? ` (${scene.appPackage})` : '';
     const durHint =
-      scene.durationMs > 0 ? `，耗时 ${scene.durationMs.toFixed(0)}ms` : '';
-    const query = `分析${typeName}性能${appHint}${durHint}`;
+      scene.durationMs > 0
+        ? uiText(
+            `，耗时 ${scene.durationMs.toFixed(0)}ms`,
+            `, duration ${scene.durationMs.toFixed(0)}ms`,
+          )
+        : '';
+    const query = uiText(
+      `分析${typeName}性能${appHint}${durHint}`,
+      `Analyze ${typeName} performance${appHint}${durHint}`,
+    );
     this.state.input = query;
     this.sendMessage();
   }
@@ -6534,7 +7173,7 @@ Click ⚙️ to configure backend connection.`,
       `Scene: ${snapshot.sceneType}`,
       `Metrics: ${snapshot.metricCount}`,
       `Visibility: ${snapshot.visibility || 'private'}`,
-      `Chat usage: 对比 ${ref}`,
+      uiText(`对话用法：对比 ${ref}`, `Chat usage: compare ${ref}`),
     ].join('\n');
   }
 
@@ -6610,7 +7249,10 @@ Click ⚙️ to configure backend connection.`,
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: `Unknown command: ${cmd}. Type \`/help\` for available commands.`,
+          content: uiText(
+            `未知命令：${cmd}。输入 \`/help\` 查看可用命令。`,
+            `Unknown command: ${cmd}. Type \`/help\` for available commands.`,
+          ),
           timestamp: Date.now(),
         });
     }
@@ -6621,8 +7263,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content:
+        content: uiText(
+          '**还没有固定结果。**\n\n使用 SQL 结果上的 📌 固定按钮将其保存到这里。',
           '**No pinned results yet.**\n\nUse the 📌 Pin button on SQL results to save them here.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -6631,14 +7275,20 @@ Click ⚙️ to configure backend connection.`,
     const pinsList = this.state.pinnedResults
       .map((pin, index) => {
         const date = new Date(pin.timestamp).toLocaleString();
-        return `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${pin.rows.length} rows • ${date}`;
+        return uiText(
+          `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${pin.rows.length} 行 • ${date}`,
+          `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${pin.rows.length} rows • ${date}`,
+        );
       })
       .join('\n\n');
 
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `**📌 Pinned Results (${this.state.pinnedResults.length})**\n\n${pinsList}\n\nClick on any result in the chat history to use the Pin button.`,
+      content: uiText(
+        `**📌 已固定结果（${this.state.pinnedResults.length}）**\n\n${pinsList}\n\n可在对话历史中的任一结果上使用固定按钮。`,
+        `**📌 Pinned Results (${this.state.pinnedResults.length})**\n\n${pinsList}\n\nClick on any result in the chat history to use the Pin button.`,
+      ),
       timestamp: Date.now(),
     });
   }
@@ -6648,8 +7298,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content:
+        content: uiText(
+          '请提供 SQL 查询。例如：`/sql SELECT * FROM slice LIMIT 10`',
           'Please provide a SQL query. Example: `/sql SELECT * FROM slice LIMIT 10`',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -6683,7 +7335,10 @@ Click ⚙️ to configure backend connection.`,
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: `Query returned **${rows.length}** rows.`,
+          content: uiText(
+            `查询返回 **${rows.length}** 行。`,
+            `Query returned **${rows.length}** rows.`,
+          ),
           timestamp: Date.now(),
           sqlResult: {columns, rows, rowCount: rows.length, query},
         });
@@ -6695,7 +7350,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Error executing query:** ${e.message || e}`,
+        content: uiText(
+          `**执行查询出错：** ${e.message || e}`,
+          `**Error executing query:** ${e.message || e}`,
+        ),
         timestamp: Date.now(),
       });
     }
@@ -6709,7 +7367,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: 'Please provide a timestamp. Example: `/goto 1234567890`',
+        content: uiText(
+          '请提供时间戳。例如：`/goto 1234567890`',
+          'Please provide a timestamp. Example: `/goto 1234567890`',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -6720,7 +7381,7 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `Invalid timestamp: ${ts}`,
+        content: uiText(`无效时间戳：${ts}`, `Invalid timestamp: ${ts}`),
         timestamp: Date.now(),
       });
       return;
@@ -6732,7 +7393,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+        content: uiText(
+          `无法跳转到时间戳 ${timestampNs.toString()}ns：${navigation.error}`,
+          `Failed to navigate to timestamp ${timestampNs.toString()}ns: ${navigation.error}`,
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -6741,7 +7405,10 @@ Click ⚙️ to configure backend connection.`,
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `Navigated to timestamp ${timestampNs.toString()}ns.`,
+      content: uiText(
+        `已跳转到时间戳 ${timestampNs.toString()}ns。`,
+        `Navigated to timestamp ${timestampNs.toString()}ns.`,
+      ),
       timestamp: Date.now(),
     });
   }
@@ -6752,7 +7419,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: '**Error:** Trace context not available.',
+        content: uiText(
+          '**错误：** Trace 上下文不可用。',
+          '**Error:** Trace context not available.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -6765,8 +7435,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content:
+        content: uiText(
+          '**未找到选区。** 请先在时间线上点击一个 Slice，再使用 `/analyze`。',
           '**No selection found.** Please click on a slice in the timeline to select it, then use `/analyze`.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -6787,7 +7459,10 @@ Click ⚙️ to configure backend connection.`,
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `**Selection type:** ${selection.kind}\n\nAnalysis for this selection type is not yet implemented. Please try selecting a specific slice.`,
+      content: uiText(
+        `**选区类型：** ${selection.kind}\n\n尚未实现此选区类型的分析，请尝试选择一个具体 Slice。`,
+        `**Selection type:** ${selection.kind}\n\nAnalysis for this selection type is not yet implemented. Please try selecting a specific slice.`,
+      ),
       timestamp: Date.now(),
     });
   }
@@ -6855,7 +7530,7 @@ Click ⚙️ to configure backend connection.`,
     let jankCount = 0;
     const topSlices: Array<{name: string; durMs: number; count: number}> = [];
 
-    if (!this.engine)
+    if (!this.engine) {
       return {
         startNs,
         endNs,
@@ -6866,6 +7541,7 @@ Click ⚙️ to configure backend connection.`,
         hasJank: false,
         jankCount,
       };
+    }
 
     try {
       const r = await this.engine.query(`
@@ -7725,7 +8401,13 @@ Click ⚙️ to configure backend connection.`,
 
     return m('div.sp-sel-card', [
       m('div.sp-sel-card-header', [
-        m('span.sp-sel-card-title', `⬛ Slice Selected${isSlow ? ' ⚠️' : ''}`),
+        m(
+          'span.sp-sel-card-title',
+          uiText(
+            `⬛ 已选 Slice${isSlow ? ' ⚠️' : ''}`,
+            `⬛ Slice selected${isSlow ? ' ⚠️' : ''}`,
+          ),
+        ),
         m(
           'button.sp-sel-card-dismiss',
           {
@@ -7733,7 +8415,7 @@ Click ⚙️ to configure backend connection.`,
               this.state.sliceCardDismissed = true;
               m.redraw();
             },
-            title: 'Dismiss',
+            title: uiText('关闭', 'Dismiss'),
           },
           '✕',
         ),
@@ -7748,13 +8430,19 @@ Click ⚙️ to configure backend connection.`,
           ? m('span.sp-meta-pill', ['📦 ', info.processName])
           : null,
         info.childCount > 0
-          ? m('span.sp-meta-pill', ['🌿 ', `${info.childCount} children`])
+          ? m('span.sp-meta-pill', [
+              '🌿 ',
+              uiText(
+                `${info.childCount} 个子项`,
+                `${info.childCount} children`,
+              ),
+            ])
           : null,
         m(
           'span.sp-meta-pill',
           {
             style: 'cursor:pointer',
-            title: 'Jump to timestamp',
+            title: uiText('跳转到时间戳', 'Jump to timestamp'),
             onclick: () =>
               this.trace!.timeline.panIntoView(Time.fromRaw(BigInt(info.ts))),
           },
@@ -7767,33 +8455,42 @@ Click ⚙️ to configure backend connection.`,
           {
             onclick: () =>
               onAction(
-                `快速分析当前选中的 Slice：${info.name}（${dur}），先给出它是什么、关键时间和是否异常`,
+                uiText(
+                  `快速分析当前选中的 Slice：${info.name}（${dur}），先给出它是什么、关键时间和是否异常`,
+                  `Quickly analyze the selected slice ${info.name} (${dur}): explain what it is, its key timestamps, and whether it is abnormal`,
+                ),
               ),
             disabled: this.state.isLoading,
           },
-          '🔍 分析此 Slice',
+          uiText('🔍 分析此 Slice', '🔍 Analyze this slice'),
         ),
         m(
           'button.sp-action-btn.sp-action-btn--secondary',
           {
             onclick: () =>
               onAction(
-                `找出 "${info.name}" 耗时 ${dur} 的根本原因，分析调用链和子调用`,
+                uiText(
+                  `找出“${info.name}”耗时 ${dur} 的根本原因，分析调用链和子调用`,
+                  `Find the root cause of ${info.name} taking ${dur}; analyze its call chain and child calls`,
+                ),
               ),
             disabled: this.state.isLoading,
           },
-          '🔎 找根因',
+          uiText('🔎 找根因', '🔎 Find root cause'),
         ),
         m(
           'button.sp-action-btn.sp-action-btn--secondary',
           {
             onclick: () =>
               onAction(
-                `展示 "${info.name}" 的完整调用链，包括父调用和子调用，并找出最耗时的部分`,
+                uiText(
+                  `展示“${info.name}”的完整调用链，包括父调用和子调用，并找出最耗时的部分`,
+                  `Show the full call chain for ${info.name}, including parents and children, and identify the longest operation`,
+                ),
               ),
             disabled: this.state.isLoading,
           },
-          '📊 调用链',
+          uiText('📊 调用链', '📊 Call chain'),
         ),
         isSlow
           ? m(
@@ -7801,11 +8498,14 @@ Click ⚙️ to configure backend connection.`,
               {
                 onclick: () =>
                   onAction(
-                    `"${info.name}" 耗时 ${dur} 超过帧预算（16ms），分析为什么会卡顿`,
+                    uiText(
+                      `“${info.name}”耗时 ${dur}，超过帧预算（16ms）；分析为什么会卡顿`,
+                      `${info.name} took ${dur}, exceeding the 16ms frame budget; analyze why it janks`,
+                    ),
                   ),
                 disabled: this.state.isLoading,
               },
-              '🚨 卡顿分析',
+              uiText('🚨 卡顿分析', '🚨 Jank analysis'),
             )
           : null,
       ]),
@@ -7840,7 +8540,10 @@ Click ⚙️ to configure backend connection.`,
       m('div.sp-sel-card-header', [
         m(
           'span.sp-sel-card-title',
-          `⬜ 时间范围选中${info.hasJank ? ' ⚠️ Jank' : ''}`,
+          uiText(
+            `⬜ 已选时间范围${info.hasJank ? ' ⚠️ Jank' : ''}`,
+            `⬜ Time range selected${info.hasJank ? ' ⚠️ Jank' : ''}`,
+          ),
         ),
         m(
           'button.sp-sel-card-dismiss',
@@ -7849,7 +8552,7 @@ Click ⚙️ to configure backend connection.`,
               this.state.sliceCardDismissed = true;
               m.redraw();
             },
-            title: 'Dismiss',
+            title: uiText('关闭', 'Dismiss'),
           },
           '✕',
         ),
@@ -7858,10 +8561,19 @@ Click ⚙️ to configure backend connection.`,
         m('span.sp-meta-pill', ['⏱ ', m('strong', dur)]),
         m('span.sp-meta-pill', ['📍 ', `${startMs}ms – ${endMs}ms`]),
         info.sliceCount > 0
-          ? m('span.sp-meta-pill', ['📋 ', `${info.sliceCount} slices`])
+          ? m('span.sp-meta-pill', [
+              '📋 ',
+              uiText(`${info.sliceCount} 个 Slice`, `${info.sliceCount} slices`),
+            ])
           : null,
         info.trackCount > 0
-          ? m('span.sp-meta-pill', ['🎛 ', `${info.trackCount} tracks`])
+          ? m('span.sp-meta-pill', [
+              '🎛 ',
+              uiText(
+                `${info.trackCount} 个轨道`,
+                `${info.trackCount} tracks`,
+              ),
+            ])
           : null,
         info.hasJank
           ? m(
@@ -7869,7 +8581,13 @@ Click ⚙️ to configure backend connection.`,
               {
                 style: 'background:#fef2f2;border-color:#fca5a5;color:#b91c1c',
               },
-              ['⚠️ ', `${info.jankCount} jank frames`],
+              [
+                '⚠️ ',
+                uiText(
+                  `${info.jankCount} 个卡顿帧`,
+                  `${info.jankCount} jank frames`,
+                ),
+              ],
             )
           : null,
       ]),
@@ -7878,7 +8596,7 @@ Click ⚙️ to configure backend connection.`,
             'div',
             {style: 'padding: 0 10px 5px; font-size:11px; color:#6b7280'},
             [
-              'Top: ',
+              uiText('最耗时：', 'Top: '),
               info.topSlices
                 .slice(0, 3)
                 .map((s, i) =>
@@ -7900,11 +8618,14 @@ Click ⚙️ to configure backend connection.`,
           {
             onclick: () =>
               onAction(
-                `分析 ${startMs}ms–${endMs}ms 这段时间范围（${dur}），找出性能瓶颈`,
+                uiText(
+                  `分析 ${startMs}ms–${endMs}ms 这段时间范围（${dur}），找出性能瓶颈`,
+                  `Analyze the ${startMs}ms–${endMs}ms range (${dur}) and identify performance bottlenecks`,
+                ),
               ),
             disabled: this.state.isLoading,
           },
-          '🔍 分析此时间段',
+          uiText('🔍 分析此时间段', '🔍 Analyze this range'),
         ),
         info.hasJank
           ? m(
@@ -7912,30 +8633,43 @@ Click ⚙️ to configure backend connection.`,
               {
                 onclick: () =>
                   onAction(
-                    `分析 ${startMs}ms–${endMs}ms 范围内的 ${info.jankCount} 个 Jank 帧，找出卡顿根因`,
+                    uiText(
+                      `分析 ${startMs}ms–${endMs}ms 范围内的 ${info.jankCount} 个 Jank 帧，找出卡顿根因`,
+                      `Analyze ${info.jankCount} janky frames in the ${startMs}ms–${endMs}ms range and find their root causes`,
+                    ),
                   ),
                 disabled: this.state.isLoading,
               },
-              '🚨 找卡顿原因',
+              uiText('🚨 找卡顿原因', '🚨 Find jank causes'),
             )
           : null,
         m(
           'button.sp-action-btn.sp-action-btn--secondary',
           {
             onclick: () =>
-              onAction(`找出 ${startMs}ms–${endMs}ms 时间段内主线程的耗时操作`),
+              onAction(
+                uiText(
+                  `找出 ${startMs}ms–${endMs}ms 时间段内主线程的耗时操作`,
+                  `Find expensive main-thread operations between ${startMs}ms and ${endMs}ms`,
+                ),
+              ),
             disabled: this.state.isLoading,
           },
-          '🧵 主线程分析',
+          uiText('🧵 主线程分析', '🧵 Main-thread analysis'),
         ),
         m(
           'button.sp-action-btn.sp-action-btn--secondary',
           {
             onclick: () =>
-              onAction(`分析 ${startMs}ms–${endMs}ms 内的 Binder 调用和锁竞争`),
+              onAction(
+                uiText(
+                  `分析 ${startMs}ms–${endMs}ms 内的 Binder 调用和锁竞争`,
+                  `Analyze Binder calls and lock contention between ${startMs}ms and ${endMs}ms`,
+                ),
+              ),
             disabled: this.state.isLoading,
           },
-          '🔗 Binder/锁',
+          uiText('🔗 Binder/锁', '🔗 Binder/locks'),
         ),
       ]),
     ]);
@@ -7952,8 +8686,9 @@ Click ⚙️ to configure backend connection.`,
   private captureVisibleWindowContext(
     message?: string,
   ): SelectionContext | null {
-    if (!this.trace || !this.messageReferencesCurrentRange(message))
+    if (!this.trace || !this.messageReferencesCurrentRange(message)) {
       return null;
+    }
     const visibleSpan = this.trace.timeline.visibleWindow.toTimeSpan();
     const startNs = Number(visibleSpan.start);
     const endNs = Number(visibleSpan.end);
@@ -8194,7 +8929,10 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: `Found **${rows.length}** potential ANRs in this trace.`,
+            content: uiText(
+              `在此 Trace 中发现 **${rows.length}** 个潜在 ANR。`,
+              `Found **${rows.length}** potential ANRs in this trace.`,
+            ),
             timestamp: Date.now(),
             query: query,
             sqlResult: {columns, rows, rowCount: rows.length, query},
@@ -8203,7 +8941,10 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: '**No ANRs detected** in this trace. Good job!',
+            content: uiText(
+              '此 Trace 中**未检测到 ANR**。',
+              '**No ANRs detected** in this trace. Good job!',
+            ),
             timestamp: Date.now(),
           });
         }
@@ -8212,7 +8953,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Error detecting ANRs:** ${e.message || e}`,
+        content: uiText(
+          `**检测 ANR 出错：** ${e.message || e}`,
+          `**Error detecting ANRs:** ${e.message || e}`,
+        ),
         timestamp: Date.now(),
       });
     }
@@ -8263,7 +9007,10 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: `Found **${rows.length}** janky frames in this trace.`,
+            content: uiText(
+              `在此 Trace 中发现 **${rows.length}** 个卡顿帧。`,
+              `Found **${rows.length}** janky frames in this trace.`,
+            ),
             timestamp: Date.now(),
             query: query,
             sqlResult: {columns, rows, rowCount: rows.length, query},
@@ -8272,7 +9019,10 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: '**No jank detected** in this trace. Smooth rendering!',
+            content: uiText(
+              '此 Trace 中**未检测到卡顿**。',
+              '**No jank detected** in this trace. Smooth rendering!',
+            ),
             timestamp: Date.now(),
           });
         }
@@ -8281,7 +9031,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Error detecting jank:** ${e.message || e}`,
+        content: uiText(
+          `**检测卡顿出错：** ${e.message || e}`,
+          `**Error detecting jank:** ${e.message || e}`,
+        ),
         timestamp: Date.now(),
       });
     }
@@ -8296,13 +9049,20 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content:
-          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。`/slow` 命令需要后端支持。',
+        content: uiText(
+          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角“重试连接”按钮。`/slow` 命令需要后端支持。',
+          '⚠️ **The trace is not connected to the AI backend**\n\nConfirm that the backend is running, then use Retry connection in the upper-right corner. The `/slow` command requires the backend.',
+        ),
         timestamp: Date.now(),
       });
       return;
     }
-    await this.handleChatMessage('分析慢操作（IO/数据库/输入事件）');
+    await this.handleChatMessage(
+      uiText(
+        '分析慢操作（I/O、数据库、输入事件）',
+        'Analyze slow operations involving I/O, databases, and input events',
+      ),
+    );
   }
 
   private async handleMemoryCommand() {
@@ -8311,13 +9071,17 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content:
-          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。`/memory` 命令需要后端支持。',
+        content: uiText(
+          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角“重试连接”按钮。`/memory` 命令需要后端支持。',
+          '⚠️ **The trace is not connected to the AI backend**\n\nConfirm that the backend is running, then use Retry connection in the upper-right corner. The `/memory` command requires the backend.',
+        ),
         timestamp: Date.now(),
       });
       return;
     }
-    await this.handleChatMessage('分析内存与 GC/LMK 情况');
+    await this.handleChatMessage(
+      uiText('分析内存与 GC/LMK 情况', 'Analyze memory, GC, and LMK behavior'),
+    );
   }
 
   /**
@@ -8353,7 +9117,7 @@ Click ⚙️ to configure backend connection.`,
           })
         ) {
           this.saveCurrentSession();
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               '[AIPanel] Agent observability updated from resume response:',
               {
@@ -8362,6 +9126,7 @@ Click ⚙️ to configure backend connection.`,
                 runSequence: this.state.agentRunSequence,
               },
             );
+          }
         }
         return;
       }
@@ -8391,7 +9156,10 @@ Click ⚙️ to configure backend connection.`,
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: `⚠️ **上下文已重置** — 之前的分析会话已过期或后端已重启，本次将以新会话开始分析。之前的对话上下文不会被继承。`,
+          content: uiText(
+            '⚠️ **上下文已重置** — 之前的分析会话已过期或后端已重启，本次将以新会话开始分析。之前的对话上下文不会被继承。',
+            '⚠️ **Context reset** — The previous analysis session expired or the backend restarted. This analysis will begin in a new session without the earlier conversation context.',
+          ),
           timestamp: Date.now(),
         });
         m.redraw();
@@ -8419,7 +9187,10 @@ Click ⚙️ to configure backend connection.`,
 
     try {
       this.upsertSseStatusMessage(
-        '正在恢复会话：后端可能刚刚重启，正在重新绑定分析上下文。',
+        uiText(
+          '正在恢复会话：后端可能刚刚重启，正在重新绑定分析上下文。',
+          'Restoring session: the backend may have restarted, so the analysis context is being rebound.',
+        ),
       );
       m.redraw();
 
@@ -8446,7 +9217,7 @@ Click ⚙️ to configure backend connection.`,
             requestId: resumeData.requestId || requestIdFromHeader,
           })
         ) {
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               '[AIPanel] Agent observability updated from SSE resume:',
               {
@@ -8455,9 +9226,13 @@ Click ⚙️ to configure backend connection.`,
                 runSequence: this.state.agentRunSequence,
               },
             );
+          }
         }
         this.upsertSseStatusMessage(
-          '后端已重启，已恢复会话，正在重新连接结果流。',
+          uiText(
+            '后端已重启，已恢复会话，正在重新连接结果流。',
+            'The backend restarted. The session was restored and the result stream is reconnecting.',
+          ),
         );
         this.saveCurrentSession();
         m.redraw();
@@ -8480,8 +9255,14 @@ Click ⚙️ to configure backend connection.`,
         this.setLoadingState(false);
         const content =
           code === 'TRACE_NOT_UPLOADED'
-            ? '后端已重启，当前 Trace 需要重新连接。请点击右上角“重试连接”重新上传 Trace 后再分析。'
-            : '后端已重启，当前分析会话无法恢复。本次流式分析已停止，请重新发起分析。';
+            ? uiText(
+                '后端已重启，当前 Trace 需要重新连接。请点击右上角“重试连接”重新上传 Trace 后再分析。',
+                'The backend restarted and this trace must reconnect. Use Retry connection in the upper-right corner to upload it again before analyzing.',
+              )
+            : uiText(
+                '后端已重启，当前分析会话无法恢复。本次流式分析已停止，请重新发起分析。',
+                'The backend restarted and this analysis session could not be restored. Streaming stopped; start the analysis again.',
+              );
         this.upsertSseStatusMessage(content);
         this.saveCurrentSession();
         m.redraw();
@@ -8501,18 +9282,22 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private async handleChatMessage(message: string) {
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] handleChatMessage called with:', message);
-    if (DEBUG_AI_PANEL)
+    }
+    if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] backendTraceId:', this.state.backendTraceId);
+    }
 
     // Check if trace is uploaded to backend
     if (!this.state.backendTraceId) {
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content:
-          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角"重试连接"按钮。后端将执行 SQL 查询并提供详细分析。',
+        content: uiText(
+          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角“重试连接”按钮。后端将执行 SQL 查询并提供详细分析。',
+          '⚠️ **The trace is not connected to the AI backend**\n\nConfirm that the backend is running, then use Retry connection in the upper-right corner. The backend executes the SQL and provides detailed analysis.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -8546,13 +9331,14 @@ Click ⚙️ to configure backend connection.`,
         this.state.settings.backendUrl,
         '/analyze',
       );
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Calling Agent API:',
           apiUrl,
           'with traceId:',
           this.state.backendTraceId,
         );
+      }
 
       // Build request body, include sessionId for multi-turn dialogue
       const requestBody: Record<string, any> = {
@@ -8579,11 +9365,12 @@ Click ⚙️ to configure backend connection.`,
       const selectionContext = await this.captureSelectionContext(message);
       if (selectionContext) {
         requestBody.selectionContext = selectionContext;
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             '[AIPanel] Injecting selectionContext:',
             selectionContext,
           );
+        }
         if (!tracePairContext && !this.state.pendingTraceContext) {
           const datasets = await this.querySelectionData(selectionContext);
           this.state.pendingTraceContext =
@@ -8608,11 +9395,12 @@ Click ⚙️ to configure backend connection.`,
       // Include agentSessionId if available for multi-turn dialogue
       if (this.state.agentSessionId) {
         requestBody.sessionId = this.state.agentSessionId;
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             '[AIPanel] Reusing Agent session for multi-turn dialogue:',
             this.state.agentSessionId,
           );
+        }
       }
 
       const beforeDispatch =
@@ -8629,8 +9417,9 @@ Click ⚙️ to configure backend connection.`,
         requestBody,
       );
 
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Agent API response status:', response.status);
+      }
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -8641,8 +9430,10 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'system',
-            content:
-              '⚠️ **后端未找到该 Trace**\n\nTrace 可能已过期。请点击右上角"重试连接"按钮重新上传。',
+            content: uiText(
+              '⚠️ **后端未找到该 Trace**\n\nTrace 可能已过期。请点击右上角“重试连接”按钮重新上传。',
+              '⚠️ **The backend could not find this trace**\n\nIt may have expired. Use Retry connection in the upper-right corner to upload it again.',
+            ),
             timestamp: Date.now(),
           });
           this.state.backendTraceId = null;
@@ -8661,8 +9452,9 @@ Click ⚙️ to configure backend connection.`,
       }
 
       const data = await response.json();
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Agent API response data:', data);
+      }
 
       if (!data.success) {
         throw new Error(data.error || 'Analysis failed');
@@ -8685,7 +9477,12 @@ Click ⚙️ to configure backend connection.`,
         } else if (afterDispatch === 'cancelled') {
           this.handleCancellationFailure(
             sessionId || '',
-            new Error('分析回执缺少可取消的 runId'),
+            new Error(
+              uiText(
+                '分析回执缺少可取消的 runId',
+                'The analysis receipt has no cancellable runId',
+              ),
+            ),
           );
         }
         return;
@@ -8698,7 +9495,7 @@ Click ⚙️ to configure backend connection.`,
       });
       this.analysisRequestCoordinator.finish(analysisRequest);
       if (observabilityUpdated) {
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             '[AIPanel] Agent observability updated from analyze response:',
             {
@@ -8707,6 +9504,7 @@ Click ⚙️ to configure backend connection.`,
               runSequence: this.state.agentRunSequence,
             },
           );
+        }
       }
 
       // Use SSE for real-time progress updates
@@ -8715,30 +9513,34 @@ Click ⚙️ to configure backend connection.`,
         // Only save if this is a new session or reusing existing session
         const isNewSession = data.isNewSession !== false;
         if (isNewSession) {
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               '[AIPanel] Saving new Agent session for multi-turn dialogue:',
               sessionId,
             );
+          }
         } else {
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               '[AIPanel] Continuing existing Agent session:',
               sessionId,
             );
+          }
         }
         this.state.agentSessionId = sessionId;
         this.saveCurrentSession();
 
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             '[AIPanel] Starting Agent SSE listener for session:',
             sessionId,
           );
+        }
         await this.listenToAgentSSE(sessionId);
       } else {
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log('[AIPanel] No sessionId in response, data:', data);
+        }
       }
     } catch (e: any) {
       const requestDisposition =
@@ -8748,7 +9550,8 @@ Click ⚙️ to configure backend connection.`,
         return;
       }
       if (requestDisposition === 'stale') return;
-      const message = e?.message || 'Failed to start analysis';
+      const message =
+        e?.message || uiText('启动分析失败', 'Failed to start analysis');
       const quotaStopped =
         e?.terminalStatus === 'quota_exceeded' ||
         e?.code === 'QUOTA_EXCEEDED' ||
@@ -8763,7 +9566,7 @@ Click ⚙️ to configure backend connection.`,
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: `**Error:** ${message}`,
+          content: uiText(`**错误：** ${message}`, `**Error:** ${message}`),
           timestamp: Date.now(),
         });
       }
@@ -8881,19 +9684,19 @@ Click ⚙️ to configure backend connection.`,
       }
 
       const requestBody: Record<string, any> = {
-          query: '/smart',
-          traceId: this.state.backendTraceId,
-          ...(boundSelection && this.state.agentSessionId
-            ? {sessionId: this.state.agentSessionId}
-            : {}),
-          options: {
-            analysisMode: this.state.analysisMode,
-            ...this.analysisContextRequestOptions(),
-            preset: 'smart',
-            smartAction,
-            ...(boundSelection ? {smartSelection: boundSelection} : {}),
-          },
-        };
+        query: '/smart',
+        traceId: this.state.backendTraceId,
+        ...(boundSelection && this.state.agentSessionId
+          ? {sessionId: this.state.agentSessionId}
+          : {}),
+        options: {
+          analysisMode: this.state.analysisMode,
+          ...this.analysisContextRequestOptions(),
+          preset: 'smart',
+          smartAction,
+          ...(boundSelection ? {smartSelection: boundSelection} : {}),
+        },
+      };
       const response = await this.postAnalysisRequestWithContextFallback(
         apiUrl,
         requestBody,
@@ -8932,7 +9735,12 @@ Click ⚙️ to configure backend connection.`,
         } else if (afterDispatch === 'cancelled') {
           this.handleCancellationFailure(
             sessionId || '',
-            new Error('分析回执缺少可取消的 runId'),
+            new Error(
+              uiText(
+                '分析回执缺少可取消的 runId',
+                'The analysis receipt has no cancellable runId',
+              ),
+            ),
           );
         }
         return;
@@ -8977,7 +9785,7 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Error:** ${message}`,
+        content: uiText(`**错误：** ${message}`, `**Error:** ${message}`),
         timestamp: Date.now(),
       });
     } finally {
@@ -9040,7 +9848,12 @@ Click ⚙️ to configure backend connection.`,
       !('runId' in payload) ||
       payload.runId !== runId
     ) {
-      throw new Error('取消接口未返回匹配 runId 的终态');
+      throw new Error(
+        uiText(
+          '取消接口未返回匹配 runId 的终态',
+          'The cancellation endpoint did not return a terminal state for the matching runId',
+        ),
+      );
     }
     return {
       status: payload.status,
@@ -9064,7 +9877,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `停止请求到达时，分析状态已是 ${status}。`,
+        content: uiText(
+          `停止请求到达时，分析状态已是 ${status}。`,
+          `The analysis was already ${status} when the stop request arrived.`,
+        ),
         timestamp: Date.now(),
       });
       this.saveCurrentSession();
@@ -9092,14 +9908,17 @@ Click ⚙️ to configure backend connection.`,
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: `停止分析失败：${detail}。请重试。`,
+      content: uiText(
+        `停止分析失败：${detail}。请重试。`,
+        `Failed to stop the analysis: ${detail}. Try again.`,
+      ),
       timestamp: Date.now(),
     });
     if (sessionId && this.state.agentSessionId === sessionId) {
       this.setLoadingState(true);
       updateAISharedState({
         status: 'analyzing',
-        currentPhase: '停止失败，请重试',
+        currentPhase: uiText('停止失败，请重试', 'Stop failed; try again'),
       });
       void this.listenToAgentSSE(sessionId, true);
     } else {
@@ -9139,8 +9958,11 @@ Click ⚙️ to configure backend connection.`,
       this.analysisRequestCoordinator.requestCancel();
     this.analysisCancellationPending = true;
     this.cancelSSEConnection();
-    this.state.loadingPhase = '正在停止分析…';
-    updateAISharedState({status: 'analyzing', currentPhase: '正在停止分析'});
+    this.state.loadingPhase = uiText('正在停止分析…', 'Stopping analysis…');
+    updateAISharedState({
+      status: 'analyzing',
+      currentPhase: uiText('正在停止分析', 'Stopping analysis'),
+    });
     m.redraw();
 
     if (waitingForRunIdentity) return Promise.resolve();
@@ -9219,7 +10041,10 @@ Click ⚙️ to configure backend connection.`,
             this.state.sseConnectionState = 'disconnected';
             this.setLoadingState(false);
             this.upsertSseStatusMessage(
-              `后端连接失败：${response.status} ${response.statusText}`,
+              uiText(
+                `后端连接失败：${response.status} ${response.statusText}`,
+                `Backend connection failed: ${response.status} ${response.statusText}`,
+              ),
             );
             m.redraw();
             return;
@@ -9258,8 +10083,9 @@ Click ⚙️ to configure backend connection.`,
 
           const {done, value} = await reader.read();
           if (done) {
-            if (DEBUG_AI_PANEL)
+            if (DEBUG_AI_PANEL) {
               console.log('[AIPanel] SSE stream ended normally');
+            }
             reader.releaseLock();
             // Stream ended normally (server closed), no need to reconnect
             this.state.sseConnectionState = 'disconnected';
@@ -9303,7 +10129,7 @@ Click ⚙️ to configure backend connection.`,
                       this.applyAgentObservability(data);
                     if (observabilityUpdated) {
                       this.saveCurrentSession();
-                      if (DEBUG_AI_PANEL)
+                      if (DEBUG_AI_PANEL) {
                         console.log(
                           '[AIPanel] Agent observability updated from SSE:',
                           {
@@ -9313,9 +10139,11 @@ Click ⚙️ to configure backend connection.`,
                             runSequence: this.state.agentRunSequence,
                           },
                         );
+                      }
                     }
-                    if (DEBUG_AI_PANEL)
+                    if (DEBUG_AI_PANEL) {
                       console.log('[AIPanel] Agent SSE event:', eventType);
+                    }
                     this.handleSSEEvent(eventType, data);
 
                     // Check for terminal events (no need to reconnect after these)
@@ -9349,8 +10177,9 @@ Click ⚙️ to configure backend connection.`,
       } catch (e: any) {
         // Check if this was an intentional abort
         if (signal.aborted || e.name === 'AbortError') {
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log('[AIPanel] SSE connection intentionally aborted');
+          }
           this.state.sseConnectionState = 'disconnected';
           return;
         }
@@ -9369,7 +10198,10 @@ Click ⚙️ to configure backend connection.`,
           this.state.sseConnectionState = 'disconnected';
           this.setLoadingState(false);
           this.upsertSseStatusMessage(
-            `后端连接失败：${e.message || 'Agent 后端连接中断'}\n\n已重试 ${this.state.sseMaxRetries} 次，请重新发起分析。`,
+            uiText(
+              `后端连接失败：${e.message || 'Agent 后端连接中断'}\n\n已重试 ${this.state.sseMaxRetries} 次，请重新发起分析。`,
+              `Backend connection failed: ${e.message || 'Agent backend connection interrupted'}\n\nRetried ${this.state.sseMaxRetries} times. Start the analysis again.`,
+            ),
           );
           m.redraw();
           return;
@@ -9379,14 +10211,18 @@ Click ⚙️ to configure backend connection.`,
         this.state.sseRetryCount++;
         this.state.sseConnectionState = 'reconnecting';
         const delay = this.calculateBackoffDelay(this.state.sseRetryCount - 1);
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             `[AIPanel] SSE reconnecting in ${delay}ms (attempt ${this.state.sseRetryCount}/${this.state.sseMaxRetries})`,
           );
+        }
 
         // Update UI to show reconnecting status
         this.upsertSseStatusMessage(
-          `连接中断，正在重连...（第 ${this.state.sseRetryCount}/${this.state.sseMaxRetries} 次）`,
+          uiText(
+            `连接中断，正在重连…（第 ${this.state.sseRetryCount}/${this.state.sseMaxRetries} 次）`,
+            `Connection interrupted; reconnecting… (${this.state.sseRetryCount}/${this.state.sseMaxRetries})`,
+          ),
         );
         m.redraw();
 
@@ -9438,12 +10274,13 @@ Click ⚙️ to configure backend connection.`,
         status === 'cancelled' ||
         status === 'failed'
       ) {
-        if (DEBUG_AI_PANEL)
+        if (DEBUG_AI_PANEL) {
           console.log(
             '[AIPanel] Session already',
             status,
             '— stopping SSE reconnect',
           );
+        }
         this.state.sseConnectionState = 'disconnected';
         this.setLoadingState(false);
         updateAISharedState({
@@ -9472,14 +10309,19 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: `**Analysis failed** while reconnecting. Please try again.`,
+            content: uiText(
+              '重连期间**分析失败**，请重试。',
+              '**Analysis failed** while reconnecting. Please try again.',
+            ),
             timestamp: Date.now(),
           });
         } else if (status === 'cancelled') {
           this.handleSSEEvent('analysis_cancelled', {
             type: 'analysis_cancelled',
             data: {
-              reason: body.error || 'Analysis cancelled while reconnecting',
+              reason:
+                body.error ||
+                uiText('重连期间分析已取消', 'Analysis cancelled while reconnecting'),
               terminalRunStatus: 'cancelled',
             },
             timestamp: Date.now(),
@@ -9499,7 +10341,10 @@ Click ⚙️ to configure backend connection.`,
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
-            content: `**Analysis stopped by quota limit** while reconnecting. The partial result is available from the completed session.`,
+            content: uiText(
+              '重连期间分析因**配额限制而停止**，可从已完成会话中查看部分结果。',
+              '**Analysis stopped by quota limit** while reconnecting. The partial result is available from the completed session.',
+            ),
             timestamp: Date.now(),
           });
         }
@@ -9570,25 +10415,36 @@ Click ⚙️ to configure backend connection.`,
       teachingPrimaryConfidence(result),
     );
     const lines: string[] = [
-      '## 🎓 渲染管线教学',
+      uiText('## 🎓 渲染管线教学', '## 🎓 Rendering pipeline tutorial'),
       '',
-      '### 检测结果',
+      uiText('### 检测结果', '### Detection result'),
     ];
     if (renderingTypeId) {
       lines.push(
-        `- **出图类型**: \`${renderingTypeId}\` (置信度: ${confidence})`,
-        `- **检测子路径**: \`${pipelineId}\``,
+        uiText(
+          `- **出图类型**：\`${renderingTypeId}\`（置信度：${confidence}）`,
+          `- **Rendering type**: \`${renderingTypeId}\` (confidence: ${confidence})`,
+        ),
+        uiText(
+          `- **检测子路径**：\`${pipelineId}\``,
+          `- **Detected subpath**: \`${pipelineId}\``,
+        ),
       );
     } else {
-      lines.push(`- **管线类型**: \`${pipelineId}\` (置信度: ${confidence})`);
+      lines.push(
+        uiText(
+          `- **管线类型**：\`${pipelineId}\`（置信度：${confidence}）`,
+          `- **Pipeline type**: \`${pipelineId}\` (confidence: ${confidence})`,
+        ),
+      );
     }
 
     const subvariants = detection.subvariants || {};
     for (const [label, value] of [
-      ['Buffer 模式', subvariants.buffer_mode],
-      ['Flutter 引擎', subvariants.flutter_engine],
-      ['WebView 模式', subvariants.webview_mode],
-      ['游戏引擎', subvariants.game_engine],
+      [uiText('Buffer 模式', 'Buffer mode'), subvariants.buffer_mode],
+      [uiText('Flutter 引擎', 'Flutter engine'), subvariants.flutter_engine],
+      [uiText('WebView 模式', 'WebView mode'), subvariants.webview_mode],
+      [uiText('游戏引擎', 'Game engine'), subvariants.game_engine],
     ]) {
       if (value && value !== 'UNKNOWN' && value !== 'N/A') {
         lines.push(`- **${label}**: ${value}`);
@@ -9600,18 +10456,30 @@ Click ⚙️ to configure backend connection.`,
       detection.renderingTypeCandidates.length > 1
     ) {
       lines.push(
-        `- **候选出图类型**: ${detection.renderingTypeCandidates
-          .slice(0, 5)
-          .map(
-            (candidate) =>
-              `${candidate.id} (${formatTeachingConfidence(candidate.confidence)})`,
-          )
-          .join(', ')}`,
+        uiText(
+          `- **候选出图类型**：${detection.renderingTypeCandidates
+            .slice(0, 5)
+            .map(
+              (candidate) =>
+                `${candidate.id}（${formatTeachingConfidence(candidate.confidence)}）`,
+            )
+            .join('，')}`,
+          `- **Rendering candidates**: ${detection.renderingTypeCandidates
+            .slice(0, 5)
+            .map(
+              (candidate) =>
+                `${candidate.id} (${formatTeachingConfidence(candidate.confidence)})`,
+            )
+            .join(', ')}`,
+        ),
       );
     }
     if (detection.candidates && detection.candidates.length > 1) {
+      const candidateLabel = renderingTypeId
+        ? uiText('候选子路径', 'Subpath candidates')
+        : uiText('候选类型', 'Type candidates');
       lines.push(
-        `- **${renderingTypeId ? '候选子路径' : '候选类型'}**: ${detection.candidates
+        `- **${candidateLabel}**: ${detection.candidates
           .slice(0, 5)
           .map(
             (candidate) =>
@@ -9625,7 +10493,7 @@ Click ⚙️ to configure backend connection.`,
       detection.relatedRenderingTypes.length > 0
     ) {
       lines.push(
-        `- **伴随出图类型**: ${detection.relatedRenderingTypes
+        `${uiText('- **伴随出图类型**：', '- **Related rendering types**: ')}${detection.relatedRenderingTypes
           .slice(0, 5)
           .map(
             (candidate) =>
@@ -9636,36 +10504,71 @@ Click ⚙️ to configure backend connection.`,
     }
     if (detection.features && detection.features.length > 0) {
       lines.push(
-        `- **伴随特性**: ${detection.features
+        `${uiText('- **伴随特性**：', '- **Related features**: ')}${detection.features
           .map((feature) => teachingFeatureName(feature))
           .join(', ')}`,
       );
     }
 
-    lines.push('', '### 当前 Trace 实际链路');
+    lines.push(
+      '',
+      uiText('### 当前 Trace 实际链路', '### Observed trace flow'),
+    );
     if (observedFlow?.context?.timeRange) {
       const {startTs, endTs, source} = observedFlow.context.timeRange;
       lines.push(
-        `- **时间范围**: ${formatTeachingNs(startTs)} ~ ${formatTeachingNs(endTs)} ns (${source})`,
+        uiText(
+          `- **时间范围**：${formatTeachingNs(startTs)} ~ ${formatTeachingNs(endTs)} ns（${source}）`,
+          `- **Time range**: ${formatTeachingNs(startTs)} ~ ${formatTeachingNs(endTs)} ns (${source})`,
+        ),
       );
     }
     if (observedFlow?.context?.fallbackUsed) {
-      lines.push(`- **上下文 fallback**: ${observedFlow.context.fallbackUsed}`);
+      lines.push(
+        uiText(
+          `- **上下文回退**：${observedFlow.context.fallbackUsed}`,
+          `- **Context fallback**: ${observedFlow.context.fallbackUsed}`,
+        ),
+      );
     }
-    lines.push(`- **观测泳道**: ${observedFlow?.lanes?.length || 0}`);
-    lines.push(`- **实际事件**: ${observedFlow?.events?.length || 0}`);
-    lines.push(`- **调度依赖**: ${observedFlow?.dependencies?.length || 0}`);
     lines.push(
-      `- **Critical task / Wakeup**: ${observedFlow?.criticalTasks?.length || 0}`,
+      uiText(
+        `- **观测泳道**：${observedFlow?.lanes?.length || 0}`,
+        `- **Observed lanes**: ${observedFlow?.lanes?.length || 0}`,
+      ),
+    );
+    lines.push(
+      uiText(
+        `- **实际事件**：${observedFlow?.events?.length || 0}`,
+        `- **Observed events**: ${observedFlow?.events?.length || 0}`,
+      ),
+    );
+    lines.push(
+      uiText(
+        `- **调度依赖**：${observedFlow?.dependencies?.length || 0}`,
+        `- **Scheduling dependencies**: ${observedFlow?.dependencies?.length || 0}`,
+      ),
+    );
+    lines.push(
+      uiText(
+        `- **关键任务 / 唤醒**：${observedFlow?.criticalTasks?.length || 0}`,
+        `- **Critical task / Wakeup**: ${observedFlow?.criticalTasks?.length || 0}`,
+      ),
     );
     if (observedFlow?.lanes?.length) {
-      lines.push('', '| Lane | 角色 | Trace 标识 | 置信度 | 证据 |');
+      lines.push(
+        '',
+        uiText(
+          '| 泳道 | 角色 | Trace 标识 | 置信度 | 证据 |',
+          '| Lane | Role | Trace identifier | Confidence | Evidence |',
+        ),
+      );
       lines.push('|------|------|------------|--------|------|');
       for (const lane of observedFlow.lanes.slice(0, 12)) {
         const marker =
           lane.threadName || lane.processName || lane.layerName || '-';
         lines.push(
-          `| ${lane.title || lane.id} | ${lane.role} | ${marker} | ${formatTeachingConfidence(lane.confidence)} | ${lane.evidenceSource || '-'} |`,
+          `| ${lane.title || lane.id} | ${teachingEnumEvidenceLabel(lane.role)} | ${marker} | ${formatTeachingConfidence(lane.confidence)} | ${lane.evidenceSource || '-'} |`,
         );
       }
     }
@@ -9673,18 +10576,30 @@ Click ⚙️ to configure backend connection.`,
       const lanesById = new Map(
         (observedFlow.lanes || []).map((lane) => [lane.id, lane]),
       );
-      lines.push('', '| From | Relation | To | Evidence |');
+      lines.push(
+        '',
+        uiText(
+          '| 来源 | 关系 | 目标 | 证据 |',
+          '| From | Relation | To | Evidence |',
+        ),
+      );
       lines.push('|------|----------|----|----------|');
       for (const dependency of observedFlow.dependencies.slice(0, 16)) {
         const from = lanesById.get(dependency.fromLaneId);
         const to = lanesById.get(dependency.toLaneId);
         lines.push(
-          `| ${from?.title || dependency.fromLaneId} | ${dependency.relation} | ${to?.title || dependency.toLaneId} | ${dependency.evidenceSource || dependency.detail || '-'} |`,
+          `| ${from?.title || dependency.fromLaneId} | ${teachingEnumEvidenceLabel(dependency.relation)} | ${to?.title || dependency.toLaneId} | ${dependency.evidenceSource || dependency.detail || '-'} |`,
         );
       }
     }
     if (observedFlow?.criticalTasks?.length) {
-      lines.push('', '| Kind | Task | Waker | ts(ns) | dur | Evidence |');
+      lines.push(
+        '',
+        uiText(
+          '| 类型 | 任务 | 唤醒方 | ts(ns) | dur | 证据 |',
+          '| Kind | Task | Waker | ts(ns) | dur | Evidence |',
+        ),
+      );
       lines.push('|------|------|-------|--------|-----|----------|');
       for (const task of observedFlow.criticalTasks.slice(0, 16)) {
         const owner =
@@ -9699,24 +10614,33 @@ Click ⚙️ to configure backend connection.`,
             '-'
           : '-';
         lines.push(
-          `| ${task.kind} | ${owner} | ${waker} | ${formatTeachingNs(task.ts)} | ${formatTeachingMs(task.durMs)} | ${task.evidenceSource || '-'} |`,
+          `| ${teachingEnumEvidenceLabel(task.kind)} | ${owner} | ${waker} | ${formatTeachingNs(task.ts)} | ${formatTeachingMs(task.durMs)} | ${task.evidenceSource || '-'} |`,
         );
       }
     }
     if (observedFlow?.events?.length) {
-      lines.push('', '| Stage | Slice | Thread / Process | ts(ns) | dur |');
+      lines.push(
+        '',
+        uiText(
+          '| 阶段 | Slice | 线程 / 进程 | ts(ns) | dur |',
+          '| Stage | Slice | Thread / Process | ts(ns) | dur |',
+        ),
+      );
       lines.push('|-------|-------|------------------|--------|-----|');
       for (const event of observedFlow.events.slice(0, 16)) {
         const owner =
           [event.threadName, event.processName].filter(Boolean).join(' / ') ||
           '-';
         lines.push(
-          `| ${event.stage} | ${event.name} | ${owner} | ${formatTeachingNs(event.ts)} | ${formatTeachingMs(event.durMs)} |`,
+          `| ${teachingEnumEvidenceLabel(event.stage)} | ${event.name} | ${owner} | ${formatTeachingNs(event.ts)} | ${formatTeachingMs(event.durMs)} |`,
         );
       }
     }
     if (observedFlow?.completeness?.missingSignals?.length) {
-      lines.push('', '### 采集/观测缺口');
+      lines.push(
+        '',
+        uiText('### 采集/观测缺口', '### Capture and observation gaps'),
+      );
       for (const missing of observedFlow.completeness.missingSignals) {
         lines.push(`- ${missing}`);
       }
@@ -9732,7 +10656,15 @@ Click ⚙️ to configure backend connection.`,
         content.summary || '',
       );
       if (content.threadRoles?.length) {
-        lines.push('', '#### 关键线程角色', '', '| 线程 | 职责 | Trace 标签 |');
+        lines.push(
+          '',
+          uiText('#### 关键线程角色', '#### Key thread roles'),
+          '',
+          uiText(
+            '| 线程 | 职责 | Trace 标签 |',
+            '| Thread | Responsibility | Trace label |',
+          ),
+        );
         lines.push('|------|------|------------|');
         for (const role of content.threadRoles) {
           lines.push(
@@ -9743,12 +10675,17 @@ Click ⚙️ to configure backend connection.`,
       if (content.keySlices?.length) {
         lines.push(
           '',
-          '#### 关键 Slice',
+          uiText('#### 关键 Slice', '#### Key slices'),
           `\`${content.keySlices.join('`, `')}\``,
         );
       }
       if (content.mermaidBlocks?.length) {
-        lines.push('', '#### 时序图', '', '```mermaid');
+        lines.push(
+          '',
+          uiText('#### 时序图', '#### Sequence diagram'),
+          '',
+          '```mermaid',
+        );
         lines.push(content.mermaidBlocks[0]);
         lines.push('```');
       }
@@ -9759,11 +10696,11 @@ Click ⚙️ to configure backend connection.`,
       detection.traceRequirementsMissing ||
       [];
     if (traceWarnings.length > 0) {
-      lines.push('', '### 采集建议');
+      lines.push('', uiText('### 采集建议', '### Capture recommendations'));
       for (const hint of traceWarnings) lines.push(`- ${hint}`);
     }
     if (result.warnings?.length) {
-      lines.push('', '### 教学结果提示');
+      lines.push('', uiText('### 教学结果提示', '### Tutorial result notes'));
       for (const warning of result.warnings.slice(0, 20)) {
         lines.push(
           `- [${warning.severity || 'info'}] ${warning.message || warning.code || 'warning'}`,
@@ -9771,18 +10708,39 @@ Click ⚙️ to configure backend connection.`,
       }
     }
     if (pinExecution) {
-      lines.push('', '### Pin 执行结果');
-      lines.push(`- 已 pin: ${pinExecution.count}`);
-      lines.push(`- 未命中/跳过: ${pinExecution.skipped}`);
-      lines.push(`- 失败: ${pinExecution.failed}`);
+      lines.push('', uiText('### Pin 执行结果', '### Pin execution result'));
+      lines.push(
+        uiText(
+          `- 已固定：${pinExecution.count}`,
+          `- Pinned: ${pinExecution.count}`,
+        ),
+      );
+      lines.push(
+        uiText(
+          `- 未命中/跳过：${pinExecution.skipped}`,
+          `- Not matched/skipped: ${pinExecution.skipped}`,
+        ),
+      );
+      lines.push(
+        uiText(
+          `- 失败：${pinExecution.failed}`,
+          `- Failed: ${pinExecution.failed}`,
+        ),
+      );
       if (pinExecution.missingPatterns?.length > 0) {
         lines.push(
-          `- 未命中的 pattern: ${pinExecution.missingPatterns.join(', ')}`,
+          uiText(
+            `- 未命中的 pattern：${pinExecution.missingPatterns.join(', ')}`,
+            `- Unmatched patterns: ${pinExecution.missingPatterns.join(', ')}`,
+          ),
         );
       }
       if (pinExecution.pinnedTrackNames?.length > 0) {
         lines.push(
-          `- 已 pin 的 track: ${pinExecution.pinnedTrackNames.join(', ')}`,
+          uiText(
+            `- 已固定的轨道：${pinExecution.pinnedTrackNames.join(', ')}`,
+            `- Pinned tracks: ${pinExecution.pinnedTrackNames.join(', ')}`,
+          ),
         );
       }
     }
@@ -9871,7 +10829,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: '⚠️ **无法执行管线检测**\n\n请先确保 Trace 已上传到后端。',
+        content: uiText(
+          '⚠️ **无法执行管线检测**\n\n请先确保 Trace 已上传到后端。',
+          '⚠️ **Pipeline detection cannot run**\n\nMake sure the trace has been uploaded to the backend.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -9880,11 +10841,12 @@ Click ⚙️ to configure backend connection.`,
     this.setLoadingState(true);
     m.redraw();
 
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log(
         '[AIPanel] Teaching pipeline request with traceId:',
         this.state.backendTraceId,
       );
+    }
 
     try {
       const requestContext = this.buildTeachingPipelineRequestContext();
@@ -9898,6 +10860,7 @@ Click ⚙️ to configure backend connection.`,
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             traceId: this.state.backendTraceId,
+            outputLanguage: uiOutputLanguage(),
             ...requestContext,
           }),
         },
@@ -9924,7 +10887,9 @@ Click ⚙️ to configure backend connection.`,
         error?: string;
       };
       if (!data.success) {
-        throw new Error(data.error || 'Pipeline detection failed');
+        throw new Error(
+          data.error || uiText('管线检测失败', 'Pipeline detection failed'),
+        );
       }
 
       const pinInstructions = this.buildTeachingPinInstructions(data);
@@ -9950,7 +10915,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `❌ **管线检测失败**\n\n${error.message || '未知错误'}`,
+        content: uiText(
+          `❌ **管线检测失败**\n\n${error.message || '未知错误'}`,
+          `❌ **Pipeline detection failed**\n\n${error.message || 'Unknown error'}`,
+        ),
         timestamp: Date.now(),
       });
     }
@@ -10057,7 +11025,8 @@ Click ⚙️ to configure backend connection.`,
       }
     } catch (err: any) {
       this.state.storyState.status = 'failed';
-      this.state.storyState.lastError = err?.message ?? 'Preview failed';
+      this.state.storyState.lastError =
+        err?.message ?? uiText('预览失败', 'Preview failed');
     }
     m.redraw();
   }
@@ -10086,7 +11055,7 @@ Click ⚙️ to configure backend connection.`,
     } catch (err: any) {
       this.state.storyState.status = 'failed';
       this.state.storyState.lastError =
-        err?.message ?? 'Scene reconstruction failed';
+        err?.message ?? uiText('场景还原失败', 'Scene reconstruction failed');
     }
     m.redraw();
   }
@@ -10102,7 +11071,10 @@ Click ⚙️ to configure backend connection.`,
         this.addMessage({
           id: this.generateId(),
           role: 'assistant',
-          content: '停止分析失败：当前分析缺少运行标识，请重试。',
+          content: uiText(
+            '停止分析失败：当前分析缺少运行标识，请重试。',
+            'Failed to stop the analysis because its run identifier is missing. Try again.',
+          ),
           timestamp: Date.now(),
         });
         m.redraw();
@@ -10159,7 +11131,7 @@ Click ⚙️ to configure backend connection.`,
     return m('aside.ai-story-sidebar', [
       m('div.ai-story-sidebar-header', [
         m('i.pf-icon', 'movie'),
-        m('span', 'Story'),
+        m('span', uiText('场景故事', 'Story')),
         m(
           'button.ai-story-sidebar-close',
           {
@@ -10190,7 +11162,11 @@ Click ⚙️ to configure backend connection.`,
     }
 
     return m('div.ai-story-body', [
-      m('h2', {style: 'margin: 0 0 8px 0;'}, uiText('🎬 场景还原', '🎬 Scene Story')),
+      m(
+        'h2',
+        {style: 'margin: 0 0 8px 0;'},
+        uiText('🎬 场景还原', '🎬 Scene Story'),
+      ),
       m(
         'p',
         {style: 'color: var(--chat-text-secondary); margin: 0 0 16px 0;'},
@@ -10213,21 +11189,30 @@ Click ⚙️ to configure backend connection.`,
       s.status === 'previewing'
         ? m(
             'div.ai-story-card.ai-story-card--info',
-            uiText('⏳ 正在检查缓存与估算成本...', '⏳ Checking cache and estimating cost...'),
+            uiText(
+              '⏳ 正在检查缓存与估算成本...',
+              '⏳ Checking cache and estimating cost...',
+            ),
           )
         : null,
 
       s.status === 'preview_cached'
         ? m(
             'div.ai-story-card.ai-story-card--success',
-            uiText('✅ 发现历史缓存报告，正在加载...', '✅ Cached report found; loading...'),
+            uiText(
+              '✅ 发现历史缓存报告，正在加载...',
+              '✅ Cached report found; loading...',
+            ),
           )
         : null,
 
       // Preview: cold path — show estimate + confirm button.
       s.status === 'preview_cold' && s.preview
         ? m('div.ai-story-card.ai-story-card--cold-preview', [
-            m('div.ai-story-cold-preview-title', uiText('预估分析成本', 'Estimated analysis cost')),
+            m(
+              'div.ai-story-cold-preview-title',
+              uiText('预估分析成本', 'Estimated analysis cost'),
+            ),
             m('div.ai-story-cold-preview-metrics', [
               this.renderEstimateMetric(
                 `${s.preview.estimate.expectedScenes}`,
@@ -10243,10 +11228,13 @@ Click ⚙️ to configure backend connection.`,
               ),
             ]),
             s.preview.estimate.confidence === 'low'
-              ? m('div.ai-story-hint', uiText(
-                  '* 预估基于启发式公式，实际可能有所偏差',
-                  '* This heuristic estimate may differ from actual usage.',
-                ))
+              ? m(
+                  'div.ai-story-hint',
+                  uiText(
+                    '* 预估基于启发式公式，实际可能有所偏差',
+                    '* This heuristic estimate may differ from actual usage.',
+                  ),
+                )
               : null,
             m('div.ai-story-cold-preview-actions', [
               m(
@@ -10272,11 +11260,21 @@ Click ⚙️ to configure backend connection.`,
 
       s.status === 'running'
         ? m('div.ai-story-card.ai-story-card--info', [
-            m('div', {style: 'margin-bottom: 8px;'}, uiText('🎬 场景还原进行中...', '🎬 Scene reconstruction in progress...')),
+            m(
+              'div',
+              {style: 'margin-bottom: 8px;'},
+              uiText(
+                '🎬 场景还原进行中...',
+                '🎬 Scene reconstruction in progress...',
+              ),
+            ),
             m(
               'div',
               {style: 'font-size: 13px; color: var(--chat-text-secondary);'},
-              uiText('进度消息同步显示在 Chat 视图中。', 'Progress is also shown in the Chat view.'),
+              uiText(
+                '进度消息同步显示在 Chat 视图中。',
+                'Progress is also shown in the Chat view.',
+              ),
             ),
             m(
               'button.ai-story-btn-ghost-danger',
@@ -10290,7 +11288,10 @@ Click ⚙️ to configure backend connection.`,
 
       s.status === 'selection_ready'
         ? m('div.ai-story-card.ai-story-card--cold-preview', [
-            m('div.ai-story-cold-preview-title', uiText('选择智能分析范围', 'Choose Smart analysis scope')),
+            m(
+              'div.ai-story-cold-preview-title',
+              uiText('选择智能分析范围', 'Choose Smart analysis scope'),
+            ),
             m(
               'div',
               {
@@ -10310,7 +11311,10 @@ Click ⚙️ to configure backend connection.`,
 
       s.status === 'failed'
         ? m('div.ai-story-card.ai-story-card--error', [
-            m('div', `❌ ${s.lastError || uiText('场景还原失败', 'Scene reconstruction failed')}`),
+            m(
+              'div',
+              `❌ ${s.lastError || uiText('场景还原失败', 'Scene reconstruction failed')}`,
+            ),
             m(
               'button.ai-story-btn-retry',
               {
@@ -10368,14 +11372,14 @@ Click ⚙️ to configure backend connection.`,
                         'margin-top: 8px; font-size: 12px; color: var(--chat-text-secondary);',
                     },
                     uiText(
-                      `来自缓存 (${new Date(report.createdAt).toLocaleString()})`,
-                      `From cache (${new Date(report.createdAt).toLocaleString()})`,
+                      `来自缓存（${new Date(report.createdAt).toLocaleString('zh-CN')}）`,
+                      `From cache (${new Date(report.createdAt).toLocaleString('en-US')})`,
                     ),
                   )
                 : null,
             ])
           : uiText(
-              '✅ 场景还原完成。切换到 Chat 视图查看完整结果。',
+              '✅ 场景还原完成。切换到对话视图查看完整结果。',
               '✅ Scene reconstruction complete. Switch to Chat for the full result.',
             ),
       ]),
@@ -10393,9 +11397,7 @@ Click ⚙️ to configure backend connection.`,
                     uiText('时长', 'Duration'),
                     uiText('应用/进程', 'App/Process'),
                     uiText('状态', 'Status'),
-                  ].map((h) =>
-                    m('th', h),
-                  ),
+                  ].map((h) => m('th', h)),
                 ),
               ),
               m(
@@ -10482,8 +11484,9 @@ Click ⚙️ to configure backend connection.`,
         !envelope?.meta?.stepId ||
         !envelope?.data?.columns ||
         !envelope?.data?.rows
-      )
+      ) {
         continue;
+      }
       const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
       if (overlayId) {
         createOverlayTrack(
@@ -10529,16 +11532,18 @@ Click ⚙️ to configure backend connection.`,
    */
   private async detectScenesQuick() {
     if (!this.state.backendTraceId) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] No backend trace ID, skipping quick scene detection',
         );
+      }
       return;
     }
 
     if (this.state.scenesLoading) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Scene detection already in progress');
+      }
       return;
     }
 
@@ -10546,11 +11551,12 @@ Click ⚙️ to configure backend connection.`,
     this.state.scenesError = null;
     m.redraw();
 
-    if (DEBUG_AI_PANEL)
+    if (DEBUG_AI_PANEL) {
       console.log(
         '[AIPanel] Starting quick scene detection for trace:',
         this.state.backendTraceId,
       );
+    }
 
     try {
       const response = await this.fetchBackend(
@@ -10578,12 +11584,13 @@ Click ⚙️ to configure backend connection.`,
       }
 
       this.state.detectedScenes = data.scenes || [];
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Quick scene detection complete:',
           this.state.detectedScenes.length,
           'scenes',
         );
+      }
     } catch (error: any) {
       console.warn('[AIPanel] Quick scene detection failed:', error.message);
       this.state.scenesError = error.message;
@@ -10659,8 +11666,9 @@ Click ⚙️ to configure backend connection.`,
     const getTrackActivityCount = async (trackNode: any): Promise<number> => {
       const uri = trackNode?.uri as string | undefined;
       if (!uri) return 0;
-      if (trackActivityCountCache.has(uri))
+      if (trackActivityCountCache.has(uri)) {
         return trackActivityCountCache.get(uri) ?? 0;
+      }
 
       const track = this.trace?.tracks.getTrack(uri);
       const trackIdsRaw = track?.tags?.trackIds;
@@ -10721,18 +11729,21 @@ Click ⚙️ to configure backend connection.`,
     // Debug: Log available track names and active processes
     if (flatTracks) {
       const trackNames = flatTracks.slice(0, 50).map((t) => t.name);
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Available track names (first 50):', trackNames);
-      if (DEBUG_AI_PANEL)
+      }
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Active rendering processes:',
           Array.from(activeProcessNames),
         );
-      if (DEBUG_AI_PANEL)
+      }
+      if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Active surface hints:',
           Array.from(activityHints),
         );
+      }
     }
 
     for (const inst of sortedInstructions) {
@@ -10741,10 +11752,11 @@ Click ⚙️ to configure backend connection.`,
       try {
         // v3.1: Skip instructions marked with skipPin (e.g., RenderThread with no active processes)
         if (inst.skipPin) {
-          if (DEBUG_AI_PANEL)
+          if (DEBUG_AI_PANEL) {
             console.log(
               `[AIPanel] Skipped by skipPin flag: ${inst.pattern} - ${inst.reason || 'no reason'}`,
             );
+          }
           pinnedCount.skipped++;
           continue;
         }
@@ -10826,8 +11838,9 @@ Click ⚙️ to configure backend connection.`,
             // Track by proc+kind to allow both SliceTrack and ThreadStateTrack per process
             const pinnedByProcAndKind = new Set<string>();
             for (const trackNode of flatTracks) {
-              if (this.shouldIgnoreAutoPinTrackName(trackNode.name || ''))
+              if (this.shouldIgnoreAutoPinTrackName(trackNode.name || '')) {
                 continue;
+              }
               const uri = trackNode.uri as string | undefined;
               if (!uri || !isMainThreadPinnableTrack(uri)) continue;
 
@@ -10871,8 +11884,9 @@ Click ⚙️ to configure backend connection.`,
                 pinnedForInstruction++;
               }
               // If we don't have per-proc filtering, pin at most 2 (slice + state).
-              if (smartProcessNames.length === 0 && pinnedForInstruction >= 2)
+              if (smartProcessNames.length === 0 && pinnedForInstruction >= 2) {
                 break;
+              }
             }
             if (
               pinnedCount.count === pinnedBeforeInstruction &&
@@ -10900,19 +11914,26 @@ Click ⚙️ to configure backend connection.`,
                     /^QueuedBuffer\\b/i.test(name) &&
                     activityHints.size > 0
                   ) {
-                    if (Array.from(activityHints).some((h) => name.includes(h)))
+                    if (
+                      Array.from(activityHints).some((h) => name.includes(h))
+                    ) {
                       score += 1_000_000;
+                    }
                   }
                   if (
                     /^BufferTX\\b/i.test(name) &&
                     smartProcessNames.length > 0
                   ) {
-                    if (smartProcessNames.some((p) => name.includes(p)))
+                    if (smartProcessNames.some((p) => name.includes(p))) {
                       score += 1_000_000;
+                    }
                   }
                   if (/BufferQueue/i.test(name) && activityHints.size > 0) {
-                    if (Array.from(activityHints).some((h) => name.includes(h)))
+                    if (
+                      Array.from(activityHints).some((h) => name.includes(h))
+                    ) {
                       score += 1_000_000;
+                    }
                   }
 
                   return {trackNode, score};
@@ -10944,8 +11965,9 @@ Click ⚙️ to configure backend connection.`,
               if (
                 maxPinsForInstruction &&
                 pinnedForInstruction >= maxPinsForInstruction
-              )
+              ) {
                 break;
+              }
             }
           }
         }
@@ -10967,10 +11989,11 @@ Click ⚙️ to configure backend connection.`,
     }
 
     if (pinnedCount.count > 0 || pinnedCount.skipped > 0) {
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           `[AIPanel] Pinned ${pinnedCount.count} tracks for teaching (skipped ${pinnedCount.skipped} inactive)`,
         );
+      }
     }
 
     pinnedCount.missingPatterns = Array.from(
@@ -10983,7 +12006,32 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private getHelpMessage(): string {
-    return `**AI Assistant Commands:**
+    return uiText(
+      `**AI 助手命令：**
+
+| 命令 | 说明 |
+|------|------|
+| \`/sql <查询>\` | 执行 SQL 查询 |
+| \`/goto <时间戳>\` | 跳转到时间戳 |
+| \`/analyze\` | 分析当前选区 |
+| \`/anr\` | 查找 ANR |
+| \`/jank\` | 查找卡顿帧 |
+| \`/slow\` | 分析慢操作（后端） |
+| \`/memory\` | 分析内存使用（后端） |
+| \`/teaching-pipeline\` | 检测渲染管线并展示教学信息 |
+| \`/scene\` | 识别 Trace 中的操作场景 |
+| \`/export [csv|json]\` | 导出会话结果 |
+| \`/pins\` | 查看固定的查询结果 |
+| \`/clear\` | 清空对话记录 |
+| \`/help\` | 显示帮助 |
+| \`/settings\` | 打开设置 |
+
+**提示：**
+- 使用方向键浏览命令历史
+- Shift+Enter 换行，Enter 发送
+- 点击 CSV 或 JSON 按钮导出查询结果
+- 点击 Pin 保存查询结果`,
+      `**AI Assistant commands:**
 
 | Command | Description |
 |---------|-------------|
@@ -10994,8 +12042,8 @@ Click ⚙️ to configure backend connection.`,
 | \`/jank\` | Find janky frames |
 | \`/slow\` | Analyze slow operations (backend) |
 | \`/memory\` | Analyze memory usage (backend) |
-| \`/teaching-pipeline\` | 🎓 教学：检测渲染管线类型 |
-| \`/scene\` | 🎬 场景还原：识别 Trace 中的操作场景 |
+| \`/teaching-pipeline\` | Detect the rendering pipeline and show tutorial details |
+| \`/scene\` | Reconstruct user-interaction scenes in the trace |
 | \`/export [csv|json]\` | Export session results |
 | \`/pins\` | View pinned query results |
 | \`/clear\` | Clear chat history |
@@ -11006,7 +12054,8 @@ Click ⚙️ to configure backend connection.`,
 - Use arrow keys to navigate command history
 - Shift+Enter for new line, Enter to send
 - Click 📄 CSV or 📋 JSON buttons to export query results
-- Click 📌 Pin to save query results for later`;
+- Click 📌 Pin to save query results for later`,
+    );
   }
 
   /**
@@ -11034,11 +12083,11 @@ Click ⚙️ to configure backend connection.`,
       // 获取 session 摘要（取第一条用户消息或自动生成）
       const userMessages = session.messages.filter((m) => m.role === 'user');
       const summary = isCurrent
-        ? '当前对话'
+        ? uiText('当前对话', 'Current chat')
         : session.summary ||
           (userMessages.length > 0
             ? userMessages[0].content.slice(0, 30)
-            : '新对话');
+            : uiText('新对话', 'New chat'));
 
       return m(
         'div.ai-session-sidebar-item',
@@ -11054,7 +12103,7 @@ Click ⚙️ to configure backend connection.`,
               this.loadSession(session.sessionId);
             }
           },
-          title: isCurrent ? '当前对话' : summary,
+          title: isCurrent ? uiText('当前对话', 'Current chat') : summary,
         },
         [
           m('div.ai-session-sidebar-item-indicator', isCurrent ? '●' : '○'),
@@ -11064,7 +12113,10 @@ Click ⚙️ to configure backend connection.`,
               summary + (!isCurrent && summary.length >= 30 ? '...' : ''),
             ),
             m('div.ai-session-sidebar-item-meta', [
-              m('span', `${messageCount} 条`),
+              m(
+                'span',
+                uiText(`${messageCount} 条`, `${messageCount} messages`),
+              ),
               m('span', '·'),
               m('span', lastActive),
             ]),
@@ -11077,11 +12129,13 @@ Click ⚙️ to configure backend connection.`,
                   disabled: this.isAnalysisIdentityLocked(),
                   onclick: (e: MouseEvent) => {
                     e.stopPropagation();
-                    if (confirm('确定删除这个对话？')) {
+                    if (
+                      confirm(uiText('确定删除这个对话？', 'Delete this chat?'))
+                    ) {
                       this.deleteSession(session.sessionId);
                     }
                   },
-                  title: '删除对话',
+                  title: uiText('删除对话', 'Delete chat'),
                 },
                 m('i.pf-icon', 'close'),
               )
@@ -11094,7 +12148,7 @@ Click ⚙️ to configure backend connection.`,
       // 标题栏
       m('div.ai-session-sidebar-header', [
         m('i.pf-icon', 'chat'),
-        m('span', '对话'),
+        m('span', uiText('对话', 'Chats')),
       ]),
 
       // Session 列表
@@ -11104,7 +12158,10 @@ Click ⚙️ to configure backend connection.`,
 
         // 历史对话分隔线（只在有历史时显示）
         historySessions.length > 0
-          ? m('div.ai-session-sidebar-divider', '历史对话')
+          ? m(
+              'div.ai-session-sidebar-divider',
+              uiText('历史对话', 'Chat history'),
+            )
           : null,
 
         // 历史对话列表
@@ -11130,7 +12187,7 @@ Click ⚙️ to configure backend connection.`,
             }
             m.redraw();
           },
-          title: '新建对话',
+          title: uiText('新建对话', 'New chat'),
         },
         [m('i.pf-icon', 'add')],
       ),
@@ -11149,10 +12206,16 @@ Click ⚙️ to configure backend connection.`,
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
 
-    if (days > 0) return `${days} 天前`;
-    if (hours > 0) return `${hours} 小时前`;
-    if (minutes > 0) return `${minutes} 分钟前`;
-    return '刚刚';
+    if (days > 0) {
+      return uiText(`${days} 天前`, `${days} days ago`);
+    }
+    if (hours > 0) {
+      return uiText(`${hours} 小时前`, `${hours} hours ago`);
+    }
+    if (minutes > 0) {
+      return uiText(`${minutes} 分钟前`, `${minutes} minutes ago`);
+    }
+    return uiText('刚刚', 'Just now');
   }
 
   /**
@@ -11181,8 +12244,9 @@ Click ⚙️ to configure backend connection.`,
       const startNs = timestampNs - windowNs / BigInt(2);
       const endNs = timestampNs + windowNs / BigInt(2);
 
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(`[AIPanel] Jumping to timestamp: ${timestampNs}ns`);
+      }
 
       this.trace.scrollTo({
         time: {
@@ -11450,14 +12514,20 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: `✅ Exported **${result.rowCount}** rows as ${format.toUpperCase()}`,
+        content: uiText(
+          `✅ 已将 **${result.rowCount}** 行导出为 ${format.toUpperCase()}`,
+          `✅ Exported **${result.rowCount}** rows as ${format.toUpperCase()}`,
+        ),
         timestamp: Date.now(),
       });
     } catch (e: any) {
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Export failed:** ${e.message}`,
+        content: uiText(
+          `**导出失败：** ${e.message}`,
+          `**Export failed:** ${e.message}`,
+        ),
         timestamp: Date.now(),
       });
     } finally {
@@ -11476,7 +12546,10 @@ Click ⚙️ to configure backend connection.`,
     const results = this.state.messages
       .filter((msg) => msg.sqlResult)
       .map((msg) => ({
-        name: `Query at ${new Date(msg.timestamp).toLocaleTimeString()}`,
+        name: uiText(
+          `${new Date(msg.timestamp).toLocaleTimeString()} 的查询`,
+          `Query at ${new Date(msg.timestamp).toLocaleTimeString()}`,
+        ),
         result: msg.sqlResult!,
       }));
 
@@ -11484,7 +12557,10 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: '**No SQL results to export.** Run some queries first.',
+        content: uiText(
+          '**没有可导出的 SQL 结果。** 请先运行一些查询。',
+          '**No SQL results to export.** Run some queries first.',
+        ),
         timestamp: Date.now(),
       });
       return;
@@ -11531,14 +12607,20 @@ Click ⚙️ to configure backend connection.`,
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: `✅ Exported session with **${results.length}** query results as ${format.toUpperCase()}`,
+        content: uiText(
+          `✅ 已将包含 **${results.length}** 个查询结果的会话导出为 ${format.toUpperCase()}`,
+          `✅ Exported the session with **${results.length}** query results as ${format.toUpperCase()}`,
+        ),
         timestamp: Date.now(),
       });
     } catch (e: any) {
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
-        content: `**Export failed:** ${e.message}`,
+        content: uiText(
+          `**导出失败：** ${e.message}`,
+          `**Export failed:** ${e.message}`,
+        ),
         timestamp: Date.now(),
       });
     } finally {
@@ -11598,7 +12680,7 @@ Click ⚙️ to configure backend connection.`,
 
     // 根据查询类型确定书签类型
     let bookmarkType: NavigationBookmark['type'] = 'custom';
-    let labelPrefix = '关键点';
+    let labelPrefix = uiText('关键点', 'Key point');
 
     if (
       queryLower.includes('jank') ||
@@ -11606,7 +12688,7 @@ Click ⚙️ to configure backend connection.`,
       queryLower.includes('frame')
     ) {
       bookmarkType = 'jank';
-      labelPrefix = '掉帧';
+      labelPrefix = uiText('掉帧', 'Jank');
     } else if (queryLower.includes('anr')) {
       bookmarkType = 'anr';
       labelPrefix = 'ANR';
@@ -11616,7 +12698,7 @@ Click ⚙️ to configure backend connection.`,
       queryLower.includes('dur')
     ) {
       bookmarkType = 'slow_function';
-      labelPrefix = '慢函数';
+      labelPrefix = uiText('慢函数', 'Slow function');
     } else if (queryLower.includes('binder')) {
       bookmarkType = 'binder_slow';
       labelPrefix = 'Binder';
@@ -11657,10 +12739,11 @@ Click ⚙️ to configure backend connection.`,
     // 更新书签列表
     if (bookmarks.length > 0) {
       this.state.bookmarks = bookmarks;
-      if (DEBUG_AI_PANEL)
+      if (DEBUG_AI_PANEL) {
         console.log(
           `Extracted ${bookmarks.length} bookmarks from query result`,
         );
+      }
       // AI Everywhere: also create timeline notes for visual annotation
       if (this.trace) {
         const findings = addBookmarkNotes(this.trace, bookmarks);
@@ -11724,10 +12807,12 @@ Click ⚙️ to configure backend connection.`,
       );
       const response = await this.fetchBackend(url);
       if (!response.ok) {
-        throw new Error(uiText(
-          `Trace 列表请求失败 (${response.status})`,
-          `Trace catalog request failed (${response.status})`,
-        ));
+        throw new Error(
+          uiText(
+            `Trace 列表请求失败 (${response.status})`,
+            `Trace catalog request failed (${response.status})`,
+          ),
+        );
       }
       const parsed = parseWorkspaceTraceCatalogResponse(await response.json());
       if (!parsed.ok) throw new Error(parsed.error);
@@ -12130,8 +13215,14 @@ Click ⚙️ to configure backend connection.`,
         role: 'system',
         content:
           error instanceof Error
-            ? `更新分析结果可见性失败: ${error.message}`
-            : '更新分析结果可见性失败。',
+            ? uiText(
+                `更新分析结果可见性失败：${error.message}`,
+                `Failed to update analysis-result visibility: ${error.message}`,
+              )
+            : uiText(
+                '更新分析结果可见性失败。',
+                'Failed to update analysis-result visibility.',
+              ),
         timestamp: Date.now(),
       });
     } finally {
@@ -12186,7 +13277,10 @@ Click ⚙️ to configure backend connection.`,
   ): string {
     const result = comparison.result;
     if (!result) {
-      return `**分析结果对比已创建**\n\nComparison: \`${comparison.id}\`\nStatus: ${comparison.status}`;
+      return uiText(
+        `**分析结果对比已创建**\n\n对比：\`${comparison.id}\`\n状态：${comparison.status}`,
+        `**Analysis-result comparison created**\n\nComparison: \`${comparison.id}\`\nStatus: ${comparison.status}`,
+      );
     }
 
     const matrix = result.matrix;
@@ -12225,11 +13319,14 @@ Click ⚙️ to configure backend connection.`,
     const table =
       tableRows.length > 0
         ? [
-            '| Metric | Baseline | Candidate values and deltas |',
+            uiText(
+              '| 指标 | 基线 | 候选值与差异 |',
+              '| Metric | Baseline | Candidate values and deltas |',
+            ),
             '|---|---:|---|',
             ...tableRows.map((row) => `| ${row[0]} | ${row[1]} | ${row[2]} |`),
           ].join('\n')
-        : '没有可展示的 metric 行。';
+        : uiText('没有可展示的指标行。', 'No metric rows are available.');
 
     const exportUrl = buildSmartPerfettoWorkspaceApiUrl(
       this.state.settings.backendUrl,
@@ -12239,7 +13336,10 @@ Click ⚙️ to configure backend connection.`,
     const hiddenRows = matrix.rows.length - rows.length;
     const hiddenText =
       hiddenRows > 0
-        ? `\n\n还有 ${hiddenRows} 行未在消息中展开，完整内容见 HTML 报告。`
+        ? uiText(
+            `\n\n还有 ${hiddenRows} 行未在消息中展开，完整内容见 HTML 报告。`,
+            `\n\n${hiddenRows} more rows are omitted from this message. See the HTML report for the full result.`,
+          )
         : '';
     const baselineTitle =
       baseline?.title ||
@@ -12257,17 +13357,32 @@ Click ⚙️ to configure backend connection.`,
       : '';
 
     return [
-      '**分析结果对比已完成**',
+      uiText(
+        '**分析结果对比已完成**',
+        '**Analysis-result comparison complete**',
+      ),
       '',
-      `Comparison: \`${comparison.id}\``,
-      `Baseline: ${baselineTitle}${baselineRef}`,
-      `Candidates: ${candidateTitles || 'n/a'}`,
-      `Significant changes: ${result.significantChanges.length}`,
+      uiText(`对比：\`${comparison.id}\``, `Comparison: \`${comparison.id}\``),
+      uiText(
+        `基线：${baselineTitle}${baselineRef}`,
+        `Baseline: ${baselineTitle}${baselineRef}`,
+      ),
+      uiText(
+        `候选：${candidateTitles || 'n/a'}`,
+        `Candidates: ${candidateTitles || 'n/a'}`,
+      ),
+      uiText(
+        `显著变化：${result.significantChanges.length}`,
+        `Significant changes: ${result.significantChanges.length}`,
+      ),
       '',
       table,
       hiddenText,
       '',
-      `[导出 HTML 报告](${exportUrl})`,
+      uiText(
+        `[导出 HTML 报告](${exportUrl})`,
+        `[Export HTML report](${exportUrl})`,
+      ),
     ].join('\n');
   }
 
@@ -12503,7 +13618,7 @@ Click ⚙️ to configure backend connection.`,
       return m('section.ai-result-similarity-summary.loading', [
         m('div.ai-result-similarity-header', [
           m('i.pf-icon', 'travel_explore'),
-          m('span', '查找相似结果中...'),
+          m('span', uiText('正在查找相似结果…', 'Finding similar results…')),
         ]),
       ]);
     }
@@ -12511,7 +13626,13 @@ Click ⚙️ to configure backend connection.`,
       return m('section.ai-result-similarity-summary.error', [
         m('div.ai-result-similarity-header', [
           m('i.pf-icon', 'error'),
-          m('span', `相似结果加载失败: ${state.error}`),
+          m(
+            'span',
+            uiText(
+              `相似结果加载失败：${state.error}`,
+              `Failed to load similar results: ${state.error}`,
+            ),
+          ),
         ]),
       ]);
     }
@@ -12521,7 +13642,7 @@ Click ⚙️ to configure backend connection.`,
     return m('section.ai-result-similarity-summary', [
       m('div.ai-result-similarity-header', [
         m('i.pf-icon', 'travel_explore'),
-        m('span', '相似结果提示'),
+        m('span', uiText('相似结果提示', 'Similar-result hints')),
         m('span.ai-result-similarity-policy', 'navigation_hint_only'),
         result.snapshotId
           ? m(
@@ -12540,7 +13661,10 @@ Click ⚙️ to configure backend connection.`,
           )
         : m(
             'div.ai-result-similarity-empty',
-            '没有找到足够相似的历史结果或案例。',
+            uiText(
+              '没有找到足够相似的历史结果或案例。',
+              'No sufficiently similar historical results or cases were found.',
+            ),
           ),
     ]);
   }
@@ -12561,9 +13685,14 @@ Click ⚙️ to configure backend connection.`,
     try {
       const query =
         input.query.trim() ||
-        `Compare ${input.baseline.title || input.baseline.id} with ${input.candidates
-          .map((item) => item.title || item.id)
-          .join(', ')}`;
+        uiText(
+          `对比 ${input.baseline.title || input.baseline.id} 与 ${input.candidates
+            .map((item) => item.title || item.id)
+            .join('、')}`,
+          `Compare ${input.baseline.title || input.baseline.id} with ${input.candidates
+            .map((item) => item.title || item.id)
+            .join(', ')}`,
+        );
       const url = buildSmartPerfettoWorkspaceApiUrl(
         this.state.settings.backendUrl,
         'comparisons',
@@ -12590,7 +13719,12 @@ Click ⚙️ to configure backend connection.`,
         | AnalysisResultComparisonRun
         | undefined;
       if (!comparison?.id) {
-        throw new Error('Comparison response is missing comparison.id');
+        throw new Error(
+          uiText(
+            '对比响应缺少 comparison.id',
+            'Comparison response is missing comparison.id',
+          ),
+        );
       }
 
       if (this.state.input.trim() === query) {
@@ -12607,12 +13741,17 @@ Click ⚙️ to configure backend connection.`,
       }
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Failed to create comparison';
+        error instanceof Error
+          ? error.message
+          : uiText('创建对比失败', 'Failed to create comparison');
       this.state.resultComparisonError = message;
       this.addMessage({
         id: this.generateId(),
         role: 'system',
-        content: `创建分析结果对比失败: ${message}`,
+        content: uiText(
+          `创建分析结果对比失败：${message}`,
+          `Failed to create analysis-result comparison: ${message}`,
+        ),
         timestamp: Date.now(),
       });
     } finally {
@@ -12631,9 +13770,14 @@ Click ⚙️ to configure backend connection.`,
     if (!baseline || candidates.length === 0) return;
     const query =
       this.state.input.trim() ||
-      `Compare ${baseline.title || baseline.id} with ${candidates
-        .map((item) => item.title || item.id)
-        .join(', ')}`;
+      uiText(
+        `对比 ${baseline.title || baseline.id} 与 ${candidates
+          .map((item) => item.title || item.id)
+          .join('、')}`,
+        `Compare ${baseline.title || baseline.id} with ${candidates
+          .map((item) => item.title || item.id)
+          .join(', ')}`,
+      );
     await this.createAnalysisResultComparison({
       baseline,
       candidates,
@@ -12644,13 +13788,15 @@ Click ⚙️ to configure backend connection.`,
 
   private formatAnalysisResultTime(timestamp: number): string {
     if (!Number.isFinite(timestamp)) return '';
-    return new Date(timestamp).toLocaleString();
+    return new Date(timestamp).toLocaleString(
+      uiOutputLanguage() === 'zh-CN' ? 'zh-CN' : 'en-US',
+    );
   }
 
   private formatAnalysisResultStatus(status: string): string {
-    if (status === 'ready') return 'Ready';
-    if (status === 'failed') return 'Failed';
-    return 'Partial';
+    if (status === 'ready') return uiText('就绪', 'Ready');
+    if (status === 'failed') return uiText('失败', 'Failed');
+    return uiText('部分完成', 'Partial');
   }
 
   private renderResultPicker(): m.Vnode {
@@ -12662,7 +13808,7 @@ Click ⚙️ to configure backend connection.`,
     return m('aside.ai-trace-picker-sidebar.ai-result-picker-sidebar', [
       m('div.ai-trace-picker-sidebar-header', [
         m('i.pf-icon', 'fact_check'),
-        m('span', '选择分析结果'),
+        m('span', uiText('选择分析结果', 'Choose analysis results')),
         m(
           'button.ai-trace-picker-sidebar-close',
           {
@@ -12670,7 +13816,7 @@ Click ⚙️ to configure backend connection.`,
               this.state.showResultPicker = false;
               m.redraw();
             },
-            title: '关闭',
+            title: uiText('关闭', 'Close'),
           },
           m('i.pf-icon', 'close'),
         ),
@@ -12678,16 +13824,25 @@ Click ⚙️ to configure backend connection.`,
       m('div.ai-trace-picker-sidebar-body', [
         m('div.ai-result-picker', [
           this.state.resultPickerLoading
-            ? m('div.ai-trace-picker-loading', '加载分析结果中...')
+            ? m(
+                'div.ai-trace-picker-loading',
+                uiText('正在加载分析结果…', 'Loading analysis results…'),
+              )
             : this.state.resultPickerError
               ? m('div.ai-result-picker-error', [
-                  m('div', `加载失败: ${this.state.resultPickerError}`),
+                  m(
+                    'div',
+                    uiText(
+                      `加载失败：${this.state.resultPickerError}`,
+                      `Load failed: ${this.state.resultPickerError}`,
+                    ),
+                  ),
                   m(
                     'button.ai-result-picker-text-btn',
                     {
                       onclick: () => this.fetchAnalysisResults(),
                     },
-                    '重试',
+                    uiText('重试', 'Retry'),
                   ),
                 ])
               : m('div.ai-result-picker-list', [
@@ -12697,7 +13852,10 @@ Click ⚙️ to configure backend connection.`,
                       )
                     : m(
                         'div.ai-trace-picker-empty',
-                        '当前 workspace 还没有可用于对比的分析结果。',
+                        uiText(
+                          '当前 workspace 还没有可用于对比的分析结果。',
+                          'This workspace has no analysis results available for comparison.',
+                        ),
                       ),
                 ]),
         ]),
@@ -12707,7 +13865,10 @@ Click ⚙️ to configure backend connection.`,
               this.state.resultComparisonError
                 ? m(
                     'span.ai-result-picker-action-error',
-                    `对比失败: ${this.state.resultComparisonError}`,
+                    uiText(
+                      `对比失败：${this.state.resultComparisonError}`,
+                      `Comparison failed: ${this.state.resultComparisonError}`,
+                    ),
                   )
                 : null,
               m(
@@ -12718,7 +13879,9 @@ Click ⚙️ to configure backend connection.`,
                     void this.startSelectedResultComparison();
                   },
                 },
-                comparisonLoading ? '对比中...' : '开始对比',
+                comparisonLoading
+                  ? uiText('正在对比…', 'Comparing…')
+                  : uiText('开始对比', 'Start comparison'),
               ),
               m(
                 'button.ai-result-picker-secondary',
@@ -12733,13 +13896,16 @@ Click ⚙️ to configure backend connection.`,
                     m.redraw();
                   },
                 },
-                '重置',
+                uiText('重置', 'Reset'),
               ),
               m(
                 'span.ai-result-picker-selection',
                 canPrepare
                   ? `1 baseline · ${selectedCount} candidate`
-                  : '请选择 baseline 和 candidate',
+                  : uiText(
+                      '请选择基线和候选结果',
+                      'Choose a baseline and candidate',
+                    ),
               ),
             ])
           : null,
@@ -12778,17 +13944,23 @@ Click ⚙️ to configure backend connection.`,
             m('div.ai-result-picker-item-name', item.title || item.id),
             m(
               'span.ai-result-picker-pill.ref-id',
-              {title: `Snapshot: ${item.id}`},
+              {title: uiText(`快照：${item.id}`, `Snapshot: ${item.id}`)},
               formatAnalysisResultRef(
                 item.id,
                 this.availableAnalysisResults.map((result) => result.id),
               ),
             ),
             isCurrent
-              ? m('span.ai-result-picker-pill.current', 'Current')
+              ? m(
+                  'span.ai-result-picker-pill.current',
+                  uiText('当前', 'Current'),
+                )
               : null,
             activeWindow
-              ? m('span.ai-result-picker-pill.active-window', 'Open')
+              ? m(
+                  'span.ai-result-picker-pill.active-window',
+                  uiText('已打开', 'Open'),
+                )
               : null,
             m(
               `span.ai-result-picker-pill.${item.status === 'ready' ? 'ready' : item.status === 'failed' ? 'failed' : 'partial'}`,
@@ -12812,8 +13984,13 @@ Click ⚙️ to configure backend connection.`,
               .join(' · '),
           ),
           m('div.ai-result-picker-coverage', [
-            `${metricCount} metrics`,
-            evidenceCount ? ` · ${evidenceCount} refs` : '',
+            uiText(`${metricCount} 个指标`, `${metricCount} metrics`),
+            evidenceCount
+              ? uiText(
+                  ` · ${evidenceCount} 条证据引用`,
+                  ` · ${evidenceCount} refs`,
+                )
+              : '',
             ` · ${item.visibility}`,
           ]),
         ]),
@@ -12823,9 +14000,9 @@ Click ⚙️ to configure backend connection.`,
             {
               class: isBaseline ? 'active' : '',
               onclick: () => this.selectResultBaseline(item.id),
-              title: '设为 baseline',
+              title: uiText('设为基线', 'Set as baseline'),
             },
-            '基线',
+            uiText('基线', 'Baseline'),
           ),
           m(
             'button.ai-result-picker-role-btn',
@@ -12834,10 +14011,13 @@ Click ⚙️ to configure backend connection.`,
               disabled: isBaseline,
               onclick: () => this.toggleResultCandidate(item.id),
               title: isBaseline
-                ? 'baseline 不能同时作为 candidate'
-                : '加入候选',
+                ? uiText(
+                    '基线不能同时作为候选',
+                    'The baseline cannot also be a candidate',
+                  )
+                : uiText('加入候选', 'Add as candidate'),
             },
-            '候选',
+            uiText('候选', 'Candidate'),
           ),
           m(
             'button.ai-result-picker-role-btn.ai-result-picker-icon-btn',
@@ -12846,7 +14026,7 @@ Click ⚙️ to configure backend connection.`,
               onclick: () => {
                 void this.fetchSimilarAnalysisResult(item.id);
               },
-              title: '查找相似结果',
+              title: uiText('查找相似结果', 'Find similar results'),
             },
             m(
               'i.pf-icon',
@@ -12860,9 +14040,12 @@ Click ⚙️ to configure backend connection.`,
                   disabled: isVisibilityUpdating,
                   onclick: () =>
                     this.updateAnalysisResultVisibility(item.id, 'workspace'),
-                  title: '设为 workspace 可见',
+                  title: uiText(
+                    '设为 workspace 可见',
+                    'Make visible to workspace',
+                  ),
                 },
-                isVisibilityUpdating ? '...' : '共享',
+                isVisibilityUpdating ? '…' : uiText('共享', 'Share'),
               )
             : null,
         ]),

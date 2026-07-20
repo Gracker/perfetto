@@ -54,12 +54,17 @@ import {
   handleAnswerTokenEvent,
   handleConversationStepEvent,
 } from './sse_event_handlers';
+import {setUiLanguagePreference} from './ui_language';
 
 import {
   Message,
   createStreamingAnswerState,
   createStreamingFlowState,
 } from './types';
+
+beforeEach(() => {
+  setUiLanguagePreference('zh-CN');
+});
 import {getAISharedState, resetAISharedState} from './ai_shared_state';
 
 // =============================================================================
@@ -867,6 +872,7 @@ describe('handleAnalysisCompletedEvent', () => {
   });
 
   it('should append code references and patch status without rendering raw diff text', () => {
+    setUiLanguagePreference('en');
     const data = {
       data: {
         conclusion: 'Analysis complete.',

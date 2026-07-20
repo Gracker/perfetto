@@ -17,13 +17,18 @@
  */
 
 import m from 'mithril';
-import {AreaSelection, AreaSelectionTab, ContentWithLoadingFlag} from '../../public/selection';
-import {Trace} from '../../public/trace';
+import type {
+  AreaSelection,
+  AreaSelectionTab,
+  ContentWithLoadingFlag,
+} from '../../public/selection';
+import type {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {NUM, NUM_NULL} from '../../trace_processor/query_result';
 import {updateAISharedState, getAISharedState} from './ai_shared_state';
 import {formatDurationAuto} from './renderers/formatters';
 import {switchFloatingMode} from './ai_transient_state';
+import {uiText} from './ui_language';
 
 // ── Quick-stats data structures ─────────────────────────────────────────
 
@@ -151,15 +156,17 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
     stats = null;
     queryError = null;
 
-    fetchQuickStats(trace, sel).then((result) => {
-      stats = result;
-      loading = false;
-      m.redraw();
-    }).catch((e) => {
-      queryError = String(e);
-      loading = false;
-      m.redraw();
-    });
+    fetchQuickStats(trace, sel)
+      .then((result) => {
+        stats = result;
+        loading = false;
+        m.redraw();
+      })
+      .catch((e) => {
+        queryError = String(e);
+        loading = false;
+        m.redraw();
+      });
   }
 
   /** Trigger AI analysis scoped to this selection. */
@@ -180,7 +187,7 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
   return {
     id: 'smartperfetto-ai-analyze',
     name: 'AI Analyze',
-    priority: 50,  // Appear early (higher = first)
+    priority: 50, // Appear early (higher = first)
 
     render(selection: AreaSelection): ContentWithLoadingFlag | undefined {
       fetchStatsIfNeeded(selection);
@@ -189,8 +196,11 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
       const isAnalyzing = aiState.status === 'analyzing';
       const durationNs = selection.end - selection.start;
       const hintText = isAnalyzing
-        ? aiState.currentPhase || '正在分析...'
-        : '将选区发送到 AI Agent 进行深度性能分析';
+        ? aiState.currentPhase || uiText('正在分析……', 'Analyzing...')
+        : uiText(
+            '将选区发送给 AI Agent 进行深度性能分析',
+            'Send the selection to the AI Agent for deep performance analysis',
+          );
 
       // Stats area: render the grid once data arrives, otherwise show
       // an error message or nothing while loading.
@@ -198,7 +208,11 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
       if (stats) {
         statsView = renderStatsGrid(stats);
       } else if (queryError) {
-        statsView = m('div', {style: STYLES.errorText}, `Stats error: ${queryError}`);
+        statsView = m(
+          'div',
+          {style: STYLES.errorText},
+          uiText(`统计失败：${queryError}`, `Stats error: ${queryError}`),
+        );
       }
 
       return {
@@ -207,7 +221,13 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
           // ── Header ──
           m('div', {style: STYLES.header}, [
             m('span', {style: 'font-size: 16px'}, '\u{1F50D}'),
-            m('span', `选区分析 · ${formatDurationAuto(Number(durationNs))} · ${selection.trackUris.length} tracks`),
+            m(
+              'span',
+              uiText(
+                `选区分析 · ${formatDurationAuto(Number(durationNs))} · ${selection.trackUris.length} 条轨道`,
+                `Selection analysis · ${formatDurationAuto(Number(durationNs))} · ${selection.trackUris.length} tracks`,
+              ),
+            ),
           ]),
 
           // ── Quick Stats Grid ──
@@ -215,20 +235,33 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
 
           // ── Actions ──
           m('div', {style: STYLES.actions}, [
-            m('button', {
-              style: isAnalyzing ? STYLES.analyzeBtnDisabled : STYLES.analyzeBtn,
-              disabled: isAnalyzing,
-              onclick: () => analyzeWithAI(selection),
-              onmouseover: (e: MouseEvent) => {
-                if (!isAnalyzing) (e.target as HTMLElement).style.background = ANALYZE_BTN_HOVER_BG;
+            m(
+              'button',
+              {
+                style: isAnalyzing
+                  ? STYLES.analyzeBtnDisabled
+                  : STYLES.analyzeBtn,
+                disabled: isAnalyzing,
+                onclick: () => analyzeWithAI(selection),
+                onmouseover: (e: MouseEvent) => {
+                  if (!isAnalyzing) {
+                    (e.target as HTMLElement).style.background =
+                      ANALYZE_BTN_HOVER_BG;
+                  }
+                },
+                onmouseout: (e: MouseEvent) => {
+                  if (!isAnalyzing) {
+                    (e.target as HTMLElement).style.background = ANALYZE_BTN_BG;
+                  }
+                },
               },
-              onmouseout: (e: MouseEvent) => {
-                if (!isAnalyzing) (e.target as HTMLElement).style.background = ANALYZE_BTN_BG;
-              },
-            }, [
-              m(Icon, {icon: 'smart_toy', style: 'font-size: 16px'}),
-              isAnalyzing ? 'AI 分析中...' : 'AI 深度分析',
-            ]),
+              [
+                m(Icon, {icon: 'smart_toy', style: 'font-size: 16px'}),
+                isAnalyzing
+                  ? uiText('AI 分析中……', 'AI analysis in progress...')
+                  : uiText('AI 深度分析', 'Deep AI analysis'),
+              ],
+            ),
             m('span', {style: STYLES.hint}, hintText),
           ]),
         ]),
@@ -241,30 +274,49 @@ export function createAIAreaSelectionTab(trace: Trace): AreaSelectionTab {
 
 function renderStatsGrid(s: QuickStats): m.Children {
   const cards: Array<{label: string; value: string; warn?: boolean}> = [
-    {label: 'Slices', value: s.sliceCount.toLocaleString()},
-    {label: 'Avg Duration', value: formatDurationAuto(s.avgDurNs)},
-    {label: 'Max Duration', value: formatDurationAuto(s.maxDurNs)},
+    {
+      label: uiText('Slice 数量', 'Slices'),
+      value: s.sliceCount.toLocaleString(),
+    },
+    {
+      label: uiText('平均时长', 'Average duration'),
+      value: formatDurationAuto(s.avgDurNs),
+    },
+    {
+      label: uiText('最大时长', 'Maximum duration'),
+      value: formatDurationAuto(s.maxDurNs),
+    },
   ];
 
   if (s.frameCount !== null) {
-    cards.push({label: 'Frames', value: String(s.frameCount)});
+    cards.push({
+      label: uiText('帧数', 'Frames'),
+      value: String(s.frameCount),
+    });
   }
   if (s.jankCount !== null && s.frameCount !== null) {
-    const rate = s.frameCount > 0
-      ? ((s.jankCount / s.frameCount) * 100).toFixed(1) + '%'
-      : '0%';
+    const rate =
+      s.frameCount > 0
+        ? ((s.jankCount / s.frameCount) * 100).toFixed(1) + '%'
+        : '0%';
     cards.push({
-      label: 'Jank Rate',
+      label: uiText('卡顿率', 'Jank rate'),
       value: `${s.jankCount} (${rate})`,
       warn: s.jankCount > 0,
     });
   }
 
-  return m('div', {style: STYLES.statsGrid},
+  return m(
+    'div',
+    {style: STYLES.statsGrid},
     cards.map((c) =>
       m('div', {style: STYLES.statCard}, [
         m('div', {style: STYLES.statLabel}, c.label),
-        m('div', {style: c.warn ? STYLES.statValueWarning : STYLES.statValue}, c.value),
+        m(
+          'div',
+          {style: c.warn ? STYLES.statValueWarning : STYLES.statValue},
+          c.value,
+        ),
       ]),
     ),
   );

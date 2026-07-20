@@ -29,11 +29,12 @@
  */
 
 import {
-  FullAnalysis,
-  ExpandableSections,
+  type FullAnalysis,
+  type ExpandableSections,
   isFrameDetailData,
 } from './generated';
 import markdownit from 'markdown-it';
+import {uiText} from './ui_language';
 
 const TIMESTAMP_LINK_SCHEME = 'ai-ts://';
 
@@ -43,9 +44,17 @@ const markdownRenderer = markdownit({
   breaks: true,
 });
 
-const defaultLinkOpenRenderer = markdownRenderer.renderer.rules.link_open ||
-  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
-markdownRenderer.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+const defaultLinkOpenRenderer =
+  markdownRenderer.renderer.rules.link_open ||
+  ((tokens, idx, options, _env, self) =>
+    self.renderToken(tokens, idx, options));
+markdownRenderer.renderer.rules.link_open = (
+  tokens,
+  idx,
+  options,
+  env,
+  self,
+) => {
   const token = tokens[idx];
   const hrefIdx = token.attrIndex('href');
   const href = hrefIdx >= 0 ? token.attrs?.[hrefIdx]?.[1] || '' : '';
@@ -56,41 +65,56 @@ markdownRenderer.renderer.rules.link_open = (tokens, idx, options, env, self) =>
   return defaultLinkOpenRenderer(tokens, idx, options, env, self);
 };
 
-const defaultImageRenderer = markdownRenderer.renderer.rules.image ||
-  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+const defaultImageRenderer =
+  markdownRenderer.renderer.rules.image ||
+  ((tokens, idx, options, _env, self) =>
+    self.renderToken(tokens, idx, options));
 markdownRenderer.renderer.rules.image = (tokens, idx, options, env, self) => {
   tokens[idx].attrJoin('class', 'ai-markdown-image');
   return defaultImageRenderer(tokens, idx, options, env, self);
 };
 
-const defaultTableOpenRenderer = markdownRenderer.renderer.rules.table_open ||
-  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
-markdownRenderer.renderer.rules.table_open = (tokens, idx, options, env, self) => {
+const defaultTableOpenRenderer =
+  markdownRenderer.renderer.rules.table_open ||
+  ((tokens, idx, options, _env, self) =>
+    self.renderToken(tokens, idx, options));
+markdownRenderer.renderer.rules.table_open = (
+  tokens,
+  idx,
+  options,
+  env,
+  self,
+) => {
   tokens[idx].attrJoin('class', 'ai-md-table');
   return defaultTableOpenRenderer(tokens, idx, options, env, self);
 };
 
-const defaultFenceRenderer = markdownRenderer.renderer.rules.fence ||
-  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+const defaultFenceRenderer =
+  markdownRenderer.renderer.rules.fence ||
+  ((tokens, idx, options, _env, self) =>
+    self.renderToken(tokens, idx, options));
 markdownRenderer.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const token = tokens[idx];
-  const info = String(token.info || '').trim().split(/\s+/)[0].toLowerCase();
+  const info = String(token.info || '')
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase();
   if (info !== 'mermaid') {
     return defaultFenceRenderer(tokens, idx, options, env, self);
   }
 
   const mermaidCode = String(token.content || '').trim();
   if (!mermaidCode) {
-    return '<div class="ai-mermaid-error">Mermaid 源码为空</div>';
+    return `<div class="ai-mermaid-error">${uiText('Mermaid 源码为空', 'Mermaid source is empty')}</div>`;
   }
   const b64 = encodeBase64Unicode(mermaidCode);
   return [
     '<div class="ai-mermaid-block">',
     `<div class="ai-mermaid-diagram" data-mermaid-b64="${b64}"></div>`,
     '<details class="ai-mermaid-details">',
-    '<summary>查看 Mermaid 源码</summary>',
+    `<summary>${uiText('查看 Mermaid 源码', 'View Mermaid source')}</summary>`,
     '<div class="ai-mermaid-actions">',
-    `<button class="ai-mermaid-copy" data-mermaid-b64="${b64}" type="button">复制代码</button>`,
+    `<button class="ai-mermaid-copy" data-mermaid-b64="${b64}" type="button">${uiText('复制代码', 'Copy code')}</button>`,
     '</div>',
     `<pre class="ai-mermaid-source" data-mermaid-b64="${b64}"></pre>`,
     '</details>',
@@ -116,9 +140,15 @@ export function escapeHtml(text: string): string {
  */
 export function sanitizeHtml(html: string): string {
   return html
-    .replace(/<\/?(?:script|iframe|object|embed|form|meta|link|base|applet|frame|frameset|style|noscript|plaintext|xmp)\b[^>]*>/gi, '')
+    .replace(
+      /<\/?(?:script|iframe|object|embed|form|meta|link|base|applet|frame|frameset|style|noscript|plaintext|xmp)\b[^>]*>/gi,
+      '',
+    )
     .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi, '')
-    .replace(/((?:href|src|action|formaction|xlink:href)\s*=\s*["'])(?:javascript|data|vbscript):/gi, '$1about:blank');
+    .replace(
+      /((?:href|src|action|formaction|xlink:href)\s*=\s*["'])(?:javascript|data|vbscript):/gi,
+      '$1about:blank',
+    );
 }
 
 function normalizeMarkdownSpacing(content: string): string {
@@ -132,14 +162,18 @@ function normalizeMarkdownSpacing(content: string): string {
 function encodeTimestampMarkers(content: string): string {
   return content.replace(
     /@ts\[(\d+)\|([^\]]+)\]/g,
-    (_match: string, ts: string, label: string) => `[${label}](${TIMESTAMP_LINK_SCHEME}${ts})`
+    (_match: string, ts: string, label: string) =>
+      `[${label}](${TIMESTAMP_LINK_SCHEME}${ts})`,
   );
 }
 
 function decodeTimestampLinks(html: string): string {
+  const title = escapeHtml(
+    uiText('点击跳转到此时间点', 'Click to jump to this timestamp'),
+  );
   return html.replace(
     /<a\b[^>]*href="ai-ts:\/\/(\d+)"[^>]*>(.*?)<\/a>/g,
-    '<span class="ai-clickable-timestamp" data-ts="$1" title="点击跳转到此时间点">$2</span>'
+    `<span class="ai-clickable-timestamp" data-ts="$1" title="${title}">$2</span>`,
   );
 }
 
@@ -170,10 +204,12 @@ export function formatRelativeTime(timestamp: number): string {
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
 
-  if (days > 0) return `${days} 天前`;
-  if (hours > 0) return `${hours} 小时前`;
-  if (minutes > 0) return `${minutes} 分钟前`;
-  return '刚刚';
+  if (days > 0) return uiText(`${days} 天前`, `${days} days ago`);
+  if (hours > 0) return uiText(`${hours} 小时前`, `${hours} hours ago`);
+  if (minutes > 0) {
+    return uiText(`${minutes} 分钟前`, `${minutes} minutes ago`);
+  }
+  return uiText('刚刚', 'Just now');
 }
 
 /**
@@ -274,7 +310,12 @@ export function formatDisplayValue(val: any, columnName?: string): string {
     }
 
     // Duration/time fields in milliseconds
-    if (col.includes('duration') || col.includes('time') || col.includes('ms') || col.includes('_ms')) {
+    if (
+      col.includes('duration') ||
+      col.includes('time') ||
+      col.includes('ms') ||
+      col.includes('_ms')
+    ) {
       if (val > 1000) return `${(val / 1000).toFixed(2)}s`;
       return `${val.toFixed(1)}ms`;
     }
@@ -310,7 +351,7 @@ export function formatDisplayValue(val: any, columnName?: string): string {
     if (val.length === 0) return '[]';
     // For short arrays, show inline
     if (val.length <= 3) {
-      return `[${val.map(v => formatDisplayValue(v)).join(', ')}]`;
+      return `[${val.map((v) => formatDisplayValue(v)).join(', ')}]`;
     }
     return `[${val.length} items]`;
   }
@@ -321,7 +362,7 @@ export function formatDisplayValue(val: any, columnName?: string): string {
     if (keys.length === 0) return '{}';
     // For small objects, try to show key-value pairs
     if (keys.length <= 3) {
-      const pairs = keys.map(k => `${k}: ${formatDisplayValue(val[k])}`);
+      const pairs = keys.map((k) => `${k}: ${formatDisplayValue(val[k])}`);
       return `{${pairs.join(', ')}}`;
     }
     // For larger objects, use JSON
@@ -368,7 +409,9 @@ export function formatMessage(content: string): string {
  * Parse a summary string like "key1: value1, key2: value2" into table data.
  * Returns null if the string doesn't match the expected pattern.
  */
-export function parseSummaryToTable(summary: string): { columns: string[], rows: string[][] } | null {
+export function parseSummaryToTable(
+  summary: string,
+): {columns: string[]; rows: string[][]} | null {
   if (!summary || typeof summary !== 'string') {
     return null;
   }
@@ -378,14 +421,17 @@ export function parseSummaryToTable(summary: string): { columns: string[], rows:
   // "key1: value1 | key2: value2 | key3: value3"
 
   // First, split by common delimiters
-  const parts = summary.split(/[,|]/).map(p => p.trim()).filter(p => p);
+  const parts = summary
+    .split(/[,|]/)
+    .map((p) => p.trim())
+    .filter((p) => p);
 
   if (parts.length < 2) {
     // Not enough key-value pairs to make a table worthwhile
     return null;
   }
 
-  const keyValuePairs: { key: string; value: string }[] = [];
+  const keyValuePairs: {key: string; value: string}[] = [];
 
   for (const part of parts) {
     // Match "key: value" pattern
@@ -404,10 +450,12 @@ export function parseSummaryToTable(summary: string): { columns: string[], rows:
   }
 
   // Create a single-row table with columns as keys
-  const columns = keyValuePairs.map(kv => kv.key);
-  const rows = [keyValuePairs.map(kv => formatDisplayValue(kv.value, kv.key))];
+  const columns = keyValuePairs.map((kv) => kv.key);
+  const rows = [
+    keyValuePairs.map((kv) => formatDisplayValue(kv.value, kv.key)),
+  ];
 
-  return { columns, rows };
+  return {columns, rows};
 }
 
 /**
@@ -420,7 +468,10 @@ export function parseSummaryToTable(summary: string): { columns: string[], rows:
  */
 export function convertToExpandableSections(data: unknown): ExpandableSections {
   if (!isFrameDetailData(data)) {
-    console.warn('[convertToExpandableSections] Invalid data format - failing isFrameDetailData check:', data);
+    console.warn(
+      '[convertToExpandableSections] Invalid data format - failing isFrameDetailData check:',
+      data,
+    );
     return {};
   }
 
@@ -428,20 +479,26 @@ export function convertToExpandableSections(data: unknown): ExpandableSections {
 
   // Title mapping for each analysis type (matches FullAnalysis keys)
   const titleMap: Record<keyof FullAnalysis, string> = {
-    'quadrants': '四象限分析',
-    'binder_calls': 'Binder 调用',
-    'cpu_frequency': 'CPU 频率',
-    'main_thread_slices': '主线程耗时操作',
-    'render_thread_slices': 'RenderThread 耗时操作',
-    'cpu_freq_timeline': 'CPU 频率时间线',
-    'lock_contentions': '锁竞争',
+    quadrants: uiText('四象限分析', 'Quadrant analysis'),
+    binder_calls: uiText('Binder 调用', 'Binder calls'),
+    cpu_frequency: uiText('CPU 频率', 'CPU frequency'),
+    main_thread_slices: uiText(
+      '主线程耗时操作',
+      'Expensive main-thread operations',
+    ),
+    render_thread_slices: uiText(
+      'RenderThread 耗时操作',
+      'Expensive RenderThread operations',
+    ),
+    cpu_freq_timeline: uiText('CPU 频率时间线', 'CPU frequency timeline'),
+    lock_contentions: uiText('锁竞争', 'Lock contention'),
   };
 
   // Handle diagnosis_summary as a special section
   if (data.diagnosis_summary) {
     sections['diagnosis'] = {
-      title: '🎯 根因诊断',
-      data: [{ diagnosis: data.diagnosis_summary }],
+      title: uiText('🎯 根因诊断', '🎯 Root-cause diagnosis'),
+      data: [{diagnosis: data.diagnosis_summary}],
     };
   }
 
@@ -450,14 +507,18 @@ export function convertToExpandableSections(data: unknown): ExpandableSections {
   if (analysis) {
     // Process quadrants - convert nested object to display array
     if (analysis.quadrants) {
-      const quadrantData: Array<{ thread: string; quadrant: string; percentage: number }> = [];
-      const { main_thread, render_thread } = analysis.quadrants;
+      const quadrantData: Array<{
+        thread: string;
+        quadrant: string;
+        percentage: number;
+      }> = [];
+      const {main_thread, render_thread} = analysis.quadrants;
 
       // Convert main_thread quadrants
       for (const [qKey, qValue] of Object.entries(main_thread)) {
         if (qValue > 0) {
           quadrantData.push({
-            thread: '主线程',
+            thread: uiText('主线程', 'Main thread'),
             quadrant: qKey.toUpperCase(),
             percentage: qValue,
           });
@@ -476,24 +537,36 @@ export function convertToExpandableSections(data: unknown): ExpandableSections {
       }
 
       if (quadrantData.length > 0) {
-        sections['quadrants'] = { title: titleMap['quadrants'], data: quadrantData };
+        sections['quadrants'] = {
+          title: titleMap['quadrants'],
+          data: quadrantData,
+        };
       }
     }
 
     // Process cpu_frequency - convert object to display array
     if (analysis.cpu_frequency) {
-      const freqData: Array<{ core_type: string; avg_freq_mhz: number }> = [];
-      const { big_avg_mhz, little_avg_mhz } = analysis.cpu_frequency;
+      const freqData: Array<{core_type: string; avg_freq_mhz: number}> = [];
+      const {big_avg_mhz, little_avg_mhz} = analysis.cpu_frequency;
 
       if (big_avg_mhz > 0) {
-        freqData.push({ core_type: '大核', avg_freq_mhz: big_avg_mhz });
+        freqData.push({
+          core_type: uiText('大核', 'Big core'),
+          avg_freq_mhz: big_avg_mhz,
+        });
       }
       if (little_avg_mhz > 0) {
-        freqData.push({ core_type: '小核', avg_freq_mhz: little_avg_mhz });
+        freqData.push({
+          core_type: uiText('小核', 'Little core'),
+          avg_freq_mhz: little_avg_mhz,
+        });
       }
 
       if (freqData.length > 0) {
-        sections['cpu_frequency'] = { title: titleMap['cpu_frequency'], data: freqData };
+        sections['cpu_frequency'] = {
+          title: titleMap['cpu_frequency'],
+          data: freqData,
+        };
       }
     }
 
@@ -509,7 +582,7 @@ export function convertToExpandableSections(data: unknown): ExpandableSections {
     for (const field of arrayFields) {
       const value = analysis[field];
       if (Array.isArray(value) && value.length > 0) {
-        sections[field] = { title: titleMap[field], data: value };
+        sections[field] = {title: titleMap[field], data: value};
       }
     }
   }
@@ -523,17 +596,17 @@ export function convertToExpandableSections(data: unknown): ExpandableSections {
 export function formatLayerName(key: string): string {
   // Common layer name mappings
   const nameMap: Record<string, string> = {
-    'jank_frames': '卡顿帧',
-    'scrolling_sessions': '滑动会话',
-    'frame_details': '帧详情',
-    'frame_analysis': '帧分析',
-    'slow_frames': '慢帧',
-    'blocked_frames': '阻塞帧',
-    'sessions': '会话',
-    'frames': '帧数据',
-    'metrics': '指标',
-    'overview': '概览',
-    'summary': '摘要',
+    jank_frames: uiText('卡顿帧', 'Janky frames'),
+    scrolling_sessions: uiText('滑动会话', 'Scroll sessions'),
+    frame_details: uiText('帧详情', 'Frame details'),
+    frame_analysis: uiText('帧分析', 'Frame analysis'),
+    slow_frames: uiText('慢帧', 'Slow frames'),
+    blocked_frames: uiText('阻塞帧', 'Blocked frames'),
+    sessions: uiText('会话', 'Sessions'),
+    frames: uiText('帧数据', 'Frame data'),
+    metrics: uiText('指标', 'Metrics'),
+    overview: uiText('概览', 'Overview'),
+    summary: uiText('摘要', 'Summary'),
   };
 
   // Check for exact match
@@ -543,16 +616,16 @@ export function formatLayerName(key: string): string {
   }
 
   // Format snake_case to readable string
-  return key
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, c => c.toUpperCase());
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /**
  * Extract conclusion from overview layer data (Phase 4).
  * Maps the root_cause_classification step output to conclusion format.
  */
-export function extractConclusionFromOverview(overview: Record<string, any> | undefined): any {
+export function extractConclusionFromOverview(
+  overview: Record<string, any> | undefined,
+): any {
   if (!overview) return null;
 
   // Check for conclusion data in various locations
@@ -604,36 +677,38 @@ export function parseEvidence(evidence: any): string[] {
 }
 
 /**
- * Translate problem category to Chinese (Phase 4).
+ * Localize a problem category for display (Phase 4).
  */
 export function translateCategory(category: string): string {
-  const translations: Record<string, string> = {
-    'APP': '应用问题',
-    'SYSTEM': '系统问题',
-    'MIXED': '混合问题',
-    'UNKNOWN': '未知',
+  const translations: Record<string, [string, string]> = {
+    APP: ['应用问题', 'App issue'],
+    SYSTEM: ['系统问题', 'System issue'],
+    MIXED: ['混合问题', 'Mixed issue'],
+    UNKNOWN: ['未知', 'Unknown'],
   };
-  return translations[category] || category;
+  const translation = translations[category];
+  return translation ? uiText(...translation) : category;
 }
 
 /**
- * Translate problem component to Chinese (Phase 4).
+ * Localize a problem component for display (Phase 4).
  */
 export function translateComponent(component: string): string {
-  const translations: Record<string, string> = {
-    'MAIN_THREAD': '主线程',
-    'RENDER_THREAD': '渲染线程',
-    'SURFACE_FLINGER': 'SurfaceFlinger',
-    'BINDER': 'Binder 跨进程调用',
-    'CPU_SCHEDULING': 'CPU 调度',
-    'CPU_AFFINITY': 'CPU 亲和性',
-    'GPU': 'GPU',
-    'MEMORY': '内存',
-    'IO': 'IO',
-    'MAIN_THREAD_BLOCKING': '主线程阻塞',
-    'UNKNOWN': '未知',
+  const translations: Record<string, [string, string]> = {
+    MAIN_THREAD: ['主线程', 'Main thread'],
+    RENDER_THREAD: ['渲染线程', 'Render thread'],
+    SURFACE_FLINGER: ['SurfaceFlinger', 'SurfaceFlinger'],
+    BINDER: ['Binder 跨进程调用', 'Binder IPC'],
+    CPU_SCHEDULING: ['CPU 调度', 'CPU scheduling'],
+    CPU_AFFINITY: ['CPU 亲和性', 'CPU affinity'],
+    GPU: ['GPU', 'GPU'],
+    MEMORY: ['内存', 'Memory'],
+    IO: ['IO', 'I/O'],
+    MAIN_THREAD_BLOCKING: ['主线程阻塞', 'Main-thread blocking'],
+    UNKNOWN: ['未知', 'Unknown'],
   };
-  return translations[component] || component;
+  const translation = translations[component];
+  return translation ? uiText(...translation) : component;
 }
 
 /**

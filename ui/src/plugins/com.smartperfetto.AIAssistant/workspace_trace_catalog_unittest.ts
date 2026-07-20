@@ -2,12 +2,17 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it} from 'vitest';
 
 import {
   formatWorkspaceTraceCatalogMeta,
   parseWorkspaceTraceCatalogResponse,
 } from './workspace_trace_catalog';
+import {setUiLanguagePreference} from './ui_language';
+
+beforeEach(() => {
+  setUiLanguagePreference('zh-CN');
+});
 
 describe('parseWorkspaceTraceCatalogResponse', () => {
   it('uses filename as the primary trace name', () => {

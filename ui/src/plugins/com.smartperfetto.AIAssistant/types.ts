@@ -25,14 +25,15 @@ import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backen
  * dependencies between the various AI panel modules.
  */
 
-import {NavigationBookmark} from './navigation_bookmark_bar';
-import {DetectedScene} from './scene_navigation_bar';
+import type {NavigationBookmark} from './navigation_bookmark_bar';
+import type {DetectedScene} from './scene_navigation_bar';
 import type {
   AnalysisReceiptV1,
   QueryReviewV1,
   UiActionProposalV1,
 } from './generated/data_contract.types';
 import type {ServerRuntimeKind} from './provider_types';
+import type {UiLanguagePreference} from './ui_language';
 
 export type {AnalysisReceiptV1, QueryReviewV1, UiActionProposalV1};
 
@@ -986,8 +987,10 @@ export interface AIPanelState {
   selectedResultCandidateIds: Set<string>; // Candidate snapshots selected by result picker
   // Story Panel state
   storyState: StoryPanelState;
-  /** Analysis mode toggle: 'fast' (quick path) / 'full' (pipeline) / 'auto' (classifier-driven).
-   *  Persisted in localStorage under ANALYSIS_MODE_KEY. */
+  /**
+   * Analysis mode toggle: 'fast' (quick path) / 'full' (pipeline) / 'auto' (classifier-driven).
+   *  Persisted in localStorage under ANALYSIS_MODE_KEY.
+   */
   analysisMode: 'fast' | 'full' | 'auto';
   /** Source/RAG authorization boundary; changing it always starts a new agent session. */
   analysisContext: AnalysisContextSelection;
@@ -1093,6 +1096,7 @@ export interface PinnedResult {
  * SmartPerfetto backend auth (SMARTPERFETTO_API_KEY), not an LLM provider key.
  */
 export interface AISettings {
+  uiLanguage: UiLanguagePreference;
   provider: 'ollama' | 'openai' | 'deepseek';
   ollamaUrl: string;
   ollamaModel: string;
@@ -1242,6 +1246,7 @@ export interface SessionsStorage {
  * Default settings for AI service configuration.
  */
 export const DEFAULT_SETTINGS: AISettings = {
+  uiLanguage: 'auto',
   provider: 'deepseek',
   ollamaUrl: 'http://localhost:11434',
   ollamaModel: 'llama3.4',
@@ -1265,7 +1270,9 @@ export const PENDING_BACKEND_TRACE_KEY = 'smartperfetto-pending-backend-trace';
  */
 export interface PresetQuestion {
   label: string;
+  labelEn: string;
   question: string;
+  questionEn: string;
   icon: string;
   isTeaching?: boolean;
   isScene?: boolean;
@@ -1276,45 +1283,83 @@ export const PRESET_QUESTIONS: PresetQuestion[] = [
   // Teaching mode - helps users understand rendering pipelines
   {
     label: '🎓 出图教学',
+    labelEn: '🎓 Rendering tutorial',
     question: '/teaching-pipeline',
+    questionEn: '/teaching-pipeline',
     icon: 'school',
     isTeaching: true,
   },
   // Scene reconstruction - understand what happened in the trace
-  {label: '🎬 场景还原', question: '/scene', icon: 'movie', isScene: true},
+  {
+    label: '🎬 场景还原',
+    labelEn: '🎬 Scene reconstruction',
+    question: '/scene',
+    questionEn: '/scene',
+    icon: 'movie',
+    isScene: true,
+  },
   // Smart mixed-trace analysis - detect and deep-dive multiple user actions.
   {
     label: '🧠 智能',
+    labelEn: '🧠 Smart',
     question: '/smart',
+    questionEn: '/smart',
     icon: 'auto_awesome',
     isSmart: true,
   },
   // Analysis mode - actual performance analysis
-  {label: '滑动', question: '分析滑动性能', icon: 'swipe'},
-  {label: '启动', question: '分析启动性能', icon: 'rocket_launch'},
-  {label: '跳转', question: '分析跳转性能', icon: 'open_in_new'},
+  {
+    label: '滑动',
+    labelEn: 'Scrolling',
+    question: '分析滑动性能',
+    questionEn: 'Analyze scrolling performance',
+    icon: 'swipe',
+  },
+  {
+    label: '启动',
+    labelEn: 'Startup',
+    question: '分析启动性能',
+    questionEn: 'Analyze startup performance',
+    icon: 'rocket_launch',
+  },
+  {
+    label: '跳转',
+    labelEn: 'Navigation',
+    question: '分析跳转性能',
+    questionEn: 'Analyze navigation performance',
+    icon: 'open_in_new',
+  },
 ];
 
 /** Preset questions for comparison mode. */
 export const COMPARISON_PRESET_QUESTIONS: PresetQuestion[] = [
   {
     label: '对比滑动',
+    labelEn: 'Compare scrolling',
     question: '对比两个 Trace 的滑动性能',
+    questionEn: 'Compare scrolling performance between the two traces',
     icon: 'compare_arrows',
   },
   {
     label: '对比启动',
+    labelEn: 'Compare startup',
     question: '对比两个 Trace 的启动性能',
+    questionEn: 'Compare startup performance between the two traces',
     icon: 'compare_arrows',
   },
   {
     label: '对比帧率',
+    labelEn: 'Compare frame rates',
     question: '对比两个 Trace 的帧率分布和 Jank 情况',
+    questionEn:
+      'Compare frame-rate distributions and jank between the two traces',
     icon: 'compare_arrows',
   },
   {
     label: '对比 CPU',
+    labelEn: 'Compare CPU',
     question: '对比两个 Trace 的 CPU 调度和频率',
+    questionEn: 'Compare CPU scheduling and frequencies between the two traces',
     icon: 'compare_arrows',
   },
 ];

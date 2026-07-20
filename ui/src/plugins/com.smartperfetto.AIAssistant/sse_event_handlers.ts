@@ -30,7 +30,7 @@
  * - analysis_completed/analysis_cancelled/degraded/error: Terminal events and degraded-result notices
  */
 
-import {
+import type {
   AnalysisReceiptV1,
   ConversationStepTimelineItem,
   DataSourceContext,
@@ -51,9 +51,9 @@ import {
   parseSummaryToTable,
 } from './data_formatter';
 import {
-  ConclusionContract,
-  DataEnvelope,
-  DataPayload,
+  type ConclusionContract,
+  type DataEnvelope,
+  type DataPayload,
   isDataEnvelope,
   envelopeToSqlQueryResult,
 } from './generated';
@@ -66,6 +66,7 @@ import {
   normalizeTraceSide,
   traceLocationLabel,
 } from './trace_location_label';
+import {uiOutputLanguage, uiText} from './ui_language';
 
 /** Set to true for verbose SSE event logging during development. */
 const DEBUG_SSE = false;
@@ -371,7 +372,7 @@ function readLegacySummary(
   const content = readStringField(value, 'content');
   if (!title && !content) return undefined;
   return {
-    title: title || '摘要',
+    title: title || uiText('摘要', 'Summary'),
     content,
   };
 }
@@ -386,7 +387,7 @@ function readSummaryReport(
   if (!title && !content) return undefined;
 
   const summaryReport: NonNullable<SqlResultData['summaryReport']> = {
-    title: title || '摘要',
+    title: title || uiText('摘要', 'Summary'),
     content,
   };
 
@@ -631,18 +632,27 @@ function setFlowSectionMessageId(
 
 function flowStatusHint(flow: StreamingFlowState): string {
   if (flow.status === 'running') {
-    return '_持续更新中..._';
+    return uiText('_持续更新中…_', '_Continuously updating…_');
   }
   if (flow.status === 'completed') {
-    return '_流程完成，结论已生成。_';
+    return uiText(
+      '_流程完成，结论已生成。_',
+      '_Flow complete; the conclusion is ready._',
+    );
   }
   if (flow.status === 'cancelled') {
-    return '_流程已取消，未生成完整结论。_';
+    return uiText(
+      '_流程已取消，未生成完整结论。_',
+      '_Flow cancelled before a complete conclusion was generated._',
+    );
   }
   if (flow.status === 'failed') {
-    return `_流程中断: ${flow.error || '发生错误'}_`;
+    return uiText(
+      `_流程中断：${flow.error || '发生错误'}_`,
+      `_Flow interrupted: ${flow.error || 'an error occurred'}_`,
+    );
   }
-  return '_等待后端事件..._';
+  return uiText('_等待后端事件…_', '_Waiting for backend events…_');
 }
 
 function buildStreamingFlowContent(
@@ -652,19 +662,19 @@ function buildStreamingFlowContent(
   const lines: string[] = [];
   switch (section) {
     case 'phase':
-      lines.push('### 🧭 分析步骤');
+      lines.push(uiText('### 🧭 分析步骤', '### 🧭 Analysis steps'));
       break;
     case 'thought':
-      lines.push('### 💭 思考');
+      lines.push(uiText('### 💭 思考', '### 💭 Reasoning'));
       break;
     case 'tool':
-      lines.push('### 🛠 工具与动作');
+      lines.push(uiText('### 🛠 工具与动作', '### 🛠 Tools and actions'));
       break;
     case 'output':
-      lines.push('### 📤 中间产出');
+      lines.push(uiText('### 📤 中间产出', '### 📤 Intermediate output'));
       break;
     case 'conversation':
-      lines.push('### 🧵 对话时间线');
+      lines.push(uiText('### 🧵 对话时间线', '### 🧵 Conversation timeline'));
       break;
   }
 
@@ -701,7 +711,10 @@ function buildSubAgentCardsHtml(
     const dur = a.completedAt
       ? `${Math.round((a.completedAt - a.startedAt) / 1000)}s`
       : `${Math.round((Date.now() - a.startedAt) / 1000)}s...`;
-    const tools = a.toolUses !== undefined ? ` · ${a.toolUses} 次调用` : '';
+    const tools =
+      a.toolUses !== undefined
+        ? uiText(` · ${a.toolUses} 次调用`, ` · ${a.toolUses} tool calls`)
+        : '';
     return (
       `<div class="ai-sub-agent-card ${statusClass}">` +
       `<span class="ai-sub-agent-icon">${statusIcon}</span>` +
@@ -871,22 +884,24 @@ function getConversationPhaseLabel(
 ): string {
   switch (phase) {
     case 'progress':
-      return '进度';
+      return uiText('进度', 'Progress');
     case 'thinking':
-      return '思考';
+      return uiText('思考', 'Reasoning');
     case 'tool':
-      return '工具';
+      return uiText('工具', 'Tool');
     case 'result':
-      return '结果';
+      return uiText('结果', 'Result');
     case 'error':
-      return '错误';
+      return uiText('错误', 'Error');
   }
 }
 
 function getConversationRoleLabel(
   role: ConversationStepTimelineItem['role'],
 ): string {
-  return role === 'system' ? '系统' : '助手';
+  return role === 'system'
+    ? uiText('系统', 'System')
+    : uiText('助手', 'Assistant');
 }
 
 function renderConversationStepLine(
@@ -895,7 +910,7 @@ function renderConversationStepLine(
   const phaseLabel = getConversationPhaseLabel(step.phase);
   const roleLabel = getConversationRoleLabel(step.role);
   const timeStr = step.timestamp
-    ? new Date(step.timestamp).toLocaleTimeString('zh-CN', {
+    ? new Date(step.timestamp).toLocaleTimeString(uiText('zh-CN', 'en-US'), {
         hour12: false,
         hour: '2-digit',
         minute: '2-digit',
@@ -914,7 +929,7 @@ function renderAnswerTimelineLine(
 ): string {
   const phaseLabel = getConversationPhaseLabel(phase);
   const roleLabel = getConversationRoleLabel(role);
-  const timeStr = new Date().toLocaleTimeString('zh-CN', {
+  const timeStr = new Date().toLocaleTimeString(uiText('zh-CN', 'en-US'), {
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',
@@ -956,7 +971,12 @@ function ensureAnswerTimelineStarted(ctx: SSEHandlerContext): void {
   const flow = ctx.streamingFlow;
   if (flow.answerTimelineStarted) return;
   flow.answerTimelineStarted = true;
-  appendAnswerTimelineLine(ctx, 'progress', 'agent', '开始流式输出分析结果。');
+  appendAnswerTimelineLine(
+    ctx,
+    'progress',
+    'agent',
+    uiText('开始流式输出分析结果。', 'Started streaming the analysis result.'),
+  );
 }
 
 function compactAnswerTimelineLine(line: string): string {
@@ -1032,7 +1052,7 @@ function recordAnswerTimelineSnapshot(
   ctx: SSEHandlerContext,
   snippet: string,
   textLength: number,
-  label = '流式更新',
+  label = uiText('流式更新', 'Streaming update'),
 ): void {
   const flow = ctx.streamingFlow;
   if (
@@ -1073,7 +1093,9 @@ function syncAnswerStreamToConversationTimeline(
       ctx,
       snippet,
       textLength,
-      options.completed === true ? '最终更新' : '流式更新',
+      options.completed === true
+        ? uiText('最终更新', 'Final update')
+        : uiText('流式更新', 'Streaming update'),
     );
   }
 
@@ -1083,7 +1105,10 @@ function syncAnswerStreamToConversationTimeline(
       ctx,
       'result',
       'agent',
-      `最终回答已输出（${textLength} 字）。`,
+      uiText(
+        `最终回答已输出（${textLength} 字）。`,
+        `The final answer was emitted (${textLength} characters).`,
+      ),
     );
     refreshStreamingFlowMessage(ctx, 'conversation', {
       createIfMissing: true,
@@ -1291,7 +1316,7 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
       envelope.display?.title ||
       envelope.meta?.stepId ||
       envelope.meta?.skillId ||
-      '数据更新',
+      uiText('数据更新', 'Data update'),
     columns: envelopeColumnsForContext(envelope),
     query: readStringField(asRecord(envelope), 'sql') || undefined,
   });
@@ -1305,7 +1330,10 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
   );
   const tracePrefix = traceLabel ? `${traceLabel} · ` : '';
   if (typeof rowCount === 'number') {
-    return `${tracePrefix}${title} (${rowCount} 行)`;
+    return uiText(
+      `${tracePrefix}${title}（${rowCount} 行）`,
+      `${tracePrefix}${title} (${rowCount} rows)`,
+    );
   }
   return `${tracePrefix}${title} (${envelope.display?.format || 'table'})`;
 }
@@ -1330,6 +1358,60 @@ function inferDataSourceReason(
   const identity = `${title} ${source} ${planPhase}`;
   const columns = (input.columns || []).map((col) => col.toLowerCase());
   const joinedColumns = columns.join(' ');
+
+  if (uiOutputLanguage() === 'en') {
+    if (/insight|__synthesize_summary__/.test(identity)) {
+      return 'Condenses key metrics, anomaly signals, and candidate directions to prioritize the next investigation steps.';
+    }
+    if (/startup_quality/.test(identity)) {
+      return 'Checks trace completeness and quality warnings to determine whether conclusions are reliable.';
+    }
+    if (/evidence matrix/.test(identity)) {
+      return 'Collects matched rules, evidence, and attribution labels so each root-cause claim can be verified.';
+    }
+    if (/binder|ipc/.test(identity) || /binder|ipc/.test(joinedColumns)) {
+      return 'Measures cross-process calls and waits to determine whether IPC materially contributes to latency.';
+    }
+    if (
+      /cpu|sched|core|freq/.test(identity) ||
+      /cpu|sched|core|freq/.test(joinedColumns)
+    ) {
+      return 'Measures CPU execution, scheduling wait, core placement, or frequency supply for the target time range.';
+    }
+    if (/gc|memory|lmk/.test(identity) || /gc|memory|lmk/.test(joinedColumns)) {
+      return 'Checks memory pressure and collection activity for a material contribution to the target latency.';
+    }
+    if (/slice/.test(identity) || /slice_name/.test(joinedColumns)) {
+      return 'Lists matching trace slices and their durations to verify that referenced events exist in the target range.';
+    }
+    if (fallbackReason && !isLowSignalReason(fallbackReason)) {
+      return /\p{Script=Han}/u.test(fallbackReason)
+        ? 'Structured evidence produced by the current analysis step.'
+        : fallbackReason;
+    }
+    if (input.query || source === 'execute_sql') {
+      return 'Fills a verification gap not covered directly by a Skill; check the target time range, thread, and referenced entities.';
+    }
+    if (
+      source.includes('invoke_skill') ||
+      source.includes('skill') ||
+      source.includes(':')
+    ) {
+      return 'Structured Skill evidence used for filtering, deeper analysis, or a conclusion.';
+    }
+    const layerReasons: Record<string, string> = {
+      overview: 'Overview evidence used to identify obvious anomalies.',
+      list: 'Candidate-list evidence used to choose a session, frame, or event for deeper analysis.',
+      session: 'Session or range evidence used to explain one time interval.',
+      deep: 'Deep evidence used to verify a frame, thread, or call-chain root cause.',
+      diagnosis:
+        'Diagnostic evidence used directly by conclusions and recommendations.',
+    };
+    return (
+      layerReasons[layer] ||
+      'Intermediate evidence connecting timeline activity to the final conclusion.'
+    );
+  }
 
   if (/洞见摘要|__synthesize_summary__|insight/.test(identity)) {
     return '压缩本轮启动的关键指标、异常提示和候选方向，用来决定后续优先下钻哪些问题。';
@@ -1479,6 +1561,34 @@ function inferDataSourceReason(
 
 function inferDataMeaning(title: string, columns: string[]): string {
   const text = `${title} ${columns.join(' ')}`.toLowerCase();
+  if (uiOutputLanguage() === 'en') {
+    if (/insight|summary/.test(text)) {
+      return 'Use the summary metrics and anomaly signals to choose the highest-priority investigation direction.';
+    }
+    if (/quality|warning|issue_code/.test(text)) {
+      return 'Use quality status and issue codes to judge whether the trace can support a firm conclusion.';
+    }
+    if (/evidence|reason|severity/.test(text)) {
+      return 'Each row is a diagnostic rule or evidence match; inspect its reason, severity, and actionability.';
+    }
+    if (/binder|ipc/.test(text)) {
+      return 'Each row represents a Binder or IPC call, or an aggregation of cross-process latency.';
+    }
+    if (/cpu|freq|core|sched|runnable/.test(text)) {
+      return 'Each row represents CPU frequency, core placement, execution, or scheduling-wait evidence.';
+    }
+    if (/memory|gc|lmk/.test(text)) {
+      return 'Each row represents memory pressure, GC, or LMK evidence.';
+    }
+    if (/io|file|database|sqlite/.test(text)) {
+      return 'Each row represents I/O, file-system, or database activity.';
+    }
+    if (/slice_name|dur_ms|frame|jank/.test(text)) {
+      return 'Each row is a matching slice or frame record; inspect its name, duration, timestamp, and state.';
+    }
+    return 'Each row is an evidence record; columns identify the metrics, entities, and timestamps used by this step.';
+  }
+
   if (/洞见摘要|insight/.test(text)) {
     return '看摘要里的启动类型、总耗时、主要异常和候选瓶颈，确定本轮分析的优先方向。';
   }
@@ -1581,27 +1691,48 @@ function inferDataSourceTitle(input: {
   const columns = (input.columns || []).map((col) => col.toLowerCase());
   const text = columns.join(' ');
   if (/slice_name/.test(text) && /state_pct|state_dur_ms/.test(text)) {
-    return 'SQL 结果 · Slice 线程状态分布';
+    return uiText(
+      'SQL 结果 · Slice 线程状态分布',
+      'SQL result · Slice thread-state distribution',
+    );
   }
   if (/slice_name/.test(text) && /self_ms|self_percent/.test(text)) {
-    return 'SQL 结果 · 主线程热点 Slice';
+    return uiText(
+      'SQL 结果 · 主线程热点 Slice',
+      'SQL result · Main-thread hot slices',
+    );
   }
   if (/slice_name/.test(text) && /dur_ms/.test(text)) {
-    return 'SQL 结果 · Slice 命中明细';
+    return uiText(
+      'SQL 结果 · Slice 命中明细',
+      'SQL result · Matching slice details',
+    );
   }
   if (/reason|severity|evidence/.test(text)) {
-    return 'SQL 结果 · 诊断规则命中';
+    return uiText(
+      'SQL 结果 · 诊断规则命中',
+      'SQL result · Diagnostic rule matches',
+    );
   }
   if (/state/.test(text) && /dur|pct|percent/.test(text)) {
-    return 'SQL 结果 · 线程状态分布';
+    return uiText(
+      'SQL 结果 · 线程状态分布',
+      'SQL result · Thread-state distribution',
+    );
   }
   if (/count|total|avg|max|min/.test(text) && /dur|ms/.test(text)) {
-    return 'SQL 结果 · 耗时聚合统计';
+    return uiText(
+      'SQL 结果 · 耗时聚合统计',
+      'SQL result · Duration aggregates',
+    );
   }
   if (/process|thread|pid|tid|utid/.test(text)) {
-    return 'SQL 结果 · 线程/进程明细';
+    return uiText(
+      'SQL 结果 · 线程/进程明细',
+      'SQL result · Thread/process details',
+    );
   }
-  return 'SQL 结果 · 数据验证';
+  return uiText('SQL 结果 · 数据验证', 'SQL result · Data verification');
 }
 
 function isLowSignalReason(reason: string): boolean {
@@ -1852,31 +1983,37 @@ function registerDataSourceContext(
     ? toolNarration
     : producerReason || toolNarration;
   const reason = isDiagnostic
-    ? '失败诊断：该步骤未产出可用数据，只用于解释失败和指导重试，不能作为结论证据。'
+    ? uiText(
+        '失败诊断：该步骤未产出可用数据，只用于解释失败和指导重试，不能作为结论证据。',
+        'Failure diagnostic: this step produced no usable data. It explains the failure and guides a retry, but is not conclusion evidence.',
+      )
     : inferDataSourceReason({...input, title}, fallbackReason);
   const meaning = isDiagnostic
-    ? '包含失败工具、错误信息、原始 SQL 或上下文；它说明数据缺失原因，不证明性能结论。'
+    ? uiText(
+        '包含失败工具、错误信息、原始 SQL 或上下文；它说明数据缺失原因，不证明性能结论。',
+        'Contains the failed tool, error, raw SQL, or context. It explains missing data but does not prove a performance conclusion.',
+      )
     : inferDataMeaning(title, input.columns || []);
   const refPrefix =
     input.kind === 'summary'
-      ? '摘要'
+      ? uiText('摘要', 'Summary')
       : input.kind === 'metric'
-        ? '指标'
+        ? uiText('指标', 'Metric')
         : input.kind === 'chart'
-          ? '图'
+          ? uiText('图', 'Chart')
           : input.kind === 'text'
-            ? '文本'
+            ? uiText('文本', 'Text')
             : input.kind === 'diagnostic'
-              ? '诊断'
+              ? uiText('诊断', 'Diagnostic')
               : input.kind === 'timeline'
-                ? '时间线'
-                : '表';
+                ? uiText('时间线', 'Timeline')
+                : uiText('表', 'Table');
   const refKind = input.kind || 'table';
   const refOrdinal = (flow.dataSourceKindOrdinals[refKind] || 0) + 1;
   flow.dataSourceKindOrdinals[refKind] = refOrdinal;
   const sourceContext: DataSourceContext = {
     ref: `${refPrefix} ${refOrdinal}`,
-    title: title || '数据表',
+    title: title || uiText('数据表', 'Data table'),
     source:
       normalizeFlowLine(input.source || input.layer || 'analysis') ||
       'analysis',
@@ -1905,16 +2042,27 @@ function registerDataSourceContext(
 }
 
 function dataSourceLine(ref: DataSourceContext): string {
-  const count = typeof ref.rowCount === 'number' ? `，${ref.rowCount} 行` : '';
+  const count =
+    typeof ref.rowCount === 'number'
+      ? uiText(`，${ref.rowCount} 行`, `, ${ref.rowCount} rows`)
+      : '';
   const phase = ref.phase ? `，${ref.phase}` : '';
   const planPhase =
     ref.planPhaseTitle || ref.planPhaseId
-      ? `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`
+      ? uiText(
+          `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`,
+          `, phase: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`,
+        )
       : '';
   const trace = traceLocationLabel(ref.traceSide, ref.paneSide);
   const tracePrefix = trace ? `${trace} · ` : '';
-  const reason = ref.reason ? `，用途: ${ref.reason}` : '';
-  return `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${reason}）`;
+  const reason = ref.reason
+    ? uiText(`，用途: ${ref.reason}`, `, purpose: ${ref.reason}`)
+    : '';
+  return uiText(
+    `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${reason}）`,
+    `- ${ref.ref}: ${tracePrefix}${ref.title}${count} (source: ${ref.source}${phase}${planPhase}${reason})`,
+  );
 }
 
 function collectClaimReferencedSourceContexts(
@@ -1990,10 +2138,19 @@ function renderDataSourceIndexSection(
 
   return [
     '---',
-    '## 数据来源索引（系统生成）',
-    '以下是本轮结论可核对的数据输出；这里保留来源、阶段和用途，详细证据 ID 保留在结果快照中。',
+    uiText(
+      '## 数据来源索引（系统生成）',
+      '## Data source index (system generated)',
+    ),
+    uiText(
+      '以下是本轮结论可核对的数据输出；这里保留来源、阶段和用途，详细证据 ID 保留在结果快照中。',
+      'These outputs can be checked against this analysis. Source, phase, and purpose stay visible here; detailed evidence IDs remain in the result snapshot.',
+    ),
     omittedCount > 0
-      ? `本轮共有 ${refs.length} 个数据来源；为避免结论过长，这里列出前 ${headCount} 个和后 ${tailCount} 个${pinnedReferencedCount > 0 ? `，并额外保留 ${pinnedReferencedCount} 个被逐句引用命中的来源` : ''}，省略中间 ${omittedCount} 个。完整来源仍保留在本轮表格消息中；结果快照可能受快照上限裁剪。`
+      ? uiText(
+          `本轮共有 ${refs.length} 个数据来源；为避免结论过长，这里列出前 ${headCount} 个和后 ${tailCount} 个${pinnedReferencedCount > 0 ? `，并额外保留 ${pinnedReferencedCount} 个被逐句引用命中的来源` : ''}，省略中间 ${omittedCount} 个。完整来源仍保留在本轮表格消息中；结果快照可能受快照上限裁剪。`,
+          `This analysis has ${refs.length} data sources. To keep the conclusion readable, this index shows the first ${headCount} and last ${tailCount}${pinnedReferencedCount > 0 ? `, plus ${pinnedReferencedCount} source references used by individual claims` : ''}, omitting ${omittedCount} in between. Full sources remain in table messages; snapshot limits may still truncate the saved snapshot.`,
+        )
       : '',
     ...displayedRefs.map(dataSourceLine),
   ]
@@ -2010,7 +2167,7 @@ function appendDataSourceIndex(
   if (!section) return content;
 
   const existingSystemIndex =
-    /(?:\n---)?\n##\s*数据来源索引（系统生成）[\s\S]*?(?=\n---\n|$)/;
+    /(?:\n---)?\n##\s*(?:数据来源索引（系统生成）|Data source index \(system generated\))[\s\S]*?(?=\n---\n|$)/;
   if (existingSystemIndex.test(content)) {
     if (!contract) return content;
     return content.replace(existingSystemIndex, `\n\n${section}`);
@@ -2031,7 +2188,8 @@ export function handleProgressEvent(
   const phaseMessage = normalizeFlowLine(readStringField(payload, 'message'));
 
   if (readStringField(payload, 'phase') === 'analysis_plan') {
-    pushStreamingPhase(ctx, phaseMessage || '分析计划已确认');
+    const confirmed = uiText('分析计划已确认', 'Analysis plan confirmed');
+    pushStreamingPhase(ctx, phaseMessage || confirmed);
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
@@ -2042,7 +2200,7 @@ export function handleProgressEvent(
       timestamp: Date.now(),
       flowTag: 'progress_note',
     });
-    return {loadingPhase: phaseMessage || '分析计划已确认'};
+    return {loadingPhase: phaseMessage || confirmed};
   }
 
   if (phaseMessage) {
@@ -2051,7 +2209,7 @@ export function handleProgressEvent(
   }
 
   if (phase) {
-    pushStreamingPhase(ctx, `阶段: ${phase}`);
+    pushStreamingPhase(ctx, uiText(`阶段: ${phase}`, `Phase: ${phase}`));
     return {loadingPhase: phase};
   }
   return {};
@@ -2062,21 +2220,26 @@ function formatAnalysisPlanMessage(
   fallbackMessage?: string,
 ): string {
   if (!isRecord(plan)) {
-    return `### 🧭 分析计划已确认\n\n${fallbackMessage || '先收集证据，再给根因假设。'}`;
+    return uiText(
+      `### 🧭 分析计划已确认\n\n${fallbackMessage || '先收集证据，再给根因假设。'}`,
+      `### 🧭 Analysis plan confirmed\n\n${fallbackMessage || 'Collect evidence before proposing root-cause hypotheses.'}`,
+    );
   }
 
   const planRecord = plan;
 
-  const lines: string[] = ['### 🧭 分析计划已确认'];
+  const lines: string[] = [
+    uiText('### 🧭 分析计划已确认', '### 🧭 Analysis plan confirmed'),
+  ];
 
   const objective = readStringField(planRecord, 'objective').trim();
   if (objective) {
-    lines.push('', `目标: ${objective}`);
+    lines.push('', uiText(`目标: ${objective}`, `Objective: ${objective}`));
   }
 
   const mode = readStringField(planRecord, 'mode').trim();
   if (mode) {
-    lines.push('', `模式: \`${mode}\``);
+    lines.push('', uiText(`模式: \`${mode}\``, `Mode: \`${mode}\``));
   }
 
   const strategy = asRecord(planRecord.strategy);
@@ -2085,19 +2248,22 @@ function formatAnalysisPlanMessage(
       readStringField(strategy, 'name') ||
       readStringField(strategy, 'id') ||
       'unknown';
-    lines.push('', `策略: **${strategyName}**`);
+    lines.push(
+      '',
+      uiText(`策略: **${strategyName}**`, `Strategy: **${strategyName}**`),
+    );
   }
 
   const rawSteps = Array.isArray(planRecord.steps) ? planRecord.steps : [];
   const steps = rawSteps.map((step) => asRecord(step));
   if (steps.length > 0) {
-    lines.push('', '**步骤**');
+    lines.push('', uiText('**步骤**', '**Steps**'));
     const sorted = [...steps].sort(
       (a, b) => readNumberField(a, 'order', 0) - readNumberField(b, 'order', 0),
     );
     for (const step of sorted) {
       const order = readNumberField(step, 'order', 0);
-      const title = readStringField(step, 'title', '步骤');
+      const title = readStringField(step, 'title', uiText('步骤', 'Step'));
       const action = readStringField(step, 'action');
       lines.push(`${order}. **${title}**: ${action}`);
     }
@@ -2107,13 +2273,19 @@ function formatAnalysisPlanMessage(
     ? planRecord.evidence
     : [];
   if (evidence.length > 0) {
-    lines.push('', '**证据清单**');
+    lines.push('', uiText('**证据清单**', '**Evidence checklist**'));
     for (const item of evidence) {
       lines.push(`- ${String(item)}`);
     }
   }
 
-  lines.push('', '说明: 先收集证据，再给根因假设。');
+  lines.push(
+    '',
+    uiText(
+      '说明: 先收集证据，再给根因假设。',
+      'Note: collect evidence before proposing root-cause hypotheses.',
+    ),
+  );
   return lines.join('\n');
 }
 
@@ -2146,10 +2318,12 @@ function normalizeColumnDefinitions(
         if (typeof col.label === 'string') normalized.label = col.label;
         if (typeof col.type === 'string') normalized.type = col.type;
         if (typeof col.format === 'string') normalized.format = col.format;
-        if (typeof col.clickAction === 'string')
+        if (typeof col.clickAction === 'string') {
           normalized.clickAction = col.clickAction;
-        if (typeof col.durationColumn === 'string')
+        }
+        if (typeof col.durationColumn === 'string') {
           normalized.durationColumn = col.durationColumn;
+        }
         if (
           col.unit === 'ns' ||
           col.unit === 'us' ||
@@ -2185,18 +2359,27 @@ export function handleSqlExecutedEvent(
     const expandableData = readExpandableData(result.expandableData);
     const summary = readLegacySummary(result.summary);
     const sourceContext = registerDataSourceContext(ctx, {
-      title: 'SQL 查询结果',
+      title: uiText('SQL 查询结果', 'SQL query result'),
       source: 'execute_sql',
       rowCount,
       columns: columns.map((col) => String(col)),
       query: sql,
     });
-    pushStreamingTool(ctx, '执行 SQL 查询');
-    pushStreamingOutput(ctx, `SQL 结果返回 ${rowCount} 行`);
+    pushStreamingTool(ctx, uiText('执行 SQL 查询', 'Execute SQL query'));
+    pushStreamingOutput(
+      ctx,
+      uiText(
+        `SQL 结果返回 ${rowCount} 行`,
+        `SQL result returned ${rowCount} rows`,
+      ),
+    );
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: `📊 查询到 **${rowCount}** 条记录`,
+      content: uiText(
+        `📊 查询到 **${rowCount}** 条记录`,
+        `📊 Found **${rowCount}** records`,
+      ),
       timestamp: Date.now(),
       sqlResult: {
         columns,
@@ -2245,14 +2428,23 @@ export function handleSkillSectionEvent(
           columns: normalizedColumns,
         })
       : undefined;
-    pushStreamingOutput(ctx, `${sectionTitle} (${rowCount} 行)`);
+    pushStreamingOutput(
+      ctx,
+      uiText(
+        `${sectionTitle} (${rowCount} 行)`,
+        `${sectionTitle} (${rowCount} rows)`,
+      ),
+    );
     // Show progress for this section - use sectionTitle for compact display
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
       content: hasTableShape
         ? '' // No message content, title is in table header
-        : `📊 ${sectionTitle}：0 行，未返回可展示列`,
+        : uiText(
+            `📊 ${sectionTitle}：0 行，未返回可展示列`,
+            `📊 ${sectionTitle}: 0 rows; no displayable columns were returned`,
+          ),
       timestamp: Date.now(),
       sqlResult: hasTableShape
         ? {
@@ -2293,27 +2485,33 @@ export function handleSkillDiagnosticsEvent(
       (d) => readStringField(d, 'severity') === 'info',
     );
 
-    let content = '**🔍 诊断结果**\n\n';
+    let content = uiText(
+      '**🔍 诊断结果**\n\n',
+      '**🔍 Diagnostic results**\n\n',
+    );
     if (criticalItems.length > 0) {
-      content += '🔴 **严重问题:**\n';
+      content += uiText('🔴 **严重问题:**\n', '🔴 **Critical issues:**\n');
       criticalItems.forEach((d) => {
         content += `- ${readStringField(d, 'message')}\n`;
         const suggestions = readStringArrayField(d, 'suggestions');
         if (suggestions.length > 0) {
-          content += `  *建议: ${suggestions.join('; ')}*\n`;
+          content += uiText(
+            `  *建议: ${suggestions.join('; ')}*\n`,
+            `  *Suggestions: ${suggestions.join('; ')}*\n`,
+          );
         }
       });
       content += '\n';
     }
     if (warningItems.length > 0) {
-      content += '🟡 **警告:**\n';
+      content += uiText('🟡 **警告:**\n', '🟡 **Warnings:**\n');
       warningItems.forEach((d) => {
         content += `- ${readStringField(d, 'message')}\n`;
       });
       content += '\n';
     }
     if (infoItems.length > 0) {
-      content += '🔵 **提示:**\n';
+      content += uiText('🔵 **提示:**\n', '🔵 **Information:**\n');
       infoItems.forEach((d) => {
         content += `- ${readStringField(d, 'message')}\n`;
       });
@@ -2325,7 +2523,13 @@ export function handleSkillDiagnosticsEvent(
       content: content.trim(),
       timestamp: Date.now(),
     });
-    pushStreamingOutput(ctx, `诊断输出 ${diagnostics.length} 条`);
+    pushStreamingOutput(
+      ctx,
+      uiText(
+        `诊断输出 ${diagnostics.length} 条`,
+        `${diagnostics.length} diagnostic items`,
+      ),
+    );
   }
   return {};
 }
@@ -2354,17 +2558,19 @@ export function handleSkillLayeredResultEvent(
     'unknown';
   const deduplicationKey = `skill_layered_result:${skillId}`;
   if (ctx.displayedSkillProgress.has(deduplicationKey)) {
-    if (DEBUG_SSE)
+    if (DEBUG_SSE) {
       console.log(
         '[SSEHandlers] Skipping duplicate skill_layered_result:',
         deduplicationKey,
       );
+    }
     return {};
   }
   ctx.displayedSkillProgress.add(deduplicationKey);
 
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log('[SSEHandlers] skill_layered_result received:', payload);
+  }
   const layers = layeredResult;
   const metadata =
     Object.keys(resultMetadata).length > 0
@@ -2377,7 +2583,10 @@ export function handleSkillLayeredResultEvent(
 
   pushStreamingOutput(
     ctx,
-    `技能结果: ${readStringField(metadata, 'skillName', skillId)}`,
+    uiText(
+      `技能结果: ${readStringField(metadata, 'skillName', skillId)}`,
+      `Skill result: ${readStringField(metadata, 'skillName', skillId)}`,
+    ),
   );
 
   // Process overview layer (L1)
@@ -2913,8 +3122,9 @@ function processListLayer(
       > = [];
       for (const item of items) {
         const rawFrameId = item.frame_id ?? item.frameId ?? item.id;
-        if (typeof rawFrameId !== 'string' && typeof rawFrameId !== 'number')
+        if (typeof rawFrameId !== 'string' && typeof rawFrameId !== 'number') {
           continue;
+        }
 
         const rawSessionId = item.session_id ?? item.sessionId;
         const sessionId =
@@ -2966,7 +3176,10 @@ function processListLayer(
         rows,
         rowCount: rows.length,
         columnDefinitions: filteredColumnDefs,
-        sectionTitle: `📋 ${displayTitle} (${rows.length}条)`,
+        sectionTitle: uiText(
+          `📋 ${displayTitle} (${rows.length}条)`,
+          `📋 ${displayTitle} (${rows.length} items)`,
+        ),
         expandableData,
         metadata:
           Object.keys(extractedMetadata).length > 0
@@ -2988,7 +3201,11 @@ function renderConclusionCard(
 ): void {
   const category = readStringField(conclusion, 'category', 'UNKNOWN');
   const component = readStringField(conclusion, 'component', 'unknown');
-  const summary = readStringField(conclusion, 'summary', '暂无总结');
+  const summary = readStringField(
+    conclusion,
+    'summary',
+    uiText('暂无总结', 'No summary available'),
+  );
   const suggestion = readStringField(conclusion, 'suggestion');
   const evidence = readStringArrayField(conclusion, 'evidence');
   const confidencePercent = Math.round(
@@ -3007,18 +3224,36 @@ function renderConclusionCard(
     '█'.repeat(Math.floor(confidencePercent / 10)) +
     '░'.repeat(10 - Math.floor(confidencePercent / 10));
 
-  let conclusionContent = `## 🎯 分析结论\n\n`;
-  conclusionContent += `**问题分类:** ${categoryEmoji} **${translateCategory(category)}**\n`;
-  conclusionContent += `**问题组件:** \`${translateComponent(component)}\`\n`;
-  conclusionContent += `**置信度:** ${confidenceBar} ${confidencePercent}%\n\n`;
-  conclusionContent += `### 📋 根因分析\n${summary}\n\n`;
+  let conclusionContent = uiText(
+    `## 🎯 分析结论\n\n`,
+    `## 🎯 Analysis conclusion\n\n`,
+  );
+  conclusionContent += uiText(
+    `**问题分类:** ${categoryEmoji} **${translateCategory(category)}**\n`,
+    `**Category:** ${categoryEmoji} **${translateCategory(category)}**\n`,
+  );
+  conclusionContent += uiText(
+    `**问题组件:** \`${translateComponent(component)}\`\n`,
+    `**Component:** \`${translateComponent(component)}\`\n`,
+  );
+  conclusionContent += uiText(
+    `**置信度:** ${confidenceBar} ${confidencePercent}%\n\n`,
+    `**Confidence:** ${confidenceBar} ${confidencePercent}%\n\n`,
+  );
+  conclusionContent += uiText(
+    `### 📋 根因分析\n${summary}\n\n`,
+    `### 📋 Root-cause analysis\n${summary}\n\n`,
+  );
 
   if (suggestion) {
-    conclusionContent += `### 💡 优化建议\n${suggestion}\n\n`;
+    conclusionContent += uiText(
+      `### 💡 优化建议\n${suggestion}\n\n`,
+      `### 💡 Recommendations\n${suggestion}\n\n`,
+    );
   }
 
   if (evidence.length > 0) {
-    conclusionContent += `### 📊 证据\n`;
+    conclusionContent += uiText(`### 📊 证据\n`, `### 📊 Evidence\n`);
     evidence.forEach((e: string) => {
       conclusionContent += `- ${e}\n`;
     });
@@ -3039,7 +3274,7 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
   const summaryTableData = parseSummaryToTable(summary);
   if (summaryTableData) {
     const sourceContext = registerDataSourceContext(ctx, {
-      title: '分析摘要',
+      title: uiText('分析摘要', 'Analysis summary'),
       source: 'summary',
       kind: 'summary',
       rowCount: summaryTableData.rows.length,
@@ -3054,7 +3289,7 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
         columns: summaryTableData.columns,
         rows: summaryTableData.rows,
         rowCount: summaryTableData.rows.length,
-        sectionTitle: '📝 分析摘要',
+        sectionTitle: uiText('📝 分析摘要', '📝 Analysis summary'),
         sourceContext,
       },
     });
@@ -3062,7 +3297,10 @@ function renderSummary(summary: string, ctx: SSEHandlerContext): void {
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: `**📝 分析摘要:** ${summary}`,
+      content: uiText(
+        `**📝 分析摘要:** ${summary}`,
+        `**📝 Analysis summary:** ${summary}`,
+      ),
       timestamp: Date.now(),
     });
   }
@@ -3190,8 +3428,9 @@ function sourceContextMatchesClaim(
   if (!context) return false;
   if (!evidenceRefId && !sourceRef && !sourceToolCallId) return false;
   if (evidenceRefId && context.evidenceRefId !== evidenceRefId) return false;
-  if (sourceToolCallId && context.sourceToolCallId !== sourceToolCallId)
+  if (sourceToolCallId && context.sourceToolCallId !== sourceToolCallId) {
     return false;
+  }
   // evidenceRefId and sourceToolCallId are machine identifiers. sourceRef is
   // an LLM-visible label such as "表 1" or "摘要 2", so it must not veto an
   // otherwise exact machine-id match when ref numbering changes.
@@ -3200,8 +3439,9 @@ function sourceContextMatchesClaim(
     !sourceToolCallId &&
     sourceRef &&
     !sourceRefMatches(context.ref, sourceRef)
-  )
+  ) {
     return false;
+  }
   return true;
 }
 
@@ -3296,8 +3536,9 @@ function resolveClaimColumn(
     .filter(
       ({name}) => normalizeClaimColumnName(String(name)) === normalizedColumn,
     );
-  if (normalizedMatches.length === 1)
+  if (normalizedMatches.length === 1) {
     return {index: normalizedMatches[0].index};
+  }
   if (normalizedMatches.length > 1) return {status: '未核验: 列名不唯一'};
 
   const labelMatches = (sqlResult.columnDefinitions || [])
@@ -3359,10 +3600,12 @@ function resolveClaimRow(
     .map((row, idx) => ({row, idx}))
     .filter(({row}) => rowMatchesSelector(row, sqlResult, rowSelector));
   const selectorLabel = `rowSelector ${selectorEntries.map(([key, value]) => `${key}=${String(value)}`).join(', ')}`;
-  if (matches.length === 0)
+  if (matches.length === 0) {
     return {rowLabel: selectorLabel, status: '未通过: rowSelector 未命中'};
-  if (matches.length > 1)
+  }
+  if (matches.length > 1) {
     return {rowLabel: selectorLabel, status: '未核验: rowSelector 不唯一'};
+  }
   return {
     row: matches[0].row,
     rowLabel: `${selectorLabel} -> row ${matches[0].idx}`,
@@ -3486,8 +3729,9 @@ function compactClaimAuditStatus(statuses: string[]): string {
   if (failed) return failed;
   const unverified = statuses.find((status) => status.startsWith('未核验'));
   if (unverified) return unverified;
-  if (statuses.some((status) => status.includes('近似匹配')))
+  if (statuses.some((status) => status.includes('近似匹配'))) {
     return '已核对（含近似匹配）';
+  }
   if (statuses.some((status) => status === '已找到来源')) return '已找到来源';
   return '已核对';
 }
@@ -3639,15 +3883,17 @@ function formatCodeLineRange(value: unknown): string {
   if (Array.isArray(value) && value.length >= 2) {
     const start = conclusionNumber(value[0]);
     const end = conclusionNumber(value[1]);
-    if (start !== undefined && end !== undefined)
+    if (start !== undefined && end !== undefined) {
       return `${Math.round(start)}-${Math.round(end)}`;
+    }
   }
   const record = asRecord(value);
   const start = conclusionNumber(record.start ?? record.startLine);
   const end = conclusionNumber(record.end ?? record.endLine);
   if (start === undefined && end === undefined) return '';
-  if (start !== undefined && end !== undefined)
+  if (start !== undefined && end !== undefined) {
     return `${Math.round(start)}-${Math.round(end)}`;
+  }
   return String(Math.round(start ?? end ?? 0));
 }
 
@@ -3668,9 +3914,9 @@ function renderCodeAwareReferencesSection(
   ]);
   if (refs.length === 0 && patches.length === 0) return '';
 
-  const lines: string[] = ['## Code references'];
+  const lines: string[] = [uiText('## 代码引用', '## Code references')];
   if (refs.length === 0) {
-    lines.push('- None');
+    lines.push(uiText('- 无', '- None'));
   } else {
     refs.slice(0, 12).forEach((ref, index) => {
       const chunkId = conclusionText(
@@ -3684,9 +3930,11 @@ function renderCodeAwareReferencesSection(
         .filter(Boolean)
         .join(':');
       const meta = [
-        location || 'metadata-only',
-        symbol ? `symbol ${symbol}` : '',
-        codebaseId ? `codebase ${codebaseId}` : '',
+        location || uiText('仅元数据', 'metadata-only'),
+        symbol ? uiText(`符号 ${symbol}`, `symbol ${symbol}`) : '',
+        codebaseId
+          ? uiText(`代码库 ${codebaseId}`, `codebase ${codebaseId}`)
+          : '',
       ].filter(Boolean);
       lines.push(
         `- \`${chunkId}\`${meta.length > 0 ? ` - ${meta.join('；')}` : ''}`,
@@ -3694,14 +3942,17 @@ function renderCodeAwareReferencesSection(
     });
     if (refs.length > 12) {
       lines.push(
-        `- ${refs.length - 12} more code references are available in the result snapshot.`,
+        uiText(
+          `- 结果快照中另有 ${refs.length - 12} 个代码引用。`,
+          `- ${refs.length - 12} more code references are available in the result snapshot.`,
+        ),
       );
     }
   }
 
   if (patches.length > 0) {
     lines.push('');
-    lines.push('## Patch proposals');
+    lines.push(uiText('## 补丁建议', '## Patch proposals'));
     patches.slice(0, 8).forEach((patch, index) => {
       const id = conclusionText(
         patch.id || patch.patchId || patch.patch_id || `patch-${index + 1}`,
@@ -3715,10 +3966,16 @@ function renderCodeAwareReferencesSection(
       );
       const copyHint =
         status === 'verified'
-          ? 'verified by backend apply-check'
+          ? uiText('已通过后端应用检查', 'verified by backend apply-check')
           : status === 'sketch'
-            ? 'sketch only; no copyable diff'
-            : 'unverified; no copyable diff';
+            ? uiText(
+                '仅为草案；没有可复制的 diff',
+                'sketch only; no copyable diff',
+              )
+            : uiText(
+                '尚未验证；没有可复制的 diff',
+                'unverified; no copyable diff',
+              );
       lines.push(
         `- \`${id}\` - ${status} (${copyHint})${rationale ? `: ${rationale}` : ''}`,
       );
@@ -3732,7 +3989,7 @@ function appendCodeAwareReferences(
   content: string,
   contract: ConclusionContract | Record<string, unknown> | null | undefined,
 ): string {
-  if (/(^|\n)##\s*Code references/.test(content)) return content;
+  if (/(^|\n)##\s*(?:代码引用|Code references)/.test(content)) return content;
   const section = renderCodeAwareReferencesSection(contract);
   if (!section) return content;
   return [content.trimEnd(), '', '---', section].join('\n');
@@ -3758,13 +4015,15 @@ function appendClaimVerificationSummary(
   payload: AnalysisCompletedPayload | undefined,
 ): string {
   if (!payload) return content;
-  if (/(^|\n)##\s*断言验证结果/.test(content)) return content;
+  if (/(^|\n)##\s*(?:断言验证结果|Claim verification results)/i.test(content))
+    {return content;}
   const verifier = asRecord(payload.claimVerificationResult);
   const hasVerifier = Object.keys(verifier).length > 0;
   const claimSupportCount = payload.claimSupport?.length || 0;
   const identityCount = payload.identityResolutions?.length || 0;
-  if (!hasVerifier && claimSupportCount === 0 && identityCount === 0)
+  if (!hasVerifier && claimSupportCount === 0 && identityCount === 0) {
     return content;
+  }
 
   const status = readStringField(verifier, 'status', 'not_checked');
   const checked = readOptionalNumberField(verifier, 'checkedClaimCount') ?? 0;
@@ -3772,12 +4031,21 @@ function appendClaimVerificationSummary(
     readOptionalNumberField(verifier, 'unsupportedClaimCount') ?? 0;
   const issues = Array.isArray(verifier.issues) ? verifier.issues : [];
   const lines = [
-    '## 断言验证结果',
-    `- Verifier: ${status}`,
-    `- Checked claims: ${checked}`,
-    `- Unsupported claims: ${unsupported}`,
-    `- Claim support entries: ${claimSupportCount}`,
-    `- Identity sidecars: ${identityCount}`,
+    uiText('## 断言验证结果', '## Claim verification results'),
+    uiText(`- 验证器: ${status}`, `- Verifier: ${status}`),
+    uiText(`- 已检查断言: ${checked}`, `- Checked claims: ${checked}`),
+    uiText(
+      `- 不受支持的断言: ${unsupported}`,
+      `- Unsupported claims: ${unsupported}`,
+    ),
+    uiText(
+      `- 断言支持记录: ${claimSupportCount}`,
+      `- Claim support entries: ${claimSupportCount}`,
+    ),
+    uiText(
+      `- 身份解析侧记录: ${identityCount}`,
+      `- Identity sidecars: ${identityCount}`,
+    ),
   ];
   issues.slice(0, 5).forEach((issue) => {
     const item = asRecord(issue);
@@ -3788,7 +4056,10 @@ function appendClaimVerificationSummary(
   });
   if (issues.length > 5) {
     lines.push(
-      `- ${issues.length - 5} more verifier issues are available in the HTML report/export.`,
+      uiText(
+        `- HTML 报告/导出中另有 ${issues.length - 5} 个验证问题。`,
+        `- ${issues.length - 5} more verifier issues are available in the HTML report/export.`,
+      ),
     );
   }
   payload.claimSupport?.slice(0, 5).forEach((support, index) => {
@@ -3853,9 +4124,12 @@ function buildPartialResultWarning(
   const reason =
     payload.terminationMessage ||
     payload.terminationReason ||
-    '本次分析结果已标记为 partial，结论可能不完整。';
+    uiText(
+      '本次分析结果已标记为 partial，结论可能不完整。',
+      'This analysis is marked partial, so the conclusion may be incomplete.',
+    );
   return [
-    '> **结果完整性提示**',
+    uiText('> **结果完整性提示**', '> **Result completeness notice**'),
     ...reason
       .split(/\r?\n/)
       .filter(Boolean)
@@ -3868,8 +4142,9 @@ function prependPartialResultWarning(
   payload: AnalysisCompletedPayload | undefined,
 ): string {
   const warning = buildPartialResultWarning(payload);
-  if (!warning || /结果完整性提示|Result Completeness Notice/i.test(content))
+  if (!warning || /结果完整性提示|Result Completeness Notice/i.test(content)) {
     return content;
+  }
   return [warning, '', content.trimStart()].join('\n');
 }
 
@@ -4079,8 +4354,8 @@ function renderConclusionContract(
         readAliasedValue(metadata, CONTRACT_ALIASES.metadata.sceneId),
     ).toLowerCase();
     return sceneId === 'jank'
-      ? '## 掉帧聚类（先看大头）'
-      : '## 聚类（先看大头）';
+      ? uiText('## 掉帧聚类（先看大头）', '## Jank clusters (largest first)')
+      : uiText('## 聚类（先看大头）', '## Clusters (largest first)');
   };
 
   const resolveClusterLimit = (): number | undefined => {
@@ -4106,9 +4381,16 @@ function renderConclusionContract(
   if (!hasSignal) return null;
 
   const lines: string[] = [];
-  lines.push('## 结论（按可能性排序）');
+  lines.push(
+    uiText('## 结论（按可能性排序）', '## Conclusions (ordered by likelihood)'),
+  );
   if (conclusions.length === 0) {
-    lines.push('1. 结论信息缺失（证据不足）');
+    lines.push(
+      uiText(
+        '1. 结论信息缺失（证据不足）',
+        '1. Conclusion unavailable (insufficient evidence)',
+      ),
+    );
   } else {
     conclusions.slice(0, 3).forEach((item, idx: number) => {
       const statement = toText(
@@ -4126,27 +4408,49 @@ function renderConclusionContract(
       let resolved = statement;
       if (!resolved && (trigger || supply || amplification)) {
         const parts: string[] = [];
-        if (trigger) parts.push(`触发因子（直接原因）: ${trigger}`);
-        if (supply) parts.push(`供给约束（资源瓶颈）: ${supply}`);
+        if (trigger)
+          {parts.push(
+            uiText(
+              `触发因子（直接原因）: ${trigger}`,
+              `Trigger (direct cause): ${trigger}`,
+            ),
+          );}
+        if (supply)
+          {parts.push(
+            uiText(
+              `供给约束（资源瓶颈）: ${supply}`,
+              `Supply constraint (resource bottleneck): ${supply}`,
+            ),
+          );}
         if (amplification)
-          parts.push(`放大路径（问题放大环节）: ${amplification}`);
-        resolved = parts.join('；');
+          {parts.push(
+            uiText(
+              `放大路径（问题放大环节）: ${amplification}`,
+              `Amplification path: ${amplification}`,
+            ),
+          );}
+        resolved = parts.join(uiText('；', '; '));
       }
       const confidence = toPercent(
         readAliasedValue(item, CONTRACT_ALIASES.conclusion.confidence),
       );
       const suffix =
         confidence !== undefined
-          ? `（置信度: ${Math.round(confidence)}%）`
+          ? uiText(
+              `（置信度: ${Math.round(confidence)}%）`,
+              ` (confidence: ${Math.round(confidence)}%)`,
+            )
           : '';
-      lines.push(`${idx + 1}. ${resolved || '结论信息缺失'}${suffix}`);
+      lines.push(
+        `${idx + 1}. ${resolved || uiText('结论信息缺失', 'Conclusion unavailable')}${suffix}`,
+      );
     });
   }
   lines.push('');
 
   lines.push(resolveClusterHeading());
   if (clusters.length === 0) {
-    lines.push('- 暂无');
+    lines.push(uiText('- 暂无', '- None'));
   } else {
     const clusterLimit = resolveClusterLimit();
     const clusterItems =
@@ -4168,7 +4472,10 @@ function renderConclusionContract(
         ? `${cluster || 'K?'}: ${description}`
         : cluster || 'K?';
       const metrics: string[] = [];
-      if (frames !== undefined) metrics.push(`${Math.round(frames)}帧`);
+      if (frames !== undefined)
+        {metrics.push(
+          uiText(`${Math.round(frames)}帧`, `${Math.round(frames)} frames`),
+        );}
       if (percentage !== undefined) metrics.push(`${percentage.toFixed(1)}%`);
       const frameRefs = readFrameRefs(
         readAliasedValue(item, CONTRACT_ALIASES.cluster.frameRefs),
@@ -4177,21 +4484,39 @@ function renderConclusionContract(
         readAliasedValue(item, CONTRACT_ALIASES.cluster.omittedFrames),
       );
       const frameRefText =
-        frameRefs.length > 0 ? `；帧: ${frameRefs.join(' / ')}` : '';
+        frameRefs.length > 0
+          ? uiText(
+              `；帧: ${frameRefs.join(' / ')}`,
+              `; frames: ${frameRefs.join(' / ')}`,
+            )
+          : '';
       const omittedHint =
         omittedFrames && omittedFrames > 0
-          ? `（其余 ${Math.round(omittedFrames)} 帧省略）`
+          ? uiText(
+              `（其余 ${Math.round(omittedFrames)} 帧省略）`,
+              ` (${Math.round(omittedFrames)} additional frames omitted)`,
+            )
           : '';
       lines.push(
-        `- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}${omittedHint}`,
+        uiText(
+          `- ${label}${metrics.length > 0 ? `（${metrics.join(', ')}）` : ''}${frameRefText}${omittedHint}`,
+          `- ${label}${metrics.length > 0 ? ` (${metrics.join(', ')})` : ''}${frameRefText}${omittedHint}`,
+        ),
       );
     });
   }
   lines.push('');
 
-  lines.push('## 证据链（对应上述结论）');
+  lines.push(
+    uiText(
+      '## 证据链（对应上述结论）',
+      '## Evidence chain (mapped to the conclusions above)',
+    ),
+  );
   if (evidenceChain.length === 0) {
-    lines.push('- 证据链信息缺失');
+    lines.push(
+      uiText('- 证据链信息缺失', '- Evidence-chain information is missing'),
+    );
   } else {
     evidenceChain.slice(0, 12).forEach((item, idx: number) => {
       const cid = toText(
@@ -4226,9 +4551,11 @@ function renderConclusionContract(
     lines.push('');
   }
 
-  lines.push('## 不确定性与反例');
+  lines.push(
+    uiText('## 不确定性与反例', '## Uncertainties and counterexamples'),
+  );
   if (uncertainties.length === 0) {
-    lines.push('- 暂无');
+    lines.push(uiText('- 暂无', '- None'));
   } else {
     uncertainties.slice(0, 6).forEach((item: unknown) => {
       const text = toText(item);
@@ -4237,9 +4564,14 @@ function renderConclusionContract(
   }
   lines.push('');
 
-  lines.push('## 下一步（最高信息增益）');
+  lines.push(
+    uiText(
+      '## 下一步（最高信息增益）',
+      '## Next steps (highest information gain)',
+    ),
+  );
   if (nextSteps.length === 0) {
-    lines.push('- 暂无');
+    lines.push(uiText('- 暂无', '- None'));
   } else {
     nextSteps.slice(0, 6).forEach((item: unknown) => {
       const text = toText(item);
@@ -4265,10 +4597,21 @@ function renderConclusionContract(
   );
   if (confidence !== undefined || rounds !== undefined) {
     lines.push('');
-    lines.push('## 分析元数据');
+    lines.push(uiText('## 分析元数据', '## Analysis metadata'));
     if (confidence !== undefined)
-      lines.push(`- 置信度: ${Math.round(confidence)}%`);
-    if (rounds !== undefined) lines.push(`- 分析轮次: ${Math.round(rounds)}`);
+      {lines.push(
+        uiText(
+          `- 置信度: ${Math.round(confidence)}%`,
+          `- Confidence: ${Math.round(confidence)}%`,
+        ),
+      );}
+    if (rounds !== undefined)
+      {lines.push(
+        uiText(
+          `- 分析轮次: ${Math.round(rounds)}`,
+          `- Analysis rounds: ${Math.round(rounds)}`,
+        ),
+      );}
   }
 
   return lines.join('\n');
@@ -4289,21 +4632,23 @@ export function handleAnalysisCompletedEvent(
   const conclusionContract =
     payload?.conclusionContract ??
     (isRecord(rawConclusionContract) ? rawConclusionContract : undefined);
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log(
       '[SSEHandlers] analysis_completed received, architecture:',
       architecture || 'unknown',
     );
+  }
 
   mergeConversationTimelineFromAnalysisCompleted(rawPayload, ctx);
 
   // Guard against duplicate conclusion handling — but still extract reportUrl
   // (agentv3 sends 'conclusion' first, then 'analysis_completed' carries reportUrl)
   if (ctx.completionHandled) {
-    if (DEBUG_SSE)
+    if (DEBUG_SSE) {
       console.log(
         '[SSEHandlers] Completion already handled, extracting reportUrl only',
       );
+    }
     const reportUrl = payload?.reportUrl;
     const resultSnapshotId = payload?.resultSnapshotId;
     const canonicalConclusion = payload?.conclusion || payload?.answer;
@@ -4447,7 +4792,10 @@ export function handleAnalysisCompletedEvent(
     // Keep the in-flight context object consistent as well (unit tests and
     // any caller that reuses the same context instance for multiple events).
     ctx.completionHandled = true;
-    pushStreamingOutput(ctx, '最终结论已生成');
+    pushStreamingOutput(
+      ctx,
+      uiText('最终结论已生成', 'Final conclusion generated'),
+    );
     completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
@@ -4506,7 +4854,9 @@ export function handleAnalysisCompletedEvent(
       // Check if conclusion was already shown
       const messages = ctx.getMessages();
       const hasConclusionAlready = messages.some(
-        (m) => m.role === 'assistant' && m.content.includes('🎯 分析结论'),
+        (m) =>
+          m.role === 'assistant' &&
+          /🎯 (?:分析结论|Analysis conclusion)/.test(m.content),
       );
 
       if (!hasConclusionAlready) {
@@ -4601,8 +4951,8 @@ export function handleAnalysisCancelledEvent(
     reason === 'Analysis cancelled by user' || reason === 'Aborted by user';
   const message =
     reason && !isDefaultUserCancellation
-      ? `分析已取消：${reason}`
-      : '分析已取消。';
+      ? uiText(`分析已取消：${reason}`, `Analysis cancelled: ${reason}`)
+      : uiText('分析已取消。', 'Analysis cancelled.');
   const lastMessage = ctx.getMessages()[ctx.getMessages().length - 1];
   if (
     !lastMessage ||
@@ -4633,9 +4983,23 @@ export function handleDegradedEvent(
     payload.terminationReason ||
     payload.fallback ||
     payload.code ||
-    '本次分析结果已标记为 partial，结论可能不完整。';
-  pushStreamingPhase(ctx, `结果完整性提示: ${message}`);
-  return {loadingPhase: '结果已标记为部分完成'};
+    uiText(
+      '本次分析结果已标记为 partial，结论可能不完整。',
+      'This analysis is marked partial, so the conclusion may be incomplete.',
+    );
+  pushStreamingPhase(
+    ctx,
+    uiText(
+      `结果完整性提示: ${message}`,
+      `Result completeness notice: ${message}`,
+    ),
+  );
+  return {
+    loadingPhase: uiText(
+      '结果已标记为部分完成',
+      'Result marked partially complete',
+    ),
+  };
 }
 
 /**
@@ -4650,33 +5014,54 @@ export function handleHypothesisGeneratedEvent(
   if (hypotheses.length > 0) {
     const evidenceBased = readBooleanField(payload, 'evidenceBased', false);
     const evidenceSummary = readStringArrayField(payload, 'evidenceSummary');
-    pushStreamingThought(ctx, `形成 ${hypotheses.length} 个待验证假设`);
+    pushStreamingThought(
+      ctx,
+      uiText(
+        `形成 ${hypotheses.length} 个待验证假设`,
+        `Formed ${hypotheses.length} hypotheses to verify`,
+      ),
+    );
     for (const hypothesis of hypotheses.slice(0, 3)) {
       pushStreamingThought(ctx, hypothesis);
     }
 
     let content = '';
     if (evidenceBased) {
-      content += `### 🧪 基于证据形成了 ${hypotheses.length} 个待验证假设\n`;
+      content += uiText(
+        `### 🧪 基于证据形成了 ${hypotheses.length} 个待验证假设\n`,
+        `### 🧪 Formed ${hypotheses.length} evidence-based hypotheses to verify\n`,
+      );
       if (evidenceSummary.length > 0) {
-        content += '\n**首轮证据摘要**\n';
+        content += uiText(
+          '\n**首轮证据摘要**\n',
+          '\n**Initial evidence summary**\n',
+        );
         for (const item of evidenceSummary) {
           content += `- ${item}\n`;
         }
       }
-      content += '\n**待验证假设**\n';
+      content += uiText('\n**待验证假设**\n', '\n**Hypotheses to verify**\n');
       for (let i = 0; i < hypotheses.length; i++) {
         const h = hypotheses[i];
         content += `${i + 1}. ${h}\n`;
       }
-      content += '\n_下一步将继续验证并收敛假设。_';
+      content += uiText(
+        '\n_下一步将继续验证并收敛假设。_',
+        '\n_Next, the analysis will verify and narrow these hypotheses._',
+      );
     } else {
-      content += `### 🧪 生成了 ${hypotheses.length} 个分析假设\n`;
+      content += uiText(
+        `### 🧪 生成了 ${hypotheses.length} 个分析假设\n`,
+        `### 🧪 Generated ${hypotheses.length} analysis hypotheses\n`,
+      );
       for (let i = 0; i < hypotheses.length; i++) {
         const h = hypotheses[i];
         content += `${i + 1}. ${h}\n`;
       }
-      content += '\n_AI 将验证这些假设..._';
+      content += uiText(
+        '\n_AI 将验证这些假设..._',
+        '\n_AI will verify these hypotheses..._',
+      );
     }
 
     ctx.addMessage({
@@ -4700,7 +5085,9 @@ export function handleRoundStartEvent(
   if (Object.keys(payload).length > 0) {
     const round = readNumberField(payload, 'round', 1);
     const maxRounds = readNumberField(payload, 'maxRounds', 5);
-    const message = readStringField(payload, 'message') || `分析轮次 ${round}`;
+    const message =
+      readStringField(payload, 'message') ||
+      uiText(`分析轮次 ${round}`, `Analysis round ${round}`);
     pushStreamingPhase(ctx, `${message} (${round}/${maxRounds})`);
 
     ctx.addMessage({
@@ -4726,13 +5113,17 @@ export function handleAgentTaskDispatchedEvent(
     const taskCount = readNumberField(payload, 'taskCount', 0);
     const agents = readStringArrayField(payload, 'agents');
     const message =
-      readStringField(payload, 'message') || `派发 ${taskCount} 个任务`;
+      readStringField(payload, 'message') ||
+      uiText(`派发 ${taskCount} 个任务`, `Dispatch ${taskCount} tasks`);
     const agentText = agents.length > 0 ? ` -> ${agents.join(', ')}` : '';
     pushStreamingTool(ctx, `${message}${agentText}`);
 
     let content = `⏳ 🤖 ${message}`;
     if (agents.length > 0) {
-      content += `\n\n派发给: ${agents.map((a: string) => `\`${a}\``).join(', ')}`;
+      content += uiText(
+        `\n\n派发给: ${agents.map((a: string) => `\`${a}\``).join(', ')}`,
+        `\n\nDispatched to: ${agents.map((a: string) => `\`${a}\``).join(', ')}`,
+      );
     }
 
     ctx.addMessage({
@@ -4757,17 +5148,25 @@ export function handleSynthesisCompleteEvent(
   if (Object.keys(payload).length > 0) {
     const confirmedFindings = readNumberField(payload, 'confirmedFindings', 0);
     const updatedHypotheses = readNumberField(payload, 'updatedHypotheses', 0);
-    const message = readStringField(payload, 'message') || '综合分析结果';
+    const message =
+      readStringField(payload, 'message') ||
+      uiText('综合分析结果', 'Synthesize analysis results');
     pushStreamingPhase(ctx, message);
     pushStreamingOutput(
       ctx,
-      `确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
+      uiText(
+        `确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
+        `Confirmed ${confirmedFindings} findings and updated ${updatedHypotheses} hypotheses`,
+      ),
     );
 
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: `⏳ 📝 ${message}\n\n确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
+      content: uiText(
+        `⏳ 📝 ${message}\n\n确认 ${confirmedFindings} 个发现，更新 ${updatedHypotheses} 个假设`,
+        `⏳ 📝 ${message}\n\nConfirmed ${confirmedFindings} findings and updated ${updatedHypotheses} hypotheses`,
+      ),
       timestamp: Date.now(),
       flowTag: 'progress_note',
     });
@@ -4786,10 +5185,15 @@ export function handleStrategyDecisionEvent(
   if (Object.keys(payload).length > 0) {
     const strategy = readStringField(payload, 'strategy') || 'continue';
     const confidence = readNumberField(payload, 'confidence', 0);
-    const message = readStringField(payload, 'message') || `策略: ${strategy}`;
+    const message =
+      readStringField(payload, 'message') ||
+      uiText(`策略: ${strategy}`, `Strategy: ${strategy}`);
     pushStreamingPhase(
       ctx,
-      `${message} (置信度 ${(confidence * 100).toFixed(0)}%)`,
+      uiText(
+        `${message} (置信度 ${(confidence * 100).toFixed(0)}%)`,
+        `${message} (confidence ${(confidence * 100).toFixed(0)}%)`,
+      ),
     );
 
     const strategyEmoji =
@@ -4804,7 +5208,10 @@ export function handleStrategyDecisionEvent(
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: `⏳ ${strategyEmoji} ${message} (置信度: ${(confidence * 100).toFixed(0)}%)`,
+      content: uiText(
+        `⏳ ${strategyEmoji} ${message} (置信度: ${(confidence * 100).toFixed(0)}%)`,
+        `⏳ ${strategyEmoji} ${message} (confidence: ${(confidence * 100).toFixed(0)}%)`,
+      ),
       timestamp: Date.now(),
       flowTag: 'progress_note',
     });
@@ -4822,12 +5229,13 @@ export function handleDataEvent(
   const eventRecord = asRecord(data);
   if (Object.keys(eventRecord).length === 0) return {};
 
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log(
       '[SSEHandlers] v2.0 data event received:',
       eventRecord.id,
       eventRecord.envelope,
     );
+  }
 
   const rawEnvelope = eventRecord.envelope;
   const envelopeCandidates = Array.isArray(rawEnvelope)
@@ -4851,11 +5259,12 @@ export function handleDataEvent(
     );
 
     if (ctx.displayedSkillProgress.has(deduplicationKey)) {
-      if (DEBUG_SSE)
+      if (DEBUG_SSE) {
         console.log(
           '[SSEHandlers] Skipping duplicate data envelope:',
           deduplicationKey,
         );
+      }
       continue;
     }
     ctx.displayedSkillProgress.add(deduplicationKey);
@@ -4910,7 +5319,10 @@ function renderDataEnvelope(
           },
         );
         const notice = isDiagnostic
-          ? '> 这是失败诊断，不是可引用的数据表或性能证据。需要修正 SQL/工具参数后重试。'
+          ? uiText(
+              '> 这是失败诊断，不是可引用的数据表或性能证据。需要修正 SQL/工具参数后重试。',
+              '> This is a failure diagnostic, not a citable data table or performance evidence. Correct the SQL or tool parameters and retry.',
+            )
           : '';
         ctx.addMessage({
           id: ctx.generateId(),
@@ -4944,7 +5356,9 @@ function renderDataEnvelope(
         }
 
         if (payload.summary.metrics && payload.summary.metrics.length > 0) {
-          const metricLines: string[] = ['### 关键指标'];
+          const metricLines: string[] = [
+            uiText('### 关键指标', '### Key metrics'),
+          ];
           for (const metric of payload.summary.metrics) {
             const icon =
               metric.severity === 'critical'
@@ -5073,20 +5487,30 @@ function renderDataEnvelope(
             ctx.addMessage({
               id: ctx.generateId(),
               role: 'assistant',
-              content: `### 📉 ${title}\n\n*[图表数据已记录，但数据不是可表格化的对象数组]*`,
+              content: uiText(
+                `### 📉 ${title}\n\n*[图表数据已记录，但数据不是可表格化的对象数组]*`,
+                `### 📉 ${title}\n\n*[Chart data was recorded, but it is not an array of objects that can be rendered as a table]*`,
+              ),
               timestamp: Date.now(),
               sourceContext,
             });
           }
         } else {
-          let chartContent = `### \uD83D\uDCC9 ${title}\n\n`;
-          chartContent += `**\u56FE\u8868\u7C7B\u578B:** ${readStringField(chartConfig, 'type', 'unknown')}\n\n`;
-          chartContent += `*[\u56FE\u8868\u6E32\u67D3\u6682\u672A\u5B9E\u73B0\uFF0C\u6570\u636E\u5DF2\u8BB0\u5F55]*\n`;
-          if (DEBUG_SSE)
+          let chartContent = `### 📉 ${title}\n\n`;
+          chartContent += uiText(
+            `**图表类型:** ${readStringField(chartConfig, 'type', 'unknown')}\n\n`,
+            `**Chart type:** ${readStringField(chartConfig, 'type', 'unknown')}\n\n`,
+          );
+          chartContent += uiText(
+            '*[图表渲染暂未实现，数据已记录]*\n',
+            '*[Chart rendering is not implemented yet; data was recorded]*\n',
+          );
+          if (DEBUG_SSE) {
             console.log(
               '[SSEHandlers] Chart data received but no renderable data:',
               chartConfig,
             );
+          }
           ctx.addMessage({
             id: ctx.generateId(),
             role: 'assistant',
@@ -5110,7 +5534,10 @@ function renderDataEnvelope(
       ctx.addMessage({
         id: ctx.generateId(),
         role: 'assistant',
-        content: `### ⏱️ ${title}\n\n*[时间线渲染暂未实现]*\n`,
+        content: uiText(
+          `### ⏱️ ${title}\n\n*[时间线渲染暂未实现]*\n`,
+          `### ⏱️ ${title}\n\n*[Timeline rendering is not implemented yet]*\n`,
+        ),
         timestamp: Date.now(),
         sourceContext: timelineSourceContext,
       });
@@ -5213,12 +5640,16 @@ export function handleSkillErrorEvent(
       error,
       timestamp: Date.now(),
     };
-    if (DEBUG_SSE)
+    if (DEBUG_SSE) {
       console.log('[SSEHandlers] Skill error collected:', errorInfo);
+    }
     ctx.collectedErrors.push(errorInfo);
     pushStreamingOutput(
       ctx,
-      `步骤错误: ${errorInfo.skillId}${errorInfo.stepId ? `/${errorInfo.stepId}` : ''}`,
+      uiText(
+        `步骤错误: ${errorInfo.skillId}${errorInfo.stepId ? `/${errorInfo.stepId}` : ''}`,
+        `Step error: ${errorInfo.skillId}${errorInfo.stepId ? `/${errorInfo.stepId}` : ''}`,
+      ),
     );
   }
   return {};
@@ -5242,11 +5673,11 @@ export function handleErrorEvent(
     ctx.addMessage({
       id: ctx.generateId(),
       role: 'assistant',
-      content: `**错误:** ${error}`,
+      content: uiText(`**错误:** ${error}`, `**Error:** ${error}`),
       timestamp: Date.now(),
     });
   } else {
-    failStreamingFlow(ctx, '分析失败');
+    failStreamingFlow(ctx, uiText('分析失败', 'Analysis failed'));
   }
 
   // Show collected errors summary if any
@@ -5277,7 +5708,10 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
       .push({stepId: err.stepId, error: err.error});
   }
 
-  let summaryContent = `### ⚠️ 分析过程中遇到 ${ctx.collectedErrors.length} 个错误\n\n`;
+  let summaryContent = uiText(
+    `### ⚠️ 分析过程中遇到 ${ctx.collectedErrors.length} 个错误\n\n`,
+    `### ⚠️ The analysis encountered ${ctx.collectedErrors.length} errors\n\n`,
+  );
 
   for (const [skillId, errors] of errorsBySkill) {
     summaryContent += `**Skill: ${skillId}**\n`;
@@ -5288,7 +5722,10 @@ function showErrorSummary(ctx: SSEHandlerContext): void {
     summaryContent += '\n';
   }
 
-  summaryContent += `\n*这些错误不影响其他分析结果的展示，但可能导致部分数据缺失。*`;
+  summaryContent += uiText(
+    '\n*这些错误不影响其他分析结果的展示，但可能导致部分数据缺失。*',
+    '\n*These errors do not prevent other results from being displayed, but some data may be missing.*',
+  );
 
   ctx.addMessage({
     id: ctx.generateId(),
@@ -5313,17 +5750,31 @@ export function handleCircuitBreakerEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const breakerData = eventPayload(data);
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log('[SSEHandlers] circuit_breaker received:', breakerData);
+  }
 
-  const reason = readStringField(breakerData, 'reason', '分析保护机制已触发');
+  const reason = readStringField(
+    breakerData,
+    'reason',
+    uiText('分析保护机制已触发', 'Analysis guardrail triggered'),
+  );
   const agentId = readStringField(breakerData, 'agentId', 'agent');
 
-  pushStreamingPhase(ctx, `保护机制触发: ${reason}`);
+  pushStreamingPhase(
+    ctx,
+    uiText(
+      `保护机制触发: ${reason}`,
+      `Analysis guardrail triggered: ${reason}`,
+    ),
+  );
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'system',
-    content: `⚠️ **分析保护机制触发**\n\n${reason}\n\n_来源: ${agentId}_`,
+    content: uiText(
+      `⚠️ **分析保护机制触发**\n\n${reason}\n\n_来源: ${agentId}_`,
+      `⚠️ **Analysis guardrail triggered**\n\n${reason}\n\n_Source: ${agentId}_`,
+    ),
     timestamp: Date.now(),
     flowTag: 'progress_note',
   });
@@ -5339,8 +5790,9 @@ export function handleStrategySelectedEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const strategyData = eventPayload(data);
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log('[SSEHandlers] strategy_selected received:', strategyData);
+  }
 
   if (Object.keys(strategyData).length === 0) return {};
 
@@ -5356,18 +5808,24 @@ export function handleStrategySelectedEvent(
   const reasoning = readStringField(
     strategyData,
     'reasoning',
-    '开始执行分析流水线...',
+    uiText('开始执行分析流水线...', 'Starting the analysis pipeline...'),
   );
   const methodEmoji = selectionMethod === 'llm' ? '🧠' : '🔑';
   pushStreamingPhase(
     ctx,
-    `选择策略 ${strategyName} (${confidencePercent}%, ${selectionMethod})`,
+    uiText(
+      `选择策略 ${strategyName} (${confidencePercent}%, ${selectionMethod})`,
+      `Selected strategy ${strategyName} (${confidencePercent}%, ${selectionMethod})`,
+    ),
   );
 
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'assistant',
-    content: `⏳ ${methodEmoji} 选择策略: **${strategyName}** (${confidencePercent}%)\n\n_${reasoning}_`,
+    content: uiText(
+      `⏳ ${methodEmoji} 选择策略: **${strategyName}** (${confidencePercent}%)\n\n_${reasoning}_`,
+      `⏳ ${methodEmoji} Selected strategy: **${strategyName}** (${confidencePercent}%)\n\n_${reasoning}_`,
+    ),
     timestamp: Date.now(),
     flowTag: 'progress_note',
   });
@@ -5383,17 +5841,31 @@ export function handleStrategyFallbackEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const fallbackData = eventPayload(data);
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log('[SSEHandlers] strategy_fallback received:', fallbackData);
+  }
 
   if (Object.keys(fallbackData).length === 0) return {};
-  const reason = readStringField(fallbackData, 'reason', '未命中预设策略');
-  pushStreamingPhase(ctx, `回退到假设驱动分析: ${reason}`);
+  const reason = readStringField(
+    fallbackData,
+    'reason',
+    uiText('未命中预设策略', 'No predefined strategy matched'),
+  );
+  pushStreamingPhase(
+    ctx,
+    uiText(
+      `回退到假设驱动分析: ${reason}`,
+      `Falling back to hypothesis-driven analysis: ${reason}`,
+    ),
+  );
 
   ctx.addMessage({
     id: ctx.generateId(),
     role: 'assistant',
-    content: `⏳ 🔄 使用假设驱动分析\n\n_${reason || '未匹配到预设策略，启动自适应分析...'}_`,
+    content: uiText(
+      `⏳ 🔄 使用假设驱动分析\n\n_${reason || '未匹配到预设策略，启动自适应分析...'}_`,
+      `⏳ 🔄 Using hypothesis-driven analysis\n\n_${reason || 'No predefined strategy matched; starting adaptive analysis...'}_`,
+    ),
     timestamp: Date.now(),
     flowTag: 'progress_note',
   });
@@ -5406,11 +5878,12 @@ export function handleStrategyFallbackEvent(
  */
 export function handleFocusUpdatedEvent(
   data: RawSSEEvent,
-  _ctx: SSEHandlerContext, // eslint-disable-line @typescript-eslint/no-unused-vars
+  _ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   // Focus updates are typically silent - just log for debugging
-  if (DEBUG_SSE)
+  if (DEBUG_SSE) {
     console.log('[SSEHandlers] focus_updated:', eventPayload(data));
+  }
   return {};
 }
 
@@ -5487,11 +5960,17 @@ export function handleAgentResponseEvent(
       payload.summary ||
       response.summary ||
       response.conclusion ||
-      '任务完成',
+      uiText('任务完成', 'Task completed'),
   );
 
   const taskSuffix = taskId ? ` (#${taskId})` : '';
-  pushStreamingTool(ctx, `${agentId} 完成任务${taskSuffix}`);
+  pushStreamingTool(
+    ctx,
+    uiText(
+      `${agentId} 完成任务${taskSuffix}`,
+      `${agentId} completed task${taskSuffix}`,
+    ),
+  );
   pushStreamingOutput(ctx, `${agentId}: ${summary}`);
   return {};
 }
@@ -5528,7 +6007,13 @@ export function handleFindingEvent(
   const findingsRaw = Array.isArray(payload.findings) ? payload.findings : [];
   if (findingsRaw.length === 0) return {};
 
-  pushStreamingOutput(ctx, `新增发现 ${findingsRaw.length} 条`);
+  pushStreamingOutput(
+    ctx,
+    uiText(
+      `新增发现 ${findingsRaw.length} 条`,
+      `${findingsRaw.length} new findings`,
+    ),
+  );
   for (const item of findingsRaw.slice(0, 2)) {
     const finding = asRecord(item);
     const title = normalizeFlowLine(
@@ -5562,7 +6047,9 @@ export function handleStageTransitionEvent(
     stageIndex >= 0 && totalStages > 0
       ? ` (${stageIndex + 1}/${totalStages})`
       : '';
-  const label = skipped ? '跳过阶段' : '进入阶段';
+  const label = skipped
+    ? uiText('跳过阶段', 'Skipped stage')
+    : uiText('进入阶段', 'Entered stage');
   const detail = stageName ? ` ${stageName}` : '';
   const reason = skipped && skipReason ? `: ${skipReason}` : '';
   pushStreamingPhase(ctx, `${label}${detail}${stageSeq}${reason}`);
@@ -5718,7 +6205,10 @@ export function handleAnswerTokenEvent(
     const answer = ctx.streamingAnswer;
     if (answer.status === 'idle') {
       ensureAnswerTimelineStarted(ctx);
-      pushStreamingOutput(ctx, '最终回答生成中...');
+      pushStreamingOutput(
+        ctx,
+        uiText('最终回答生成中...', 'Generating final answer...'),
+      );
     }
     answer.status = 'streaming';
     answer.pending += token;
@@ -5743,7 +6233,7 @@ export function handleAnswerTokenEvent(
       force: true,
       completed: true,
     });
-    pushStreamingOutput(ctx, '最终回答已输出');
+    pushStreamingOutput(ctx, uiText('最终回答已输出', 'Final answer emitted'));
     completeStreamingAnswer(ctx);
   }
 
@@ -5810,7 +6300,10 @@ function handleSSEEventInner(
 
     case 'sql_generated':
       // SQL was generated - don't show raw SQL to user
-      pushStreamingTool(ctx, 'SQL 已生成，等待执行');
+      pushStreamingTool(
+        ctx,
+        uiText('SQL 已生成，等待执行', 'SQL generated; waiting to execute'),
+      );
       return {};
 
     case 'sql_executed':
@@ -5928,7 +6421,10 @@ function handleSSEEventInner(
         const confidence = readNumberField(arch, 'confidence', 0);
         pushStreamingPhase(
           ctx,
-          `检测到渲染架构: ${archDesc} (置信度: ${Math.round(confidence * 100)}%)`,
+          uiText(
+            `检测到渲染架构: ${archDesc} (置信度: ${Math.round(confidence * 100)}%)`,
+            `Detected rendering architecture: ${archDesc} (confidence: ${Math.round(confidence * 100)}%)`,
+          ),
         );
       }
       return {};
@@ -5997,7 +6493,10 @@ function handleSSEEventInner(
       const desc = readStringField(subPayload, 'description') || agentName;
       const msg =
         readStringField(subPayload, 'message') ||
-        `委托子代理 [${agentName}]: ${desc}`;
+        uiText(
+          `委托子代理 [${agentName}]: ${desc}`,
+          `Delegated to sub-agent [${agentName}]: ${desc}`,
+        );
       // Track sub-agent card state
       ctx.streamingFlow.subAgents.push({
         agentName,
@@ -6012,7 +6511,10 @@ function handleSSEEventInner(
           ctx,
           'tool',
           'system',
-          `🤖 委托 ${agentName}: ${desc}`,
+          uiText(
+            `🤖 委托 ${agentName}: ${desc}`,
+            `🤖 Delegated to ${agentName}: ${desc}`,
+          ),
         );
       }
       refreshSubAgentCards(ctx);
@@ -6024,7 +6526,10 @@ function handleSSEEventInner(
       const agentName = readStringField(subPayload, 'agentName') || 'sub-agent';
       const msg =
         readStringField(subPayload, 'message') ||
-        `子代理 [${agentName}] 完成证据收集`;
+        uiText(
+          `子代理 [${agentName}] 完成证据收集`,
+          `Sub-agent [${agentName}] completed evidence collection`,
+        );
       // Update sub-agent card state
       const card = ctx.streamingFlow.subAgents.find(
         (a) => a.agentName === agentName && a.status === 'running',
@@ -6049,7 +6554,10 @@ function handleSSEEventInner(
           ctx,
           'result',
           'system',
-          `✅ ${agentName} 完成${dur ? ` (${dur})` : ''}`,
+          uiText(
+            `✅ ${agentName} 完成${dur ? ` (${dur})` : ''}`,
+            `✅ ${agentName} completed${dur ? ` (${dur})` : ''}`,
+          ),
         );
       }
       refreshSubAgentCards(ctx);
@@ -6072,13 +6580,17 @@ function handleSSEEventInner(
 
     case 'incremental_scope':
       // Incremental scope changes are internal - just log
-      if (DEBUG_SSE)
+      if (DEBUG_SSE) {
         console.log('[SSEHandlers] incremental_scope:', eventData.data);
+      }
       {
         const payload = asRecord(eventData.data);
         const scopeType = payload.scopeType;
         if (typeof scopeType === 'string' && scopeType) {
-          pushStreamingPhase(ctx, `增量范围: ${scopeType}`);
+          pushStreamingPhase(
+            ctx,
+            uiText(`增量范围: ${scopeType}`, `Incremental scope: ${scopeType}`),
+          );
         }
       }
       return {};
@@ -6099,8 +6611,9 @@ function handleSSEEventInner(
       return {stopLoading: true};
 
     default:
-      if (DEBUG_SSE)
+      if (DEBUG_SSE) {
         console.warn(`[SSEHandlers] Unhandled event type: ${eventType}`);
+      }
       return {};
   }
 }

@@ -16,14 +16,15 @@ import m from 'mithril';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
 import {
   SCENE_PIN_MAPPING,
-  ScenePinInstruction,
+  type ScenePinInstruction,
   formatSceneTimestamp,
   getSceneDisplayName,
   getSceneResponseStatusLabel,
+  localizeScenePinInstruction,
 } from './scene_constants';
 import {uiOutputLanguage, uiText, uiTextForLanguage} from './ui_language';
 import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
-import {Message, StoryPreviewResult} from './types';
+import type {Message, StoryPreviewResult} from './types';
 
 /**
  * StoryController context — injected by AIPanel.
@@ -71,7 +72,11 @@ function sceneProgressFallback(
       return uiTextForLanguage(language, '正在分析场景', 'Analyzing scenes');
     case 'summarizing':
     case 'finalizing':
-      return uiTextForLanguage(language, '正在生成场景摘要', 'Summarizing scenes');
+      return uiTextForLanguage(
+        language,
+        '正在生成场景摘要',
+        'Summarizing scenes',
+      );
     default:
       return uiTextForLanguage(language, '正在分析', 'Analyzing');
   }
@@ -87,9 +92,10 @@ export function buildSceneProgressContent(input: {
   const message = input.data?.message ?? input.rawData?.message;
   const phase = input.data?.phase ?? input.rawData?.phase;
   if (input.eventType === 'progress' && !message && !phase) return undefined;
-  const detail = typeof message === 'string' && message.trim()
-    ? message.trim()
-    : sceneProgressFallback(phase, input.language);
+  const detail =
+    typeof message === 'string' && message.trim()
+      ? message.trim()
+      : sceneProgressFallback(phase, input.language);
   return uiTextForLanguage(
     input.language,
     `🎬 **场景还原中...**\n\n${detail}`,
@@ -129,18 +135,27 @@ export class StoryController {
     );
     const response = await this.ctx.fetchBackend(url, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({traceId}),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept-Language': uiOutputLanguage(),
+      },
+      body: JSON.stringify({traceId, outputLanguage: uiOutputLanguage()}),
     });
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
       throw new Error(
-        (errData as any).error || `Preview failed: HTTP ${response.status}`,
+        (errData as any).error ||
+          uiText(
+            `预览失败：HTTP ${response.status}`,
+            `Preview failed: HTTP ${response.status}`,
+          ),
       );
     }
     const data = await response.json();
     if (!(data as any).success) {
-      throw new Error((data as any).error || 'Preview request failed');
+      throw new Error(
+        (data as any).error || uiText('预览请求失败', 'Preview request failed'),
+      );
     }
     return data as StoryPreviewResult;
   }
@@ -158,12 +173,18 @@ export class StoryController {
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
       throw new Error(
-        (errData as any).error || `Load report failed: HTTP ${response.status}`,
+        (errData as any).error ||
+          uiText(
+            `加载报告失败：HTTP ${response.status}`,
+            `Load report failed: HTTP ${response.status}`,
+          ),
       );
     }
     const data = await response.json();
     if (!(data as any).success) {
-      throw new Error((data as any).error || 'Failed to load report');
+      throw new Error(
+        (data as any).error || uiText('加载报告失败', 'Failed to load report'),
+      );
     }
     return (data as any).report;
   }
@@ -210,7 +231,10 @@ export class StoryController {
         buildAssistantApiV1Url(this.ctx.getBackendUrl(), '/scene-reconstruct'),
         {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept-Language': uiOutputLanguage(),
+          },
           body: JSON.stringify({
             traceId: backendTraceId,
             options: {
@@ -226,8 +250,14 @@ export class StoryController {
       if (!response.ok) {
         try {
           const errorData = await response.json();
-          console.error('[StoryController] Scene reconstruction error response:', errorData);
-          throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+          console.error(
+            '[StoryController] Scene reconstruction error response:',
+            errorData,
+          );
+          throw new Error(
+            errorData.error ||
+              `HTTP ${response.status}: ${response.statusText}`,
+          );
         } catch (parseErr) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -235,11 +265,17 @@ export class StoryController {
 
       const data = await response.json();
       if (!data.success || !data.analysisId) {
-        throw new Error(data.error || 'Failed to start scene reconstruction');
+        throw new Error(
+          data.error ||
+            uiText('启动场景还原失败', 'Failed to start scene reconstruction'),
+        );
       }
 
       const analysisId = data.analysisId;
-      this.debugLog('Scene reconstruction started with analysisId:', analysisId);
+      this.debugLog(
+        'Scene reconstruction started with analysisId:',
+        analysisId,
+      );
 
       // Connect to SSE for real-time updates
       await this.connectToSSE(analysisId, progressMessageId);
@@ -265,7 +301,10 @@ export class StoryController {
    * Connect to the backend scene-reconstruct SSE stream. See the file header
    * for the reason this uses fetch + manual SSE parsing rather than EventSource.
    */
-  private async connectToSSE(analysisId: string, progressMessageId: string): Promise<void> {
+  private async connectToSSE(
+    analysisId: string,
+    progressMessageId: string,
+  ): Promise<void> {
     const sceneSseUrl = buildAssistantApiV1Url(
       this.ctx.getBackendUrl(),
       `/scene-reconstruct/${analysisId}/stream`,
@@ -287,18 +326,28 @@ export class StoryController {
       if (!payload || typeof payload !== 'object') return;
       if (Array.isArray(payload.scenes)) scenes = payload.scenes;
       if (Array.isArray(payload.trackEvents)) trackEvents = payload.trackEvents;
-      if (Array.isArray(payload.tracks) && trackEvents.length === 0) trackEvents = payload.tracks;
-      if (typeof payload.narrative === 'string' && payload.narrative) narrative = payload.narrative;
-      if (typeof payload.conclusion === 'string' && payload.conclusion && !narrative) narrative = payload.conclusion;
+      if (Array.isArray(payload.tracks) && trackEvents.length === 0)
+        {trackEvents = payload.tracks;}
+      if (typeof payload.narrative === 'string' && payload.narrative)
+        {narrative = payload.narrative;}
+      if (
+        typeof payload.conclusion === 'string' &&
+        payload.conclusion &&
+        !narrative
+      )
+        {narrative = payload.conclusion;}
       if (Array.isArray(payload.findings)) findings = payload.findings;
     };
 
     // Use AbortController for timeout (5 minutes)
     const abortController = new AbortController();
-    const timeoutId = setTimeout(() => {
-      console.warn('[StoryController] Scene SSE timeout');
-      abortController.abort();
-    }, 5 * 60 * 1000);
+    const timeoutId = setTimeout(
+      () => {
+        console.warn('[StoryController] Scene SSE timeout');
+        abortController.abort();
+      },
+      5 * 60 * 1000,
+    );
 
     try {
       // fetchBackend sends API key via x-api-key header (no URL exposure)
@@ -356,11 +405,22 @@ export class StoryController {
                 eventType === 'end' ||
                 eventType === 'error' ||
                 eventType === 'scene_story_report_ready';
-              console.log('[StoryController] Scene SSE event:', eventType, 'terminal?', isTerminal);
+              console.log(
+                '[StoryController] Scene SSE event:',
+                eventType,
+                'terminal?',
+                isTerminal,
+              );
 
               this.handleSSEEvent(
-                eventType, rawData, unwrapEventData, applyScenePayload,
-                progressMessageId, scenes, findings, trackEvents,
+                eventType,
+                rawData,
+                unwrapEventData,
+                applyScenePayload,
+                progressMessageId,
+                scenes,
+                findings,
+                trackEvents,
               );
 
               // Terminal events
@@ -369,18 +429,30 @@ export class StoryController {
                 clearTimeout(timeoutId);
                 if (eventType === 'error') {
                   const errData = unwrapEventData(rawData);
-                  console.error('[StoryController] Scene SSE error event:', errData);
+                  console.error(
+                    '[StoryController] Scene SSE error event:',
+                    errData,
+                  );
                   // Backend sends {content: {message: "..."}} but legacy paths
                   // use {error: "..."}. Check all variants.
-                  const errMsg = errData.message || errData.error
-                    || rawData.content?.message || rawData.error
-                    || 'Scene reconstruction failed';
+                  const errMsg =
+                    errData.message ||
+                    errData.error ||
+                    rawData.content?.message ||
+                    rawData.error ||
+                    'Scene reconstruction failed';
                   throw new Error(errMsg);
                 }
                 // Terminal event ('end' or 'scene_story_report_ready') — render
                 // whatever scenes/narrative we've collected and tear down.
                 this.debugLog('Scene SSE: terminal event received:', eventType);
-                this.renderResult(progressMessageId, scenes, trackEvents, narrative, findings);
+                this.renderResult(
+                  progressMessageId,
+                  scenes,
+                  trackEvents,
+                  narrative,
+                  findings,
+                );
                 this.autoPinTracks(scenes);
                 // Update scene navigation bar with reconstruction results
                 this.ctx.setDetectedScenes(scenes);
@@ -394,7 +466,10 @@ export class StoryController {
               // exact casing/wording (e.g. `scene_reconstruction skill
               // failed: ...`), causing the reader to be used after release.
               if (!(e instanceof SyntaxError)) throw e;
-              console.warn('[StoryController] Failed to parse scene SSE data:', e);
+              console.warn(
+                '[StoryController] Failed to parse scene SSE data:',
+                e,
+              );
             }
             currentEventType = '';
           }
@@ -402,13 +477,22 @@ export class StoryController {
       }
 
       // Stream ended without explicit 'end' event - render what we have
-      this.renderResult(progressMessageId, scenes, trackEvents, narrative, findings);
+      this.renderResult(
+        progressMessageId,
+        scenes,
+        trackEvents,
+        narrative,
+        findings,
+      );
       this.autoPinTracks(scenes);
       // Update scene navigation bar with reconstruction results
       this.ctx.setDetectedScenes(scenes);
       m.redraw();
     } catch (e: any) {
-      if (abortController.signal.aborted && !e.message?.includes('Scene reconstruction')) {
+      if (
+        abortController.signal.aborted &&
+        !e.message?.includes('Scene reconstruction')
+      ) {
         throw new Error('Scene reconstruction timeout');
       }
       throw e;
@@ -519,15 +603,31 @@ export class StoryController {
       case 'data': {
         const envelopes = Array.isArray(rawData.envelope)
           ? rawData.envelope
-          : (rawData.envelope ? [rawData.envelope] : []);
+          : rawData.envelope
+            ? [rawData.envelope]
+            : [];
         const trace = this.ctx.getTrace();
         for (const envelope of envelopes) {
-          if (!envelope?.meta?.stepId || !envelope?.data?.columns || !envelope?.data?.rows) continue;
+          if (
+            !envelope?.meta?.stepId ||
+            !envelope?.data?.columns ||
+            !envelope?.data?.rows
+          )
+            {continue;}
           const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
           if (overlayId && trace) {
             this.debugLog('Creating overlay track:', overlayId);
-            createOverlayTrack(trace, overlayId, envelope.data.columns, envelope.data.rows)
-              .catch((err: Error) => console.warn('[StoryController] Overlay track creation failed:', err));
+            createOverlayTrack(
+              trace,
+              overlayId,
+              envelope.data.columns,
+              envelope.data.rows,
+            ).catch((err: Error) =>
+              console.warn(
+                '[StoryController] Overlay track creation failed:',
+                err,
+              ),
+            );
           }
         }
         break;
@@ -556,7 +656,12 @@ export class StoryController {
       case 'scene_story_detected': {
         const sceneCount = Array.isArray(data.scenes) ? data.scenes.length : 0;
         const queuedCount = Number(data.analysisIntervals ?? 0);
-        this.debugLog('Story scenes detected:', sceneCount, 'queued:', queuedCount);
+        this.debugLog(
+          'Story scenes detected:',
+          sceneCount,
+          'queued:',
+          queuedCount,
+        );
         this.ctx.updateMessage(progressMessageId, {
           content: uiText(
             `🎬 **场景还原中...**\n\n已检测到 ${sceneCount} 个场景，排队深度分析 ${queuedCount} 个`,
@@ -601,7 +706,7 @@ export class StoryController {
         // notice the terminal type and render the final scene table.
         this.debugLog('Story report ready:', data);
         if (typeof data.summary === 'string' && data.summary.length > 0) {
-          applyScenePayload({ narrative: data.summary });
+          applyScenePayload({narrative: data.summary});
         }
         break;
       }
@@ -635,7 +740,10 @@ export class StoryController {
     }
 
     // Build scene cards content
-    let content = uiText('## 🎬 场景还原结果\n\n', '## 🎬 Scene reconstruction result\n\n');
+    let content = uiText(
+      '## 🎬 场景还原结果\n\n',
+      '## 🎬 Scene reconstruction result\n\n',
+    );
 
     // Scene summary
     content += uiText(
@@ -652,12 +760,19 @@ export class StoryController {
 
     scenes.forEach((scene, index) => {
       const displayName = getSceneDisplayName(scene.type, scene.label);
-      const durationStr = scene.durationMs >= 1000
-        ? `${(scene.durationMs / 1000).toFixed(2)}s`
-        : `${scene.durationMs.toFixed(0)}ms`;
-      const responseStatus = getSceneResponseStatusLabel(scene.type, scene.durationMs, scene.metadata);
+      const durationStr =
+        scene.durationMs >= 1000
+          ? `${(scene.durationMs / 1000).toFixed(2)}s`
+          : `${scene.durationMs.toFixed(0)}ms`;
+      const responseStatus = getSceneResponseStatusLabel(
+        scene.type,
+        scene.durationMs,
+        scene.metadata,
+      );
       const appInfo = scene.appPackage
-        ? (scene.activityName ? `${scene.appPackage}/${scene.activityName}` : scene.appPackage)
+        ? scene.activityName
+          ? `${scene.appPackage}/${scene.activityName}`
+          : scene.appPackage
         : '-';
 
       // Make start timestamp clickable for navigation
@@ -694,18 +809,18 @@ export class StoryController {
     if (!trace || scenes.length === 0) return;
 
     // Collect unique scene types
-    const sceneTypes = new Set(scenes.map(s => s.type));
+    const sceneTypes = new Set(scenes.map((s) => s.type));
 
     // Collect pin instructions for all detected scene types
     const allInstructions: ScenePinInstruction[] = [];
 
-    sceneTypes.forEach(sceneType => {
+    sceneTypes.forEach((sceneType) => {
       const instructions = SCENE_PIN_MAPPING[sceneType];
       if (instructions) {
-        instructions.forEach(inst => {
+        instructions.forEach((inst) => {
           // Avoid duplicates
-          if (!allInstructions.some(i => i.pattern === inst.pattern)) {
-            allInstructions.push(inst);
+          if (!allInstructions.some((i) => i.pattern === inst.pattern)) {
+            allInstructions.push(localizeScenePinInstruction(inst));
           }
         });
       }
@@ -715,10 +830,16 @@ export class StoryController {
 
     // Get active processes from scenes
     const activeProcesses = scenes
-      .filter(s => s.appPackage)
-      .map(s => ({processName: s.appPackage, frameCount: 1}));
+      .filter((s) => s.appPackage)
+      .map((s) => ({processName: s.appPackage, frameCount: 1}));
 
-    this.debugLog('Auto-pinning tracks for scenes:', sceneTypes, 'with', allInstructions.length, 'instructions');
+    this.debugLog(
+      'Auto-pinning tracks for scenes:',
+      sceneTypes,
+      'with',
+      allInstructions.length,
+      'instructions',
+    );
 
     // Delegate to AIPanel via ctx
     await this.ctx.pinTracksFromInstructions(allInstructions, activeProcesses);

@@ -4,6 +4,7 @@ import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoWorkspaceApiUrl,
 } from '../../core/smartperfetto_request_context';
+import {uiText} from './ui_language';
 
 export type ProviderType =
   | 'anthropic'
@@ -281,6 +282,62 @@ export const CONNECTION_FIELD_LABELS: Record<
   gcpRegion: {label: 'GCP Region', type: 'text', placeholder: 'us-central1'},
 };
 
+const CONNECTION_FIELD_LABEL_ZH: Record<string, string> = {
+  apiKey: '提供商 API 密钥（共享）',
+  baseUrl: '基础 URL',
+  claudeBaseUrl: 'Claude 兼容基础 URL',
+  claudeApiKey: 'Claude 兼容 API 密钥',
+  claudeAuthToken: 'Claude 兼容认证令牌',
+  openaiBaseUrl: 'OpenAI 兼容基础 URL',
+  openaiApiKey: 'OpenAI 兼容 API 密钥',
+  piAgentCoreModulePath: 'Pi Agent Core 模块路径',
+  piAgentCoreModelJson: 'Pi Agent Core 模型 JSON',
+  piAgentCoreSystemPrompt: 'Pi Agent Core 系统提示词',
+  openCodeSdkModulePath: 'OpenCode SDK 模块路径',
+  openCodeModelJson: 'OpenCode 模型 JSON',
+  openCodeSystemPrompt: 'OpenCode 系统提示词',
+  awsRegion: 'AWS 区域',
+  awsBearerToken: 'AWS Bearer 令牌',
+  awsAccessKeyId: 'AWS 访问密钥 ID',
+  awsSecretAccessKey: 'AWS 私密访问密钥',
+  awsSessionToken: 'AWS 会话令牌',
+  awsProfile: 'AWS 配置文件',
+  gcpProjectId: 'GCP 项目 ID',
+  gcpRegion: 'GCP 区域',
+};
+
+const CONNECTION_FIELD_PLACEHOLDER_ZH: Record<string, string> = {
+  claudeAuthToken: '不包含 Bearer 前缀的令牌',
+  piAgentCoreSystemPrompt: '可选的运行时级系统提示词',
+  openCodeSystemPrompt: '可选的运行时级系统提示词',
+  awsBearerToken: '令牌……',
+  awsSecretAccessKey: '私密密钥……',
+  awsSessionToken: '会话令牌……',
+};
+
+export function connectionFieldMetadata(field: string): {
+  label: string;
+  type: string;
+  placeholder: string;
+} {
+  const metadata = CONNECTION_FIELD_LABELS[field] || {
+    label: field,
+    type: 'text',
+    placeholder: '',
+  };
+  return {
+    ...metadata,
+    label: uiText(
+      CONNECTION_FIELD_LABEL_ZH[field] || metadata.label,
+      metadata.label,
+    ),
+    placeholder: uiText(
+      CONNECTION_FIELD_PLACEHOLDER_ZH[field] || metadata.placeholder,
+      metadata.placeholder,
+    ),
+  };
+}
+
 export function buildHeaders(apiKey?: string): Record<string, string> {
   const headers: Record<string, string> = {'Content-Type': 'application/json'};
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -390,10 +447,12 @@ export function providerSupportsRuntime(
   provider: ProviderConfig,
   runtime: AgentRuntimeKind,
 ): boolean {
-  if (runtime === 'openai-agents-sdk')
+  if (runtime === 'openai-agents-sdk') {
     return providerHasOpenAISurface(provider);
-  if (runtime === 'pi-agent-core')
+  }
+  if (runtime === 'pi-agent-core') {
     return providerHasPiAgentCoreSurface(provider);
+  }
   if (runtime === 'opencode') return providerHasOpenCodeSurface(provider);
   return providerHasClaudeSurface(provider);
 }
@@ -411,8 +470,12 @@ export function providerRuntimeLabel(runtime: ServerRuntimeKind): string {
 
 export function providerRuntimeShortLabel(runtime: ServerRuntimeKind): string {
   if (runtime === 'openai-agents-sdk') return 'OA';
-  if (runtime === 'pi-agent-core' || runtime === 'experimental-pi-agent-core') return 'PI';
-  if (runtime === 'opencode' || runtime === 'experimental-opencode') return 'OC';
+  if (runtime === 'pi-agent-core' || runtime === 'experimental-pi-agent-core') {
+    return 'PI';
+  }
+  if (runtime === 'opencode' || runtime === 'experimental-opencode') {
+    return 'OC';
+  }
   return 'CL';
 }
 

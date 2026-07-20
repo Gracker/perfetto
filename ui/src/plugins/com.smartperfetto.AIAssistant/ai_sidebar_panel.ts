@@ -16,10 +16,11 @@
  */
 
 import m from 'mithril';
-import {Trace} from '../../public/trace';
+import type {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {AIPanel} from './ai_panel';
-import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import {uiText} from './ui_language';
+import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {
   clamp,
   getFloatingState,
@@ -169,9 +170,12 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
         'style': hidden ? 'display: none;' : undefined,
         'onclick': () => toggleSidebarCollapsedWithTransientState(),
         'title': workspaceOpen
-          ? '展开 AI 侧边栏（双 Trace 工作区保持打开）'
-          : '展开 AI 侧边栏',
-        'aria-label': '展开 AI 侧边栏',
+          ? uiText(
+              '展开 AI 侧边栏（双 Trace 工作区保持打开）',
+              'Expand the AI sidebar (keep the dual-trace workspace open)',
+            )
+          : uiText('展开 AI 侧边栏', 'Expand the AI sidebar'),
+        'aria-label': uiText('展开 AI 侧边栏', 'Expand the AI sidebar'),
         'aria-hidden': hidden ? 'true' : undefined,
         'data-workspace-open': workspaceOpen ? 'true' : 'false',
       },
@@ -209,7 +213,10 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
       [
         m(`.ai-sidebar-resize-handle.ai-sidebar-resize-handle--${layout}`, {
           onmousedown: startResize,
-          title: layout === 'bottom' ? '拖动调整高度' : '拖动调整宽度',
+          title:
+            layout === 'bottom'
+              ? uiText('拖动调整高度', 'Drag to resize height')
+              : uiText('拖动调整宽度', 'Drag to resize width'),
         }),
 
         // Content: AIPanel

@@ -18,9 +18,9 @@
 
 import './styles.scss';
 import {isTimelineRouteActive} from '../../frontend/timeline_route';
-import {App} from '../../public/app';
-import {PerfettoPlugin} from '../../public/plugin';
-import {Trace} from '../../public/trace';
+import type {App} from '../../public/app';
+import type {PerfettoPlugin} from '../../public/plugin';
+import type {Trace} from '../../public/trace';
 import {Intent} from '../../widgets/common';
 import {
   emitClearChatCommand,
@@ -47,13 +47,17 @@ import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {installTracePairFrameRedrawListener} from './trace_pair_workspace';
 import {getAIAssistantSurfacePolicy} from './ai_surface_policy';
 import {sessionManager} from './session_manager';
+import {setUiLanguagePreference} from './ui_language';
 
 // Inject smart-detected backend URL at module load time, BEFORE any trace
 // auto-upload kicks in.
 (function injectBackendUrl() {
   try {
     const settings = sessionManager.loadSettings();
-    setDefaultBackendUrl(settings.backendUrl || getDefaultSmartPerfettoBackendUrl());
+    setUiLanguagePreference(settings.uiLanguage);
+    setDefaultBackendUrl(
+      settings.backendUrl || getDefaultSmartPerfettoBackendUrl(),
+    );
     setDefaultBackendCredential(settings.backendApiKey);
   } catch {}
 })();

@@ -36,6 +36,7 @@
 
 import {Trace} from '../../public/trace';
 import {addDebugSliceTrack} from '../../components/tracks/debug_tracks';
+import {uiText} from './ui_language';
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -56,7 +57,7 @@ interface OverlayConfig {
   /** Unique identifier for this overlay type */
   id: OverlayId;
   /** Display title for the debug track */
-  trackTitle: string;
+  trackTitle: () => string;
   /** Column mapping: which data columns map to ts/dur/name */
   columns: {
     ts: string;
@@ -90,9 +91,12 @@ function generateJankSliceName(responsibility: string, durMs: number): string {
     case 'SF':
       return `SF ${rounded}ms`;
     case 'HIDDEN':
-      return `隐形掉帧 ${rounded}ms`;
+      return uiText(
+        `隐形掉帧 ${rounded}ms`,
+        `Hidden jank ${rounded}ms`,
+      );
     case 'BUFFER_STUFFING':
-      return '管线耗尽';
+      return uiText('管线耗尽', 'Pipeline stuffing');
     default:
       return `${responsibility} ${rounded}ms`;
   }
@@ -107,7 +111,7 @@ const OVERLAY_CONFIGS = new Map<OverlayId, OverlayConfig>([
     'jank',
     {
       id: 'jank',
-      trackTitle: 'AI Jank Analysis',
+      trackTitle: () => uiText('AI 掉帧分析', 'AI Jank Analysis'),
       columns: {ts: 'start_ts', dur: 'dur', name: '_generated'},
       pivotOn: 'layer_name',
       colorColumn: 'jank_responsibility',
@@ -133,7 +137,7 @@ const OVERLAY_CONFIGS = new Map<OverlayId, OverlayConfig>([
     'scene_timeline',
     {
       id: 'scene_timeline',
-      trackTitle: 'AI Scene Timeline',
+      trackTitle: () => uiText('AI 场景时间线', 'AI Scene Timeline'),
       columns: {ts: 'ts', dur: 'dur', name: 'event'},
       colorColumn: 'event_type',
       rawColumns: [
@@ -151,7 +155,7 @@ const OVERLAY_CONFIGS = new Map<OverlayId, OverlayConfig>([
     'pipeline_slices',
     {
       id: 'pipeline_slices',
-      trackTitle: 'Pipeline Key Slices',
+      trackTitle: () => uiText('渲染管线关键 Slice', 'Pipeline Key Slices'),
       columns: {ts: 'ts', dur: 'dur', name: 'slice_name'},
       pivotOn: 'thread_name',
       colorColumn: 'pipeline_stage',
@@ -172,14 +176,14 @@ const OVERLAY_CONFIGS = new Map<OverlayId, OverlayConfig>([
 
 function makeStateLaneOverlay(
   id: OverlayId,
-  title: string,
+  title: [string, string],
   extraRawCols: string[] = [],
 ): [OverlayId, OverlayConfig] {
   return [
     id,
     {
       id,
-      trackTitle: title,
+      trackTitle: () => uiText(...title),
       columns: {ts: 'start_ts', dur: 'dur_ns', name: 'state_label'},
       colorColumn: 'state',
       rawColumns: [
@@ -195,13 +199,25 @@ function makeStateLaneOverlay(
 }
 
 // Register state lane overlays
-OVERLAY_CONFIGS.set(...makeStateLaneOverlay('state_device', 'Device State'));
 OVERLAY_CONFIGS.set(
-  ...makeStateLaneOverlay('state_input', 'User Input', ['app_package']),
+  ...makeStateLaneOverlay('state_device', ['设备状态', 'Device State']),
 );
-OVERLAY_CONFIGS.set(...makeStateLaneOverlay('state_app', 'App State'));
 OVERLAY_CONFIGS.set(
-  ...makeStateLaneOverlay('state_system', 'System State', ['confidence']),
+  ...makeStateLaneOverlay(
+    'state_input',
+    ['用户输入', 'User Input'],
+    ['app_package'],
+  ),
+);
+OVERLAY_CONFIGS.set(
+  ...makeStateLaneOverlay('state_app', ['应用状态', 'App State']),
+);
+OVERLAY_CONFIGS.set(
+  ...makeStateLaneOverlay(
+    'state_system',
+    ['系统状态', 'System State'],
+    ['confidence'],
+  ),
 );
 
 // ---------------------------------------------------------------------------
@@ -479,7 +495,7 @@ export async function createOverlayTrack(
   await addDebugSliceTrack({
     trace,
     data: {sqlSource},
-    title: config.trackTitle,
+    title: config.trackTitle(),
     columns: {ts: config.columns.ts, dur: config.columns.dur, name: 'name'},
     ...(pivotIdx >= 0 ? {pivotOn: config.pivotOn} : {}),
     ...(colorIdx >= 0 ? {colorColumn: config.colorColumn} : {}),

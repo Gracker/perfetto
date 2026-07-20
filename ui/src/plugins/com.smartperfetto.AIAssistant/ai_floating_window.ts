@@ -35,7 +35,7 @@
 
 import m from 'mithril';
 import {isTimelineRouteActive} from '../../frontend/timeline_route';
-import {Trace} from '../../public/trace';
+import type {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {AIPanel} from './ai_panel';
 import {uiText} from './ui_language';
@@ -46,7 +46,7 @@ import {
   clampSidebarHeight,
   clampSidebarWidth,
   FLOATING_SNAP_LAYOUTS,
-  FloatingState,
+  type FloatingState,
   FLOATING_MIN_HEIGHT,
   FLOATING_MIN_WIDTH,
   getEffectiveSidebarHeight,
@@ -61,7 +61,7 @@ import {SidebarPanel} from './ai_sidebar_panel';
 import {switchFloatingMode} from './ai_transient_state';
 import {isAIAnalysisIdentityLocked} from './ai_shared_state';
 import {TracePairWorkspace} from './trace_pair_workspace';
-import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 
 // ── Layout constants ────────────────────────────────────────────────────
 
@@ -389,8 +389,9 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
           if (
             target.closest('[data-layout-menu]') ||
             target.closest('[data-layout-trigger]')
-          )
+          ) {
             return;
+          }
           this.showLayoutMenu = false;
         },
       },
@@ -408,14 +409,24 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
           },
           [
             m('span', {style: STYLES.titleIcon}, '\u{1F916}'),
-            m('span', {style: STYLES.titleText}, 'AI Assistant — 浮动窗口'),
+            m(
+              'span',
+              {style: STYLES.titleText},
+              uiText(
+                'AI Assistant — 浮动窗口',
+                'AI Assistant — Floating Window',
+              ),
+            ),
             // Layout dropdown trigger — Windows Snap Assist style presets.
             m(
               'button',
               {
                 'data-layout-trigger': 'true',
                 'style': STYLES.iconBtn,
-                'title': '预设布局（左半屏 / 右半屏 / 最大化等）',
+                'title': uiText(
+                  '预设布局（左半屏 / 右半屏 / 最大化等）',
+                  'Layout presets (left half, right half, maximize, and more)',
+                ),
                 'onclick': () => {
                   this.showLayoutMenu = !this.showLayoutMenu;
                 },
@@ -476,7 +487,7 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
               },
               [
                 m(Icon, {icon: 'close_fullscreen', style: 'font-size: 14px'}),
-                m('span', 'Dock'),
+                m('span', uiText('收回', 'Dock')),
               ],
             ),
           ],
@@ -496,7 +507,7 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
                   {
                     key: opt.id,
                     style: LAYOUT_MENU_STYLES.menuItem,
-                    title: opt.tooltip,
+                    title: uiText(opt.tooltip, opt.tooltipEn),
                     onclick: () => {
                       applyFloatingSnapLayout(opt.id);
                       this.showLayoutMenu = false;
@@ -516,7 +527,7 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
                       style:
                         'font-size: 16px; color: var(--pf-color-text-muted, #75797c);',
                     }),
-                    m('span', opt.label),
+                    m('span', uiText(opt.label, opt.labelEn)),
                   ],
                 ),
               ),
@@ -538,7 +549,7 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
         m('div', {
           style: STYLES.resizeHandle,
           onmousedown: (e: MouseEvent) => startGesture('resize', e),
-          title: '拖动调整大小',
+          title: uiText('拖动调整大小', 'Drag to resize'),
         }),
       ],
     );

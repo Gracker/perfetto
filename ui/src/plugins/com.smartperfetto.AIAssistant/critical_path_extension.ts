@@ -2,19 +2,18 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {Trace} from '../../public/trace';
+import type {Trace} from '../../public/trace';
 import {getBackendUploadState} from '../../core/backend_upload_state';
 import {
   backendUploadSourceKey,
   getBackendUploadIdentityKey,
 } from '../../core/backend_uploader';
 import {THREAD_STATE_TRACK_KIND} from '../../public/track_kinds';
-import {
-  buildSmartPerfettoContextHeaders,
-} from '../../core/smartperfetto_request_context';
+import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 import {SETTINGS_KEY} from './types';
 import {getSettingsStorageKey} from './session_manager';
+import {uiOutputLanguage, uiText} from './ui_language';
 
 interface CriticalPathSegment {
   startOffsetMs?: number;
@@ -126,11 +125,17 @@ async function resolveCurrentTraceId(sourceKey: string): Promise<string> {
     backendUploadState.state === 'ready' &&
     backendUploadState.traceId &&
     backendUploadState.sourceKey === sourceKey &&
-    backendUploadState.backendIdentityKey === getBackendUploadIdentityKey(backendUrl, sourceKey)
+    backendUploadState.backendIdentityKey ===
+      getBackendUploadIdentityKey(backendUrl, sourceKey)
   ) {
     return backendUploadState.traceId;
   }
-  throw new Error('当前 Trace 尚未完成后端绑定，请等待 AI Assistant 显示当前 Trace 已连接后再试。');
+  throw new Error(
+    uiText(
+      '当前 Trace 尚未完成后端绑定，请等待 AI Assistant 显示当前 Trace 已连接后再试。',
+      'The current trace is not bound to the backend yet. Wait until AI Assistant shows it as connected, then try again.',
+    ),
+  );
 }
 
 function numericString(value: unknown): string {
@@ -146,17 +151,28 @@ function numericString(value: unknown): string {
 function getSelectedTask(trace: Trace): SelectedTask {
   const selection = trace.selection.selection;
   if (selection.kind !== 'track_event') {
-    throw new Error('请先选中一个 thread_state task。');
+    throw new Error(
+      uiText(
+        '请先选中一个 thread_state task。',
+        'Select a thread_state task first.',
+      ),
+    );
   }
 
   const startTs = numericString(selection.ts);
   const dur = numericString(selection.dur);
   if (!startTs || !dur || dur === '-1' || dur === '0') {
-    throw new Error('当前选中项没有有效持续时间，不能做 Critical path 分析。');
+    throw new Error(
+      uiText(
+        '当前选中项没有有效持续时间，不能做 Critical path 分析。',
+        'The selected item has no valid duration, so critical-path analysis cannot run.',
+      ),
+    );
   }
 
   const track = trace.tracks.getTrack(selection.trackUri);
-  const utid = typeof track?.tags?.utid === 'number' ? track.tags.utid : undefined;
+  const utid =
+    typeof track?.tags?.utid === 'number' ? track.tags.utid : undefined;
   return {
     threadStateId: selection.eventId,
     utid,
@@ -233,13 +249,16 @@ function renderPlainText(value: unknown): string {
 function renderAnomalies(analysis: CriticalPathAnalysis): string {
   const items = analysis.anomalies ?? [];
   if (items.length === 0) {
-    return '<div class="sp-critical-path-muted">未发现明显异常。</div>';
+    return `<div class="sp-critical-path-muted">${uiText(
+      '未发现明显异常。',
+      'No clear anomaly was found.',
+    )}</div>`;
   }
   return items
     .map(
       (item) => `
       <div class="sp-critical-path-anomaly ${escapeHtml(item.severity || 'info')}">
-        <b>${escapeHtml(item.title || '异常')}</b>
+        <b>${escapeHtml(item.title || uiText('异常', 'Anomaly'))}</b>
         <p>${escapeHtml(item.detail || '')}</p>
         ${renderEvidence(item.evidence)}
       </div>
@@ -251,7 +270,10 @@ function renderAnomalies(analysis: CriticalPathAnalysis): string {
 function renderChain(analysis: CriticalPathAnalysis): string {
   const items = analysis.wakeupChain ?? [];
   if (items.length === 0) {
-    return '<div class="sp-critical-path-muted">没有取到外部 critical path 段。</div>';
+    return `<div class="sp-critical-path-muted">${uiText(
+      '没有取到外部 critical path 段。',
+      'No external critical-path segments were found.',
+    )}</div>`;
   }
   return items
     .slice(0, 24)
@@ -273,7 +295,10 @@ function renderChain(analysis: CriticalPathAnalysis): string {
 function renderModules(analysis: CriticalPathAnalysis): string {
   const items = analysis.moduleBreakdown ?? [];
   if (items.length === 0) {
-    return '<div class="sp-critical-path-muted">暂无模块归因。</div>';
+    return `<div class="sp-critical-path-muted">${uiText(
+      '暂无模块归因。',
+      'No module attribution is available.',
+    )}</div>`;
   }
   return items
     .slice(0, 10)
@@ -293,7 +318,10 @@ function renderModules(analysis: CriticalPathAnalysis): string {
 
 function renderList(items: string[] = []): string {
   if (items.length === 0) {
-    return '<div class="sp-critical-path-muted">暂无建议。</div>';
+    return `<div class="sp-critical-path-muted">${uiText(
+      '暂无建议。',
+      'No recommendations are available.',
+    )}</div>`;
   }
   return `<ul class="sp-critical-path-list">${items
     .map((item) => `<li>${escapeHtml(item)}</li>`)
@@ -304,18 +332,21 @@ function renderAiSummary(aiSummary: CriticalPathAiSummary | null): string {
   if (!aiSummary) return '';
   const badge = aiSummary.generated
     ? `LLM · ${aiSummary.model || 'model'}`
-    : '规则兜底';
+    : uiText('规则兜底', 'Rule fallback');
   return `
     <section class="sp-critical-path-card sp-critical-path-ai-card">
-      <h3>AI 诊断 <span>${escapeHtml(badge)}</span></h3>
+      <h3>${uiText('AI 诊断', 'AI diagnosis')} <span>${escapeHtml(badge)}</span></h3>
       <div class="sp-critical-path-summary">${renderPlainText(aiSummary.summary)}</div>
-      ${aiSummary.redactionApplied ? renderStatus('已对发送给模型的数据做隐私脱敏。', false) : ''}
+      ${aiSummary.redactionApplied ? renderStatus(uiText('已对发送给模型的数据做隐私脱敏。', 'Data sent to the model was privacy-redacted.'), false) : ''}
       ${aiSummary.warnings?.length ? renderStatus(aiSummary.warnings.join('；'), false) : ''}
     </section>
   `;
 }
 
-function renderAnalysis(analysis: CriticalPathAnalysis, aiSummary: CriticalPathAiSummary | null): string {
+function renderAnalysis(
+  analysis: CriticalPathAnalysis,
+  aiSummary: CriticalPathAiSummary | null,
+): string {
   const task = analysis.task ?? {};
   const waker = task.waker?.interruptContext
     ? 'Interrupt'
@@ -325,11 +356,11 @@ function renderAnalysis(analysis: CriticalPathAnalysis, aiSummary: CriticalPathA
   return `
     <div class="sp-critical-path-metrics">
       ${renderMetric('Task', formatMs(analysis.totalMs))}
-      ${renderMetric('外部链路', formatMs(analysis.blockingMs))}
-      ${renderMetric('占比', formatPercent(analysis.externalBlockingPercentage))}
+      ${renderMetric(uiText('外部链路', 'External path'), formatMs(analysis.blockingMs))}
+      ${renderMetric(uiText('占比', 'Share'), formatPercent(analysis.externalBlockingPercentage))}
     </div>
     <section class="sp-critical-path-card">
-      <h3>规则事实</h3>
+      <h3>${uiText('规则事实', 'Rule facts')}</h3>
       <div class="sp-critical-path-summary">${renderPlainText(analysis.summary)}</div>
       <div class="sp-critical-path-facts">
         <span>${escapeHtml(task.processName || '-')} / ${escapeHtml(task.threadName || '-')}</span>
@@ -338,15 +369,17 @@ function renderAnalysis(analysis: CriticalPathAnalysis, aiSummary: CriticalPathA
       </div>
     </section>
     ${renderAiSummary(aiSummary)}
-    <section class="sp-critical-path-card"><h3>异常判断</h3>${renderAnomalies(analysis)}</section>
-    <section class="sp-critical-path-card"><h3>唤醒链</h3>${renderChain(analysis)}</section>
-    <section class="sp-critical-path-card"><h3>关联模块</h3>${renderModules(analysis)}</section>
-    <section class="sp-critical-path-card"><h3>下一步</h3>${renderList(analysis.recommendations)}</section>
+    <section class="sp-critical-path-card"><h3>${uiText('异常判断', 'Anomaly assessment')}</h3>${renderAnomalies(analysis)}</section>
+    <section class="sp-critical-path-card"><h3>${uiText('唤醒链', 'Wakeup chain')}</h3>${renderChain(analysis)}</section>
+    <section class="sp-critical-path-card"><h3>${uiText('关联模块', 'Related modules')}</h3>${renderModules(analysis)}</section>
+    <section class="sp-critical-path-card"><h3>${uiText('下一步', 'Next steps')}</h3>${renderList(analysis.recommendations)}</section>
     ${analysis.warnings?.length ? renderStatus(analysis.warnings.join('；'), false) : ''}
   `;
 }
 
-export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} {
+export function setupCriticalPathExtension(trace: Trace): {
+  dispose: () => void;
+} {
   const state: CriticalPathState = {
     open: false,
     loading: false,
@@ -374,17 +407,19 @@ export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} 
     if (!state.open) return;
     target.innerHTML = `
       <div class="sp-critical-path-header">
-        <div><span>Critical Path</span><h2>Critical path 分析</h2></div>
-        <button class="sp-critical-path-close" type="button" aria-label="关闭">×</button>
+        <div><span>Critical Path</span><h2>${uiText('Critical path 分析', 'Critical-path analysis')}</h2></div>
+        <button class="sp-critical-path-close" type="button" aria-label="${uiText('关闭', 'Close')}">×</button>
       </div>
-      ${state.loading ? renderStatus('正在分析 selected task 的 critical path，并生成 AI 诊断...', false) : ''}
+      ${state.loading ? renderStatus(uiText('正在分析所选 task 的 critical path，并生成 AI 诊断…', 'Analyzing the selected task critical path and generating an AI diagnosis…'), false) : ''}
       ${state.error ? renderStatus(state.error, true) : ''}
       ${state.analysis ? renderAnalysis(state.analysis, state.aiSummary) : ''}
     `;
-    target.querySelector('.sp-critical-path-close')?.addEventListener('click', () => {
-      state.open = false;
-      renderDrawer();
-    });
+    target
+      .querySelector('.sp-critical-path-close')
+      ?.addEventListener('click', () => {
+        state.open = false;
+        renderDrawer();
+      });
   };
 
   const analyzeSelectedTask = async (): Promise<void> => {
@@ -395,21 +430,36 @@ export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} 
     renderDrawer();
     try {
       const backendUrl = getBackendUrl();
-      const traceSource = (trace.traceInfo as unknown as {source?: Parameters<typeof backendUploadSourceKey>[0]}).source;
+      const traceSource = (
+        trace.traceInfo as unknown as {
+          source?: Parameters<typeof backendUploadSourceKey>[0];
+        }
+      ).source;
       if (!traceSource) {
-        throw new Error('当前 Trace 缺少可验证的来源标识，无法安全选择后端 Trace。');
+        throw new Error(
+          uiText(
+            '当前 Trace 缺少可验证的来源标识，无法安全选择后端 Trace。',
+            'The current trace has no verifiable source identity, so the backend trace cannot be selected safely.',
+          ),
+        );
       }
-      const traceId = await resolveCurrentTraceId(backendUploadSourceKey(traceSource));
+      const traceId = await resolveCurrentTraceId(
+        backendUploadSourceKey(traceSource),
+      );
       state.traceId = traceId;
       const selectedTask = getSelectedTask(trace);
       const result = await fetchJson<{
         analysis: CriticalPathAnalysis;
+        presentationAnalysis?: CriticalPathAnalysis;
         aiSummary?: CriticalPathAiSummary;
       }>(
         `${backendUrl}/api/critical-path/${encodeURIComponent(traceId)}/analyze`,
         {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept-Language': uiOutputLanguage(),
+          },
           body: JSON.stringify({
             threadStateId: selectedTask.threadStateId,
             utid: selectedTask.utid,
@@ -417,13 +467,18 @@ export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} 
             dur: selectedTask.dur,
             maxSegments: 180,
             includeAi: true,
+            outputLanguage: uiOutputLanguage(),
           }),
         },
       );
-      state.analysis = result.analysis;
+      state.analysis = result.presentationAnalysis ?? result.analysis;
       state.aiSummary = result.aiSummary ?? null;
     } catch (error: unknown) {
-      state.error = `Critical path 分析失败：${error instanceof Error ? error.message : String(error)}`;
+      const detail = error instanceof Error ? error.message : String(error);
+      state.error = uiText(
+        `Critical path 分析失败：${detail}`,
+        `Critical-path analysis failed: ${detail}`,
+      );
     } finally {
       state.loading = false;
       renderDrawer();
@@ -431,9 +486,11 @@ export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} 
   };
 
   const removeInlineButtons = (): void => {
-    document.querySelectorAll<HTMLButtonElement>(`.${INLINE_BTN_CLASS}`).forEach((button) => {
-      button.remove();
-    });
+    document
+      .querySelectorAll<HTMLButtonElement>(`.${INLINE_BTN_CLASS}`)
+      .forEach((button) => {
+        button.remove();
+      });
   };
 
   const ensureInlineButtons = (): void => {
@@ -451,8 +508,11 @@ export function setupCriticalPathExtension(trace: Trace): {dispose: () => void} 
     const analyzeButton = document.createElement('button');
     analyzeButton.type = 'button';
     analyzeButton.className = `ai-preset-btn ${INLINE_BTN_CLASS}`;
-    analyzeButton.innerHTML = '<i class="pf-icon">account_tree</i><span>Critical path 分析</span>';
-    analyzeButton.title = '分析选中 thread_state task 的唤醒链、异常点和关联模块';
+    analyzeButton.innerHTML = `<i class="pf-icon">account_tree</i><span>${uiText('Critical path 分析', 'Critical-path analysis')}</span>`;
+    analyzeButton.title = uiText(
+      '分析选中 thread_state task 的唤醒链、异常点和关联模块',
+      'Analyze the selected thread_state task wakeup chain, anomalies, and related modules',
+    );
     analyzeButton.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();

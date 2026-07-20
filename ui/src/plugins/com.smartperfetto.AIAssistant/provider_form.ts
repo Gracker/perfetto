@@ -3,21 +3,22 @@
 import m from 'mithril';
 
 import {
-  ProviderType,
-  ProviderTuning,
-  ProviderConfig,
-  ProviderTemplate,
-  FormState,
-  BedrockAuthMethod,
-  AgentRuntimeKind,
-  OpenAIProtocol,
-  CONNECTION_FIELD_LABELS,
+  type ProviderType,
+  type ProviderTuning,
+  type ProviderConfig,
+  type ProviderTemplate,
+  type FormState,
+  type BedrockAuthMethod,
+  type AgentRuntimeKind,
+  type OpenAIProtocol,
+  connectionFieldMetadata,
   buildHeaders,
   apiUrl,
   createEmptyForm,
 } from './provider_types';
 import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
+import {uiText as text} from './ui_language';
 
 export interface ProviderFormAttrs {
   backendUrl: string;
@@ -54,32 +55,61 @@ function isDualSurfaceProviderType(type: ProviderType): boolean {
   return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
 }
 
-const CONNECTION_FIELD_HINTS: Record<string, string> = {
-  apiKey:
+const CONNECTION_FIELD_HINTS: Record<string, [string, string]> = {
+  apiKey: [
+    '通常只需要此凭据。除非设置了下方的可选覆盖项，预设提供商会将它用于所选 SDK 运行时。',
     'Usually this is the only credential you need. Preset providers reuse it for the selected SDK runtime unless an optional override below is set.',
-  claudeApiKey:
+  ],
+  claudeApiKey: [
+    '用于 Claude SDK 路径，并以 x-api-key 发送。需要复用共享提供商密钥时请留空。',
     'Used by the Claude SDK path and sent as x-api-key. Leave empty when the shared provider key should be reused.',
-  claudeAuthToken:
+  ],
+  claudeAuthToken: [
+    '仅用于在 Claude SDK 路径上要求 Authorization: Bearer <token> 的提供商。请勿包含 Bearer 前缀。',
     'Only needed for providers that require Authorization: Bearer <token> on the Claude SDK path. Do not include the Bearer prefix.',
-  claudeBaseUrl:
+  ],
+  claudeBaseUrl: [
+    '提供商模板已预填。仅当提供商控制台给出不同的 Claude/Anthropic 兼容 URL 时修改。',
     'Prefilled by the provider template. Change only when your provider console shows a different Claude/Anthropic-compatible URL.',
-  openaiApiKey:
+  ],
+  openaiApiKey: [
+    '用于 OpenAI SDK 路径。需要复用共享提供商密钥时请留空。',
     'Used by the OpenAI SDK path. Leave empty when the shared provider key should be reused.',
-  openaiBaseUrl:
+  ],
+  openaiBaseUrl: [
+    '提供商模板已预填。OpenAI 兼容网关通常使用以 /v1 结尾的 URL。',
     'Prefilled by the provider template. OpenAI-compatible gateways usually use a URL ending in /v1.',
-  piAgentCoreModulePath:
+  ],
+  piAgentCoreModulePath: [
+    '可选的显式模块路径。留空时从后端包加载 @earendil-works/pi-agent-core。',
     'Optional explicit module path. Leave empty to load @earendil-works/pi-agent-core from the backend package.',
-  piAgentCoreModelJson:
+  ],
+  piAgentCoreModelJson: [
+    'Pi Agent Core 必填。请粘贴 Pi 运行时要求的模型 JSON 对象；此字段按敏感信息处理。',
     'Required for Pi Agent Core. Paste the model JSON object expected by the Pi runtime. This field is treated as sensitive.',
-  piAgentCoreSystemPrompt:
+  ],
+  piAgentCoreSystemPrompt: [
+    'Pi Agent Core 的可选运行时系统提示词。SmartPerfetto 分析契约仍来自后端 Strategy。',
     'Optional runtime-level system prompt for Pi Agent Core. SmartPerfetto analysis contracts still come from backend strategies.',
-  openCodeSdkModulePath:
+  ],
+  openCodeSdkModulePath: [
+    '可选的显式模块路径。留空时从后端包加载 @opencode-ai/sdk。',
     'Optional explicit module path. Leave empty to load @opencode-ai/sdk from the backend package.',
-  openCodeModelJson:
+  ],
+  openCodeModelJson: [
+    '可选的 OpenCode 模型/提供商 JSON。省略时使用该提供商的 OpenAI 兼容字段和主模型。',
     'Optional OpenCode model/provider JSON. If omitted, OpenCode uses the OpenAI-compatible fields and primary model from this provider.',
-  openCodeSystemPrompt:
+  ],
+  openCodeSystemPrompt: [
+    'OpenCode 的可选运行时系统提示词。SmartPerfetto 分析契约仍来自后端 Strategy。',
     'Optional runtime-level system prompt for OpenCode. SmartPerfetto analysis contracts still come from backend strategies.',
+  ],
 };
+
+function connectionFieldHint(field: string): string | undefined {
+  const hint = CONNECTION_FIELD_HINTS[field];
+  return hint ? text(hint[0], hint[1]) : undefined;
+}
 
 const CONNECTION_FIELD_QUALIFIERS: Record<string, string> = {
   baseUrl: 'Optional',
@@ -96,6 +126,13 @@ const CONNECTION_FIELD_QUALIFIERS: Record<string, string> = {
   awsProfile: 'Optional',
   gcpRegion: 'Preset',
 };
+
+function connectionFieldQualifier(field: string): string | undefined {
+  const qualifier = CONNECTION_FIELD_QUALIFIERS[field];
+  if (qualifier === 'Optional') return text('可选', 'Optional');
+  if (qualifier === 'Preset') return text('预设', 'Preset');
+  return qualifier;
+}
 
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private form: FormState = createEmptyForm();
@@ -130,7 +167,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.isEdit = false;
       this.editingId = null;
       this.form = {
-        name: `${src.name} (Copy)`,
+        name: text(`${src.name}（副本）`, `${src.name} (Copy)`),
         type: src.type,
         models: {...src.models},
         connection: this.normalizeConnectionForForm(src.type, src.connection),
@@ -188,7 +225,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       conn.openaiApiKey ??= conn.apiKey;
       conn.openaiBaseUrl ??= conn.baseUrl;
       conn.agentRuntime ??= 'openai-agents-sdk';
-      conn.openaiProtocol ??= type === 'openai' ? 'responses' : 'chat_completions';
+      conn.openaiProtocol ??=
+        type === 'openai' ? 'responses' : 'chat_completions';
     } else if (isDualSurfaceProviderType(type)) {
       conn.claudeBaseUrl ??= conn.baseUrl;
       conn.openaiProtocol ??= 'chat_completions';
@@ -201,7 +239,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         conn.openaiApiKey ??= conn.apiKey;
         conn.openaiBaseUrl ??= conn.baseUrl;
         conn.openaiProtocol ??= 'chat_completions';
-      } else if (conn.agentRuntime === 'openai-agents-sdk' || conn.openaiProtocol) {
+      } else if (
+        conn.agentRuntime === 'openai-agents-sdk' ||
+        conn.openaiProtocol
+      ) {
         conn.openaiApiKey ??= conn.apiKey;
         conn.openaiBaseUrl ??= conn.baseUrl;
         conn.openaiProtocol ??= 'chat_completions';
@@ -236,7 +277,12 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           return !!(conn.claudeApiKey || conn.claudeAuthToken || conn.apiKey);
         }
         if (isDualSurfaceProviderType(this.form.type)) {
-          return !!(conn.apiKey || conn.claudeApiKey || conn.claudeAuthToken || conn.openaiApiKey);
+          return !!(
+            conn.apiKey ||
+            conn.claudeApiKey ||
+            conn.claudeAuthToken ||
+            conn.openaiApiKey
+          );
         }
         if (this.form.type === 'openai') {
           return !!(conn.openaiApiKey || conn.apiKey);
@@ -252,7 +298,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             return !!conn.piAgentCoreModelJson;
           }
           if (this.currentRuntime() === 'opencode') {
-            return !!(conn.openCodeModelJson || conn.openaiBaseUrl || conn.baseUrl);
+            return !!(
+              conn.openCodeModelJson ||
+              conn.openaiBaseUrl ||
+              conn.baseUrl
+            );
           }
           return !!(conn.claudeBaseUrl || conn.baseUrl);
         }
@@ -322,13 +372,15 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(
-          (errData as {error?: string}).error || `Save failed: ${res.status}`,
+          (errData as {error?: string}).error ||
+            text(`保存失败：${res.status}`, `Save failed: ${res.status}`),
         );
       }
 
       onSaved();
     } catch (e: unknown) {
-      this.error = e instanceof Error ? e.message : 'Save failed';
+      this.error =
+        e instanceof Error ? e.message : text('保存失败', 'Save failed');
       m.redraw();
     } finally {
       this.saving = false;
@@ -365,14 +417,22 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             m(
               'h3',
               {style: s.title},
-              this.isEdit ? 'Edit Provider' : 'Add Provider',
+              this.isEdit
+                ? text('编辑提供商', 'Edit Provider')
+                : text('添加提供商', 'Add Provider'),
             ),
             m(
               'p',
               {style: s.subtitle},
               this.isEdit
-                ? 'Modify provider credentials, runtime, and models'
-                : 'Provider templates prefill runtime URLs and models. Usually only the API key is required.',
+                ? text(
+                    '修改提供商凭据、运行时和模型。',
+                    'Modify provider credentials, runtime, and models',
+                  )
+                : text(
+                    '提供商模板会预填运行时 URL 和模型；通常只需填写 API 密钥。',
+                    'Provider templates prefill runtime URLs and models. Usually only the API key is required.',
+                  ),
             ),
           ]),
           m(
@@ -381,7 +441,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               style: {...s.btn, ...s.btnSecondary},
               onclick: () => onCancel(),
             },
-            '← Back',
+            text('← 返回', '← Back'),
           ),
         ]),
 
@@ -418,7 +478,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 style: {...s.btn, ...s.btnSecondary},
                 onclick: () => onCancel(),
               },
-              'Close',
+              text('关闭', 'Close'),
             ),
             m(
               'button',
@@ -432,10 +492,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 onclick: () => this.saveProvider(vnode.attrs),
               },
               this.saving
-                ? 'Saving...'
+                ? text('保存中……', 'Saving...')
                 : this.isEdit
-                  ? 'Save Changes'
-                  : 'Create Provider',
+                  ? text('保存修改', 'Save Changes')
+                  : text('创建提供商', 'Create Provider'),
             ),
           ],
         ),
@@ -491,10 +551,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     attrs: ProviderFormAttrs,
   ): m.Children {
     const sections: Array<{key: AccordionSection; title: string}> = [
-      {key: 'name', title: 'Name & Identity'},
-      {key: 'connection', title: 'Connection'},
-      {key: 'models', title: 'Models'},
-      {key: 'tuning', title: 'Advanced Tuning'},
+      {key: 'name', title: text('名称与身份', 'Name & Identity')},
+      {key: 'connection', title: text('连接', 'Connection')},
+      {key: 'models', title: text('模型', 'Models')},
+      {key: 'tuning', title: text('高级调优', 'Advanced Tuning')},
     ];
 
     return m('div', [
@@ -573,19 +633,25 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     template?: ProviderTemplate,
   ): m.Children {
     return m('div', {style: s.formField}, [
-      this.renderFieldLabel(s, 'Display Name'),
+      this.renderFieldLabel(s, text('显示名称', 'Display Name')),
       m('input[type=text]', {
         style: s.formInput,
         value: this.form.name,
         oninput: (e: Event) => {
           this.form.name = (e.target as HTMLInputElement).value;
         },
-        placeholder: `My ${template?.displayName || 'Provider'}`,
+        placeholder: text(
+          `我的${template?.displayName || '提供商'}`,
+          `My ${template?.displayName || 'Provider'}`,
+        ),
       }),
       m(
         'div',
         {style: s.formHint},
-        'Use a name you can recognize in the switcher. It does not affect provider credentials or model IDs.',
+        text(
+          '使用便于在切换器中识别的名称；它不会影响提供商凭据或模型 ID。',
+          'Use a name you can recognize in the switcher. It does not affect provider credentials or model IDs.',
+        ),
       ),
     ]);
   }
@@ -626,7 +692,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       return m(
         'div',
         {style: s.formField},
-        m('span', {style: s.formHint}, 'Select a provider type first.'),
+        m(
+          'span',
+          {style: s.formHint},
+          text('请先选择提供商类型。', 'Select a provider type first.'),
+        ),
       );
     }
 
@@ -661,7 +731,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       return m(
         'div',
         {style: s.formField},
-        m('span', {style: s.formHint}, 'No connection fields required.'),
+        m(
+          'span',
+          {style: s.formHint},
+          text('无需填写连接字段。', 'No connection fields required.'),
+        ),
       );
     }
 
@@ -669,17 +743,9 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       'div',
       {},
       requiredFields.map((field) => {
-        const meta = CONNECTION_FIELD_LABELS[field] || {
-          label: field,
-          type: 'text',
-          placeholder: '',
-        };
+        const meta = connectionFieldMetadata(field);
         return m('div', {key: field, style: s.formField}, [
-          this.renderFieldLabel(
-            s,
-            meta.label,
-            CONNECTION_FIELD_QUALIFIERS[field],
-          ),
+          this.renderFieldLabel(s, meta.label, connectionFieldQualifier(field)),
           m(`input[type=${meta.type}]`, {
             style: s.formInput,
             value:
@@ -691,8 +757,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             },
             placeholder: meta.placeholder,
           }),
-          CONNECTION_FIELD_HINTS[field]
-            ? m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS[field])
+          connectionFieldHint(field)
+            ? m('div', {style: s.formHint}, connectionFieldHint(field))
             : null,
         ]);
       }),
@@ -732,9 +798,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     return 'claude-agent-sdk';
   }
 
-  private renderCustomConnection(
-    s: ReturnType<typeof getStyles>,
-  ): m.Children {
+  private renderCustomConnection(s: ReturnType<typeof getStyles>): m.Children {
     const runtime = this.currentRuntime();
     return m('div', [
       this.renderRuntimeSelector(s),
@@ -742,21 +806,19 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         ? this.renderPiAgentCoreConnectionFields(s)
         : runtime === 'opencode'
           ? this.renderOpenCodeConnectionFields(s)
-        : runtime === 'openai-agents-sdk'
-          ? this.renderOpenAIConnectionFields(s, {includeApiKey: true})
-          : this.renderClaudeConnectionFields(s, {includeApiKey: true}),
+          : runtime === 'openai-agents-sdk'
+            ? this.renderOpenAIConnectionFields(s, {includeApiKey: true})
+            : this.renderClaudeConnectionFields(s, {includeApiKey: true}),
     ]);
   }
 
-  private renderDualSdkConnection(
-    s: ReturnType<typeof getStyles>,
-  ): m.Children {
+  private renderDualSdkConnection(s: ReturnType<typeof getStyles>): m.Children {
     const t = getTokens();
     const runtime = this.currentRuntime();
     return m('div', [
       this.renderRuntimeSelector(s),
       m('div', {style: s.formField}, [
-        this.renderFieldLabel(s, 'Provider API Key'),
+        this.renderFieldLabel(s, text('提供商 API 密钥', 'Provider API Key')),
         m('input[type=password]', {
           style: s.formInput,
           value: this.form.connection.apiKey || '',
@@ -765,7 +827,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           },
           placeholder: 'sk-...',
         }),
-        m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS.apiKey),
+        m('div', {style: s.formHint}, connectionFieldHint('apiKey')),
       ]),
       this.renderPresetConnectionSummary(),
       m(
@@ -780,8 +842,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         [
           this.renderConnectionGroupTitle(
             runtime === 'openai-agents-sdk'
-              ? 'OpenAI SDK optional fields'
-              : 'Claude SDK optional fields',
+              ? text('OpenAI SDK 可选字段', 'OpenAI SDK optional fields')
+              : text('Claude SDK 可选字段', 'Claude SDK optional fields'),
           ),
           runtime === 'openai-agents-sdk'
             ? this.renderOpenAIConnectionFields(s, {includeApiKey: false})
@@ -821,8 +883,14 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         },
       },
       details
-        ? `Template already filled the runtime defaults (${details}).`
-        : 'Template already filled the runtime defaults.',
+        ? text(
+            `模板已预填运行时默认值（${details}）。`,
+            `Template already filled the runtime defaults (${details}).`,
+          )
+        : text(
+            '模板已预填运行时默认值。',
+            'Template already filled the runtime defaults.',
+          ),
     );
   }
 
@@ -841,7 +909,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     ];
 
     return m('div', {style: s.formField}, [
-      m('label', {style: s.formLabel}, 'Runtime'),
+      m('label', {style: s.formLabel}, text('运行时', 'Runtime')),
       m(
         'div',
         {
@@ -862,7 +930,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               type: 'button',
               style: {
                 border: 'none',
-                borderRight: index < options.length - 1 ? `1px solid ${t.border}` : 'none',
+                borderRight:
+                  index < options.length - 1 ? `1px solid ${t.border}` : 'none',
                 padding: '7px 12px',
                 cursor: 'pointer',
                 fontSize: '12px',
@@ -886,7 +955,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {style: s.formHint},
-        'Most preset providers work without changing this. Switch runtime only when you intentionally want the provider to use another SDK surface.',
+        text(
+          '大多数预设提供商无需修改。仅在明确需要使用另一套 SDK 接口时切换运行时。',
+          'Most preset providers work without changing this. Switch runtime only when you intentionally want the provider to use another SDK surface.',
+        ),
       ),
     ]);
   }
@@ -901,7 +973,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {key: 'piAgentCoreCapabilityHint', style: s.formHint},
-        'Pi Agent Core is capability-limited: it is optional, dynamically loaded, and does not enable shell/file tools or .pi project discovery.',
+        text(
+          'Pi Agent Core 能力受限：它是可选的动态加载运行时，不会启用 Shell/文件工具或 .pi 项目发现。',
+          'Pi Agent Core is capability-limited: it is optional, dynamically loaded, and does not enable shell/file tools or .pi project discovery.',
+        ),
       ),
     ]);
   }
@@ -921,7 +996,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'div',
         {key: 'openCodeCapabilityHint', style: s.formHint},
-        'OpenCode runs through an isolated server with request-scoped SmartPerfetto MCP tools. Built-in shell/file/project discovery tools remain disabled.',
+        text(
+          'OpenCode 通过隔离服务器运行，只使用请求范围内的 SmartPerfetto MCP 工具；内置 Shell、文件和项目发现工具仍保持禁用。',
+          'OpenCode runs through an isolated server with request-scoped SmartPerfetto MCP tools. Built-in shell/file/project discovery tools remain disabled.',
+        ),
       ),
     ]);
   }
@@ -953,11 +1031,24 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         : this.renderConnectionInput(
             s,
             'claudeApiKey',
-            'Claude-compatible API Key Override',
-            'Optional',
+            text(
+              'Claude 兼容 API 密钥覆盖',
+              'Claude-compatible API Key Override',
+            ),
+            text('可选', 'Optional'),
           ),
-      this.renderConnectionInput(s, 'claudeAuthToken', undefined, 'Optional'),
-      this.renderConnectionInput(s, 'claudeBaseUrl', undefined, 'Preset'),
+      this.renderConnectionInput(
+        s,
+        'claudeAuthToken',
+        undefined,
+        text('可选', 'Optional'),
+      ),
+      this.renderConnectionInput(
+        s,
+        'claudeBaseUrl',
+        undefined,
+        text('预设', 'Preset'),
+      ),
     ]);
   }
 
@@ -971,10 +1062,18 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         : this.renderConnectionInput(
             s,
             'openaiApiKey',
-            'OpenAI-compatible API Key Override',
-            'Optional',
+            text(
+              'OpenAI 兼容 API 密钥覆盖',
+              'OpenAI-compatible API Key Override',
+            ),
+            text('可选', 'Optional'),
           ),
-      this.renderConnectionInput(s, 'openaiBaseUrl', undefined, 'Preset'),
+      this.renderConnectionInput(
+        s,
+        'openaiBaseUrl',
+        undefined,
+        text('预设', 'Preset'),
+      ),
       this.renderOpenAIProtocolSelect(s),
     ]);
   }
@@ -986,26 +1085,38 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.form.connection.openaiProtocol ||
       (this.form.type === 'openai' ? 'responses' : 'chat_completions');
     return m('div', {key: 'openaiProtocol', style: s.formField}, [
-      this.renderFieldLabel(s, 'OpenAI Protocol', 'Preset'),
+      this.renderFieldLabel(
+        s,
+        text('OpenAI 协议', 'OpenAI Protocol'),
+        text('预设', 'Preset'),
+      ),
       m(
         'select',
         {
           style: s.formSelect,
           value: protocol,
           onchange: (e: Event) => {
-            this.form.connection.openaiProtocol = (e.target as HTMLSelectElement)
-              .value as OpenAIProtocol;
+            this.form.connection.openaiProtocol = (
+              e.target as HTMLSelectElement
+            ).value as OpenAIProtocol;
           },
         },
         [
           m('option', {value: 'responses'}, 'Responses'),
-          m('option', {value: 'chat_completions'}, 'Chat Completions'),
+          m(
+            'option',
+            {value: 'chat_completions'},
+            text('聊天补全', 'Chat Completions'),
+          ),
         ],
       ),
       m(
         'div',
         {style: s.formHint},
-        'Use Responses for official OpenAI. Keep Chat Completions for Ollama and most OpenAI-compatible gateways.',
+        text(
+          '官方 OpenAI 请使用 Responses；Ollama 和大多数 OpenAI 兼容网关请保留“聊天补全”。',
+          'Use Responses for official OpenAI. Keep Chat Completions for Ollama and most OpenAI-compatible gateways.',
+        ),
       ),
     ]);
   }
@@ -1016,17 +1127,13 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     labelOverride?: string,
     qualifierOverride?: string,
   ): m.Children {
-    const meta = CONNECTION_FIELD_LABELS[field] || {
-      label: field,
-      type: 'text',
-      placeholder: '',
-    };
+    const meta = connectionFieldMetadata(field);
     const conn = this.form.connection as Record<string, string>;
     return m('div', {key: field, style: s.formField}, [
       this.renderFieldLabel(
         s,
         labelOverride || meta.label,
-        qualifierOverride ?? CONNECTION_FIELD_QUALIFIERS[field],
+        qualifierOverride ?? connectionFieldQualifier(field),
       ),
       m(`input[type=${meta.type}]`, {
         style: s.formInput,
@@ -1036,8 +1143,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         },
         placeholder: meta.placeholder,
       }),
-      CONNECTION_FIELD_HINTS[field]
-        ? m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS[field])
+      connectionFieldHint(field)
+        ? m('div', {style: s.formHint}, connectionFieldHint(field))
         : null,
     ]);
   }
@@ -1046,17 +1153,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     s: ReturnType<typeof getStyles>,
     field: string,
   ): m.Children {
-    const meta = CONNECTION_FIELD_LABELS[field] || {
-      label: field,
-      placeholder: '',
-    };
+    const meta = connectionFieldMetadata(field);
     const conn = this.form.connection as Record<string, string>;
     return m('div', {key: field, style: s.formField}, [
-      this.renderFieldLabel(
-        s,
-        meta.label,
-        CONNECTION_FIELD_QUALIFIERS[field],
-      ),
+      this.renderFieldLabel(s, meta.label, connectionFieldQualifier(field)),
       m('textarea', {
         style: {
           ...s.formInput,
@@ -1070,8 +1170,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         },
         placeholder: meta.placeholder,
       }),
-      CONNECTION_FIELD_HINTS[field]
-        ? m('div', {style: s.formHint}, CONNECTION_FIELD_HINTS[field])
+      connectionFieldHint(field)
+        ? m('div', {style: s.formHint}, connectionFieldHint(field))
         : null,
     ]);
   }
@@ -1087,35 +1187,38 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       bearer: [
         {
           key: 'awsBearerToken',
-          label: 'AWS Bearer Token',
+          label: text('AWS Bearer 令牌', 'AWS Bearer Token'),
           type: 'password',
-          placeholder: 'Bearer token for Bedrock access',
+          placeholder: text(
+            '用于访问 Bedrock 的 Bearer 令牌',
+            'Bearer token for Bedrock access',
+          ),
         },
       ],
       accessKey: [
         {
           key: 'awsAccessKeyId',
-          label: 'AWS Access Key ID',
+          label: text('AWS 访问密钥 ID', 'AWS Access Key ID'),
           type: 'text',
           placeholder: 'AKIA...',
         },
         {
           key: 'awsSecretAccessKey',
-          label: 'AWS Secret Access Key',
+          label: text('AWS 私密访问密钥', 'AWS Secret Access Key'),
           type: 'password',
-          placeholder: 'Secret key...',
+          placeholder: text('私密密钥……', 'Secret key...'),
         },
         {
           key: 'awsSessionToken',
-          label: 'Session Token (optional)',
+          label: text('会话令牌（可选）', 'Session Token (optional)'),
           type: 'password',
-          placeholder: 'Temporary session token...',
+          placeholder: text('临时会话令牌……', 'Temporary session token...'),
         },
       ],
       profile: [
         {
           key: 'awsProfile',
-          label: 'AWS Profile Name',
+          label: text('AWS 配置文件名称', 'AWS Profile Name'),
           type: 'text',
           placeholder: 'default',
         },
@@ -1124,36 +1227,52 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
 
     return m('div', [
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, 'AWS Region'),
+        m('label', {style: s.formLabel}, text('AWS 区域', 'AWS Region')),
         m('input[type=text]', {
           style: s.formInput,
           value: conn['awsRegion'] || '',
           oninput: (e: Event) => {
             conn['awsRegion'] = (e.target as HTMLInputElement).value;
           },
-          placeholder: 'us-east-1 (leave empty to use AWS_REGION env)',
+          placeholder: text(
+            'us-east-1（留空则使用 AWS_REGION 环境变量）',
+            'us-east-1 (leave empty to use AWS_REGION env)',
+          ),
         }),
         m(
           'div',
           {style: s.formHint},
-          'Leave empty to inherit from AWS_REGION environment variable',
+          text(
+            '留空则继承 AWS_REGION 环境变量。',
+            'Leave empty to inherit from AWS_REGION environment variable',
+          ),
         ),
       ]),
 
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, 'API Key (optional)'),
+        m(
+          'label',
+          {style: s.formLabel},
+          text('API 密钥（可选）', 'API Key (optional)'),
+        ),
         m('input[type=password]', {
           style: s.formInput,
           value: conn['apiKey'] || '',
           oninput: (e: Event) => {
             conn['apiKey'] = (e.target as HTMLInputElement).value;
           },
-          placeholder: 'sk-ant-... (for Anthropic proxy, if applicable)',
+          placeholder: text(
+            'sk-ant-…（适用于 Anthropic 代理）',
+            'sk-ant-... (for Anthropic proxy, if applicable)',
+          ),
         }),
         m(
           'div',
           {style: s.formHint},
-          'Only needed if using an Anthropic API proxy in front of Bedrock',
+          text(
+            '仅在 Bedrock 前使用 Anthropic API 代理时需要。',
+            'Only needed if using an Anthropic API proxy in front of Bedrock',
+          ),
         ),
       ]),
 
@@ -1180,7 +1299,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 marginBottom: '12px',
               },
             },
-            'Advanced Configuration',
+            text('高级配置', 'Advanced Configuration'),
           ),
 
           m(
@@ -1201,7 +1320,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                   this.form.useBedrock = (e.target as HTMLInputElement).checked;
                 },
               }),
-              m('label', {style: {...s.formLabel, margin: 0}}, 'Use Bedrock'),
+              m(
+                'label',
+                {style: {...s.formLabel, margin: 0}},
+                text('使用 Bedrock', 'Use Bedrock'),
+              ),
               m(
                 'span',
                 {style: {fontSize: '11px', color: t.textMuted}},
@@ -1211,7 +1334,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           ),
 
           m('div', {key: 'adv-authmethod', style: s.formField}, [
-            m('label', {style: s.formLabel}, 'Authentication Method'),
+            m(
+              'label',
+              {style: s.formLabel},
+              text('认证方式', 'Authentication Method'),
+            ),
             m(
               'select',
               {
@@ -1226,14 +1353,27 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 m(
                   'option',
                   {value: 'accessKey'},
-                  'Access Key (AWS_ACCESS_KEY_ID + Secret)',
+                  text(
+                    '访问密钥（AWS_ACCESS_KEY_ID + Secret）',
+                    'Access Key (AWS_ACCESS_KEY_ID + Secret)',
+                  ),
                 ),
                 m(
                   'option',
                   {value: 'bearer'},
-                  'Bearer Token (AWS_BEARER_TOKEN_BEDROCK)',
+                  text(
+                    'Bearer 令牌（AWS_BEARER_TOKEN_BEDROCK）',
+                    'Bearer Token (AWS_BEARER_TOKEN_BEDROCK)',
+                  ),
                 ),
-                m('option', {value: 'profile'}, 'AWS Profile (AWS_PROFILE)'),
+                m(
+                  'option',
+                  {value: 'profile'},
+                  text(
+                    'AWS 配置文件（AWS_PROFILE）',
+                    'AWS Profile (AWS_PROFILE)',
+                  ),
+                ),
               ],
             ),
           ]),
@@ -1253,7 +1393,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           ),
 
           m('div', {key: 'adv-baseurl', style: s.formField}, [
-            m('label', {style: s.formLabel}, 'Bedrock Base URL (optional)'),
+            m(
+              'label',
+              {style: s.formLabel},
+              text('Bedrock 基础 URL（可选）', 'Bedrock Base URL (optional)'),
+            ),
             m('input[type=text]', {
               style: s.formInput,
               value: conn['baseUrl'] || '',
@@ -1265,7 +1409,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             m(
               'div',
               {style: s.formHint},
-              'Maps to ANTHROPIC_BEDROCK_BASE_URL. Leave empty for default.',
+              text(
+                '对应 ANTHROPIC_BEDROCK_BASE_URL；留空则使用默认值。',
+                'Maps to ANTHROPIC_BEDROCK_BASE_URL. Leave empty for default.',
+              ),
             ),
           ]),
         ],
@@ -1287,7 +1434,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       defaultVal?: string,
     ) =>
       m('div', {style: s.formField}, [
-        this.renderFieldLabel(s, label, defaultVal ? 'Preset' : undefined),
+        this.renderFieldLabel(
+          s,
+          label,
+          defaultVal ? text('预设', 'Preset') : undefined,
+        ),
         hasAvailableModels
           ? m(
               'select',
@@ -1299,7 +1450,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 },
               },
               [
-                m('option', {value: ''}, '-- Select --'),
+                m('option', {value: ''}, text('-- 请选择 --', '-- Select --')),
                 ...(template?.availableModels || []).map((mdl) =>
                   m('option', {value: mdl.id}, `${mdl.name} (${mdl.tier})`),
                 ),
@@ -1311,22 +1462,37 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               oninput: (e: Event) => {
                 this.form.models[key] = (e.target as HTMLInputElement).value;
               },
-              placeholder: defaultVal || 'Model ID',
+              placeholder: defaultVal || text('模型 ID', 'Model ID'),
             }),
         defaultVal
           ? m(
               'div',
               {style: s.formHint},
-              `Prefilled: ${defaultVal}. Change only if your provider plan uses another model ID.`,
+              text(
+                `已预填：${defaultVal}。仅在提供商套餐使用其他模型 ID 时修改。`,
+                `Prefilled: ${defaultVal}. Change only if your provider plan uses another model ID.`,
+              ),
             )
           : null,
       ]);
 
     return m('div', [
-      modelField('Primary Model', 'primary', template?.defaultModels.primary),
-      modelField('Light Model', 'light', template?.defaultModels.light),
+      modelField(
+        text('主模型', 'Primary Model'),
+        'primary',
+        template?.defaultModels.primary,
+      ),
+      modelField(
+        text('轻量模型', 'Light Model'),
+        'light',
+        template?.defaultModels.light,
+      ),
       m('div', {style: s.formField}, [
-        this.renderFieldLabel(s, 'Sub-agent Model', 'Optional'),
+        this.renderFieldLabel(
+          s,
+          text('子 Agent 模型', 'Sub-agent Model'),
+          text('可选', 'Optional'),
+        ),
         m('input[type=text]', {
           style: s.formInput,
           value: this.form.models.subAgent || '',
@@ -1334,7 +1500,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             this.form.models.subAgent =
               (e.target as HTMLInputElement).value || undefined;
           },
-          placeholder: 'Leave empty to inherit primary',
+          placeholder: text(
+            '留空则继承主模型',
+            'Leave empty to inherit primary',
+          ),
         }),
       ]),
     ]);
@@ -1402,11 +1571,17 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         m(
           'div',
           {style: {...s.formHint, margin: '0 0 12px'}},
-          'Optional. Leave these empty to inherit SmartPerfetto runtime defaults.',
+          text(
+            '均为可选；留空则继承 SmartPerfetto 运行时默认值。',
+            'Optional. Leave these empty to inherit SmartPerfetto runtime defaults.',
+          ),
         ),
-        numField('Max Turns', 'maxTurns', '100', {min: 2, step: 1}),
+        numField(text('最大轮数', 'Max Turns'), 'maxTurns', '100', {
+          min: 2,
+          step: 1,
+        }),
         m('div', {style: s.formField}, [
-          m('label', {style: s.formLabel}, 'Effort Level'),
+          m('label', {style: s.formLabel}, text('推理强度', 'Effort Level')),
           m(
             'select',
             {
@@ -1422,20 +1597,43 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               },
             },
             [
-              m('option', {value: ''}, '-- Default --'),
-              m('option', {value: 'low'}, 'Low'),
-              m('option', {value: 'medium'}, 'Medium'),
-              m('option', {value: 'high'}, 'High'),
+              m('option', {value: ''}, text('-- 默认 --', '-- Default --')),
+              m('option', {value: 'low'}, text('低', 'Low')),
+              m('option', {value: 'medium'}, text('中', 'Medium')),
+              m('option', {value: 'high'}, text('高', 'High')),
             ],
           ),
         ]),
-        numField('Max Budget (USD)', 'maxBudgetUsd', '5'),
-        numField('Full Per-turn Timeout (ms)', 'fullPerTurnMs', '60000'),
-        numField('Quick Per-turn Timeout (ms)', 'quickPerTurnMs', '40000'),
-        numField('Verifier Timeout (ms)', 'verifierTimeoutMs', '60000'),
-        numField('Classifier Timeout (ms)', 'classifierTimeoutMs', '30000'),
-        boolField('Enable Sub-agents', 'enableSubAgents'),
-        boolField('Enable Verification', 'enableVerification'),
+        numField(
+          text('最大预算（USD）', 'Max Budget (USD)'),
+          'maxBudgetUsd',
+          '5',
+        ),
+        numField(
+          text('完整分析单轮超时（ms）', 'Full Per-turn Timeout (ms)'),
+          'fullPerTurnMs',
+          '60000',
+        ),
+        numField(
+          text('快速分析单轮超时（ms）', 'Quick Per-turn Timeout (ms)'),
+          'quickPerTurnMs',
+          '40000',
+        ),
+        numField(
+          text('验证器超时（ms）', 'Verifier Timeout (ms)'),
+          'verifierTimeoutMs',
+          '60000',
+        ),
+        numField(
+          text('分类器超时（ms）', 'Classifier Timeout (ms)'),
+          'classifierTimeoutMs',
+          '30000',
+        ),
+        boolField(text('启用子 Agent', 'Enable Sub-agents'), 'enableSubAgents'),
+        boolField(
+          text('启用验证', 'Enable Verification'),
+          'enableVerification',
+        ),
       ],
     );
   }

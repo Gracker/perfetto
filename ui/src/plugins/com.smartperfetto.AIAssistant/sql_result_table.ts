@@ -17,17 +17,16 @@
 // limitations under the License.
 
 import m from 'mithril';
-import {Trace} from '../../public/trace';
+import type {Trace} from '../../public/trace';
 import {Time} from '../../base/time';
-import {ChartVisualizer, ChartData} from './chart_visualizer';
+import {ChartVisualizer, type ChartData} from './chart_visualizer';
 import {
-  ColumnDefinition,
+  type ColumnDefinition,
   buildColumnDefinitions,
 } from './generated/data_contract.types';
-import {
-  getColumnClasses,
-} from './renderers/formatters';
+import {getColumnClasses} from './renderers/formatters';
 import {escapeHtml, sanitizeHtml} from './data_formatter';
+import {uiText} from './ui_language';
 
 /**
  * User interaction data for focus tracking (Agent-Driven Architecture v2.0).
@@ -39,13 +38,19 @@ export interface UserInteraction {
   type: 'click' | 'drill_down';
   target: {
     /** Entity type if clicking on an entity column */
-    entityType?: 'frame' | 'process' | 'thread' | 'session' | 'cpu_slice' | 'binder';
+    entityType?:
+      | 'frame'
+      | 'process'
+      | 'thread'
+      | 'session'
+      | 'cpu_slice'
+      | 'binder';
     /** Entity ID (string for JSON serialization) */
     entityId?: string;
     /** Entity name for display */
     entityName?: string;
     /** Time range if clicking on timestamp (stringified for JSON) */
-    timeRange?: { start: string; end: string };
+    timeRange?: {start: string; end: string};
   };
   source: 'ui';
   timestamp: number;
@@ -62,9 +67,14 @@ export interface SqlResultTableAttrs {
   rows: any[][];
   rowCount: number;
   query?: string;
-  title?: string;  // Optional title to display in header (e.g., section title)
-  trace?: Trace;  // 新增：用于跳转到时间线
-  onPin?: (data: {query: string, columns: string[], rows: any[][], timestamp: number}) => void;
+  title?: string; // Optional title to display in header (e.g., section title)
+  trace?: Trace; // 新增：用于跳转到时间线
+  onPin?: (data: {
+    query: string;
+    columns: string[];
+    rows: any[][];
+    timestamp: number;
+  }) => void;
   onExport?: (format: 'csv' | 'json') => void;
   /**
    * Callback for user interaction tracking (Agent-Driven Architecture v2.0).
@@ -99,7 +109,9 @@ export interface SqlResultTableAttrs {
   columnDefinitions?: ColumnDefinition[];
 }
 
-type ExpandableRowData = NonNullable<SqlResultTableAttrs['expandableData']>[number];
+type ExpandableRowData = NonNullable<
+  SqlResultTableAttrs['expandableData']
+>[number];
 
 interface DisplayRow {
   row: any[];
@@ -122,36 +134,42 @@ interface TimestampColumn {
 interface EntityColumn {
   columnIndex: number;
   columnName: string;
-  entityType: 'frame' | 'process' | 'thread' | 'session' | 'cpu_slice' | 'binder';
+  entityType:
+    | 'frame'
+    | 'process'
+    | 'thread'
+    | 'session'
+    | 'cpu_slice'
+    | 'binder';
 }
 
 // 单位转换为纳秒的乘数
 type TimeUnit = 'ns' | 'us' | 'ms' | 's';
 
 const UNIT_TO_NS: Record<TimeUnit, number> = {
-  'ns': 1,
-  'us': 1e3,
-  'ms': 1e6,
-  's': 1e9,
+  ns: 1,
+  us: 1e3,
+  ms: 1e6,
+  s: 1e9,
 };
 
 // Colors are now defined in CSS variables (styles.scss)
 // This file uses CSS class names instead of inline styles
 
 // 显示限制常量
-const COLLAPSED_ROW_LIMIT = 10;  // 折叠时显示的行数
-const EXPANDED_ROW_LIMIT = 50;   // 展开时最大显示的行数
+const COLLAPSED_ROW_LIMIT = 10; // 折叠时显示的行数
+const EXPANDED_ROW_LIMIT = 50; // 展开时最大显示的行数
 
 export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private expanded = false;
   private showStats = false;
-  private showChart = false;  // 新增：控制图表显示
+  private showChart = false; // 新增：控制图表显示
   private copySuccess = false;
   private copiedTimeout: any = null;
   private pinSuccess = false;
   private pinTimeout: any = null;
-  private timestampColumns: TimestampColumn[] = [];  // 存储检测到的时间戳列
-  private entityColumns: EntityColumn[] = [];  // 存储检测到的实体列 (v2.0 交互追踪)
+  private timestampColumns: TimestampColumn[] = []; // 存储检测到的时间戳列
+  private entityColumns: EntityColumn[] = []; // 存储检测到的实体列 (v2.0 交互追踪)
   // 可展开行状态：记录哪些行处于展开状态
   private expandedRows = new Set<number>();
   // Trace 起始时间（纳秒），用于计算相对时间显示
@@ -161,7 +179,20 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private sortDirection: 'asc' | 'desc' = 'asc';
 
   view(vnode: m.Vnode<SqlResultTableAttrs>) {
-    const {columns, rows, rowCount, query, onPin, trace, title, expandableData, summary, metadata, columnDefinitions, onInteraction} = vnode.attrs;
+    const {
+      columns,
+      rows,
+      rowCount,
+      query,
+      onPin,
+      trace,
+      title,
+      expandableData,
+      summary,
+      metadata,
+      columnDefinitions,
+      onInteraction,
+    } = vnode.attrs;
 
     // 获取 trace 起始时间，用于相对时间戳显示
     if (trace) {
@@ -170,20 +201,30 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     // Build or infer column definitions (v2.0 schema-driven rendering)
     // If columnDefinitions are provided, use them; otherwise infer from column names
-    const effectiveColumnDefs = columnDefinitions || buildColumnDefinitions(columns);
+    const effectiveColumnDefs =
+      columnDefinitions || buildColumnDefinitions(columns);
 
     // 检测时间戳列（只在第一次或列变化时执行）
     // If column definitions are provided, extract from them; otherwise use pattern matching
-    if (this.timestampColumns.length === 0 ||
-        this.timestampColumns.some((tc) => columns[tc.columnIndex] !== tc.columnName)) {
+    if (
+      this.timestampColumns.length === 0 ||
+      this.timestampColumns.some(
+        (tc) => columns[tc.columnIndex] !== tc.columnName,
+      )
+    ) {
       this.timestampColumns = columnDefinitions
-        ? this.extractTimestampColumnsFromDefinitions(columnDefinitions, columns)
+        ? this.extractTimestampColumnsFromDefinitions(
+            columnDefinitions,
+            columns,
+          )
         : this.detectTimestampColumns(columns);
     }
 
     // 检测实体列 (v2.0 交互追踪)
-    if (this.entityColumns.length === 0 ||
-        this.entityColumns.some((ec) => columns[ec.columnIndex] !== ec.columnName)) {
+    if (
+      this.entityColumns.length === 0 ||
+      this.entityColumns.some((ec) => columns[ec.columnIndex] !== ec.columnName)
+    ) {
       this.entityColumns = this.detectEntityColumns(columns);
     }
 
@@ -192,10 +233,16 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ? columns.map((_, idx) => getColumnClasses(effectiveColumnDefs[idx]))
       : this.classifyColumns(columns);
 
-    const sortedRows = this.buildSortedRowsWithExpandableData(rows, columns, expandableData);
+    const sortedRows = this.buildSortedRowsWithExpandableData(
+      rows,
+      columns,
+      expandableData,
+    );
 
     // Limit displayed rows: collapsed shows 10, expanded shows up to 50
-    const displayLimit = this.expanded ? EXPANDED_ROW_LIMIT : COLLAPSED_ROW_LIMIT;
+    const displayLimit = this.expanded
+      ? EXPANDED_ROW_LIMIT
+      : COLLAPSED_ROW_LIMIT;
     const displayRows = sortedRows.slice(0, displayLimit);
     const hasMore = rows.length > COLLAPSED_ROW_LIMIT;
 
@@ -206,199 +253,313 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       // 汇总报告（如果有且有关键发现）
       // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
       // reconciliation for formatted content (avoids removeChild errors)
-      summary && summary.content.includes('关键发现') ? m('.sql-result-summary', [
-        m('div.summary-content', {
-          oncreate: (vnode: m.VnodeDOM) => {
-            (vnode.dom as HTMLElement).innerHTML = this.formatMarkdown(summary.content);
-          },
-          onupdate: (vnode: m.VnodeDOM) => {
-            const newHtml = this.formatMarkdown(summary.content);
-            const dom = vnode.dom as HTMLElement;
-            if (dom.innerHTML !== newHtml) {
-              dom.innerHTML = newHtml;
-            }
-          },
-        }),
-      ]) : null,
+      summary &&
+      (summary.content.includes('关键发现') ||
+        summary.content.toLowerCase().includes('key findings'))
+        ? m('.sql-result-summary', [
+            m('div.summary-content', {
+              oncreate: (vnode: m.VnodeDOM) => {
+                (vnode.dom as HTMLElement).innerHTML = this.formatMarkdown(
+                  summary.content,
+                );
+              },
+              onupdate: (vnode: m.VnodeDOM) => {
+                const newHtml = this.formatMarkdown(summary.content);
+                const dom = vnode.dom as HTMLElement;
+                if (dom.innerHTML !== newHtml) {
+                  dom.innerHTML = newHtml;
+                }
+              },
+            }),
+          ])
+        : null,
 
       // Compact single-row header with title (if provided), row count, and actions
       m('.sql-result-header.compact-header', [
         m('.sql-result-title', [
           m('span.pf-icon', title ? 'folder' : 'table_chart'),
-          title
-            ? m('span.section-title', title)
-            : null,
-          m('span.row-count', `${rowCount} 条`),
+          title ? m('span.section-title', title) : null,
+          m('span.row-count', uiText(`${rowCount} 条`, `${rowCount} rows`)),
           // Inline metadata display - dynamically render all metadata fields
           metadata && Object.keys(metadata).length > 0
-            ? m('span.header-metadata',
+            ? m(
+                'span.header-metadata',
                 Object.entries(metadata)
                   .filter(([_, v]) => v !== null && v !== undefined && v !== '')
-                  .map(([key, value]) => m('span.metadata-tag', [
-                    m('span.metadata-label', this.formatMetadataLabel(key) + ':'),
-                    m('span.metadata-value', this.formatMetadataValue(value, key)),
-                  ]))
+                  .map(([key, value]) =>
+                    m('span.metadata-tag', [
+                      m(
+                        'span.metadata-label',
+                        this.formatMetadataLabel(key) + ':',
+                      ),
+                      m(
+                        'span.metadata-value',
+                        this.formatMetadataValue(value, key),
+                      ),
+                    ]),
+                  ),
               )
             : null,
         ]),
         m('.sql-result-actions', [
           // Copy button (icon only)
-          m('button.sql-result-action.icon-only', {
-            class: this.copySuccess ? 'active' : '',
-            onclick: () => this.copyResults(columns, rows),
-            title: 'Copy to clipboard',
-          }, m('span.pf-icon', this.copySuccess ? 'check' : 'content_copy')),
+          m(
+            'button.sql-result-action.icon-only',
+            {
+              class: this.copySuccess ? 'active' : '',
+              onclick: () => this.copyResults(columns, rows),
+              title: uiText('复制到剪贴板', 'Copy to clipboard'),
+            },
+            m('span.pf-icon', this.copySuccess ? 'check' : 'content_copy'),
+          ),
           // Pin button (icon only) - only show if query exists
-          onPin && query ? m('button.sql-result-action.icon-only', {
-            class: this.pinSuccess ? 'active' : '',
-            onclick: () => this.pinResults(query, columns, rows, onPin),
-            title: 'Pin results',
-          }, m('span.pf-icon', this.pinSuccess ? 'check' : 'push_pin')) : null,
+          onPin && query
+            ? m(
+                'button.sql-result-action.icon-only',
+                {
+                  class: this.pinSuccess ? 'active' : '',
+                  onclick: () => this.pinResults(query, columns, rows, onPin),
+                  title: uiText('固定结果', 'Pin results'),
+                },
+                m('span.pf-icon', this.pinSuccess ? 'check' : 'push_pin'),
+              )
+            : null,
           // Stats toggle (icon only)
-          m('button.sql-result-action.icon-only', {
-            class: this.showStats ? 'active' : '',
-            onclick: () => { this.showStats = !this.showStats; m.redraw(); },
-            title: 'Show statistics',
-          }, m('span.pf-icon', 'analytics')),
+          m(
+            'button.sql-result-action.icon-only',
+            {
+              class: this.showStats ? 'active' : '',
+              onclick: () => {
+                this.showStats = !this.showStats;
+                m.redraw();
+              },
+              title: uiText('显示统计信息', 'Show statistics'),
+            },
+            m('span.pf-icon', 'analytics'),
+          ),
           // Chart button (icon only, if data is visualizable)
-          this.canVisualize(columns, rows) ? m('button.sql-result-action.icon-only', {
-            class: this.showChart ? 'active' : '',
-            onclick: () => { this.showChart = !this.showChart; m.redraw(); },
-            title: 'Show chart',
-          }, m('span.pf-icon', 'bar_chart')) : null,
+          this.canVisualize(columns, rows)
+            ? m(
+                'button.sql-result-action.icon-only',
+                {
+                  class: this.showChart ? 'active' : '',
+                  onclick: () => {
+                    this.showChart = !this.showChart;
+                    m.redraw();
+                  },
+                  title: uiText('显示图表', 'Show chart'),
+                },
+                m('span.pf-icon', 'bar_chart'),
+              )
+            : null,
         ]),
       ]),
 
       // Statistics section (collapsible, compact)
-      this.showStats ? m('.sql-result-stats.compact-stats', [
-        m('.stats-grid',
-          Object.entries(stats).slice(0, 6).map(([key, value]) =>
-            m('.stat-item', [
-              m('.stat-label', key),
-              m('.stat-value', String(value)),
-            ])
-          )
-        ),
-      ]) : null,
+      this.showStats
+        ? m('.sql-result-stats.compact-stats', [
+            m(
+              '.stats-grid',
+              Object.entries(stats)
+                .slice(0, 6)
+                .map(([key, value]) =>
+                  m('.stat-item', [
+                    m('.stat-label', key),
+                    m('.stat-value', String(value)),
+                  ]),
+                ),
+            ),
+          ])
+        : null,
 
       // Table - Perfetto style, full width
-      m('.sql-result-table-wrapper',
-        m('table.sql-result-table', { role: 'grid' }, [
-          m('thead',
+      m(
+        '.sql-result-table-wrapper',
+        m('table.sql-result-table', {role: 'grid'}, [
+          m(
+            'thead',
             m('tr', [
               // 可展开按钮列表头（如果有可展开数据 - check for at least one non-null item）
-              expandableData && expandableData.some(Boolean) ? m('th.col-expand', '') : null,
+              expandableData && expandableData.some(Boolean)
+                ? m('th.col-expand', '')
+                : null,
               ...columns.map((col, idx) =>
-                m('th', {
-                  role: 'columnheader',
-                  'aria-sort': this.sortColumnIdx === idx
-                    ? (this.sortDirection === 'asc' ? 'ascending' : 'descending')
-                    : 'none',
-                  class: columnClasses[idx] || '',
-                  title: col,
-                  style: { cursor: 'pointer', userSelect: 'none' },
-                  onclick: (e: MouseEvent) => {
-                    if (e.shiftKey) {
-                      // Shift+click copies column (original behavior)
-                      this.copyColumn(rows, columns, idx);
-                    } else {
-                      // Click sorts
-                      if (this.sortColumnIdx === idx) {
-                        this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+                m(
+                  'th',
+                  {
+                    'role': 'columnheader',
+                    'aria-sort':
+                      this.sortColumnIdx === idx
+                        ? this.sortDirection === 'asc'
+                          ? 'ascending'
+                          : 'descending'
+                        : 'none',
+                    'class': columnClasses[idx] || '',
+                    'title': col,
+                    'style': {cursor: 'pointer', userSelect: 'none'},
+                    'onclick': (e: MouseEvent) => {
+                      if (e.shiftKey) {
+                        // Shift+click copies column (original behavior)
+                        this.copyColumn(rows, columns, idx);
                       } else {
-                        this.sortColumnIdx = idx;
-                        this.sortDirection = 'asc';
+                        // Click sorts
+                        if (this.sortColumnIdx === idx) {
+                          this.sortDirection =
+                            this.sortDirection === 'asc' ? 'desc' : 'asc';
+                        } else {
+                          this.sortColumnIdx = idx;
+                          this.sortDirection = 'asc';
+                        }
+                        m.redraw();
                       }
-                      m.redraw();
-                    }
+                    },
                   },
-                }, [
-                  col,
-                  this.sortColumnIdx === idx
-                    ? m('span.sort-indicator', { style: { marginLeft: '4px', fontSize: '10px' } },
-                        this.sortDirection === 'asc' ? '\u25B2' : '\u25BC')
-                    : null,
-                ])
+                  [
+                    col,
+                    this.sortColumnIdx === idx
+                      ? m(
+                          'span.sort-indicator',
+                          {style: {marginLeft: '4px', fontSize: '10px'}},
+                          this.sortDirection === 'asc' ? '\u25B2' : '\u25BC',
+                        )
+                      : null,
+                  ],
+                ),
               ),
               // Navigation arrow column header
               trace ? m('th.col-action', '') : null,
-            ])
+            ]),
           ),
           // Use map().flat() instead of flatMap for more predictable DOM structure
           // CRITICAL: Each row ALWAYS produces exactly 2 tr elements for structural stability
           // This prevents Mithril's virtual DOM reconciliation errors during concurrent redraws
-          m('tbody',
-            displayRows.map(({row, originalIndex, expandableData: rowExpandableData}) => {
-              const hasExpandableData = Boolean(rowExpandableData);
-              const isExpanded = hasExpandableData && this.expandedRows.has(originalIndex);
-              const hasAnyExpandable = expandableData && expandableData.some(Boolean);
-              const totalColSpan = columns.length + (trace ? 2 : 1) + (hasAnyExpandable ? 1 : 0);
+          m(
+            'tbody',
+            displayRows
+              .map(
+                ({row, originalIndex, expandableData: rowExpandableData}) => {
+                  const hasExpandableData = Boolean(rowExpandableData);
+                  const isExpanded =
+                    hasExpandableData && this.expandedRows.has(originalIndex);
+                  const hasAnyExpandable =
+                    expandableData && expandableData.some(Boolean);
+                  const totalColSpan =
+                    columns.length +
+                    (trace ? 2 : 1) +
+                    (hasAnyExpandable ? 1 : 0);
 
-              // 主行 - 始终渲染
-              const mainRow = m('tr.main-row', {
-                key: `main-${originalIndex}`,
-                class: trace ? 'clickable' : '',
-              }, [
-                // 可展开按钮列（如果整体有可展开数据）
-                hasAnyExpandable ? m('td.col-expand', hasExpandableData ? {
-                  onclick: (e: MouseEvent) => {
-                    e.stopPropagation();
-                    if (isExpanded) {
-                      this.expandedRows.delete(originalIndex);
-                    } else {
-                      this.expandedRows.add(originalIndex);
-                    }
-                    m.redraw();
-                  },
-                } : {}, hasExpandableData ? m('span.expand-icon', isExpanded ? '▼' : '▶') : null) : null,
-                // 数据列
-                ...row.map((cell, cellIndex) =>
-                  this.renderCellPerfetto(
-                    cell,
-                    cellIndex,
-                    columnClasses[cellIndex],
-                    trace,
-                    row,
-                    columns,
-                    onInteraction,
-                    effectiveColumnDefs[cellIndex]
-                  )
-                ),
-                // Navigation arrow
-                trace ? m('td.col-action', {
-                  onclick: () => this.jumpToFirstTimestamp(row, trace),
-                  title: 'Jump to timeline',
-                }, '→') : null,
-              ]);
+                  // 主行 - 始终渲染
+                  const mainRow = m(
+                    'tr.main-row',
+                    {
+                      key: `main-${originalIndex}`,
+                      class: trace ? 'clickable' : '',
+                    },
+                    [
+                      // 可展开按钮列（如果整体有可展开数据）
+                      hasAnyExpandable
+                        ? m(
+                            'td.col-expand',
+                            hasExpandableData
+                              ? {
+                                  onclick: (e: MouseEvent) => {
+                                    e.stopPropagation();
+                                    if (isExpanded) {
+                                      this.expandedRows.delete(originalIndex);
+                                    } else {
+                                      this.expandedRows.add(originalIndex);
+                                    }
+                                    m.redraw();
+                                  },
+                                }
+                              : {},
+                            hasExpandableData
+                              ? m('span.expand-icon', isExpanded ? '▼' : '▶')
+                              : null,
+                          )
+                        : null,
+                      // 数据列
+                      ...row.map((cell, cellIndex) =>
+                        this.renderCellPerfetto(
+                          cell,
+                          cellIndex,
+                          columnClasses[cellIndex],
+                          trace,
+                          row,
+                          columns,
+                          onInteraction,
+                          effectiveColumnDefs[cellIndex],
+                        ),
+                      ),
+                      // Navigation arrow
+                      trace
+                        ? m(
+                            'td.col-action',
+                            {
+                              onclick: () =>
+                                this.jumpToFirstTimestamp(row, trace),
+                              title: uiText('跳转到时间线', 'Jump to timeline'),
+                            },
+                            '→',
+                          )
+                        : null,
+                    ],
+                  );
 
-              // 详情行 - 始终渲染完整内容，仅用 CSS 控制显示
-              // 关键：内容始终存在，不根据 isExpanded 条件渲染，避免 DOM 变化
-              const detailRow = m('tr.detail-row', {
-                key: `detail-${originalIndex}`,
-                style: { display: isExpanded ? 'table-row' : 'none' },
-              }, m('td', {
-                colSpan: totalColSpan,
-              }, hasExpandableData
-                ? m('div.expanded-content', this.renderExpandableContent(rowExpandableData!))
-                : null  // 没有数据的行内容为空，但 tr 和 td 始终存在
-              ));
+                  // 详情行 - 始终渲染完整内容，仅用 CSS 控制显示
+                  // 关键：内容始终存在，不根据 isExpanded 条件渲染，避免 DOM 变化
+                  const detailRow = m(
+                    'tr.detail-row',
+                    {
+                      key: `detail-${originalIndex}`,
+                      style: {display: isExpanded ? 'table-row' : 'none'},
+                    },
+                    m(
+                      'td',
+                      {
+                        colSpan: totalColSpan,
+                      },
+                      hasExpandableData
+                        ? m(
+                            'div.expanded-content',
+                            this.renderExpandableContent(rowExpandableData!),
+                          )
+                        : null, // 没有数据的行内容为空，但 tr 和 td 始终存在
+                    ),
+                  );
 
-              // 始终返回 2 个元素的数组
-              return [mainRow, detailRow];
-            }).flat()
+                  // 始终返回 2 个元素的数组
+                  return [mainRow, detailRow];
+                },
+              )
+              .flat(),
           ),
-        ])
+        ]),
       ),
 
       // Expand/collapse (compact)
-      hasMore ? m('.sql-result-expand.compact-expand', [
-        m('button', {
-          onclick: () => { this.expanded = !this.expanded; m.redraw(); },
-        }, [
-          m('span.pf-icon', this.expanded ? 'expand_less' : 'expand_more'),
-          this.expanded ? '收起' : `展开 (${rowCount})`,
-        ]),
-      ]) : null,
+      hasMore
+        ? m('.sql-result-expand.compact-expand', [
+            m(
+              'button',
+              {
+                onclick: () => {
+                  this.expanded = !this.expanded;
+                  m.redraw();
+                },
+              },
+              [
+                m(
+                  'span.pf-icon',
+                  this.expanded ? 'expand_less' : 'expand_more',
+                ),
+                this.expanded
+                  ? uiText('收起', 'Collapse')
+                  : uiText(`展开 (${rowCount})`, `Expand (${rowCount})`),
+              ],
+            ),
+          ])
+        : null,
 
       // Chart visualization (collapsible)
       this.showChart && this.canVisualize(columns, rows)
@@ -443,7 +604,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       // String comparison
       const strA = String(valA ?? '');
       const strB = String(valB ?? '');
-      return dir === 'asc' ? strA.localeCompare(strB) : strB.localeCompare(strA);
+      return dir === 'asc'
+        ? strA.localeCompare(strB)
+        : strB.localeCompare(strA);
     });
   }
 
@@ -453,25 +616,40 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
       // 绝对时间戳列 - 只有 ts, ts_str 等明确的绝对时间列才显示为可点击
       // 排除 relative_*, dur_* 等相对时间列
-      if (!(/relative|dur|duration|latency|elapsed/i.test(lowerCol)) &&
-          (/^ts$/i.test(col) || /^ts_str$/i.test(col) || /^timestamp$/i.test(col) ||
-           /^start_ts$/i.test(col) || /^end_ts$/i.test(col) || /^ts_end$/i.test(col) ||
-           /^client_ts$/i.test(col) || /^server_ts$/i.test(col))) {
+      if (
+        !/relative|dur|duration|latency|elapsed/i.test(lowerCol) &&
+        (/^ts$/i.test(col) ||
+          /^ts_str$/i.test(col) ||
+          /^timestamp$/i.test(col) ||
+          /^start_ts$/i.test(col) ||
+          /^end_ts$/i.test(col) ||
+          /^ts_end$/i.test(col) ||
+          /^client_ts$/i.test(col) ||
+          /^server_ts$/i.test(col))
+      ) {
         return 'col-timestamp';
       }
 
       // Duration/relative time columns - numeric style, not clickable
-      if (/dur|duration|latency|relative|elapsed|_ms$|_us$|_ns$/i.test(lowerCol)) {
+      if (
+        /dur|duration|latency|relative|elapsed|_ms$|_us$|_ns$/i.test(lowerCol)
+      ) {
         return 'col-duration';
       }
 
       // Count/number/ID columns
-      if (/count|cnt|num|total|sum|avg|min|max|^id$|_id$|^pid$|^tid$|^upid$|^utid$|percent|ratio|depth|index|frame_index|token|session_id|track_id|slice_id|arg_set_id/i.test(lowerCol)) {
+      if (
+        /count|cnt|num|total|sum|avg|min|max|^id$|_id$|^pid$|^tid$|^upid$|^utid$|percent|ratio|depth|index|frame_index|token|session_id|track_id|slice_id|arg_set_id/i.test(
+          lowerCol,
+        )
+      ) {
         return 'col-number';
       }
 
       // Name columns
-      if (/name|label|title|desc|package|process|thread|function/i.test(lowerCol)) {
+      if (
+        /name|label|title|desc|package|process|thread|function/i.test(lowerCol)
+      ) {
         return 'col-name';
       }
 
@@ -492,10 +670,10 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     columnIndex: number,
     columnClass: string,
     trace?: Trace,
-    row?: any[],  // 完整行数据，用于获取 dur_str
-    columns?: string[],  // 列名数组，用于构建交互上下文
-    onInteraction?: (interaction: UserInteraction) => void,  // 交互回调
-    columnDefinition?: ColumnDefinition
+    row?: any[], // 完整行数据，用于获取 dur_str
+    columns?: string[], // 列名数组，用于构建交互上下文
+    onInteraction?: (interaction: UserInteraction) => void, // 交互回调
+    columnDefinition?: ColumnDefinition,
   ): m.Children {
     const isTimestamp = columnClass === 'col-timestamp';
     // Fix: 区分 duration (时长，需要单位转换) 和 number (普通数字如 ID/count)
@@ -505,11 +683,20 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     const isIdentifier = this.isIdentifierColumn(columnName);
 
     // 获取该列的时间戳信息（如果有）
-    const tsColumn = this.timestampColumns.find(tc => tc.columnIndex === columnIndex);
-    const resolvedUnit = this.resolveTimeUnit(columnDefinition?.unit, columnName);
+    const tsColumn = this.timestampColumns.find(
+      (tc) => tc.columnIndex === columnIndex,
+    );
+    const resolvedUnit = this.resolveTimeUnit(
+      columnDefinition?.unit,
+      columnName,
+    );
     const timestampUnit = tsColumn?.unit ?? resolvedUnit;
-    const timestampNs = isTimestamp ? this.parseTimeValueToNs(value, timestampUnit) : null;
-    const durationNs = isDuration ? this.parseTimeValueToNs(value, resolvedUnit) : null;
+    const timestampNs = isTimestamp
+      ? this.parseTimeValueToNs(value, timestampUnit)
+      : null;
+    const durationNs = isDuration
+      ? this.parseTimeValueToNs(value, resolvedUnit)
+      : null;
 
     // Format the display value
     // 支持 number、bigint 和字符串数值
@@ -559,98 +746,137 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     // Timestamp cell with click handler
     if (isTimestamp && trace && tsColumn && timestampNs !== null) {
       // 获取 duration 值（如果有）
-      const durValue = (tsColumn.durationColumnIndex !== undefined && row)
-        ? row[tsColumn.durationColumnIndex]
-        : undefined;
-      const durUnit = tsColumn.durationUnit || this.resolveTimeUnit(undefined, tsColumn.durationColumnName);
-      const durNs = durValue === undefined ? null : this.parseTimeValueToNs(durValue, durUnit);
+      const durValue =
+        tsColumn.durationColumnIndex !== undefined && row
+          ? row[tsColumn.durationColumnIndex]
+          : undefined;
+      const durUnit =
+        tsColumn.durationUnit ||
+        this.resolveTimeUnit(undefined, tsColumn.durationColumnName);
+      const durNs =
+        durValue === undefined
+          ? null
+          : this.parseTimeValueToNs(durValue, durUnit);
       const hasRange = durNs !== null && durNs > BigInt(0);
 
-      return m('td', {
-        class: `${columnClass} timestamp-cell`,
-        onclick: (e: MouseEvent) => {
-          e.stopPropagation();
-          if (hasRange && durNs !== null) {
-            this.jumpToTimeRange(timestampNs, durNs, trace);
+      return m(
+        'td',
+        {
+          class: `${columnClass} timestamp-cell`,
+          onclick: (e: MouseEvent) => {
+            e.stopPropagation();
+            if (hasRange && durNs !== null) {
+              this.jumpToTimeRange(timestampNs, durNs, trace);
 
-            // 发送交互事件 (v2.0 Focus Tracking)
-            if (onInteraction) {
-              const endNs = timestampNs + durNs;
-              onInteraction({
-                type: 'click',
-                target: {
-                  timeRange: {
-                    start: timestampNs.toString(),
-                    end: endNs.toString(),
+              // 发送交互事件 (v2.0 Focus Tracking)
+              if (onInteraction) {
+                const endNs = timestampNs + durNs;
+                onInteraction({
+                  type: 'click',
+                  target: {
+                    timeRange: {
+                      start: timestampNs.toString(),
+                      end: endNs.toString(),
+                    },
                   },
-                },
-                source: 'ui',
-                timestamp: Date.now(),
-                context: {
-                  columnName: columns?.[columnIndex],
-                  rowContext: this.buildRowContext(row, columns),
-                },
-              });
-            }
-          } else {
-            this.jumpToTimestampNs(timestampNs, trace);
+                  source: 'ui',
+                  timestamp: Date.now(),
+                  context: {
+                    columnName: columns?.[columnIndex],
+                    rowContext: this.buildRowContext(row, columns),
+                  },
+                });
+              }
+            } else {
+              this.jumpToTimestampNs(timestampNs, trace);
 
-            // 发送单点时间戳交互事件 (v2.0 Focus Tracking)
-            if (onInteraction) {
-              onInteraction({
-                type: 'click',
-                target: {
-                  timeRange: {
-                    start: timestampNs.toString(),
-                    end: timestampNs.toString(),
+              // 发送单点时间戳交互事件 (v2.0 Focus Tracking)
+              if (onInteraction) {
+                onInteraction({
+                  type: 'click',
+                  target: {
+                    timeRange: {
+                      start: timestampNs.toString(),
+                      end: timestampNs.toString(),
+                    },
                   },
-                },
-                source: 'ui',
-                timestamp: Date.now(),
-                context: {
-                  columnName: columns?.[columnIndex],
-                  rowContext: this.buildRowContext(row, columns),
-                },
-              });
+                  source: 'ui',
+                  timestamp: Date.now(),
+                  context: {
+                    columnName: columns?.[columnIndex],
+                    rowContext: this.buildRowContext(row, columns),
+                  },
+                });
+              }
             }
-          }
+          },
+          title: hasRange
+            ? uiText('点击跳转到时间范围', 'Click to jump to time range')
+            : uiText(
+                `点击跳转（${timestampUnit}）`,
+                `Click to jump (${timestampUnit})`,
+              ),
         },
-        title: hasRange ? 'Click to jump to time range' : `Click to jump (${timestampUnit})`,
-      }, displayValue);
+        displayValue,
+      );
     }
 
     // Entity column cell with click handler (v2.0 Focus Tracking)
-    const entityColumn = this.entityColumns.find(ec => ec.columnIndex === columnIndex);
-    if (entityColumn && value !== null && value !== undefined && onInteraction) {
-      return m('td', {
-        class: `${columnClass} entity-cell`,
-        onclick: (e: MouseEvent) => {
-          e.stopPropagation();
-          // 发送实体点击交互事件
-          onInteraction({
-            type: 'click',
-            target: {
-              entityType: entityColumn.entityType,
-              entityId: isIdentifier ? this.formatIdentifierValue(value) : String(value),
-              entityName: this.findEntityName(row, columns, entityColumn.entityType),
-            },
-            source: 'ui',
-            timestamp: Date.now(),
-            context: {
-              columnName: columns?.[columnIndex],
-              rowContext: this.buildRowContext(row, columns),
-            },
-          });
+    const entityColumn = this.entityColumns.find(
+      (ec) => ec.columnIndex === columnIndex,
+    );
+    if (
+      entityColumn &&
+      value !== null &&
+      value !== undefined &&
+      onInteraction
+    ) {
+      return m(
+        'td',
+        {
+          class: `${columnClass} entity-cell`,
+          onclick: (e: MouseEvent) => {
+            e.stopPropagation();
+            // 发送实体点击交互事件
+            onInteraction({
+              type: 'click',
+              target: {
+                entityType: entityColumn.entityType,
+                entityId: isIdentifier
+                  ? this.formatIdentifierValue(value)
+                  : String(value),
+                entityName: this.findEntityName(
+                  row,
+                  columns,
+                  entityColumn.entityType,
+                ),
+              },
+              source: 'ui',
+              timestamp: Date.now(),
+              context: {
+                columnName: columns?.[columnIndex],
+                rowContext: this.buildRowContext(row, columns),
+              },
+            });
+          },
+          title: uiText(
+            `点击聚焦此 ${entityColumn.entityType}`,
+            `Click to focus on this ${entityColumn.entityType}`,
+          ),
         },
-        title: `Click to focus on this ${entityColumn.entityType}`,
-      }, displayValue);
+        displayValue,
+      );
     }
 
     // Regular cell
-    return m('td', {
-      class: columnClass + (value === null ? ' null-cell' : ''),
-      title: String(value),
-    }, displayValue);
+    return m(
+      'td',
+      {
+        class: columnClass + (value === null ? ' null-cell' : ''),
+        title: String(value),
+      },
+      displayValue,
+    );
   }
 
   /**
@@ -692,11 +918,17 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         continue;
       }
 
-      const durValue = tc.durationColumnIndex !== undefined
-        ? row[tc.durationColumnIndex]
-        : undefined;
-      const durUnit = tc.durationUnit || this.resolveTimeUnit(undefined, tc.durationColumnName);
-      const durNs = durValue === undefined ? null : this.parseTimeValueToNs(durValue, durUnit);
+      const durValue =
+        tc.durationColumnIndex !== undefined
+          ? row[tc.durationColumnIndex]
+          : undefined;
+      const durUnit =
+        tc.durationUnit ||
+        this.resolveTimeUnit(undefined, tc.durationColumnName);
+      const durNs =
+        durValue === undefined
+          ? null
+          : this.parseTimeValueToNs(durValue, durUnit);
 
       if (durNs !== null && durNs > BigInt(0)) {
         this.jumpToTimeRange(startNs, durNs, trace);
@@ -721,7 +953,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       const viewStart = startNs - margin;
       const viewEnd = endNs + margin;
 
-      console.log(`[SqlResultTable] Jumping to time range: start=${startNs}, dur=${durNs}, end=${endNs}`);
+      console.log(
+        `[SqlResultTable] Jumping to time range: start=${startNs}, dur=${durNs}, end=${endNs}`,
+      );
 
       trace.scrollTo({
         time: {
@@ -731,13 +965,18 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         },
       });
 
-      console.log(`[SqlResultTable] Jumped to time range: ${this.formatTimestamp(Number(startNs))} - ${this.formatTimestamp(Number(endNs))}`);
+      console.log(
+        `[SqlResultTable] Jumped to time range: ${this.formatTimestamp(Number(startNs))} - ${this.formatTimestamp(Number(endNs))}`,
+      );
     } catch (error) {
       console.error('[SqlResultTable] Failed to jump to time range:', error);
     }
   }
 
-  private calculateStats(columns: string[], rows: any[][]): Record<string, string | number> {
+  private calculateStats(
+    columns: string[],
+    rows: any[][],
+  ): Record<string, string | number> {
     const stats: Record<string, string | number> = {
       'Total Rows': rows.length,
       'Columns': columns.length,
@@ -774,7 +1013,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     const isIdentifier = this.isIdentifierColumn(columnName);
     if (typeof value === 'number') {
       if (isIdentifier && Number.isFinite(value)) {
-        return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
+        return Number.isInteger(value)
+          ? String(Math.trunc(value))
+          : String(value);
       }
       if (Number.isInteger(value)) return value.toLocaleString();
       return value.toFixed(2);
@@ -820,7 +1061,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   private formatIdentifierValue(value: any): string {
     if (value === null || value === undefined) return '';
     if (typeof value === 'number' && Number.isFinite(value)) {
-      return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
+      return Number.isInteger(value)
+        ? String(Math.trunc(value))
+        : String(value);
     }
     if (typeof value === 'bigint') {
       return value.toString();
@@ -836,7 +1079,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     // Copy as TSV (tab-separated values)
     const header = columns.join('\t');
     const data = rows.map((row) =>
-      row.map((cell, idx) => this.formatCellValue(cell, columns[idx])).join('\t')
+      row
+        .map((cell, idx) => this.formatCellValue(cell, columns[idx]))
+        .join('\t'),
     );
     const tsv = [header, ...data].join('\n');
 
@@ -855,7 +1100,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   }
 
   private async copyColumn(rows: any[][], columns: string[], colIndex: number) {
-    const columnData = rows.map((row) => this.formatCellValue(row[colIndex], columns[colIndex])).join('\n');
+    const columnData = rows
+      .map((row) => this.formatCellValue(row[colIndex], columns[colIndex]))
+      .join('\n');
     try {
       await navigator.clipboard.writeText(columnData);
       this.copySuccess = true;
@@ -874,7 +1121,12 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     query: string,
     columns: string[],
     rows: any[][],
-    onPin: (data: {query: string, columns: string[], rows: any[][], timestamp: number}) => void
+    onPin: (data: {
+      query: string;
+      columns: string[];
+      rows: any[][];
+      timestamp: number;
+    }) => void,
   ) {
     // Call the pin callback with the data
     onPin({
@@ -907,21 +1159,25 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       const lowerCol = col.toLowerCase();
 
       // 排除相对时间和持续时间列（这些不能用于跳转）
-      if (/relative|dur|duration|latency|elapsed|delta|diff|offset/i.test(lowerCol)) {
-        return;  // 跳过此列
+      if (
+        /relative|dur|duration|latency|elapsed|delta|diff|offset/i.test(
+          lowerCol,
+        )
+      ) {
+        return; // 跳过此列
       }
 
       // 检测是否是【绝对时间戳】列（可用于跳转到 Perfetto 时间线）
       // 必须是 ts, ts_str, timestamp 等明确的绝对时间列
       const isAbsoluteTimestamp =
-        /^ts$/i.test(col) ||              // 标准的 ts 列（纳秒）
-        /^ts_str$/i.test(col) ||          // 字符串形式的 ts（纳秒）
-        /^timestamp$/i.test(col) ||       // timestamp
-        /^start_ts$/i.test(col) ||        // start_ts（绝对开始时间）
-        /^end_ts$/i.test(col) ||          // end_ts（绝对结束时间）
-        /^ts_end$/i.test(col) ||          // ts_end（绝对结束时间）
-        /^client_ts$/i.test(col) ||       // Binder client_ts
-        /^server_ts$/i.test(col);         // Binder server_ts
+        /^ts$/i.test(col) || // 标准的 ts 列（纳秒）
+        /^ts_str$/i.test(col) || // 字符串形式的 ts（纳秒）
+        /^timestamp$/i.test(col) || // timestamp
+        /^start_ts$/i.test(col) || // start_ts（绝对开始时间）
+        /^end_ts$/i.test(col) || // end_ts（绝对结束时间）
+        /^ts_end$/i.test(col) || // ts_end（绝对结束时间）
+        /^client_ts$/i.test(col) || // Binder client_ts
+        /^server_ts$/i.test(col); // Binder server_ts
 
       if (isAbsoluteTimestamp) {
         const tsColumn: TimestampColumn = {
@@ -942,7 +1198,10 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         if (isStartLikeTimestamp && durationColumnIndex !== -1) {
           tsColumn.durationColumnIndex = durationColumnIndex;
           tsColumn.durationColumnName = columns[durationColumnIndex];
-          tsColumn.durationUnit = this.resolveTimeUnit(undefined, columns[durationColumnIndex]);
+          tsColumn.durationUnit = this.resolveTimeUnit(
+            undefined,
+            columns[durationColumnIndex],
+          );
         }
 
         detected.push(tsColumn);
@@ -961,38 +1220,62 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     columns.forEach((col, idx) => {
       // Frame 相关列
-      if (/^frame_id$/i.test(col) || /^jank_frame_id$/i.test(col) || /^actual_frame_id$/i.test(col)) {
-        detected.push({ columnIndex: idx, columnName: col, entityType: 'frame' });
+      if (
+        /^frame_id$/i.test(col) ||
+        /^jank_frame_id$/i.test(col) ||
+        /^actual_frame_id$/i.test(col)
+      ) {
+        detected.push({columnIndex: idx, columnName: col, entityType: 'frame'});
         return;
       }
 
       // Session 相关列
       if (/^session_id$/i.test(col) || /^scroll_session_id$/i.test(col)) {
-        detected.push({ columnIndex: idx, columnName: col, entityType: 'session' });
+        detected.push({
+          columnIndex: idx,
+          columnName: col,
+          entityType: 'session',
+        });
         return;
       }
 
       // Process 相关列 (只检测 upid/pid，不检测 process_name 因为那是名称不是 ID)
       if (/^upid$/i.test(col) || /^pid$/i.test(col)) {
-        detected.push({ columnIndex: idx, columnName: col, entityType: 'process' });
+        detected.push({
+          columnIndex: idx,
+          columnName: col,
+          entityType: 'process',
+        });
         return;
       }
 
       // Thread 相关列
       if (/^utid$/i.test(col) || /^tid$/i.test(col)) {
-        detected.push({ columnIndex: idx, columnName: col, entityType: 'thread' });
+        detected.push({
+          columnIndex: idx,
+          columnName: col,
+          entityType: 'thread',
+        });
         return;
       }
 
       // CPU slice 相关列
       if (/^slice_id$/i.test(col) || /^cpu_slice_id$/i.test(col)) {
-        detected.push({ columnIndex: idx, columnName: col, entityType: 'cpu_slice' });
+        detected.push({
+          columnIndex: idx,
+          columnName: col,
+          entityType: 'cpu_slice',
+        });
         return;
       }
 
       // Binder 相关列
       if (/^binder_id$/i.test(col) || /^transaction_id$/i.test(col)) {
-        detected.push({ columnIndex: idx, columnName: col, entityType: 'binder' });
+        detected.push({
+          columnIndex: idx,
+          columnName: col,
+          entityType: 'binder',
+        });
         return;
       }
     });
@@ -1003,20 +1286,37 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
   /**
    * 构建行上下文，用于交互事件的 context 字段
    */
-  private buildRowContext(row?: any[], columns?: string[]): Record<string, any> | undefined {
+  private buildRowContext(
+    row?: any[],
+    columns?: string[],
+  ): Record<string, any> | undefined {
     if (!row || !columns) return undefined;
 
     const context: Record<string, any> = {};
 
     // 提取关键字段作为上下文
     const keyFields = [
-      'frame_id', 'session_id', 'process_name', 'thread_name',
-      'upid', 'utid', 'pid', 'tid', 'ts', 'dur', 'name', 'slice_name',
+      'frame_id',
+      'session_id',
+      'process_name',
+      'thread_name',
+      'upid',
+      'utid',
+      'pid',
+      'tid',
+      'ts',
+      'dur',
+      'name',
+      'slice_name',
     ];
 
     columns.forEach((col, idx) => {
       const lowerCol = col.toLowerCase();
-      if (keyFields.some(kf => lowerCol.includes(kf)) && row[idx] !== null && row[idx] !== undefined) {
+      if (
+        keyFields.some((kf) => lowerCol.includes(kf)) &&
+        row[idx] !== null &&
+        row[idx] !== undefined
+      ) {
         context[col] = row[idx];
       }
     });
@@ -1028,7 +1328,11 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
    * 从行数据中查找实体名称
    * 例如：对于 process 实体，查找 process_name 列
    */
-  private findEntityName(row?: any[], columns?: string[], entityType?: string): string | undefined {
+  private findEntityName(
+    row?: any[],
+    columns?: string[],
+    entityType?: string,
+  ): string | undefined {
     if (!row || !columns || !entityType) return undefined;
 
     // 实体类型到名称列的映射
@@ -1044,8 +1348,14 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     const candidateColumns = nameColumnMap[entityType] || ['name'];
 
     for (const candidateCol of candidateColumns) {
-      const colIndex = columns.findIndex(c => c.toLowerCase() === candidateCol.toLowerCase());
-      if (colIndex !== -1 && row[colIndex] !== null && row[colIndex] !== undefined) {
+      const colIndex = columns.findIndex(
+        (c) => c.toLowerCase() === candidateCol.toLowerCase(),
+      );
+      if (
+        colIndex !== -1 &&
+        row[colIndex] !== null &&
+        row[colIndex] !== undefined
+      ) {
         return String(row[colIndex]);
       }
     }
@@ -1061,7 +1371,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
    */
   private extractTimestampColumnsFromDefinitions(
     columnDefs: ColumnDefinition[],
-    columns: string[]
+    columns: string[],
   ): TimestampColumn[] {
     const detected: TimestampColumn[] = [];
 
@@ -1069,7 +1379,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       // Check if this column has a navigate_timeline or navigate_range click action
       if (
         def.type === 'timestamp' &&
-        (def.clickAction === 'navigate_timeline' || def.clickAction === 'navigate_range')
+        (def.clickAction === 'navigate_timeline' ||
+          def.clickAction === 'navigate_range')
       ) {
         const tsColumn: TimestampColumn = {
           columnIndex: idx,
@@ -1085,7 +1396,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             tsColumn.durationColumnName = def.durationColumn;
             tsColumn.durationUnit = this.resolveTimeUnit(
               columnDefs[durIndex]?.unit,
-              def.durationColumn
+              def.durationColumn,
             );
           }
         }
@@ -1122,7 +1433,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     ];
 
     for (const pattern of candidates) {
-      const index = columns.findIndex(col => pattern.test(col));
+      const index = columns.findIndex((col) => pattern.test(col));
       if (index !== -1) {
         return index;
       }
@@ -1142,16 +1453,28 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       return 'ns';
     }
 
-    if (/_ns$/.test(lowerCol) || /\b(?:time|duration)\s*\(ns\)/.test(lowerCol)) {
+    if (
+      /_ns$/.test(lowerCol) ||
+      /\b(?:time|duration)\s*\(ns\)/.test(lowerCol)
+    ) {
       return 'ns';
     }
-    if (/_us$|_micros$/.test(lowerCol) || /\b(?:time|duration)\s*\((?:us|µs)\)/.test(lowerCol)) {
+    if (
+      /_us$|_micros$/.test(lowerCol) ||
+      /\b(?:time|duration)\s*\((?:us|µs)\)/.test(lowerCol)
+    ) {
       return 'us';
     }
-    if (/_ms$|_millis$/.test(lowerCol) || /\b(?:time|duration)\s*\(ms\)/.test(lowerCol)) {
+    if (
+      /_ms$|_millis$/.test(lowerCol) ||
+      /\b(?:time|duration)\s*\(ms\)/.test(lowerCol)
+    ) {
       return 'ms';
     }
-    if (/(^|_)s$|_sec$/.test(lowerCol) || /\b(?:time|duration)\s*\(s\)/.test(lowerCol)) {
+    if (
+      /(^|_)s$|_sec$/.test(lowerCol) ||
+      /\b(?:time|duration)\s*\(s\)/.test(lowerCol)
+    ) {
       return 's';
     }
 
@@ -1265,7 +1588,9 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         },
       });
 
-      console.log(`[SqlResultTable] Jumped to timestamp: ${this.formatTimestamp(Number(timestampNs))}`);
+      console.log(
+        `[SqlResultTable] Jumped to timestamp: ${this.formatTimestamp(Number(timestampNs))}`,
+      );
     } catch (error) {
       console.error('[SqlResultTable] Failed to jump to timestamp:', error);
     }
@@ -1282,8 +1607,10 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     // 检查是否有数值列
     const hasNumericColumn = columns.some((_col, idx) => {
-      const sampleValues = rows.slice(0, 5).map(row => row[idx]);
-      return sampleValues.some(v => typeof v === 'number' && isFinite(v) && v > 0);
+      const sampleValues = rows.slice(0, 5).map((row) => row[idx]);
+      return sampleValues.some(
+        (v) => typeof v === 'number' && isFinite(v) && v > 0,
+      );
     });
 
     return hasNumericColumn;
@@ -1302,16 +1629,20 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     const valueColumnIndex = columns.findIndex((_col, idx) => {
       const sampleValue = rows[0]?.[idx];
-      return typeof sampleValue === 'number' && isFinite(sampleValue) && sampleValue > 0;
+      return (
+        typeof sampleValue === 'number' &&
+        isFinite(sampleValue) &&
+        sampleValue > 0
+      );
     });
 
     if (labelColumnIndex === -1 || valueColumnIndex === -1) {
       // 降级：使用行索引作为标签
       return {
         type: 'bar',
-        title: 'Data Distribution',
+        title: uiText('数据分布', 'Data Distribution'),
         data: rows.map((row, idx) => ({
-          label: `Row ${idx + 1}`,
+          label: uiText(`第 ${idx + 1} 行`, `Row ${idx + 1}`),
           value: parseFloat(row[valueColumnIndex] || row[0]) || 0,
         })),
       };
@@ -1319,17 +1650,20 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     // 判断使用饼图还是柱状图
     // 如果是百分比数据或者总和接近100，使用饼图
-    const values = rows.map(row => parseFloat(row[valueColumnIndex]) || 0);
+    const values = rows.map((row) => parseFloat(row[valueColumnIndex]) || 0);
     const total = values.reduce((sum, v) => sum + v, 0);
     const usePieChart = rows.length <= 10 && total > 50 && total < 150;
 
     return {
       type: usePieChart ? 'pie' : 'bar',
-      title: `${columns[valueColumnIndex]} by ${columns[labelColumnIndex]}`,
-      data: rows.map(row => {
+      title: uiText(
+        `${columns[valueColumnIndex]} 按 ${columns[labelColumnIndex]} 分组`,
+        `${columns[valueColumnIndex]} by ${columns[labelColumnIndex]}`,
+      ),
+      data: rows.map((row) => {
         const value = parseFloat(row[valueColumnIndex]) || 0;
         return {
-          label: String(row[labelColumnIndex] || 'Unknown'),
+          label: String(row[labelColumnIndex] || uiText('未知', 'Unknown')),
           value,
           percentage: usePieChart ? (value / total) * 100 : undefined,
         };
@@ -1351,18 +1685,29 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     if (!data.result.success) {
       return m('div.expanded-error', [
         m('span.error-icon', '✗'),
-        m('span', `分析失败: ${data.result.error || '未知错误'}`),
+        m(
+          'span',
+          uiText(
+            `分析失败：${data.result.error || '未知错误'}`,
+            `Analysis failed: ${data.result.error || 'Unknown error'}`,
+          ),
+        ),
       ]);
     }
 
     if (!data.result.sections) {
-      return m('div.expanded-empty', '无详细分析数据');
+      return m(
+        'div.expanded-empty',
+        uiText('无详细分析数据', 'No detailed analysis data'),
+      );
     }
 
     const sections: m.Children[] = [];
-    const emptySections: string[] = [];  // 记录空的 section 名称
+    const emptySections: string[] = []; // 记录空的 section 名称
 
-    for (const [sectionId, sectionData] of Object.entries(data.result.sections)) {
+    for (const [sectionId, sectionData] of Object.entries(
+      data.result.sections,
+    )) {
       if (!sectionData || typeof sectionData !== 'object') continue;
 
       const section = sectionData as any;
@@ -1370,38 +1715,50 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       const dataRows = section.data || [];
 
       // 更严格的空数据检查：数组为空，或者第一行没有任何有效键
-      if (dataRows.length === 0 ||
-          !dataRows[0] ||
-          typeof dataRows[0] !== 'object' ||
-          Object.keys(dataRows[0]).length === 0) {
+      if (
+        dataRows.length === 0 ||
+        !dataRows[0] ||
+        typeof dataRows[0] !== 'object' ||
+        Object.keys(dataRows[0]).length === 0
+      ) {
         emptySections.push(title);
         continue;
       }
 
-      sections.push(m('div.expanded-section', [
-        m('div.section-title', title),
-        m('table.section-table', [
-          m('thead',
-            m('tr',
-              Object.keys(dataRows[0]).map(key =>
-                m('th', key)
+      sections.push(
+        m('div.expanded-section', [
+          m('div.section-title', title),
+          m('table.section-table', [
+            m(
+              'thead',
+              m(
+                'tr',
+                Object.keys(dataRows[0]).map((key) => m('th', key)),
+              ),
+            ),
+            m(
+              'tbody',
+              dataRows.slice(0, 20).map((row: any) =>
+                m(
+                  'tr',
+                  Object.values(row).map((value: any) =>
+                    m('td', this.formatCellValue(value)),
+                  ),
+                ),
+              ),
+            ),
+          ]),
+          dataRows.length > 20
+            ? m(
+                'div.section-more',
+                uiText(
+                  `……还有 ${dataRows.length - 20} 条`,
+                  `... ${dataRows.length - 20} more rows`,
+                ),
               )
-            )
-          ),
-          m('tbody',
-            dataRows.slice(0, 20).map((row: any) =>
-              m('tr',
-                Object.values(row).map((value: any) =>
-                  m('td', this.formatCellValue(value))
-                )
-              )
-            )
-          ),
+            : null,
         ]),
-        dataRows.length > 20
-          ? m('div.section-more', `... 还有 ${dataRows.length - 20} 条`)
-          : null,
-      ]));
+      );
     }
 
     // 如果有有效 section，返回它们；否则显示紧凑的空数据提示
@@ -1412,12 +1769,15 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     // 所有 section 都是空的，显示简洁提示
     if (emptySections.length > 0) {
       return m('div.expanded-empty.compact', [
-        m('span', '无数据'),
+        m('span', uiText('无数据', 'No data')),
         m('span.empty-sections', ` (${emptySections.join(', ')})`),
       ]);
     }
 
-    return m('div.expanded-empty.compact', '无详细数据');
+    return m(
+      'div.expanded-empty.compact',
+      uiText('无详细数据', 'No detailed data'),
+    );
   }
 
   /**
@@ -1426,16 +1786,19 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
    */
   private formatMetadataLabel(key: string): string {
     // 常用字段的中文标签映射
-    const labelMap: Record<string, string> = {
-      layer_name: 'Layer',
-      process_name: '进程',
-      pid: 'PID',
-      session_id: '会话',
-      package: '包名',
-      frame_count: '帧数',
-      jank_rate: '掉帧率',
+    const labelMap: Record<string, [string, string]> = {
+      layer_name: ['图层', 'Layer'],
+      process_name: ['进程', 'Process'],
+      pid: ['PID', 'PID'],
+      session_id: ['会话', 'Session'],
+      package: ['包名', 'Package'],
+      frame_count: ['帧数', 'Frame count'],
+      jank_rate: ['卡顿率', 'Jank rate'],
     };
-    return labelMap[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const label = labelMap[key];
+    return label
+      ? uiText(label[0], label[1])
+      : key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
   /**
@@ -1484,14 +1847,16 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     // by formatMessage() in data_formatter.ts. The escapeHtml call above
     // handles the primary case, but any future additions to these regexes
     // could introduce raw HTML; the sanitizer catches those.
-    return sanitizeHtml(escapeHtml(content)
-      // 粗体
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      // 斜体
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      // 代码
-      .replace(/`(.+?)`/g, '<code>$1</code>')
-      // 换行
-      .replace(/\n/g, '<br>'));
+    return sanitizeHtml(
+      escapeHtml(content)
+        // 粗体
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        // 斜体
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        // 代码
+        .replace(/`(.+?)`/g, '<code>$1</code>')
+        // 换行
+        .replace(/\n/g, '<br>'),
+    );
   }
 }

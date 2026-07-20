@@ -4,10 +4,16 @@
 
 import {beforeEach, describe, expect, it} from 'vitest';
 
-import {AISession, PENDING_BACKEND_TRACE_KEY} from './types';
+import {
+  type AISession,
+  type AISettings,
+  DEFAULT_SETTINGS,
+  PENDING_BACKEND_TRACE_KEY,
+} from './types';
 import {
   SessionManager,
   getPendingBackendTraceStorageKey,
+  getSettingsStorageKey,
   getSessionsStorageKey,
 } from './session_manager';
 import {setSmartPerfettoWorkspaceId} from '../../core/smartperfetto_request_context';
@@ -28,6 +34,50 @@ function makeSession(sessionId: string, fingerprint: string): AISession {
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
+  setSmartPerfettoWorkspaceId('default-workspace');
+});
+
+describe('SessionManager UI language settings', () => {
+  it('loads explicit language preferences and normalizes invalid persisted data', () => {
+    localStorage.setItem(
+      getSettingsStorageKey(),
+      JSON.stringify({...DEFAULT_SETTINGS, uiLanguage: 'en'}),
+    );
+    expect(new SessionManager().loadSettings().uiLanguage).toBe('en');
+
+    localStorage.setItem(
+      getSettingsStorageKey(),
+      JSON.stringify({...DEFAULT_SETTINGS, uiLanguage: 'invalid'}),
+    );
+    expect(new SessionManager().loadSettings().uiLanguage).toBe('auto');
+    expect(
+      JSON.parse(localStorage.getItem(getSettingsStorageKey()) || '{}')
+        .uiLanguage,
+    ).toBe('auto');
+
+    localStorage.setItem(
+      getSettingsStorageKey(),
+      JSON.stringify({...DEFAULT_SETTINGS, uiLanguage: undefined}),
+    );
+    expect(new SessionManager().loadSettings().uiLanguage).toBe('auto');
+    expect(
+      JSON.parse(localStorage.getItem(getSettingsStorageKey()) || '{}')
+        .uiLanguage,
+    ).toBe('auto');
+  });
+
+  it('normalizes language preferences before saving settings', () => {
+    const manager = new SessionManager();
+    manager.saveSettings({
+      ...DEFAULT_SETTINGS,
+      uiLanguage: 'invalid',
+    } as unknown as AISettings);
+
+    expect(
+      JSON.parse(localStorage.getItem(getSettingsStorageKey()) || '{}')
+        .uiLanguage,
+    ).toBe('auto');
+  });
 });
 
 describe('SessionManager pending backend trace storage', () => {
@@ -88,10 +138,10 @@ describe('SessionManager session storage CAS', () => {
     secondWindow.saveSessionsStorage(secondSnapshot);
 
     const merged = new SessionManager().loadSessionsStorage();
-    expect(merged.byTrace['trace-a'].map(s => s.sessionId)).toEqual([
+    expect(merged.byTrace['trace-a'].map((s) => s.sessionId)).toEqual([
       'session-a',
     ]);
-    expect(merged.byTrace['trace-b'].map(s => s.sessionId)).toEqual([
+    expect(merged.byTrace['trace-b'].map((s) => s.sessionId)).toEqual([
       'session-b',
     ]);
 
@@ -129,7 +179,11 @@ describe('SessionManager session storage CAS', () => {
 
   it('clears stale raw trace comparison identity when a session returns to single trace', () => {
     const manager = new SessionManager();
-    const session = manager.createSession('trace-a', 'current.trace', 'backend-a');
+    const session = manager.createSession(
+      'trace-a',
+      'current.trace',
+      'backend-a',
+    );
 
     manager.updateSession('trace-a', session.sessionId, {
       type: 'comparison',

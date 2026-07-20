@@ -32,6 +32,7 @@
 
 import {assetSrc} from '../../base/assets';
 import {decodeBase64Unicode, sanitizeHtml} from './data_formatter';
+import {uiText} from './ui_language';
 
 /**
  * Get the global Mermaid instance if loaded.
@@ -78,7 +79,9 @@ export class MermaidRenderer {
         resolve();
       };
       script.onerror = () => {
-        console.error('[MermaidRenderer] Failed to load Mermaid from local assets');
+        console.error(
+          '[MermaidRenderer] Failed to load Mermaid from local assets',
+        );
         this.mermaidLoadPromise = null;
         reject(new Error('Failed to load Mermaid'));
       };
@@ -107,12 +110,15 @@ export class MermaidRenderer {
 
     const mermaid = this.getMermaid();
     if (!mermaid) {
-      console.warn('[MermaidRenderer] Mermaid not available on globalThis after load');
+      console.warn(
+        '[MermaidRenderer] Mermaid not available on globalThis after load',
+      );
       return;
     }
 
     // Detect dark mode to select appropriate Mermaid theme
-    const isDarkMode = typeof window !== 'undefined' &&
+    const isDarkMode =
+      typeof window !== 'undefined' &&
       window.matchMedia?.('(prefers-color-scheme: dark)').matches === true;
     const theme = isDarkMode ? 'dark' : 'default';
 
@@ -123,7 +129,9 @@ export class MermaidRenderer {
       theme,
     });
     this.mermaidInitialized = true;
-    console.log(`[MermaidRenderer] Mermaid initialized (theme: ${theme}, strict security)`);
+    console.log(
+      `[MermaidRenderer] Mermaid initialized (theme: ${theme}, strict security)`,
+    );
   }
 
   /**
@@ -139,10 +147,14 @@ export class MermaidRenderer {
    */
   async renderMermaidInElement(container: HTMLElement): Promise<void> {
     const diagramNodes = Array.from(
-      container.querySelectorAll<HTMLElement>('.ai-mermaid-diagram[data-mermaid-b64]')
+      container.querySelectorAll<HTMLElement>(
+        '.ai-mermaid-diagram[data-mermaid-b64]',
+      ),
     );
     const sourceNodes = Array.from(
-      container.querySelectorAll<HTMLElement>('.ai-mermaid-source[data-mermaid-b64]')
+      container.querySelectorAll<HTMLElement>(
+        '.ai-mermaid-source[data-mermaid-b64]',
+      ),
     );
 
     if (diagramNodes.length === 0 && sourceNodes.length === 0) return;
@@ -182,7 +194,6 @@ export class MermaidRenderer {
       // LLMs often generate <br/> for line breaks in node labels — replace with \n.
       code = code.replace(/<br\s*\/?>/gi, '\n');
 
-
       const renderId = `ai-mermaid-${Math.random().toString(36).slice(2)}`;
       host.classList.add('mermaid');
       host.textContent = '';
@@ -201,8 +212,10 @@ export class MermaidRenderer {
         host.dataset.rendered = 'true';
       } catch (e) {
         console.warn('[MermaidRenderer] Mermaid render failed:', e);
-        host.innerHTML =
-          '<div class="ai-mermaid-error">Mermaid 渲染失败（请展开查看源码）</div>';
+        host.innerHTML = `<div class="ai-mermaid-error">${uiText(
+          'Mermaid 渲染失败（请展开查看源码）',
+          'Mermaid rendering failed (expand to view the source)',
+        )}</div>`;
         host.dataset.rendered = 'true';
       }
     }

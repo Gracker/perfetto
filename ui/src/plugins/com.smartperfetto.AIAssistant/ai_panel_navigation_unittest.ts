@@ -30,9 +30,13 @@ import {sessionManager} from './session_manager';
 import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import type {TracePairWorkspaceScope} from './trace_pair_workspace_state_model';
 import type {AIPanelState} from './types';
-import {uiText} from './ui_language';
+import {setUiLanguagePreference, uiText} from './ui_language';
 import {saveAnalysisContext} from './analysis_context';
 import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+
+beforeEach(() => {
+  setUiLanguagePreference('zh-CN');
+});
 
 type TestAIPanel = {
   state: AIPanelState;
@@ -170,11 +174,15 @@ describe('AIPanel backend binding reset', () => {
       backendApiKey: 'same-key',
     };
     panel.state.settings = original;
-    saveAnalysisContext('http://new-backend', getSmartPerfettoRequestContext(), {
-      codeAwareMode: 'metadata_only',
-      codebaseIds: ['new-backend-source'],
-      knowledgeSourceIds: [],
-    });
+    saveAnalysisContext(
+      'http://new-backend',
+      getSmartPerfettoRequestContext(),
+      {
+        codeAwareMode: 'metadata_only',
+        codebaseIds: ['new-backend-source'],
+        knowledgeSourceIds: [],
+      },
+    );
 
     panel.saveSettings({...original, backendUrl: 'http://new-backend'});
 
@@ -221,6 +229,41 @@ describe('AIPanel backend binding reset', () => {
   });
 });
 
+describe('AIPanel language identity', () => {
+  afterEach(() => {
+    setUiLanguagePreference('auto');
+    vi.restoreAllMocks();
+  });
+
+  it('retires the current backend session and updates future request language', () => {
+    const panel = new AIPanel() as any;
+    const original = {
+      ...panel.state.settings,
+      uiLanguage: 'zh-CN',
+    };
+    panel.state.settings = original;
+    panel.state.agentSessionId = 'agent-session-1';
+    panel.state.analysisContext = {
+      codeAwareMode: 'off',
+      codebaseIds: [],
+      knowledgeSourceIds: [],
+    };
+    const retireSession = vi
+      .spyOn(panel, 'retireBackendAgentSession')
+      .mockImplementation(() => {});
+    vi.spyOn(panel, 'flushSessionSave').mockImplementation(() => {});
+    vi.spyOn(panel, 'initBackendStatus').mockImplementation(() => {});
+
+    panel.saveSettings({...original, uiLanguage: 'en'});
+
+    expect(retireSession).toHaveBeenCalledOnce();
+    expect(panel.state.settings.uiLanguage).toBe('en');
+    expect(panel.analysisContextRequestOptions()).toMatchObject({
+      outputLanguage: 'en',
+    });
+  });
+});
+
 describe('AIPanel header tool panels', () => {
   it('opens the dual-trace shell before a history trace is selected', () => {
     const panel = createMutableTestPanel();
@@ -260,7 +303,10 @@ describe('AIPanel header tool panels', () => {
       header,
       uiText('打开双 Trace 工作区', 'Open dual-trace workspace'),
     );
-    const newChatButton = findVNodeByTitle(header, 'New Chat');
+    const newChatButton = findVNodeByTitle(
+      header,
+      uiText('新对话', 'New chat'),
+    );
     const settingsButton = findVNodeByTitle(
       header,
       uiText(
@@ -307,10 +353,15 @@ describe('AIPanel header tool panels', () => {
       },
     };
 
-    panel.saveSettings({...originalSettings, backendUrl: 'http://other-backend'});
+    panel.saveSettings({
+      ...originalSettings,
+      backendUrl: 'http://other-backend',
+    });
 
     expect(panel.state.settings).toBe(originalSettings);
-    expect(panel.state.retryError).toContain('cannot be migrated safely');
+    expect(panel.state.retryError).toContain(
+      uiText('无法安全迁移', 'cannot be migrated safely'),
+    );
     expect(saveSettings).not.toHaveBeenCalled();
     saveSettings.mockRestore();
   });
@@ -375,7 +426,10 @@ describe('AIPanel header tool panels', () => {
 
     panel.state.captureConfigSuggestion.visible = true;
     const header = panel.renderHeaderActions(true, true, true);
-    findVNodeByTitle(header, 'Story').attrs.onclick();
+    findVNodeByTitle(
+      header,
+      uiText('场景还原', 'Scene Story'),
+    ).attrs.onclick();
 
     expect(panel.state.showStorySidebar).toBe(true);
     expect(panel.state.captureConfigSuggestion.visible).toBe(false);
@@ -385,7 +439,10 @@ describe('AIPanel header tool panels', () => {
     expect(panel.state.showStorySidebar).toBe(false);
 
     const headerWithCapture = panel.renderHeaderActions(true, true, true);
-    findVNodeByTitle(headerWithCapture, '历史对话').attrs.onclick();
+    findVNodeByTitle(
+      headerWithCapture,
+      uiText('历史对话', 'Chat history'),
+    ).attrs.onclick();
 
     expect(panel.state.showSessionSidebar).toBe(true);
     expect(panel.state.captureConfigSuggestion.visible).toBe(false);
@@ -535,7 +592,7 @@ describe('AIPanel /goto navigation', () => {
     expect(panel.addMessage).toHaveBeenCalledTimes(1);
     const message = panel.addMessage.mock.calls[0][0];
     expect(message.role).toBe('assistant');
-    expect(message.content).toContain('Failed to navigate to timestamp 123ns');
+    expect(message.content).toContain('无法跳转到时间戳 123ns');
     expect(message.content).toContain('boom');
   });
 
@@ -551,7 +608,7 @@ describe('AIPanel /goto navigation', () => {
     expect(panel.addMessage).toHaveBeenCalledTimes(1);
     const message = panel.addMessage.mock.calls[0][0];
     expect(message.role).toBe('assistant');
-    expect(message.content).toBe('Navigated to timestamp 456ns.');
+    expect(message.content).toBe('已跳转到时间戳 456ns。');
   });
 
   it('rejects invalid goto timestamp input', async () => {
@@ -565,7 +622,7 @@ describe('AIPanel /goto navigation', () => {
     expect(panel.jumpToTimestamp).not.toHaveBeenCalled();
     expect(panel.addMessage).toHaveBeenCalledTimes(1);
     const message = panel.addMessage.mock.calls[0][0];
-    expect(message.content).toBe('Invalid timestamp: abc');
+    expect(message.content).toBe('无效时间戳：abc');
   });
 });
 
@@ -709,8 +766,8 @@ describe('AIPanel teaching pipeline compatibility view', () => {
     expect(markdown).toContain('present fence not available');
     expect(markdown).toContain('**候选类型**:');
     expect(markdown).not.toContain('**候选子路径**:');
-    expect(markdown).toContain('未命中的 pattern: ^RenderThread$');
-    expect(markdown).toContain('已 pin 的 track: com.example.app > main');
+    expect(markdown).toContain('未命中的 pattern：^RenderThread$');
+    expect(markdown).toContain('已固定的轨道：com.example.app > main');
   });
 
   it('shows the Android 17 rendering type separately from the detected subpath', () => {
@@ -733,9 +790,7 @@ describe('AIPanel teaching pipeline compatibility view', () => {
             docPath: 'rendering_pipelines/S06_multi_window_type.md',
           },
         ],
-        candidates: [
-          {id: 'FLUTTER_SURFACEVIEW_IMPELLER', confidence: 0.93},
-        ],
+        candidates: [{id: 'FLUTTER_SURFACEVIEW_IMPELLER', confidence: 0.93}],
       },
       teaching: {
         title: 'Android Perfetto 系列 - App 出图类型 - Flutter 类型',
@@ -747,11 +802,15 @@ describe('AIPanel teaching pipeline compatibility view', () => {
       panel.renderTeachingPipelineSummary(result),
     );
 
-    expect(markdown).toContain('**出图类型**: `S10_FLUTTER`');
-    expect(markdown).toContain('**检测子路径**: `FLUTTER_SURFACEVIEW_IMPELLER`');
-    expect(markdown).toContain('**伴随出图类型**: S06_MULTI_WINDOW');
+    expect(markdown).toContain('**出图类型**：`S10_FLUTTER`');
+    expect(markdown).toContain(
+      '**检测子路径**：`FLUTTER_SURFACEVIEW_IMPELLER`',
+    );
+    expect(markdown).toContain('**伴随出图类型**：S06_MULTI_WINDOW');
     expect(markdown).toContain('rendering_pipelines/S06_multi_window_type.md');
-    expect(markdown).not.toContain('**管线类型**: `FLUTTER_SURFACEVIEW_IMPELLER`');
+    expect(markdown).not.toContain(
+      '**管线类型**: `FLUTTER_SURFACEVIEW_IMPELLER`',
+    );
     expect(renderedSummary).toContain('出图类型');
     expect(renderedSummary).toContain('S10_FLUTTER');
     expect(renderedSummary).toContain('检测子路径');

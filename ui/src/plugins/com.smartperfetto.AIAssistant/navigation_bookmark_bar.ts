@@ -17,7 +17,8 @@
 // limitations under the License.
 
 import m from 'mithril';
-import {Trace} from '../../public/trace';
+import {uiText} from './ui_language';
+import type {Trace} from '../../public/trace';
 import {Time} from '../../base/time';
 
 /**
@@ -50,10 +51,10 @@ const COLORS = {
   success: '#10b981',
   warning: '#f59e0b',
   error: '#ef4444',
-  jank: '#f59e0b',      // 橙色 - 掉帧
-  anr: '#ef4444',       // 红色 - ANR
-  slow: '#f59e0b',      // 橙色 - 慢函数
-  custom: '#6366f1',    // 蓝色 - 自定义
+  jank: '#f59e0b', // 橙色 - 掉帧
+  anr: '#ef4444', // 红色 - ANR
+  slow: '#f59e0b', // 橙色 - 慢函数
+  custom: '#6366f1', // 蓝色 - 自定义
 };
 
 // 样式
@@ -130,7 +131,9 @@ const STYLES = {
  * 导航书签栏组件
  * 显示AI识别出的关键时间点，支持快速跳转和前后切换
  */
-export class NavigationBookmarkBar implements m.ClassComponent<NavigationBookmarkBarAttrs> {
+export class NavigationBookmarkBar
+  implements m.ClassComponent<NavigationBookmarkBarAttrs>
+{
   private currentIndex: number = 0;
 
   view(vnode: m.Vnode<NavigationBookmarkBarAttrs>): m.Children {
@@ -149,54 +152,77 @@ export class NavigationBookmarkBar implements m.ClassComponent<NavigationBookmar
     return m('div', {style: STYLES.container}, [
       // 导航控制按钮
       m('div', {style: STYLES.navControls}, [
-        m('button', {
-          style: {
-            ...STYLES.navBtn,
-            ...(this.currentIndex === 0 ? STYLES.navBtnDisabled : {}),
+        m(
+          'button',
+          {
+            style: {
+              ...STYLES.navBtn,
+              ...(this.currentIndex === 0 ? STYLES.navBtnDisabled : {}),
+            },
+            disabled: this.currentIndex === 0,
+            onclick: () =>
+              this.jumpToPrevious(bookmarks, trace, onBookmarkClick),
+            title: uiText('上一个关键点', 'Previous key point'),
           },
-          disabled: this.currentIndex === 0,
-          onclick: () => this.jumpToPrevious(bookmarks, trace, onBookmarkClick),
-          title: '上一个关键点',
-        }, [
-          m('span', '←'),
-          m('span', '上一个'),
-        ]),
+          [m('span', '←'), m('span', uiText('上一个', 'Previous'))],
+        ),
 
-        m('button', {
-          style: {
-            ...STYLES.navBtn,
-            ...(this.currentIndex === bookmarks.length - 1 ? STYLES.navBtnDisabled : {}),
+        m(
+          'button',
+          {
+            style: {
+              ...STYLES.navBtn,
+              ...(this.currentIndex === bookmarks.length - 1
+                ? STYLES.navBtnDisabled
+                : {}),
+            },
+            disabled: this.currentIndex === bookmarks.length - 1,
+            onclick: () => this.jumpToNext(bookmarks, trace, onBookmarkClick),
+            title: uiText('下一个关键点', 'Next key point'),
           },
-          disabled: this.currentIndex === bookmarks.length - 1,
-          onclick: () => this.jumpToNext(bookmarks, trace, onBookmarkClick),
-          title: '下一个关键点',
-        }, [
-          m('span', '下一个'),
-          m('span', '→'),
-        ]),
+          [m('span', uiText('下一个', 'Next')), m('span', '→')],
+        ),
       ]),
 
       // 书签列表
-      m('div', {style: STYLES.bookmarkList},
+      m(
+        'div',
+        {style: STYLES.bookmarkList},
         bookmarks.map((bookmark, index) =>
-          m('button', {
-            key: bookmark.id,
-            style: {
-              ...STYLES.bookmark,
-              ...(index === this.currentIndex ? STYLES.bookmarkActive : {}),
-              borderColor: this.getBookmarkColor(bookmark.type),
+          m(
+            'button',
+            {
+              key: bookmark.id,
+              style: {
+                ...STYLES.bookmark,
+                ...(index === this.currentIndex ? STYLES.bookmarkActive : {}),
+                borderColor: this.getBookmarkColor(bookmark.type),
+              },
+              onclick: () =>
+                this.jumpTo(index, bookmarks, trace, onBookmarkClick),
+              title: bookmark.description || bookmark.label,
             },
-            onclick: () => this.jumpTo(index, bookmarks, trace, onBookmarkClick),
-            title: bookmark.description || bookmark.label,
-          }, [
-            m('span', {style: STYLES.bookmarkIcon}, this.getBookmarkIcon(bookmark.type)),
-            m('span', bookmark.label),
-          ])
-        )
+            [
+              m(
+                'span',
+                {style: STYLES.bookmarkIcon},
+                this.getBookmarkIcon(bookmark.type),
+              ),
+              m('span', bookmark.label),
+            ],
+          ),
+        ),
       ),
 
       // 统计信息
-      m('div', {style: STYLES.summary}, `${bookmarks.length} 个关键点`),
+      m(
+        'div',
+        {style: STYLES.summary},
+        uiText(
+          `${bookmarks.length} 个关键点`,
+          `${bookmarks.length} key points`,
+        ),
+      ),
     ]);
   }
 
@@ -207,7 +233,7 @@ export class NavigationBookmarkBar implements m.ClassComponent<NavigationBookmar
     index: number,
     bookmarks: NavigationBookmark[],
     trace: Trace,
-    onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void
+    onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void,
   ): void {
     if (index < 0 || index >= bookmarks.length) {
       return;
@@ -239,7 +265,7 @@ export class NavigationBookmarkBar implements m.ClassComponent<NavigationBookmar
   private jumpToPrevious(
     bookmarks: NavigationBookmark[],
     trace: Trace,
-    onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void
+    onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void,
   ): void {
     if (this.currentIndex > 0) {
       this.jumpTo(this.currentIndex - 1, bookmarks, trace, onBookmarkClick);
@@ -252,7 +278,7 @@ export class NavigationBookmarkBar implements m.ClassComponent<NavigationBookmar
   private jumpToNext(
     bookmarks: NavigationBookmark[],
     trace: Trace,
-    onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void
+    onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void,
   ): void {
     if (this.currentIndex < bookmarks.length - 1) {
       this.jumpTo(this.currentIndex + 1, bookmarks, trace, onBookmarkClick);
@@ -264,11 +290,11 @@ export class NavigationBookmarkBar implements m.ClassComponent<NavigationBookmar
    */
   private getBookmarkIcon(type: NavigationBookmark['type']): string {
     const icons = {
-      jank: '🎯',       // 掉帧
-      anr: '⚠️',        // ANR
+      jank: '🎯', // 掉帧
+      anr: '⚠️', // ANR
       slow_function: '🐌', // 慢函数
-      binder_slow: '🔗',   // Binder慢
-      custom: '📍',     // 自定义
+      binder_slow: '🔗', // Binder慢
+      custom: '📍', // 自定义
     };
     return icons[type] || '📍';
   }

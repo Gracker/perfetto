@@ -3,10 +3,10 @@
 import m from 'mithril';
 
 import {
-  AgentRuntimeKind,
-  ProviderConfig,
-  ProviderQuickSwitcherAttrs,
-  HealthStatus,
+  type AgentRuntimeKind,
+  type ProviderConfig,
+  type ProviderQuickSwitcherAttrs,
+  type HealthStatus,
   providerRuntimeLabel,
   providerRuntimeShortLabel,
   providerSupportsRuntime,
@@ -254,7 +254,10 @@ export class ProviderQuickSwitcher
       if (activateRes.ok) {
         await this.loadProviders();
         this.showToast(
-          `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
+          uiText(
+            `✶ 已切换到 ${provider.name} · ${providerRuntimeLabel(runtime)}`,
+            `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
+          ),
         );
         this.publishProviderCatalogChanged('runtime-switched');
         vnode?.attrs.onActivate?.();
@@ -281,7 +284,9 @@ export class ProviderQuickSwitcher
       });
       if (res.ok) {
         await this.loadProviders();
-        this.showToast('✶ Switched to System Default');
+        this.showToast(
+          uiText('✶ 已切换到系统默认配置', '✶ Switched to System Default'),
+        );
         this.publishProviderCatalogChanged('deactivated');
         vnode?.attrs.onActivate?.();
       }
@@ -354,7 +359,7 @@ export class ProviderQuickSwitcher
               )
             : active
               ? `${active.name} · ${providerRuntimeLabel(resolveProviderRuntime(active))}`
-              : 'System Default · .env',
+              : uiText('系统默认 · .env', 'System Default · .env'),
           disabled: mutationDisabled,
         },
         [
@@ -370,7 +375,7 @@ export class ProviderQuickSwitcher
                 textOverflow: 'ellipsis',
               },
             },
-            active?.name || 'System Default',
+            active?.name || uiText('系统默认', 'System Default'),
           ),
           active
             ? m(
@@ -466,12 +471,15 @@ export class ProviderQuickSwitcher
           m(
             'div',
             {style: {fontSize: '13px', fontWeight: 500}},
-            'System Default',
+            uiText('系统默认', 'System Default'),
           ),
           m(
             'div',
             {style: {fontSize: '11px', color: t.textSecondary}},
-            'Claude Code, backend/.env, or Docker .env',
+            uiText(
+              'Claude Code、backend/.env 或 Docker .env',
+              'Claude Code, backend/.env, or Docker .env',
+            ),
           ),
         ]),
         noActiveProvider ? m('div', {style: s.activeDot}) : null,

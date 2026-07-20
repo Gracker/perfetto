@@ -315,7 +315,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
           (value) => {
             this.displayName = value;
           },
-          {placeholder: 'MyApp source'},
+          {placeholder: text('MyApp 源码', 'MyApp source')},
         ),
       ]),
       this.renderField(

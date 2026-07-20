@@ -49,6 +49,11 @@ import {
   translateComponent,
   DataFormatter,
 } from './data_formatter';
+import {setUiLanguagePreference} from './ui_language';
+
+beforeEach(() => {
+  setUiLanguagePreference('zh-CN');
+});
 
 // =============================================================================
 // Base64 Encoding/Decoding Tests
