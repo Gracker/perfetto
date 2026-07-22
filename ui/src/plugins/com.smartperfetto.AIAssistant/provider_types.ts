@@ -524,7 +524,7 @@ export function providerRuntimeShortLabel(runtime: ServerRuntimeKind): string {
   }
   if (runtime === 'qoder-agent-sdk') {
     return 'QD';
-  } 
+  }
   return 'CL';
 }
 
