@@ -10,7 +10,23 @@ import {
   providerRuntimeShortLabel,
   providerSupportsRuntime,
   resolveProviderRuntime,
+  type ProviderConfig,
 } from './provider_types';
+
+function makeProvider(overrides: Partial<ProviderConfig>): ProviderConfig {
+  return {
+    id: 'p1',
+    name: 'Test Provider',
+    category: 'custom',
+    type: 'custom',
+    isActive: true,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    models: {primary: 'model-a', light: 'model-b'},
+    connection: {},
+    ...overrides,
+  };
+}
 
 describe('provider runtime short labels', () => {
   it('keeps OpenCode distinct from Claude', () => {
@@ -27,22 +43,16 @@ describe('provider runtime short labels', () => {
 
 describe('resolveProviderRuntime', () => {
   it('resolves qoder-agent-sdk when agentRuntime is set', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Qoder Provider',
-      type: 'custom' as const,
-      connection: {agentRuntime: 'qoder-agent-sdk' as const},
-    };
+    const provider = makeProvider({
+      connection: {agentRuntime: 'qoder-agent-sdk'},
+    });
     expect(resolveProviderRuntime(provider)).toBe('qoder-agent-sdk');
   });
 
   it('falls back to claude-agent-sdk when only qoderAccessToken is set without agentRuntime', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Qoder Provider',
-      type: 'custom' as const,
+    const provider = makeProvider({
       connection: {qoderAccessToken: 'qpat_123'},
-    };
+    });
     // resolveProviderRuntime only checks explicit agentRuntime field;
     // inference from qoderAccessToken is done via providerHasQoderSurface
     expect(resolveProviderRuntime(provider)).toBe('claude-agent-sdk');
@@ -50,56 +60,43 @@ describe('resolveProviderRuntime', () => {
   });
 
   it('does not resolve qoder for non-custom providers', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Anthropic',
-      type: 'anthropic' as const,
+    const provider = makeProvider({
+      type: 'anthropic',
       connection: {},
-    };
+    });
     expect(resolveProviderRuntime(provider)).toBe('claude-agent-sdk');
   });
 });
 
 describe('providerHasQoderSurface', () => {
   it('detects Qoder surface via agentRuntime', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Test',
-      type: 'custom' as const,
-      connection: {agentRuntime: 'qoder-agent-sdk' as const},
-    };
+    const provider = makeProvider({
+      connection: {agentRuntime: 'qoder-agent-sdk'},
+    });
     expect(providerHasQoderSurface(provider)).toBe(true);
   });
 
   it('detects Qoder surface via qoderCliPath', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Test',
-      type: 'custom' as const,
+    const provider = makeProvider({
       connection: {qoderCliPath: '/usr/bin/qodercli'},
-    };
+    });
     expect(providerHasQoderSurface(provider)).toBe(true);
   });
 
   it('returns false for non-custom providers', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Test',
-      type: 'anthropic' as const,
-      connection: {agentRuntime: 'qoder-agent-sdk' as const},
-    };
+    const provider = makeProvider({
+      type: 'anthropic',
+      connection: {agentRuntime: 'qoder-agent-sdk'},
+    });
     expect(providerHasQoderSurface(provider)).toBe(false);
   });
 });
 
 describe('providerSupportsRuntime', () => {
   it('supports qoder-agent-sdk for custom providers with Qoder surface', () => {
-    const provider = {
-      id: 'p1',
-      name: 'Test',
-      type: 'custom' as const,
+    const provider = makeProvider({
       connection: {qoderAccessToken: 'qpat_123'},
-    };
+    });
     expect(providerSupportsRuntime(provider, 'qoder-agent-sdk')).toBe(true);
   });
 });
