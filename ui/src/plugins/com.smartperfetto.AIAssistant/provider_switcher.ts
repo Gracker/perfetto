@@ -559,6 +559,7 @@ export class ProviderQuickSwitcher
       {runtime: 'openai-agents-sdk', label: 'OpenAI'},
       {runtime: 'pi-agent-core', label: 'Pi'},
       {runtime: 'opencode', label: 'OpenCode'},
+      {runtime: 'qoder-agent-sdk', label: 'Qoder'},
     ];
     const buttons = allButtons.filter((button) =>
       providerSupportsRuntime(provider, button.runtime),

@@ -34,7 +34,8 @@ export type AgentRuntimeKind =
   | 'claude-agent-sdk'
   | 'openai-agents-sdk'
   | 'pi-agent-core'
-  | 'opencode';
+  | 'opencode'
+  | 'qoder-agent-sdk';
 export type ServerRuntimeKind =
   | AgentRuntimeKind
   | 'experimental-pi-agent-core'
@@ -63,6 +64,10 @@ export interface ProviderConnection {
   openCodeSdkModulePath?: string;
   openCodeModelJson?: string;
   openCodeSystemPrompt?: string;
+  qoderAccessToken?: string;
+  qoderCliPath?: string;
+  qoderModel?: string;
+  qoderSystemPrompt?: string;
   agentRuntime?: AgentRuntimeKind;
   openaiProtocol?: OpenAIProtocol;
   awsRegion?: string;
@@ -252,6 +257,26 @@ export const CONNECTION_FIELD_LABELS: Record<
     type: 'text',
     placeholder: 'Optional runtime-level system prompt',
   },
+  qoderAccessToken: {
+    label: 'Qoder Personal Access Token',
+    type: 'password',
+    placeholder: 'qpat_...',
+  },
+  qoderCliPath: {
+    label: 'Qoder CLI Path',
+    type: 'text',
+    placeholder: '/usr/local/bin/qodercli',
+  },
+  qoderModel: {
+    label: 'Qoder Model',
+    type: 'text',
+    placeholder: 'Optional model override',
+  },
+  qoderSystemPrompt: {
+    label: 'Qoder System Prompt',
+    type: 'text',
+    placeholder: 'Optional runtime-level system prompt',
+  },
   awsRegion: {label: 'AWS Region', type: 'text', placeholder: 'us-east-1'},
   awsBearerToken: {
     label: 'AWS Bearer Token',
@@ -296,6 +321,10 @@ const CONNECTION_FIELD_LABEL_ZH: Record<string, string> = {
   openCodeSdkModulePath: 'OpenCode SDK 模块路径',
   openCodeModelJson: 'OpenCode 模型 JSON',
   openCodeSystemPrompt: 'OpenCode 系统提示词',
+  qoderAccessToken: 'Qoder 个人访问令牌',
+  qoderCliPath: 'Qoder CLI 路径',
+  qoderModel: 'Qoder 模型',
+  qoderSystemPrompt: 'Qoder 系统提示词',
   awsRegion: 'AWS 区域',
   awsBearerToken: 'AWS Bearer 令牌',
   awsAccessKeyId: 'AWS 访问密钥 ID',
@@ -310,6 +339,7 @@ const CONNECTION_FIELD_PLACEHOLDER_ZH: Record<string, string> = {
   claudeAuthToken: '不包含 Bearer 前缀的令牌',
   piAgentCoreSystemPrompt: '可选的运行时级系统提示词',
   openCodeSystemPrompt: '可选的运行时级系统提示词',
+  qoderSystemPrompt: '可选的运行时级系统提示词',
   awsBearerToken: '令牌……',
   awsSecretAccessKey: '私密密钥……',
   awsSessionToken: '会话令牌……',
@@ -417,6 +447,18 @@ export function providerHasOpenCodeSurface(provider: ProviderConfig): boolean {
   );
 }
 
+export function providerHasQoderSurface(provider: ProviderConfig): boolean {
+  const conn = provider.connection;
+  return (
+    provider.type === 'custom' &&
+    !!(
+      conn.agentRuntime === 'qoder-agent-sdk' ||
+      conn.qoderAccessToken ||
+      conn.qoderCliPath
+    )
+  );
+}
+
 export function resolveProviderRuntime(
   provider?: ProviderConfig,
 ): AgentRuntimeKind {
@@ -425,7 +467,8 @@ export function resolveProviderRuntime(
     runtime === 'openai-agents-sdk' ||
     runtime === 'claude-agent-sdk' ||
     runtime === 'pi-agent-core' ||
-    runtime === 'opencode'
+    runtime === 'opencode' ||
+    runtime === 'qoder-agent-sdk'
   ) {
     return runtime;
   }
@@ -454,6 +497,8 @@ export function providerSupportsRuntime(
     return providerHasPiAgentCoreSurface(provider);
   }
   if (runtime === 'opencode') return providerHasOpenCodeSurface(provider);
+  if (runtime === 'qoder-agent-sdk')
+    return providerHasQoderSurface(provider);
   return providerHasClaudeSurface(provider);
 }
 
@@ -465,6 +510,7 @@ export function providerRuntimeLabel(runtime: ServerRuntimeKind): string {
   }
   if (runtime === 'opencode') return 'OpenCode';
   if (runtime === 'experimental-opencode') return 'Experimental OpenCode';
+  if (runtime === 'qoder-agent-sdk') return 'Qoder SDK';
   return 'Claude SDK';
 }
 
@@ -476,6 +522,9 @@ export function providerRuntimeShortLabel(runtime: ServerRuntimeKind): string {
   if (runtime === 'opencode' || runtime === 'experimental-opencode') {
     return 'OC';
   }
+  if (runtime === 'qoder-agent-sdk') {
+    return 'QD';
+  } 
   return 'CL';
 }
 
