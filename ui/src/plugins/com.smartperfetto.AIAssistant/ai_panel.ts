@@ -171,6 +171,11 @@ import {
   resolveReportDownloadTarget,
   suggestedReportFilename,
 } from './report_download';
+import {
+  applicationUpdateDismissKey,
+  parseApplicationUpdateStatus,
+  type ApplicationUpdateStatus,
+} from './application_update';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
 import {getSceneDisplayName} from './scene_constants';
 import {StoryController} from './story_controller';
@@ -625,6 +630,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private analysisModeMenuKeydownHandler:
     | ((event: KeyboardEvent) => void)
     | null = null;
+  private applicationUpdateStatus?: ApplicationUpdateStatus;
+  private applicationUpdateChecking = false;
+  private applicationUpdatePollTimer: ReturnType<typeof setTimeout> | null =
+    null;
+  private applicationUpdatePollAttempts = 0;
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
@@ -1447,6 +1457,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // Initialize backend status - must happen before first render
     this.initBackendStatus();
+    this.refreshApplicationUpdateStatus();
 
     // 检测 Trace 变化并加载对应的历史
     this.handleTraceChange();
@@ -2621,6 +2632,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       );
       this.analysisModeMenuKeydownHandler = null;
     }
+    if (this.applicationUpdatePollTimer) {
+      clearTimeout(this.applicationUpdatePollTimer);
+      this.applicationUpdatePollTimer = null;
+    }
   }
 
   private closeAnalysisModeMenu(): boolean {
@@ -3240,6 +3255,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               initialStatus: this.serverStatus.connected
                 ? this.serverStatus
                 : undefined,
+              applicationUpdateStatus: this.applicationUpdateStatus,
+              applicationUpdateChecking: this.applicationUpdateChecking,
+              onCheckApplicationUpdate: () =>
+                this.refreshApplicationUpdateStatus(true),
             })
           : null,
 
@@ -3252,12 +3271,26 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               ? m(
                   'span.ai-version-chip',
                   {
+                    class:
+                      this.applicationUpdateStatus?.state ===
+                      'update_available'
+                        ? 'update-available'
+                        : '',
                     title: uiText(
-                      `SmartPerfetto 后端版本：${this.serverStatus.version}`,
-                      `SmartPerfetto backend version: ${this.serverStatus.version}`,
+                      this.applicationUpdateStatus?.state === 'update_available'
+                        ? `SmartPerfetto ${this.serverStatus.version}，新版本 ${this.applicationUpdateStatus.latest?.version} 可用`
+                        : `SmartPerfetto 后端版本：${this.serverStatus.version}`,
+                      this.applicationUpdateStatus?.state === 'update_available'
+                        ? `SmartPerfetto ${this.serverStatus.version}; version ${this.applicationUpdateStatus.latest?.version} is available`
+                        : `SmartPerfetto backend version: ${this.serverStatus.version}`,
                     ),
                   },
-                  `v${this.serverStatus.version}`,
+                  [
+                    `v${this.serverStatus.version}`,
+                    this.applicationUpdateStatus?.state === 'update_available'
+                      ? m('i.pf-icon', 'arrow_upward')
+                      : null,
+                  ],
                 )
               : null,
             m('span.ai-status-dot', {
@@ -3445,6 +3478,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             // Left: Main content area
             m('div.ai-main-content', [
               this.renderAiDisabledBanner(),
+              this.renderApplicationUpdateBanner(),
 
               this.state.captureConfigSuggestion.visible
                 ? this.renderCaptureConfigSuggestionPanel()
@@ -5634,6 +5668,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
     if (backendIdentityChanged) {
+      this.applicationUpdateStatus = undefined;
+      this.applicationUpdatePollAttempts = 0;
+      if (this.applicationUpdatePollTimer) {
+        clearTimeout(this.applicationUpdatePollTimer);
+        this.applicationUpdatePollTimer = null;
+      }
       this.flushSessionSave();
       this.retireBackendAgentSession(this.state.settings.backendUrl);
       this.tracePairWorkspaceController.resetScope();
@@ -5682,6 +5722,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.loadAnalysisContextSelection();
     }
     this.initBackendStatus();
+    this.refreshApplicationUpdateStatus();
     if (backendIdentityChanged && this.trace) {
       void this.retryBackendConnection();
     }
@@ -6382,6 +6423,63 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
+  private renderApplicationUpdateBanner(): m.Children {
+    const status = this.applicationUpdateStatus;
+    if (status?.state !== 'update_available' || !status.latest) return null;
+    const dismissKey = applicationUpdateDismissKey(
+      this.state.settings.backendUrl,
+      status,
+    );
+    if (dismissKey && localStorage.getItem(dismissKey) === '1') return null;
+    return m(
+      'section.ai-application-update-banner',
+      {
+        'role': 'status',
+        'aria-live': 'polite',
+        'aria-label': uiText('SmartPerfetto 更新', 'SmartPerfetto update'),
+      },
+      [
+        m('i.pf-icon', 'system_update_alt'),
+        m('div.ai-application-update-copy', [
+          m(
+            'strong',
+            uiText(
+              `SmartPerfetto ${status.latest.version} 可用`,
+              `SmartPerfetto ${status.latest.version} is available`,
+            ),
+          ),
+          m(
+            'span',
+            uiText(
+              `当前 ${status.current.version} · ${status.current.distribution}`,
+              `Current ${status.current.version} · ${status.current.distribution}`,
+            ),
+          ),
+        ]),
+        m(
+          'button.ai-application-update-action',
+          {
+            type: 'button',
+            onclick: () => this.openSettings(),
+          },
+          uiText('查看升级步骤', 'View upgrade steps'),
+        ),
+        m(
+          'button.ai-application-update-dismiss',
+          {
+            type: 'button',
+            title: uiText('暂不提示此版本', 'Dismiss this version'),
+            'aria-label': uiText('暂不提示此版本', 'Dismiss this version'),
+            onclick: () => {
+              if (dismissKey) localStorage.setItem(dismissKey, '1');
+            },
+          },
+          m('i.pf-icon', 'close'),
+        ),
+      ],
+    );
+  }
+
   /**
    * Check backend runtime status through the authenticated diagnostics endpoint.
    * Used by SettingsModal to test with potentially unsaved URL/key values.
@@ -6452,6 +6550,47 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.serverStatus = status;
       m.redraw();
     });
+  }
+
+  private refreshApplicationUpdateStatus(force = false): Promise<void> {
+    if (this.applicationUpdateChecking) return Promise.resolve();
+    this.applicationUpdateChecking = true;
+    if (force) this.applicationUpdatePollAttempts = 0;
+    const backendUrl = this.state.settings.backendUrl.replace(/\/+$/, '');
+    const request = fetch(`${backendUrl}/api/application-update/${force ? 'check' : 'status'}`, {
+      method: force ? 'POST' : 'GET',
+      headers: this.buildBackendHeaders(),
+      credentials: 'include',
+    })
+      .then(async response => {
+        if (!response.ok) return;
+        const parsed = parseApplicationUpdateStatus(
+          await response.json().catch(() => undefined),
+        );
+        if (!parsed) return;
+        this.applicationUpdateStatus = parsed;
+        if (
+          parsed.state === 'checking' &&
+          this.applicationUpdatePollAttempts < 4
+        ) {
+          this.applicationUpdatePollAttempts++;
+          if (this.applicationUpdatePollTimer) {
+            clearTimeout(this.applicationUpdatePollTimer);
+          }
+          this.applicationUpdatePollTimer = setTimeout(() => {
+            this.applicationUpdatePollTimer = null;
+            void this.refreshApplicationUpdateStatus();
+          }, 1_500);
+        }
+      })
+      .catch(() => {
+        // Advisory status must not change backend connectivity or show errors.
+      })
+      .finally(() => {
+        this.applicationUpdateChecking = false;
+        m.redraw();
+      });
+    return request;
   }
 
   private getWelcomeMessage(): string {

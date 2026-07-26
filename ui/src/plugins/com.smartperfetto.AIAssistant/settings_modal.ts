@@ -25,6 +25,10 @@ import type {SmartPerfettoRequestContext} from '../../core/smartperfetto_request
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 import {analysisContextScopeKey} from './analysis_context';
 import {uiText} from './ui_language';
+import {
+  applicationUpgradeInstruction,
+  type ApplicationUpdateStatus,
+} from './application_update';
 
 export interface SettingsModalAttrs {
   settings: AISettings;
@@ -38,6 +42,9 @@ export interface SettingsModalAttrs {
   onProviderSelectionChange: () => void;
   onAnalysisContextChange?: (selection: AnalysisContextSelection) => void;
   initialStatus?: ServerStatus;
+  applicationUpdateStatus?: ApplicationUpdateStatus;
+  applicationUpdateChecking?: boolean;
+  onCheckApplicationUpdate?: () => Promise<void>;
 }
 
 // Dark-mode-aware color scheme using CSS variables from the plugin's
@@ -859,6 +866,172 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     ]);
   }
 
+  private renderApplicationUpdateCard(
+    status: ApplicationUpdateStatus | undefined,
+    checking: boolean,
+    onCheck: () => Promise<void>,
+  ): m.Children {
+    const instruction = status
+      ? applicationUpgradeInstruction(status)
+      : {};
+    const stateLabel = !status
+      ? uiText('尚未检查', 'Not checked')
+      : status.state === 'update_available'
+        ? uiText(
+            `发现新版本 ${status.latest?.version ?? ''}`,
+            `Version ${status.latest?.version ?? ''} is available`,
+          )
+        : status.state === 'up_to_date'
+          ? uiText('已是最新版本', 'Up to date')
+          : status.state === 'ahead'
+            ? uiText('当前构建领先于稳定版', 'Current build is ahead of stable')
+            : status.state === 'disabled'
+              ? uiText('更新检查已禁用', 'Update checks are disabled')
+              : status.state === 'unsupported_channel'
+                ? uiText('当前分发渠道不支持更新检查', 'Unsupported update channel')
+                : status.state === 'error'
+                  ? uiText('检查失败', 'Check failed')
+                  : uiText('等待检查结果', 'Waiting for update status');
+
+    return m('div', {style: MODAL_STYLES.section}, [
+      m(
+        'h4',
+        {style: MODAL_STYLES.sectionTitle},
+        uiText('应用更新', 'Application Update'),
+      ),
+      m('div', {style: MODAL_STYLES.statusCard}, [
+        this.renderStatusRow(
+          uiText('当前版本', 'Current version'),
+          status ? `v${status.current.version}` : '—',
+          true,
+        ),
+        this.renderStatusRow(uiText('状态', 'Status'), stateLabel),
+        status?.checkedAt
+          ? this.renderStatusRow(
+              uiText('检查时间', 'Checked'),
+              new Date(status.checkedAt).toLocaleString(),
+            )
+          : null,
+        status?.stale
+          ? m(
+              'div',
+              {style: {...MODAL_STYLES.hint, marginTop: '8px'}},
+              uiText(
+                '当前显示上次成功检查的结果。',
+                'Showing the last-known-good result.',
+              ),
+            )
+          : null,
+        status?.state === 'error' && status.lastError
+          ? m(
+              'div',
+              {style: {...MODAL_STYLES.hint, marginTop: '8px'}},
+              status.lastError.message,
+            )
+          : null,
+        instruction.command
+          ? m('div', {style: {...MODAL_STYLES.field, marginTop: '12px'}}, [
+              m(
+                'label',
+                {style: MODAL_STYLES.fieldLabel},
+                uiText('升级命令', 'Upgrade command'),
+              ),
+              m(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                  },
+                },
+                [
+                  m(
+                    'code',
+                    {
+                      style: {
+                        flex: 1,
+                        minWidth: 0,
+                        overflowWrap: 'anywhere',
+                        padding: '8px',
+                        borderRadius: '6px',
+                        background: 'var(--chat-bg-secondary)',
+                      },
+                    },
+                    instruction.command,
+                  ),
+                  m(
+                    'button',
+                    {
+                      'type': 'button',
+                      'style': {
+                        ...MODAL_STYLES.btn,
+                        ...MODAL_STYLES.btnSecondary,
+                      },
+                      'onclick': () => {
+                        void navigator.clipboard
+                          .writeText(instruction.command ?? '')
+                          .catch(() => undefined);
+                      },
+                      'aria-label': uiText('复制升级命令', 'Copy upgrade command'),
+                    },
+                    uiText('复制', 'Copy'),
+                  ),
+                ],
+              ),
+            ])
+          : null,
+        instruction.sha256
+          ? this.renderStatusRow('SHA-256', instruction.sha256, true)
+          : null,
+        instruction.url
+          ? m(
+              'a',
+              {
+                href: instruction.url,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+                style: {
+                  display: 'inline-flex',
+                  marginTop: '10px',
+                  color: COLORS.primary,
+                },
+              },
+              status?.action?.kind === 'portable'
+                ? uiText('下载对应平台安装包', 'Download this platform package')
+                : uiText('查看发布详情', 'View release details'),
+            )
+          : null,
+      ]),
+      m(
+        'button',
+        {
+          'type': 'button',
+          'style': {
+            ...MODAL_STYLES.statusBtn,
+            ...(checking ? MODAL_STYLES.statusBtnDisabled : {}),
+            marginTop: '10px',
+          },
+          'onclick': () => {
+            if (!checking) void onCheck();
+          },
+          'disabled': checking,
+        },
+        checking
+          ? uiText('⏳ 正在检查……', '⏳ Checking...')
+          : uiText('⬆️ 立即检查更新', '⬆️ Check for updates'),
+      ),
+      m(
+        'div',
+        {style: {...MODAL_STYLES.hint, marginTop: '8px'}},
+        uiText(
+          'SmartPerfetto 只提供与你当前分发方式匹配的升级步骤，不会静默替换正在运行的程序。',
+          'SmartPerfetto shows distribution-specific upgrade steps and never silently replaces the running application.',
+        ),
+      ),
+    ]);
+  }
+
   view(vnode: m.Vnode<SettingsModalAttrs>) {
     const readOnly = vnode.attrs.readOnly === true;
     const backendBindingDirty = settingsBackendBindingChanged(
@@ -1380,6 +1553,13 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                       ),
                       this.renderStatusCard(),
                     ]),
+
+                    this.renderApplicationUpdateCard(
+                      vnode.attrs.applicationUpdateStatus,
+                      vnode.attrs.applicationUpdateChecking === true,
+                      vnode.attrs.onCheckApplicationUpdate ??
+                        (() => Promise.resolve()),
+                    ),
 
                     m(
                       'div',
