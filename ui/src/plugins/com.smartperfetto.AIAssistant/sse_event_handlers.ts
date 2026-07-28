@@ -31,7 +31,7 @@
  */
 
 import type {
-  AnalysisReceiptV1,
+  AnalysisReceipt,
   ConversationStepTimelineItem,
   DataSourceContext,
   Message,
@@ -98,7 +98,7 @@ type AnalysisCompletedPayload = {
   hypotheses?: AnalysisHypothesisItem[];
   smartScenePreview?: SmartScenePreviewPayload;
   quickRun?: QuickRunReceipt;
-  analysisReceipt?: AnalysisReceiptV1;
+  analysisReceipt?: AnalysisReceipt;
   uiActionProposals?: UiActionProposalV1[];
 };
 
@@ -201,7 +201,7 @@ function toAnalysisCompletedPayload(
   }
   if (isRecord(source.analysisReceipt)) {
     payload.analysisReceipt =
-      source.analysisReceipt as unknown as AnalysisReceiptV1;
+      source.analysisReceipt as unknown as AnalysisReceipt;
   }
   if (Array.isArray(source.uiActionProposals)) {
     payload.uiActionProposals =

@@ -1087,8 +1087,7 @@ export type AnalysisReceiptRuntime =
 
 export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
 
-export interface AnalysisReceiptV1 {
-  schemaVersion: 1;
+export interface AnalysisReceiptBase {
   runId: string;
   sessionId: string;
   traceId: string;
@@ -1129,6 +1128,17 @@ export interface AnalysisReceiptV1 {
     reportError?: string;
   };
 }
+
+export interface AnalysisReceiptV1 extends AnalysisReceiptBase {
+  schemaVersion: 1;
+}
+
+export interface AnalysisReceiptV2 extends AnalysisReceiptBase {
+  schemaVersion: 2;
+  runManifestId: string;
+}
+
+export type AnalysisReceipt = AnalysisReceiptV1 | AnalysisReceiptV2;
 
 export type UiActionKind =
   | 'navigate_timeline'
@@ -1244,7 +1254,7 @@ export interface AnalysisCompletedEvent {
     terminationReason?: string;
     terminationMessage?: string;
     quickRun?: QuickRunReceipt;
-    analysisReceipt?: AnalysisReceiptV1;
+    analysisReceipt?: AnalysisReceipt;
     uiActionProposals?: UiActionProposalV1[];
     smartScenePreview?: Record<string, unknown>;
     terminalRunStatus?: 'completed' | 'quota_exceeded';

@@ -28,14 +28,22 @@ import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backen
 import type {NavigationBookmark} from './navigation_bookmark_bar';
 import type {DetectedScene} from './scene_navigation_bar';
 import type {
+  AnalysisReceipt,
   AnalysisReceiptV1,
+  AnalysisReceiptV2,
   QueryReviewV1,
   UiActionProposalV1,
 } from './generated/data_contract.types';
 import type {ServerRuntimeKind} from './provider_types';
 import type {UiLanguagePreference} from './ui_language';
 
-export type {AnalysisReceiptV1, QueryReviewV1, UiActionProposalV1};
+export type {
+  AnalysisReceipt,
+  AnalysisReceiptV1,
+  AnalysisReceiptV2,
+  QueryReviewV1,
+  UiActionProposalV1,
+};
 
 /**
  * A chat message in the AI conversation.
@@ -79,7 +87,7 @@ export interface Message {
   teachingPinExecution?: TeachingPinExecutionResult;
   smartScenePreview?: SmartScenePreviewPayload;
   quickRun?: QuickRunReceipt;
-  analysisReceipt?: AnalysisReceiptV1;
+  analysisReceipt?: AnalysisReceipt;
   uiActionProposals?: UiActionProposalV1[];
 }
 
