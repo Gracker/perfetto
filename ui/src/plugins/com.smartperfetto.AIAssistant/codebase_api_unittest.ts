@@ -6,8 +6,11 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
   deleteCodebase,
+  getCodebaseDirectoryPickerCapability,
+  previewCodebaseRoot,
   registerExternalKnowledgeSource,
   reindexExternalKnowledgeSource,
+  selectCodebaseDirectory,
 } from './codebase_api';
 
 afterEach(() => {
@@ -41,6 +44,104 @@ describe('codebase deletion API', () => {
       expect.objectContaining({
         method: 'DELETE',
         headers: expect.objectContaining({Authorization: 'Bearer secret-key'}),
+      }),
+    );
+  });
+});
+
+describe('codebase directory picker API', () => {
+  it('loads local picker capability and requests a system directory selection', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          capability: {
+            available: true,
+            platform: 'darwin',
+            provider: 'macos',
+          },
+        }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          selected: true,
+          rootPath: '/Users/me/App',
+          directorySelectionId: 'selection-a',
+          displayNameSuggestion: 'App',
+          expiresAt: 123,
+        }),
+      } as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getCodebaseDirectoryPickerCapability(
+      'http://backend/',
+      'secret-key',
+    )).resolves.toMatchObject({
+      available: true,
+      provider: 'macos',
+    });
+    await expect(selectCodebaseDirectory(
+      'http://backend/',
+      'secret-key',
+    )).resolves.toMatchObject({
+      selected: true,
+      directorySelectionId: 'selection-a',
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://backend/api/rag/codebases/directory-picker',
+      expect.objectContaining({
+        headers: expect.objectContaining({Authorization: 'Bearer secret-key'}),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://backend/api/rag/codebases/directory-picker',
+      expect.objectContaining({
+        method: 'POST',
+        body: '{}',
+      }),
+    );
+  });
+
+  it('keeps the picker authorization attached to preview requests', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        preview: {
+          blocked: false,
+          acceptedFileCount: 1,
+          skippedFileCount: 0,
+          acceptedFiles: ['Main.kt'],
+          skippedFiles: [],
+        },
+      }),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await previewCodebaseRoot(
+      'http://backend',
+      '/Users/me/App',
+      'secret-key',
+      'selection-a',
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://backend/api/rag/codebases/preview',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          rootPath: '/Users/me/App',
+          directorySelectionId: 'selection-a',
+        }),
       }),
     );
   });

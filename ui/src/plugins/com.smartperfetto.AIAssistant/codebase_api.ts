@@ -19,12 +19,16 @@
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 
 export type CodebaseKind = 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk';
+export type CodebaseRootAuthorization =
+  | 'configured_allowlist'
+  | 'native_picker';
 
 export interface CodebaseSummary {
   codebaseId: string;
   lifecycleState?: 'active' | 'deleting';
   kind: CodebaseKind;
   displayName: string;
+  rootAuthorization?: CodebaseRootAuthorization;
   commitHash?: string;
   vendor?: string;
   buildId?: string;
@@ -81,6 +85,7 @@ export interface CodebasePreview {
 export interface CodebaseAudit {
   codebaseId: string;
   kind: CodebaseKind;
+  rootAuthorization?: CodebaseRootAuthorization;
   indexGeneration: number;
   activeGeneration?: string;
   contentFingerprint?: string;
@@ -108,8 +113,9 @@ export interface CodeExcerpt {
 
 export interface RegisterCodebaseInput {
   kind: CodebaseKind;
-  displayName: string;
+  displayName?: string;
   rootPath: string;
+  directorySelectionId?: string;
   commitHash?: string;
   vendor?: string;
   buildId?: string;
@@ -119,6 +125,32 @@ export interface RegisterCodebaseInput {
   licenseTag?: string;
   sendToProvider: boolean;
 }
+
+export interface CodebaseDirectoryPickerCapability {
+  available: boolean;
+  platform: string;
+  provider?: 'macos' | 'windows' | 'windows_wsl' | 'zenity' | 'kdialog';
+  reason?:
+    | 'unsupported_distribution'
+    | 'enterprise_mode'
+    | 'non_loopback_bind'
+    | 'no_graphical_session'
+    | 'no_supported_dialog'
+    | 'remote_request';
+}
+
+export type CodebaseDirectoryPickerResult =
+  | {
+      selected: true;
+      rootPath: string;
+      directorySelectionId: string;
+      displayNameSuggestion: string;
+      expiresAt: number;
+    }
+  | {
+      selected: false;
+      cancelled: true;
+    };
 
 export interface ReindexCodebaseResult {
   codebaseId: string;
@@ -232,14 +264,47 @@ export async function previewCodebaseRoot(
   backendUrl: string,
   rootPath: string,
   apiKey?: string,
+  directorySelectionId?: string,
 ): Promise<CodebasePreview> {
   const res = await fetch(buildCodebaseApiUrl(backendUrl, '/codebases/preview'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
-    body: JSON.stringify({rootPath}),
+    body: JSON.stringify({
+      rootPath,
+      ...(directorySelectionId ? {directorySelectionId} : {}),
+    }),
   });
   const body = await readJsonOrThrow<{preview: CodebasePreview}>(res);
   return body.preview;
+}
+
+export async function getCodebaseDirectoryPickerCapability(
+  backendUrl: string,
+  apiKey?: string,
+): Promise<CodebaseDirectoryPickerCapability> {
+  const res = await fetch(
+    buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
+    {headers: buildHeaders(apiKey)},
+  );
+  const body = await readJsonOrThrow<{
+    capability: CodebaseDirectoryPickerCapability;
+  }>(res);
+  return body.capability;
+}
+
+export async function selectCodebaseDirectory(
+  backendUrl: string,
+  apiKey?: string,
+): Promise<CodebaseDirectoryPickerResult> {
+  const res = await fetch(
+    buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
+    {
+      method: 'POST',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({}),
+    },
+  );
+  return readJsonOrThrow<CodebaseDirectoryPickerResult>(res);
 }
 
 export async function registerCodebase(
