@@ -427,7 +427,23 @@ async function loadTraceIntoEngine(
   // Plugins may call trace.initialPage.suggest(...) during onTraceLoad to
   // request that the app navigate somewhere other than /viewer.
   const initialRoute = trace.initialPage.getWinner() ?? '/viewer';
-  Router.navigate(`#!${initialRoute}?local_cache_key=${cacheUuid}`);
+  const routeArgs: Record<string, string | boolean> = {
+    local_cache_key: cacheUuid,
+  };
+  if (traceSource.type === 'HTTP_RPC' && isSmartPerfettoDualTracePane(app)) {
+    for (const key of [
+      'smartperfettoDualTrace',
+      'smartperfettoTraceId',
+      'smartperfettoPane',
+      'traceFileName',
+      'mode',
+      'hideSidebar',
+    ] as const) {
+      const value = app.initialRouteArgs[key];
+      if (value !== undefined) routeArgs[key] = value;
+    }
+  }
+  Router.navigate(`#!${initialRoute}?${m.buildQueryString(routeArgs)}`);
 
   decideTabs(trace);
 

@@ -19,13 +19,17 @@ const BACKEND_CHECK_TIMEOUT_MS = 1000; // Fast timeout for health check
 const BACKEND_UPLOAD_MIN_TIMEOUT_MS = 60000;
 const BACKEND_UPLOAD_THROUGHPUT_MB_PER_S = 50;
 const BACKEND_URL_UPLOAD_TIMEOUT_MS = 300000; // URL fetches can be slow on first load
+const BACKEND_VIEWER_OPEN_TIMEOUT_MS = 15 * 60 * 1000;
 
 function computeUploadTimeoutMs(byteSize: number): number {
   if (!Number.isFinite(byteSize) || byteSize <= 0) {
     return BACKEND_UPLOAD_MIN_TIMEOUT_MS;
   }
   const bytesPerMs = BACKEND_UPLOAD_THROUGHPUT_MB_PER_S * 1024;
-  return Math.max(BACKEND_UPLOAD_MIN_TIMEOUT_MS, Math.ceil(byteSize / bytesPerMs));
+  return Math.max(
+    BACKEND_VIEWER_OPEN_TIMEOUT_MS,
+    Math.ceil(byteSize / bytesPerMs),
+  );
 }
 
 let nextTraceSourceObjectId = 0;
@@ -293,6 +297,71 @@ export class BackendUploader {
       return {
         success: false,
         error: `Upload error: ${errorMsg}`,
+      };
+    }
+  }
+
+  /**
+   * Open a trace already stored by SmartPerfetto through a dedicated viewer
+   * lease. Independent UIs must not share one trace_processor RPC sequence.
+   */
+  async openExistingTrace(
+    traceId: string,
+    sessionId?: string,
+  ): Promise<BackendUploadResult> {
+    const normalizedTraceId = traceId.trim();
+    if (!normalizedTraceId) {
+      return {success: false, error: 'Trace ID is required'};
+    }
+
+    try {
+      const response = await fetchWithTimeout(
+        buildSmartPerfettoWorkspaceApiUrl(
+          this.backendUrl,
+          'traces',
+          `/${encodeURIComponent(normalizedTraceId)}/viewer`,
+        ),
+        {
+          method: 'POST',
+          cache: 'no-cache',
+          credentials: 'include',
+          headers: this.requestHeaders({'Content-Type': 'application/json'}),
+          body: JSON.stringify({
+            ...(sessionId?.trim() ? {sessionId: sessionId.trim()} : {}),
+          }),
+        },
+        BACKEND_VIEWER_OPEN_TIMEOUT_MS,
+      );
+      const data = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        trace?: {
+          id?: string;
+          port?: number;
+          leaseId?: string;
+          leaseMode?: string;
+          leaseModeReason?: string;
+          leaseQueueLength?: number;
+          websocketCapability?: {
+            protocol?: string;
+            expiresAt?: number;
+          };
+        };
+      };
+      if (!response.ok || !data.success || !data.trace) {
+        return {
+          success: false,
+          error:
+            data.error ||
+            `Trace viewer request failed (${response.status} ${response.statusText})`,
+        };
+      }
+      return this.buildUploadResult(data.trace, 'Existing trace viewer');
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        error: `Existing trace viewer error: ${error}`,
       };
     }
   }

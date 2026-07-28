@@ -14,7 +14,6 @@ export interface TracePairWorkspaceTrace extends WorkspaceTraceCatalogItem {
 export interface TracePairWorkspaceScope {
   readonly key: string;
   readonly backendUrl: string;
-  readonly backendHeaders?: Readonly<Record<string, string>>;
 }
 
 export interface TracePairWorkspaceState {

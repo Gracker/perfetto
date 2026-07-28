@@ -79,6 +79,10 @@ describe('TracePairWorkspace', () => {
     expect(referenceFrame).not.toBeNull();
     const currentSrc = currentFrame?.src;
     const referenceSrc = referenceFrame?.src;
+    expect(currentSrc).toContain('smartperfettoTraceId=current');
+    expect(referenceSrc).toContain('smartperfettoTraceId=history-a');
+    expect(currentSrc).not.toContain('url=');
+    expect(referenceSrc).not.toContain('url=');
 
     const assertFramesUnchanged = () => {
       m.redraw.sync();

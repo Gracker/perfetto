@@ -106,6 +106,31 @@ export class Router {
       // location.replace is NOT just a String.replace operation).
       newRoute.args.local_cache_key = oldRoute.args.local_cache_key;
     }
+    const isDualTrace =
+      oldRoute.args.smartperfettoDualTrace === true ||
+      oldRoute.args.smartperfettoDualTrace === 'true';
+    if (isDualTrace) {
+      const oldArgs = oldRoute.args as Record<
+        string,
+        string | boolean | undefined
+      >;
+      const newArgs = newRoute.args as Record<
+        string,
+        string | boolean | undefined
+      >;
+      for (const key of [
+        'smartperfettoDualTrace',
+        'smartperfettoTraceId',
+        'smartperfettoPane',
+        'traceFileName',
+        'mode',
+        'hideSidebar',
+      ] as const) {
+        if (newArgs[key] === undefined && oldArgs[key] !== undefined) {
+          newArgs[key] = oldArgs[key];
+        }
+      }
+    }
 
     const args = m.buildQueryString(newRoute.args);
     let normalizedFragment = `#!${newRoute.page}${newRoute.subpage}`;

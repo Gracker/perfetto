@@ -24,6 +24,7 @@ function okResponse(): Response {
     status: 200,
     statusText: 'OK',
     json: async () => ({}),
+    arrayBuffer: async () => new ArrayBuffer(0),
   } as Response;
 }
 
@@ -112,6 +113,26 @@ describe('HttpRpcEngine target selection', () => {
     });
     expect(HttpRpcEngine.hostAndPort).toBe('backend shared lease lease-a');
     expect(HttpRpcEngine.isSmartPerfettoBackendTarget()).toBe(true);
+  });
+
+  it('probes a candidate target without selecting it or starting heartbeat', async () => {
+    const candidate = {
+      mode: 'backend-lease-proxy' as const,
+      leaseId: 'lease-candidate',
+      statusUrl: 'http://backend/api/tp/lease-candidate/status',
+      websocketUrl: 'ws://backend/api/tp/lease-candidate/websocket',
+      heartbeatUrl: 'http://backend/api/tp/lease-candidate/heartbeat',
+    };
+
+    await expect(HttpRpcEngine.checkTargetConnection(candidate)).resolves
+      .toMatchObject({connected: true});
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(candidate.statusUrl);
+    expect(HttpRpcEngine.getCurrentTarget()).toMatchObject({
+      mode: 'direct-port',
+      port: '9001',
+    });
   });
 
   it('keeps backend-owned direct port targets distinguishable from user ports', () => {

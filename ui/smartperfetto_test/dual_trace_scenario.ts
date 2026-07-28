@@ -104,8 +104,9 @@ export class DualTraceScenario {
     );
 
     await waitForEmbeddedTraces(this.page);
-    expect(this.ledger.traceFileAuthenticated).toEqual([true, true]);
-    const frameTraceSources = await this.page
+    expect(this.ledger.traceFileUrls).toEqual([]);
+    expect(this.ledger.traceViewerAuthenticated).toEqual([true, true]);
+    const frameTraceIds = await this.page
       .locator('iframe.ai-trace-pair-frame')
       .evaluateAll((frames) =>
         frames.map((frame) => {
@@ -113,20 +114,38 @@ export class DualTraceScenario {
             throw new Error('Trace pair frame is not an iframe');
           }
           const hashQuery = new URL(frame.src).hash.split('?')[1] ?? '';
-          return new URLSearchParams(hashQuery).get('url') ?? '';
+          const params = new URLSearchParams(hashQuery);
+          return {
+            traceId: params.get('smartperfettoTraceId') ?? '',
+            url: params.get('url'),
+            source: frame.src,
+          };
         }),
       );
-    expect(frameTraceSources).toHaveLength(2);
-    expect(frameTraceSources.every((source) => source.startsWith('blob:'))).toBe(
-      true,
+    expect(frameTraceIds.map((frame) => frame.traceId).sort()).toEqual(
+      [this.heavyTraceId, this.lightTrace.id].sort(),
     );
+    expect(frameTraceIds.every((frame) => frame.url === null)).toBe(true);
     expect(
-      frameTraceSources.every(
-        (source) =>
-          !source.includes(backendApiKey) &&
-          !source.includes(process.env.SMARTPERFETTO_E2E_BACKEND_URL ?? ''),
+      frameTraceIds.every(
+        (frame) =>
+          !frame.source.includes(backendApiKey) &&
+          !frame.source.includes(process.env.SMARTPERFETTO_E2E_BACKEND_URL ?? ''),
       ),
     ).toBe(true);
+    const viewerRequestsBeforeReload = this.ledger.traceViewerUrls.length;
+    await this.page
+      .locator('iframe[data-trace-side="reference"]')
+      .evaluate((frame) => {
+        if (!(frame instanceof HTMLIFrameElement)) {
+          throw new Error('Reference trace frame is not an iframe');
+        }
+        frame.contentWindow?.location.reload();
+      });
+    await expect
+      .poll(() => this.ledger.traceViewerUrls.length, {timeout: 120_000})
+      .toBe(viewerRequestsBeforeReload + 1);
+    await waitForEmbeddedTraces(this.page);
     await expectEmbeddedFramesWithoutAssistantOwners(this.page);
     this.initialFrameProbes = await installFrameProbes(this.page);
     await dragSplitterToPercent(this.page, 58);

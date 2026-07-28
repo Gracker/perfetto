@@ -39,12 +39,12 @@ function getPaneTitle(
 }
 
 function buildFrameUrl(
-  traceSourceUrl: string,
+  traceId: string,
   traceFileName: string,
   traceSide: TracePairTraceSide,
 ): string {
   const params = new URLSearchParams({
-    url: traceSourceUrl,
+    smartperfettoTraceId: traceId,
     traceFileName,
     hideSidebar: 'true',
     mode: 'embedded',
@@ -134,18 +134,9 @@ export function renderTracePairPane(
     .filter(Boolean)
     .join(' ');
   const title = getPaneTitle(state.layout, pane, traceSide);
-  const traceSourceUrl = trace
-    ? controller.getTraceSourceUrl(trace.id)
+  const frameUrl = trace
+    ? buildFrameUrl(trace.id, trace.filename || 'trace.pftrace', traceSide)
     : null;
-  const frameUrl = traceSourceUrl
-    ? buildFrameUrl(traceSourceUrl, trace?.filename || 'trace.pftrace', traceSide)
-    : null;
-  const traceSourceError = trace
-    ? controller.getTraceSourceError(trace.id)
-    : null;
-  const traceSourceLoading = trace
-    ? controller.isTraceSourceLoading(trace.id)
-    : false;
 
   return m(
     'section.ai-trace-pair-pane',
@@ -206,26 +197,11 @@ export function renderTracePairPane(
             'data-trace-side': traceSide,
           })
         : m('div.ai-trace-pair-empty', [
-            m('i.pf-icon', traceSourceError ? 'error' : 'add_chart'),
+            m('i.pf-icon', 'add_chart'),
             m(
               'span',
-              traceSourceError
-                ? traceSourceError
-                : traceSourceLoading
-                  ? uiText('正在安全加载 Trace…', 'Loading trace securely…')
-                  : uiText('在上方选择一个历史 Trace', 'Select a historical trace above'),
+              uiText('在上方选择一个历史 Trace', 'Select a historical trace above'),
             ),
-            traceSourceError && trace
-              ? m(
-                  'button.ai-trace-pair-icon-btn',
-                  {
-                    type: 'button',
-                    onclick: () => controller.retryTraceSource(trace.id),
-                    title: uiText('重新加载 Trace', 'Reload trace'),
-                  },
-                  uiText('重试', 'Retry'),
-                )
-              : null,
           ]),
       frameUrl
         ? m(

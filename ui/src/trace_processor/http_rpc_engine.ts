@@ -156,7 +156,10 @@ export class HttpRpcEngine extends EngineBase {
   }
 
   static async checkConnection(): Promise<HttpRpcState> {
-    const target = HttpRpcEngine.getCurrentTarget();
+    return HttpRpcEngine.checkTargetConnection(HttpRpcEngine.getCurrentTarget());
+  }
+
+  static async checkTargetConnection(target: HttpRpcTarget): Promise<HttpRpcState> {
     const httpRpcState: HttpRpcState = {connected: false};
     console.info(
       `It's safe to ignore the ERR_CONNECTION_REFUSED on ${target.statusUrl} below. ` +

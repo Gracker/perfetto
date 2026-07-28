@@ -12,6 +12,7 @@ let fetchMock: MockedFunction<typeof fetch>;
 function jsonResponse(body: unknown, status = 200): Response {
   return {
     status,
+    ok: status >= 200 && status < 300,
     statusText: status === 200 ? 'OK' : 'Error',
     json: async () => body,
     text: async () => JSON.stringify(body),
@@ -102,6 +103,57 @@ describe('BackendUploader request context', () => {
     ).resolves.toBe(true);
 
     expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
+  });
+
+  it('opens an existing trace through an isolated viewer lease', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        trace: {
+          id: 'trace-existing',
+          leaseId: 'lease-viewer',
+          leaseMode: 'isolated',
+          leaseModeReason: 'requested_isolated',
+          websocketCapability: {
+            protocol: 'smartperfetto.tp.viewer-capability',
+            expiresAt: 654321,
+          },
+        },
+      }),
+    );
+
+    const result = await new BackendUploader(
+      'https://backend.example/base',
+      'spak_test-secret',
+    ).openExistingTrace('trace-existing', 'pane-current');
+
+    expect(result).toMatchObject({
+      success: true,
+      traceId: 'trace-existing',
+      leaseId: 'lease-viewer',
+      leaseMode: 'isolated',
+      rpcTarget: {
+        mode: 'backend-lease-proxy',
+        leaseId: 'lease-viewer',
+        websocketProtocols: ['smartperfetto.tp.viewer-capability'],
+        websocketCapabilityExpiresAt: 654321,
+      },
+    });
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      '/traces/trace-existing/viewer',
+    );
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      cache: 'no-cache',
+      credentials: 'include',
+      body: JSON.stringify({sessionId: 'pane-current'}),
+    });
+    expect(requestHeaders(0)).toMatchObject({
+      Authorization: 'Bearer spak_test-secret',
+      'Content-Type': 'application/json',
+      'x-api-key': 'spak_test-secret',
+      'X-Window-Id': 'window-upload',
+    });
   });
 
   it('sends the configured API key on health and upload requests', async () => {

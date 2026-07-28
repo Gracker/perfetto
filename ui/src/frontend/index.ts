@@ -65,6 +65,7 @@ import {
 import {type HotkeyConfig, HotkeyContext} from '../widgets/hotkey_context';
 import {sleepMs} from '../base/utils';
 import {getSmartPerfettoBackendCspSources} from '../core/smartperfetto_backend_url';
+import {getBackendUploader} from '../core/backend_uploader';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -128,6 +129,45 @@ function routeChange(route: Route) {
     }
   });
   maybeOpenTraceFromRoute(route);
+}
+
+async function maybeOpenSmartPerfettoDualTracePane(
+  app: AppImpl,
+): Promise<boolean> {
+  const route = Router.parseUrl(window.location.href);
+  const isDualTrace =
+    route.args.smartperfettoDualTrace === true ||
+    route.args.smartperfettoDualTrace === 'true';
+  const traceId = route.args.smartperfettoTraceId;
+  if (!isDualTrace || typeof traceId !== 'string' || !traceId.trim()) {
+    return false;
+  }
+
+  try {
+    const pane =
+      typeof route.args.smartperfettoPane === 'string'
+        ? route.args.smartperfettoPane
+        : 'pane';
+    const result = await getBackendUploader().openExistingTrace(
+      traceId,
+      `dual-trace:${pane}`,
+    );
+    if (!result.success || !result.rpcTarget) {
+      throw new Error(result.error ?? 'Backend did not return an RPC target');
+    }
+    const state = await HttpRpcEngine.checkTargetConnection(result.rpcTarget);
+    if (!state.connected) {
+      throw new Error(
+        `Isolated trace processor connection failed: ${state.failure ?? 'unknown error'}`,
+      );
+    }
+    HttpRpcEngine.setRpcTarget(result.rpcTarget);
+    app.httpRpc.httpRpcAvailable = true;
+    await app.openTraceFromHttpRpc();
+  } catch (error) {
+    reportError(error);
+  }
+  return true;
 }
 
 function setupContentSecurityPolicy() {
@@ -457,8 +497,10 @@ function onCssLoaded(app: AppImpl) {
   // Don't auto-open any trace URLs until we get a response here because we may
   // accidentially clober the state of an open trace processor instance
   // otherwise.
-  maybeChangeRpcPortFromFragment();
-  checkHttpRpcConnection().then(() => {
+  void maybeOpenSmartPerfettoDualTracePane(app).then((handled) => {
+    if (handled) return;
+    maybeChangeRpcPortFromFragment();
+    return checkHttpRpcConnection().then(() => {
     const route = Router.parseUrl(window.location.href);
     if (!app.embeddedMode) {
       installFileDropHandler();
@@ -476,7 +518,8 @@ function onCssLoaded(app: AppImpl) {
 
     // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
     // cases.
-    routeChange(route);
+      routeChange(route);
+    });
   });
 
   // Initialize plugins, now that we are ready to go.

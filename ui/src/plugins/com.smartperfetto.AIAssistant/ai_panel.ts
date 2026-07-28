@@ -1515,7 +1515,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.state.backendTraceId || '',
       ].join(':'),
       backendUrl: this.state.settings.backendUrl,
-      backendHeaders: this.buildBackendHeaders(),
     };
   }
 

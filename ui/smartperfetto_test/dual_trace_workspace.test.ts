@@ -216,7 +216,7 @@ test('keeps heavy/light analysis stable through window operations and confirms s
       '分析运行中，停止后可退出双窗',
     );
     await expect(workspaceExit).toContainText('退出双窗');
-    await expect(page.getByTitle('New Chat')).toBeDisabled();
+    await expect(page.getByTitle('新对话')).toBeDisabled();
     await expect(page.getByTitle('分析运行中，设置保持只读')).toBeDisabled();
     await expect(page.locator('[data-switcher] > button')).toBeDisabled();
     await expect(page.getByTitle('请先停止当前分析再退出对比')).toBeDisabled();

@@ -28,6 +28,8 @@ export class BrowserNetworkLedger {
   readonly cancelRequests: CancelRequestProbe[] = [];
   readonly traceFileUrls: string[] = [];
   readonly traceFileAuthenticated: boolean[] = [];
+  readonly traceViewerUrls: string[] = [];
+  readonly traceViewerAuthenticated: boolean[] = [];
   readonly streamRequests: StreamRequestProbe[] = [];
 
   constructor(page: Page) {
@@ -53,6 +55,13 @@ export class BrowserNetworkLedger {
         this.traceFileUrls.push(request.url());
         const headers = request.headers();
         this.traceFileAuthenticated.push(
+          Boolean(headers.authorization && headers['x-api-key']),
+        );
+      }
+      if (request.method() === 'POST' && /\/traces\/[^/]+\/viewer$/.test(path)) {
+        this.traceViewerUrls.push(request.url());
+        const headers = request.headers();
+        this.traceViewerAuthenticated.push(
           Boolean(headers.authorization && headers['x-api-key']),
         );
       }
@@ -113,19 +122,26 @@ export async function waitForEmbeddedTraces(page: Page): Promise<void> {
     .toBe(2);
   await Promise.all(
     embeddedTraceFrames(page).map(async (frame) => {
-      await frame.waitForFunction(
-        () => typeof Reflect.get(window, 'waitForPerfettoIdle') === 'function',
-        undefined,
-        {timeout: 120_000},
-      );
       try {
-        await frame.evaluate(async () => {
-          const idle = Reflect.get(window, 'waitForPerfettoIdle');
-          if (typeof idle !== 'function') {
-            throw new Error('Embedded Perfetto idle detector is unavailable');
-          }
-          await Reflect.apply(idle, window, []);
-        });
+        await frame.waitForFunction(
+          () => {
+            const app = Reflect.get(window, 'app') as
+              | {
+                  isLoadingTrace?: boolean;
+                  trace?: {engine?: {numRequestsPending?: number}};
+                }
+              | undefined;
+            return (
+              window.location.hash.includes('smartperfettoTraceId=') &&
+              app?.isLoadingTrace === false &&
+              app.trace?.engine?.numRequestsPending === 0 &&
+              document.querySelector('.pf-track') !== null &&
+              document.querySelector('.progress.progress-anim') === null
+            );
+          },
+          undefined,
+          {timeout: 120_000},
+        );
       } catch (error) {
         const diagnostic = await frame.evaluate(() => ({
           url: window.location.href,
@@ -135,6 +151,15 @@ export async function waitForEmbeddedTraces(page: Page): Promise<void> {
           progress:
             document.querySelector('.progress.progress-anim')?.textContent ??
             null,
+          isLoadingTrace: (
+            Reflect.get(window, 'app') as {isLoadingTrace?: boolean} | undefined
+          )?.isLoadingTrace,
+          pendingRequests: (
+            Reflect.get(window, 'app') as
+              | {trace?: {engine?: {numRequestsPending?: number}}}
+              | undefined
+          )?.trace?.engine?.numRequestsPending,
+          trackCount: document.querySelectorAll('.pf-track').length,
           title: document.title,
         }));
         throw new Error(
