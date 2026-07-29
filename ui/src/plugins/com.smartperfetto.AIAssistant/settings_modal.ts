@@ -29,6 +29,7 @@ import {
   applicationUpgradeInstruction,
   type ApplicationUpdateStatus,
 } from './application_update';
+import {SelfEvolutionPanel} from './self_evolution_panel';
 
 export interface SettingsModalAttrs {
   settings: AISettings;
@@ -88,7 +89,7 @@ const MODAL_STYLES = {
     backgroundColor: 'var(--chat-bg)',
     color: 'var(--chat-text)',
     borderRadius: '12px',
-    width: '540px',
+    width: '720px',
     maxWidth: '90vw',
     height: '80vh',
     maxHeight: '90vh',
@@ -135,7 +136,7 @@ const MODAL_STYLES = {
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
     borderRadius: '6px',
-    transition: 'all 0.15s ease',
+    transition: 'color 0.15s ease, background-color 0.15s ease, transform 0.15s ease',
   },
   content: {
     padding: '24px',
@@ -178,7 +179,8 @@ const MODAL_STYLES = {
     color: 'var(--chat-text)',
     fontSize: '14px',
     boxSizing: 'border-box' as const,
-    transition: 'all 0.15s ease',
+    transition:
+      'border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease',
     fontFamily: 'inherit',
   },
   hint: {
@@ -221,7 +223,8 @@ const MODAL_STYLES = {
     cursor: 'pointer',
     fontSize: '13px',
     fontWeight: 500,
-    transition: 'all 0.15s ease',
+    transition:
+      'box-shadow 0.15s ease, transform 0.15s ease, opacity 0.15s ease',
   },
   statusBtnDisabled: {
     opacity: 0.6,
@@ -308,7 +311,8 @@ const MODAL_STYLES = {
     fontSize: '14px',
     fontWeight: 500,
     cursor: 'pointer',
-    transition: 'all 0.15s ease',
+    transition:
+      'box-shadow 0.15s ease, transform 0.15s ease, opacity 0.15s ease',
   },
   btnSecondary: {
     backgroundColor: 'transparent',
@@ -329,13 +333,16 @@ const TAB_STYLES = {
     padding: '0 24px',
   },
   tab: {
-    padding: '12px 20px',
+    flex: 1,
+    minHeight: '40px',
+    padding: '10px 8px',
     fontSize: '14px',
     fontWeight: 500,
     cursor: 'pointer',
     color: 'var(--chat-text-secondary)',
     borderBottom: '2px solid transparent',
-    transition: 'all 0.15s ease',
+    transition:
+      'color 0.15s ease, border-bottom-color 0.15s ease, background-color 0.15s ease',
     background: 'transparent',
     border: 'none',
     borderBottomWidth: '2px',
@@ -348,7 +355,11 @@ const TAB_STYLES = {
   },
 };
 
-type SettingsTab = 'connection' | 'providers' | 'codebases';
+type SettingsTab =
+  | 'connection'
+  | 'providers'
+  | 'codebases'
+  | 'evolution';
 
 export function settingsBackendBindingChanged(
   committed: AISettings,
@@ -467,8 +478,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const tabs: SettingsTab[] = providersDisabled
-      ? ['connection', 'codebases']
-      : ['connection', 'providers', 'codebases'];
+      ? ['connection', 'codebases', 'evolution']
+      : ['connection', 'providers', 'codebases', 'evolution'];
     const currentIndex = Math.max(0, tabs.indexOf(this.currentTab));
     const nextIndex =
       event.key === 'Home'
@@ -1179,6 +1190,33 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                 },
                 uiText('源码库', 'Codebases'),
               ),
+              m(
+                'button',
+                {
+                  'type': 'button',
+                  'id': 'smartperfetto-settings-tab-evolution',
+                  'role': 'tab',
+                  'aria-selected':
+                    this.currentTab === 'evolution' ? 'true' : 'false',
+                  'aria-controls': 'smartperfetto-settings-panel-evolution',
+                  'tabindex': this.currentTab === 'evolution' ? 0 : -1,
+                  'style': {
+                    ...TAB_STYLES.tab,
+                    ...(this.currentTab === 'evolution'
+                      ? TAB_STYLES.tabActive
+                      : {}),
+                  },
+                  'onclick': () => {
+                    this.currentTab = 'evolution';
+                  },
+                  'onkeydown': (event: KeyboardEvent) =>
+                    this.handleTabKeyDown(
+                      event,
+                      readOnly || backendBindingDirty,
+                    ),
+                },
+                uiText('自进化', 'Evolution'),
+              ),
             ],
           ),
 
@@ -1251,7 +1289,41 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                       }),
                     ],
                   )
-            : this.currentTab === 'codebases'
+            : this.currentTab === 'evolution'
+              ? m(
+                  'div',
+                  {
+                    'style': {...MODAL_STYLES.content, padding: 0},
+                    'role': 'tabpanel',
+                    'id': 'smartperfetto-settings-panel-evolution',
+                    'aria-labelledby': 'smartperfetto-settings-tab-evolution',
+                  },
+                  [
+                    backendBindingDirty
+                      ? m(
+                          'div',
+                          {
+                            style: {
+                              ...MODAL_STYLES.alertBox,
+                              ...MODAL_STYLES.alertWarning,
+                              margin: '16px 16px 0',
+                            },
+                          },
+                          uiText(
+                            '连接地址或凭证有未保存的修改。控制台仍读取已保存的后端，并暂时禁用写操作。',
+                            'Backend URL or credentials have unsaved changes. The control plane still reads the saved backend and temporarily disables mutations.',
+                          ),
+                        )
+                      : null,
+                    m(SelfEvolutionPanel, {
+                      backendUrl: vnode.attrs.settings.backendUrl,
+                      apiKey:
+                        vnode.attrs.settings.backendApiKey || undefined,
+                      readOnly: readOnly || backendBindingDirty,
+                    }),
+                  ],
+                )
+              : this.currentTab === 'codebases'
               ? m(
                   'div',
                   {
