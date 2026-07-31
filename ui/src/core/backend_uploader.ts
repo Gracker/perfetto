@@ -146,6 +146,7 @@ export class BackendUploader {
         {
           method: 'GET',
           cache: 'no-cache',
+          credentials: 'include',
           headers: this.requestHeaders(),
         },
         BACKEND_CHECK_TIMEOUT_MS,
@@ -266,6 +267,7 @@ export class BackendUploader {
         buildSmartPerfettoWorkspaceApiUrl(this.backendUrl, 'traces', '/upload'),
         {
           method: 'POST',
+          credentials: 'include',
           headers: this.requestHeaders(),
           body: formData,
         },
@@ -378,6 +380,7 @@ export class BackendUploader {
         ),
         {
           method: 'POST',
+          credentials: 'include',
           headers: this.requestHeaders({
             'Content-Type': 'application/json',
           }),

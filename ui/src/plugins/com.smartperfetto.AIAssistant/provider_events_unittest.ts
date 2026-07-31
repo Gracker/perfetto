@@ -142,6 +142,7 @@ describe('Analysis identity lock', () => {
           onClose: () => {},
           onSave,
           onWorkspaceChange,
+          onEnterpriseIdentityChange: () => {},
           onCheckStatus: async () => ({connected: true}),
           onProviderSelectionChange,
         }),

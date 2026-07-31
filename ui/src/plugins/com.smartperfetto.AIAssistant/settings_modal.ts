@@ -30,6 +30,8 @@ import {
   type ApplicationUpdateStatus,
 } from './application_update';
 import {SelfEvolutionPanel} from './self_evolution_panel';
+import {EnterpriseAuthCard} from './enterprise_auth_card';
+import type {EnterpriseAuthIdentity} from './enterprise_auth';
 
 export interface SettingsModalAttrs {
   settings: AISettings;
@@ -39,6 +41,9 @@ export interface SettingsModalAttrs {
   onClose: () => void;
   onSave: (settings: AISettings) => void;
   onWorkspaceChange: (workspaceId: string) => void;
+  onEnterpriseIdentityChange: (
+    identity: EnterpriseAuthIdentity | null,
+  ) => void;
   onCheckStatus: (backendUrl: string, apiKey: string) => Promise<ServerStatus>;
   onProviderSelectionChange: () => void;
   onAnalysisContextChange?: (selection: AnalysisContextSelection) => void;
@@ -1509,6 +1514,17 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                           placeholder: getDefaultSmartPerfettoBackendUrl(),
                         }),
                       ]),
+                      m(EnterpriseAuthCard, {
+                        backendUrl: vnode.attrs.settings.backendUrl,
+                        readOnly:
+                          readOnly ||
+                          settingsBackendBindingChanged(
+                            vnode.attrs.settings,
+                            this.settings,
+                          ),
+                        onIdentityChange:
+                          vnode.attrs.onEnterpriseIdentityChange,
+                      }),
                       m('div', {style: MODAL_STYLES.field}, [
                         m(
                           'button',

@@ -17,6 +17,7 @@
 // limitations under the License.
 
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
+import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 
 export type CodebaseKind = 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk';
 export type CodebaseRootAuthorization =
@@ -203,7 +204,7 @@ export async function listCodebases(
   backendUrl: string,
   apiKey?: string,
 ): Promise<{featureEnabled: boolean; codebases: CodebaseSummary[]}> {
-  const res = await fetch(buildCodebaseApiUrl(backendUrl, '/codebases'), {
+  const res = await fetchSmartPerfettoBackend(buildCodebaseApiUrl(backendUrl, '/codebases'), {
     headers: buildHeaders(apiKey),
   });
   const body = await readJsonOrThrow<{
@@ -220,7 +221,7 @@ export async function listExternalKnowledgeSources(
   backendUrl: string,
   apiKey?: string,
 ): Promise<ExternalKnowledgeSourceSummary[]> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, '/android-internals/sources'),
     {headers: buildHeaders(apiKey)},
   );
@@ -235,7 +236,7 @@ export async function registerExternalKnowledgeSource(
   input: RegisterExternalKnowledgeSourceInput,
   apiKey?: string,
 ): Promise<ExternalKnowledgeSourceSummary> {
-  const res = await fetch(buildCodebaseApiUrl(backendUrl, '/android-internals/sources'), {
+  const res = await fetchSmartPerfettoBackend(buildCodebaseApiUrl(backendUrl, '/android-internals/sources'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
     body: JSON.stringify(input),
@@ -249,7 +250,7 @@ export async function reindexExternalKnowledgeSource(
   sourceId: string,
   apiKey?: string,
 ): Promise<void> {
-  const res = await fetch(buildCodebaseApiUrl(
+  const res = await fetchSmartPerfettoBackend(buildCodebaseApiUrl(
     backendUrl,
     `/android-internals/sources/${encodeURIComponent(sourceId)}/reindex`,
   ), {
@@ -266,7 +267,7 @@ export async function previewCodebaseRoot(
   apiKey?: string,
   directorySelectionId?: string,
 ): Promise<CodebasePreview> {
-  const res = await fetch(buildCodebaseApiUrl(backendUrl, '/codebases/preview'), {
+  const res = await fetchSmartPerfettoBackend(buildCodebaseApiUrl(backendUrl, '/codebases/preview'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
     body: JSON.stringify({
@@ -282,7 +283,7 @@ export async function getCodebaseDirectoryPickerCapability(
   backendUrl: string,
   apiKey?: string,
 ): Promise<CodebaseDirectoryPickerCapability> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
     {headers: buildHeaders(apiKey)},
   );
@@ -296,7 +297,7 @@ export async function selectCodebaseDirectory(
   backendUrl: string,
   apiKey?: string,
 ): Promise<CodebaseDirectoryPickerResult> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
     {
       method: 'POST',
@@ -312,7 +313,7 @@ export async function registerCodebase(
   input: RegisterCodebaseInput,
   apiKey?: string,
 ): Promise<{codebase: CodebaseSummary; preview?: CodebasePreview}> {
-  const res = await fetch(buildCodebaseApiUrl(backendUrl, '/codebases/register'), {
+  const res = await fetchSmartPerfettoBackend(buildCodebaseApiUrl(backendUrl, '/codebases/register'), {
     method: 'POST',
     headers: buildHeaders(apiKey),
     body: JSON.stringify(input),
@@ -325,7 +326,7 @@ export async function reindexCodebase(
   codebaseId: string,
   apiKey?: string,
 ): Promise<ReindexCodebaseResult> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/reindex`),
     {
       method: 'POST',
@@ -342,7 +343,7 @@ export async function deleteCodebase(
   codebaseId: string,
   apiKey?: string,
 ): Promise<{codebaseId: string; removedChunkCount: number; alreadyDeleted?: boolean}> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}`),
     {
       method: 'DELETE',
@@ -362,7 +363,7 @@ export async function updateCodebaseConsent(
   sendToProvider: boolean,
   apiKey?: string,
 ): Promise<CodebaseSummary> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
     {
       method: 'PATCH',
@@ -380,7 +381,7 @@ export async function updateExternalKnowledgeSourceConsent(
   sendToProvider: boolean,
   apiKey?: string,
 ): Promise<ExternalKnowledgeSourceSummary> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(
       backendUrl,
       `/android-internals/sources/${encodeURIComponent(sourceId)}/consent`,
@@ -400,7 +401,7 @@ export async function loadCodebaseAudit(
   codebaseId: string,
   apiKey?: string,
 ): Promise<CodebaseAudit> {
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/audit`),
     {headers: buildHeaders(apiKey)},
   );
@@ -415,7 +416,7 @@ export async function loadCodeExcerpt(
   apiKey?: string,
 ): Promise<CodeExcerpt> {
   const params = new URLSearchParams({chunkId});
-  const res = await fetch(
+  const res = await fetchSmartPerfettoBackend(
     buildCodebaseApiUrl(
       backendUrl,
       `/codebases/${encodeURIComponent(codebaseId)}/excerpt?${params.toString()}`,

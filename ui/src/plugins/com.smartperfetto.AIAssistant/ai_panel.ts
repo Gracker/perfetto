@@ -18,6 +18,7 @@
 
 import m from 'mithril';
 import {SettingsModal} from './settings_modal';
+import type {EnterpriseAuthIdentity} from './enterprise_auth';
 import {ProviderQuickSwitcher} from './provider_switcher';
 import {SqlResultTable} from './sql_result_table';
 import type {UserInteraction} from './sql_result_table';
@@ -46,9 +47,13 @@ import {getSmartPerfettoExternalIssueUrl} from '../../core/smartperfetto_backend
 import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoWorkspaceApiUrl,
+  clearSmartPerfettoIdentityContext,
+  getDefaultSmartPerfettoIdentityContext,
   getSmartPerfettoRequestContext,
+  setSmartPerfettoIdentityContext,
   setSmartPerfettoWorkspaceId,
 } from '../../core/smartperfetto_request_context';
+import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 import {
   getBackendUploadState,
   backendUploadSnapshotMatchesIdentity,
@@ -3267,6 +3272,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 this.saveSettings(newSettings),
               onWorkspaceChange: (workspaceId: string) =>
                 this.onWorkspaceSelectionChange(workspaceId),
+              onEnterpriseIdentityChange: (
+                identity: EnterpriseAuthIdentity | null,
+              ) => this.onEnterpriseIdentityChange(identity),
               onCheckStatus: (url: string, key: string) =>
                 this.checkServerStatus(url, key),
               onProviderSelectionChange: () => this.onProviderSelectionChange(),
@@ -6209,6 +6217,45 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.isAnalysisIdentityLocked()) return;
     const previousContext = getSmartPerfettoRequestContext();
     if (workspaceId === previousContext.workspaceId) return;
+    this.transitionIdentityContext(
+      () => {
+        setSmartPerfettoWorkspaceId(
+          workspaceId,
+          previousContext.tenantId,
+          previousContext.userId,
+        );
+        return getSmartPerfettoRequestContext();
+      },
+      previousContext,
+    );
+  }
+
+  private onEnterpriseIdentityChange(
+    identity: EnterpriseAuthIdentity | null,
+  ): void {
+    if (this.isAnalysisIdentityLocked()) return;
+    const previousContext = getSmartPerfettoRequestContext();
+    const nextIdentity =
+      identity ?? getDefaultSmartPerfettoIdentityContext();
+    if (
+      nextIdentity.tenantId === previousContext.tenantId
+      && nextIdentity.userId === previousContext.userId
+      && nextIdentity.workspaceId === previousContext.workspaceId
+    ) {
+      return;
+    }
+    this.transitionIdentityContext(
+      () => identity
+        ? setSmartPerfettoIdentityContext(identity)
+        : clearSmartPerfettoIdentityContext(),
+      previousContext,
+    );
+  }
+
+  private transitionIdentityContext(
+    applyIdentity: () => ReturnType<typeof getSmartPerfettoRequestContext>,
+    previousContext: ReturnType<typeof getSmartPerfettoRequestContext>,
+  ): void {
     this.flushSessionSave();
     this.saveCurrentSession();
     this.cancelSSEConnection();
@@ -6216,12 +6263,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.agentSessionId,
       this.state.settings.backendUrl,
     );
-    const nextWorkspaceId = setSmartPerfettoWorkspaceId(
-      workspaceId,
-      previousContext.tenantId,
-      previousContext.userId,
-    );
-    if (nextWorkspaceId === previousContext.workspaceId) return;
+    const nextContext = applyIdentity();
+    if (
+      nextContext.tenantId === previousContext.tenantId
+      && nextContext.userId === previousContext.userId
+      && nextContext.workspaceId === previousContext.workspaceId
+    ) {
+      return;
+    }
     const sourceKey = this.getBackendUploadSourceKey();
     const nextBackendIdentityKey = getBackendUploadIdentityKey(
       this.state.settings.backendUrl,
@@ -6243,8 +6292,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       id: this.generateId(),
       role: 'system',
       content: uiText(
-        `已切换到 Workspace: ${nextWorkspaceId}。当前窗口的 Trace、AI 会话和临时运行状态已按新 Workspace 隔离。`,
-        `Switched to workspace ${nextWorkspaceId}. This window's trace, AI session, and transient run state are isolated in the new workspace.`,
+        `已切换到身份 ${nextContext.userId} / Workspace: ${nextContext.workspaceId}。当前窗口的 Trace、AI 会话和临时运行状态已按新身份隔离。`,
+        `Switched to identity ${nextContext.userId} / workspace ${nextContext.workspaceId}. This window's trace, AI session, and transient run state are isolated under the new identity.`,
       ),
       timestamp: Date.now(),
     });
@@ -6626,7 +6675,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private fetchBackend(url: string, init: RequestInit = {}): Promise<Response> {
-    return fetch(url, {
+    return fetchSmartPerfettoBackend(url, {
       ...init,
       headers: this.buildBackendHeaders(init.headers),
     });
@@ -7193,7 +7242,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         headers['x-api-key'] = trimmedKey;
         headers['Authorization'] = `Bearer ${trimmedKey}`;
       }
-      const response = await fetch(
+      const response = await fetchSmartPerfettoBackend(
         `${backendUrl.replace(/\/+$/, '')}/api/runtime-health`,
         {
           headers: buildSmartPerfettoContextHeaders(headers),
@@ -7255,7 +7304,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.applicationUpdateChecking = true;
     if (force) this.applicationUpdatePollAttempts = 0;
     const backendUrl = this.state.settings.backendUrl.replace(/\/+$/, '');
-    const request = fetch(`${backendUrl}/api/application-update/${force ? 'check' : 'status'}`, {
+    const request = fetchSmartPerfettoBackend(`${backendUrl}/api/application-update/${force ? 'check' : 'status'}`, {
       method: force ? 'POST' : 'GET',
       headers: this.buildBackendHeaders(),
       credentials: 'include',

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import m from 'mithril';
+import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 
 import type {
   ProviderConfig,
@@ -110,10 +111,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
     try {
       const [providersRes, templatesRes] = await Promise.all([
-        fetch(apiUrl(this.backendUrl, ''), {
+        fetchSmartPerfettoBackend(apiUrl(this.backendUrl, ''), {
           headers: buildHeaders(this.apiKey),
         }),
-        fetch(apiUrl(this.backendUrl, '/templates'), {
+        fetchSmartPerfettoBackend(apiUrl(this.backendUrl, '/templates'), {
           headers: buildHeaders(this.apiKey),
         }),
       ]);
@@ -159,7 +160,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     this.loadingEffective = true;
     m.redraw();
     try {
-      const res = await fetch(apiUrl(this.backendUrl, '/effective'), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, '/effective'), {
         headers: buildHeaders(this.apiKey),
       });
       if (res.ok) {
@@ -176,7 +177,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
   private async activateProvider(id: string) {
     try {
-      const res = await fetch(apiUrl(this.backendUrl, `/${id}/activate`), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, `/${id}/activate`), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });
@@ -199,7 +200,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
   private async deactivateAll() {
     try {
-      const res = await fetch(apiUrl(this.backendUrl, '/deactivate'), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, '/deactivate'), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });
@@ -230,7 +231,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     m.redraw();
 
     try {
-      const res = await fetch(apiUrl(this.backendUrl, `/${id}`), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, `/${id}`), {
         method: 'DELETE',
         headers: buildHeaders(this.apiKey),
       });
@@ -268,7 +269,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     m.redraw();
 
     try {
-      const res = await fetch(apiUrl(this.backendUrl, `/${id}/test`), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, `/${id}/test`), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import m from 'mithril';
+import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 
 import {
   type AgentRuntimeKind,
@@ -175,7 +176,7 @@ export class ProviderQuickSwitcher
   private async loadProviders() {
     this.loading = true;
     try {
-      const res = await fetch(apiUrl(this.backendUrl, ''), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, ''), {
         headers: buildHeaders(this.apiKey),
       });
       if (res.ok) {
@@ -200,7 +201,7 @@ export class ProviderQuickSwitcher
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
-      const res = await fetch(apiUrl(this.backendUrl, `/${id}/activate`), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, `/${id}/activate`), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });
@@ -233,7 +234,7 @@ export class ProviderQuickSwitcher
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
-      const runtimeRes = await fetch(
+      const runtimeRes = await fetchSmartPerfettoBackend(
         apiUrl(this.backendUrl, `/${provider.id}/runtime`),
         {
           method: 'POST',
@@ -244,7 +245,7 @@ export class ProviderQuickSwitcher
       if (!runtimeRes.ok) return;
       if (this.isMutationLocked()) return;
 
-      const activateRes = await fetch(
+      const activateRes = await fetchSmartPerfettoBackend(
         apiUrl(this.backendUrl, `/${provider.id}/activate`),
         {
           method: 'POST',
@@ -278,7 +279,7 @@ export class ProviderQuickSwitcher
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
-      const res = await fetch(apiUrl(this.backendUrl, '/deactivate'), {
+      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, '/deactivate'), {
         method: 'POST',
         headers: buildHeaders(this.apiKey),
       });

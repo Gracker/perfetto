@@ -7,9 +7,12 @@ import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoTraceProcessorProxyTarget,
   buildSmartPerfettoWorkspaceApiUrl,
+  clearSmartPerfettoIdentityContext,
+  getDefaultSmartPerfettoIdentityContext,
   getSmartPerfettoRequestContext,
   getSmartPerfettoStorageNamespace,
   getSmartPerfettoWindowId,
+  setSmartPerfettoIdentityContext,
   setSmartPerfettoWorkspaceId,
 } from './smartperfetto_request_context';
 
@@ -75,6 +78,51 @@ describe('SmartPerfetto frontend request context', () => {
     ).toBe('workspace-a');
     expect(buildSmartPerfettoContextHeaders()).toMatchObject({
       'X-Workspace-Id': 'workspace-a',
+    });
+  });
+
+  it('switches the complete persisted identity after enterprise sign-in', () => {
+    sessionStorage.setItem('smartperfetto-window-id', 'window-a');
+
+    expect(setSmartPerfettoIdentityContext({
+      tenantId: 'tenant-enterprise',
+      userId: 'sso-user-a',
+      workspaceId: 'workspace-enterprise',
+    })).toEqual({
+      tenantId: 'tenant-enterprise',
+      userId: 'sso-user-a',
+      workspaceId: 'workspace-enterprise',
+      windowId: 'window-a',
+    });
+    expect(localStorage.getItem('smartperfetto-tenant-id')).toBe(
+      'tenant-enterprise',
+    );
+    expect(localStorage.getItem('smartperfetto-user-id')).toBe('sso-user-a');
+
+    expect(clearSmartPerfettoIdentityContext()).toEqual({
+      tenantId: 'default-dev-tenant',
+      userId: 'dev-user-123',
+      workspaceId: 'default-workspace',
+      windowId: 'window-a',
+    });
+  });
+
+  it('resolves the effective identity produced by clearing enterprise state', () => {
+    setSmartPerfettoWorkspaceId(
+      'local-workspace',
+      'default-dev-tenant',
+      'dev-user-123',
+    );
+    setSmartPerfettoIdentityContext({
+      tenantId: 'tenant-enterprise',
+      userId: 'sso-user-a',
+      workspaceId: 'workspace-enterprise',
+    });
+
+    expect(getDefaultSmartPerfettoIdentityContext()).toEqual({
+      tenantId: 'default-dev-tenant',
+      userId: 'dev-user-123',
+      workspaceId: 'local-workspace',
     });
   });
 

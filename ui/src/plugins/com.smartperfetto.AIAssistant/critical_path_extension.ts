@@ -11,6 +11,7 @@ import {
 import {THREAD_STATE_TRACK_KIND} from '../../public/track_kinds';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
+import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 import {SETTINGS_KEY} from './types';
 import {getSettingsStorageKey} from './session_manager';
 import {uiOutputLanguage, uiText} from './ui_language';
@@ -103,7 +104,7 @@ function getBackendUrl(): string {
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetchSmartPerfettoBackend(url, {
     ...options,
     headers: buildSmartPerfettoContextHeaders(options?.headers),
   });

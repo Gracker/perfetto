@@ -7,6 +7,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {CodebasePanel} from './codebase_panel';
 import {ProviderPanel} from './provider_panel';
 import {SettingsModal, type SettingsModalAttrs} from './settings_modal';
+import {EnterpriseAuthCard} from './enterprise_auth_card';
 import {DEFAULT_SETTINGS} from './types';
 
 function findComponent(node: any, tag: unknown): any {
@@ -55,6 +56,7 @@ describe('SettingsModal codebase binding', () => {
       onClose: vi.fn(),
       onSave: vi.fn(),
       onWorkspaceChange: vi.fn(),
+      onEnterpriseIdentityChange: vi.fn(),
       onCheckStatus: vi.fn(async () => ({connected: true})),
       onProviderSelectionChange: vi.fn(),
     };
@@ -70,6 +72,10 @@ describe('SettingsModal codebase binding', () => {
     expect(findNode(view, (node) => node.attrs?.['aria-label'] === 'Close settings')).toBeDefined();
     expect(findNode(view, (node) => node.attrs?.for === 'smartperfetto-workspace-id')).toBeDefined();
     expect(findNode(view, (node) => node.attrs?.id === 'smartperfetto-workspace-id')).toBeDefined();
+    expect(findComponent(view, EnterpriseAuthCard)?.attrs).toMatchObject({
+      backendUrl: DEFAULT_SETTINGS.backendUrl,
+      readOnly: false,
+    });
   });
 
   it('keeps codebase mutations on the committed backend while connection edits are unsaved', () => {
@@ -93,6 +99,7 @@ describe('SettingsModal codebase binding', () => {
       onClose: vi.fn(),
       onSave: vi.fn(),
       onWorkspaceChange: vi.fn(),
+      onEnterpriseIdentityChange: vi.fn(),
       onCheckStatus: vi.fn(async () => ({connected: true})),
       onProviderSelectionChange: vi.fn(),
       onAnalysisContextChange: vi.fn(),

@@ -21,6 +21,12 @@ export interface SmartPerfettoRequestContext {
   windowId: string;
 }
 
+export interface SmartPerfettoIdentityContext {
+  tenantId: string;
+  userId: string;
+  workspaceId: string;
+}
+
 function createWindowId(): string {
   return `win-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
@@ -59,6 +65,14 @@ function setLocalStorageValue(key: string, value: string): void {
   }
 }
 
+function removeLocalStorageValue(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures in private browsing / quota edge cases.
+  }
+}
+
 function getWorkspacePreferenceKey(tenantId: string, userId: string): string {
   return `${WORKSPACE_PREFERENCE_KEY_PREFIX}:${tenantId}:${userId}`;
 }
@@ -87,6 +101,18 @@ export function getSmartPerfettoWorkspaceId(
   );
 }
 
+export function getDefaultSmartPerfettoIdentityContext():
+    SmartPerfettoIdentityContext {
+  return {
+    tenantId: DEFAULT_SMARTPERFETTO_TENANT_ID,
+    userId: DEFAULT_SMARTPERFETTO_USER_ID,
+    workspaceId: getSmartPerfettoWorkspaceId(
+      DEFAULT_SMARTPERFETTO_TENANT_ID,
+      DEFAULT_SMARTPERFETTO_USER_ID,
+    ),
+  };
+}
+
 export function setSmartPerfettoWorkspaceId(
   workspaceId: string,
   tenantId = getSmartPerfettoTenantId(),
@@ -98,6 +124,29 @@ export function setSmartPerfettoWorkspaceId(
   );
   setLocalStorageValue(getWorkspacePreferenceKey(tenantId, userId), sanitized);
   return sanitized;
+}
+
+export function setSmartPerfettoIdentityContext(
+  identity: SmartPerfettoIdentityContext,
+): SmartPerfettoRequestContext {
+  const tenantId = sanitizeContextId(
+    identity.tenantId,
+    DEFAULT_SMARTPERFETTO_TENANT_ID,
+  );
+  const userId = sanitizeContextId(
+    identity.userId,
+    DEFAULT_SMARTPERFETTO_USER_ID,
+  );
+  setLocalStorageValue(TENANT_ID_KEY, tenantId);
+  setLocalStorageValue(USER_ID_KEY, userId);
+  setSmartPerfettoWorkspaceId(identity.workspaceId, tenantId, userId);
+  return getSmartPerfettoRequestContext();
+}
+
+export function clearSmartPerfettoIdentityContext(): SmartPerfettoRequestContext {
+  removeLocalStorageValue(TENANT_ID_KEY);
+  removeLocalStorageValue(USER_ID_KEY);
+  return getSmartPerfettoRequestContext();
 }
 
 export function getSmartPerfettoRequestContext(): SmartPerfettoRequestContext {
