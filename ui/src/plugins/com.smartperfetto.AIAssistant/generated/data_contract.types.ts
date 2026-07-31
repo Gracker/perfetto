@@ -635,6 +635,11 @@ export interface ExternalIssueReviewV1 {
   model?: string;
   fallbackReason?: ExternalIssueReviewUnavailableReason | 'agent_invalid';
   candidates: ExternalIssueReviewCandidateV1[];
+  /**
+   * Short-lived server proof issued by the review endpoint. The draft endpoint
+   * requires it so clients cannot forge or alter an Agent/fallback review.
+   */
+  serverAttestation?: string;
 }
 
 export interface ExternalIssueUserAnswerV1 {
