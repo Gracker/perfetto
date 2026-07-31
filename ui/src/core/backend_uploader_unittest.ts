@@ -4,7 +4,11 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {MockedFunction} from 'vitest';
 
 import {backendUploadSourceKey, BackendUploader} from './backend_uploader';
-import {getSmartPerfettoBackendCspSources} from './smartperfetto_backend_url';
+import {
+  DEFAULT_SMARTPERFETTO_EXTERNAL_ISSUE_URL,
+  getSmartPerfettoBackendCspSources,
+  getSmartPerfettoExternalIssueUrl,
+} from './smartperfetto_backend_url';
 
 let originalFetch: typeof fetch;
 let fetchMock: MockedFunction<typeof fetch>;
@@ -69,6 +73,22 @@ describe('BackendUploader request context', () => {
       'http://127.0.0.1:43123',
       'ws://127.0.0.1:43123',
     ]);
+  });
+
+  it('uses only a validated runtime external issue endpoint', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {
+      externalIssueUrl: 'https://github.example.com/org/repo/issues/new',
+    };
+    expect(getSmartPerfettoExternalIssueUrl()).toBe(
+      'https://github.example.com/org/repo/issues/new',
+    );
+
+    window.__SMARTPERFETTO_CONFIG__ = {
+      externalIssueUrl: 'https://evil.example/redirect',
+    };
+    expect(getSmartPerfettoExternalIssueUrl()).toBe(
+      DEFAULT_SMARTPERFETTO_EXTERNAL_ISSUE_URL,
+    );
   });
 
   it('uses runtime-configured backend port by default', async () => {

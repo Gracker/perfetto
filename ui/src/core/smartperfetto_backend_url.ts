@@ -4,11 +4,14 @@
 // plugin and trace auto-upload code.
 
 export const DEFAULT_SMARTPERFETTO_BACKEND_PORT = '3000';
+export const DEFAULT_SMARTPERFETTO_EXTERNAL_ISSUE_URL =
+  'https://github.com/Gracker/SmartPerfetto/issues/new';
 
 export interface SmartPerfettoRuntimeConfig {
   backendUrl?: string;
   backendPort?: string | number;
   frontendPort?: string | number;
+  externalIssueUrl?: string;
 }
 
 declare global {
@@ -50,6 +53,30 @@ function normalizeBackendUrl(value: unknown): string | undefined {
   return undefined;
 }
 
+function normalizeExternalIssueUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    if (
+      parsed.protocol === 'https:' &&
+      !parsed.username &&
+      !parsed.password &&
+      pathname.endsWith('/issues/new')
+    ) {
+      parsed.pathname = pathname;
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString();
+    }
+  } catch {
+    // Fall through.
+  }
+  return undefined;
+}
+
 export function getSmartPerfettoBackendPort(): string {
   return (
     normalizePort(readRuntimeConfig().backendPort) ||
@@ -63,6 +90,13 @@ export function getDefaultSmartPerfettoBackendUrl(): string {
 
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
   return `${protocol}//${window.location.hostname}:${getSmartPerfettoBackendPort()}`;
+}
+
+export function getSmartPerfettoExternalIssueUrl(): string {
+  return (
+    normalizeExternalIssueUrl(readRuntimeConfig().externalIssueUrl) ||
+    DEFAULT_SMARTPERFETTO_EXTERNAL_ISSUE_URL
+  );
 }
 
 export function getSmartPerfettoBackendCspSources(): ReadonlyArray<string> {

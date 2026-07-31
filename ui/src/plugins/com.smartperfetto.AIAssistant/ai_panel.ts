@@ -42,6 +42,7 @@ import {
   setDefaultBackendCredential,
   setDefaultBackendUrl,
 } from '../../core/backend_uploader';
+import {getSmartPerfettoExternalIssueUrl} from '../../core/smartperfetto_backend_url';
 import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoWorkspaceApiUrl,
@@ -124,6 +125,24 @@ import {
 import {sessionManager} from './session_manager';
 import {mermaidRenderer} from './mermaid_renderer';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import type {
+  ExternalIssueContributionKind,
+  ExternalIssueDecision,
+  ExternalIssueReviewCandidateV1,
+  ExternalIssueReviewUnavailableReason,
+} from './generated/data_contract.types';
+import {
+  createExternalIssueUiState,
+  externalIssueCandidateCanDraft,
+  externalIssueFeedbackRequest,
+  externalIssueResponseError,
+  externalIssueSourceRefs,
+  isSafeExternalIssueUrl,
+  parseExternalIssueDraftResponse,
+  parseExternalIssueOpportunityResponse,
+  parseExternalIssueReviewResponse,
+  type ExternalIssueUiState,
+} from './external_issue_reporting';
 import {
   formatAnalysisResultRef,
   isAnalysisResultComparisonRequest,
@@ -621,6 +640,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private renderedMessageContent = new WeakMap<HTMLElement, string>();
   private copiedMessageIds = new Set<string>();
   private formattedSqlCache = new Map<string, CachedSqlFormat>();
+  private externalIssueStates = new Map<string, ExternalIssueUiState>();
   // Transient state saver — bound closure registered in oncreate, cleared in onremove.
   // Captures input draft, collapsed tables, and active SSE analysis when the
   // user switches between tab and floating window mode.
@@ -2474,6 +2494,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.state.selectedResultCandidateIds = new Set();
     this.availableAnalysisResults = [];
     this.activeResultWindowStates = [];
+    this.externalIssueStates.clear();
     this.resultVisibilityUpdatingIds.clear();
     this.clearAgentObservability();
     this.clearTracePairSessionState();
@@ -3842,6 +3863,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   this.renderAnalysisReceipt(
                                     msg.analysisReceipt,
                                   ),
+                                  this.renderExternalIssueReporting(msg),
                                   this.renderUiActionProposals(
                                     msg.uiActionProposals,
                                   ),
@@ -5144,6 +5166,662 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
+  private renderExternalIssueReporting(message: Message): m.Children {
+    const refs = externalIssueSourceRefs(message.analysisReceipt);
+    if (!refs || message.role !== 'assistant') return null;
+    let state = this.externalIssueStates.get(message.id);
+    if (!state) {
+      state = createExternalIssueUiState();
+      this.externalIssueStates.set(message.id, state);
+      void this.loadExternalIssueOpportunity(message.id, refs);
+    }
+    if (
+      state.phase === 'ready' &&
+      state.opportunity?.status === 'not_needed'
+    ) {
+      return null;
+    }
+    if (state.phase === 'loading_opportunity') {
+      return m('div.ai-external-issue-card.muted', [
+        m('i.pf-icon', 'travel_explore'),
+        m(
+          'span',
+          uiText(
+            '正在检查是否有值得反馈或贡献的信号…',
+            'Checking for signals worth reporting or contributing…',
+          ),
+        ),
+      ]);
+    }
+    if (state.opportunity?.status === 'disabled') {
+      return m('div.ai-external-issue-card.muted', [
+        m('i.pf-icon', 'lock'),
+        m(
+          'span',
+          uiText(
+            '此分析包含私有来源，不生成公开 GitHub 反馈。',
+            'This analysis uses private sources, so public GitHub feedback is disabled.',
+          ),
+        ),
+      ]);
+    }
+    if (state.phase === 'error') {
+      return m('div.ai-external-issue-card.error', [
+        m('div.ai-external-issue-heading', [
+          m('i.pf-icon', 'error_outline'),
+          m(
+            'span',
+            state.error ??
+              uiText('反馈分析暂时不可用', 'Feedback triage is unavailable'),
+          ),
+        ]),
+        m(
+          'button.ai-external-issue-secondary',
+          {
+            type: 'button',
+            onclick: () => {
+              state!.phase = 'loading_opportunity';
+              state!.error = undefined;
+              void this.loadExternalIssueOpportunity(message.id, refs);
+            },
+          },
+          uiText('重试', 'Retry'),
+        ),
+      ]);
+    }
+
+    const opportunity = state.opportunity;
+    if (!opportunity || opportunity.status !== 'available') return null;
+    const followsNegativeFeedback =
+      (this.state as any)[`feedback_${message.id}`] === 'negative';
+    const review = state.review;
+    const selected = review?.candidates.find(
+      (candidate) => candidate.candidateId === state!.selectedCandidateId,
+    );
+    return m('div.ai-external-issue-card', [
+      m('div.ai-external-issue-heading', [
+        m('i.pf-icon', 'campaign'),
+        m(
+          'strong',
+          uiText(
+            `发现 ${opportunity.signals.length} 个可能值得反馈或贡献的信号`,
+            `${opportunity.signals.length} signal(s) may be worth reporting or contributing`,
+          ),
+        ),
+      ]),
+      m(
+        'div.ai-external-issue-description',
+        uiText(
+          followsNegativeFeedback
+            ? '你已标记此回答不准确。让 Agent 先判断问题属于产品、Skill/策略还是 Trace 数据，并告诉你真正值得反馈或贡献什么。'
+            : 'Agent 会区分产品问题、Skill/策略改进、Trace 数据不足与不可反馈项，并告诉你需要补充什么。',
+          followsNegativeFeedback
+            ? 'You marked this answer inaccurate. Ask the Agent to identify whether the issue belongs to the product, a Skill or strategy, or the trace data, and what is actually worth reporting or contributing.'
+            : 'The Agent separates product bugs, Skill or strategy improvements, trace-data gaps, and non-reportable items, then tells you what to add.',
+        ),
+      ),
+      !review
+        ? m(
+            'button.ai-external-issue-primary',
+            {
+              type: 'button',
+              disabled: state.phase === 'reviewing',
+              onclick: () =>
+                void this.requestExternalIssueReview(message.id, refs),
+            },
+            [
+              m(
+                'i.pf-icon',
+                state.phase === 'reviewing' ? 'hourglass_top' : 'smart_toy',
+              ),
+              m(
+                'span',
+                state.phase === 'reviewing'
+                  ? uiText('Agent 正在判断…', 'Agent is reviewing…')
+                  : opportunity.agentReviewAvailable
+                    ? uiText(
+                        followsNegativeFeedback
+                          ? '让 Agent 分析我该反馈或贡献什么'
+                          : '让 Agent 帮我判断是否应反馈',
+                        followsNegativeFeedback
+                          ? 'Ask the Agent what I should report or contribute'
+                          : 'Ask the Agent whether to report this',
+                      )
+                    : uiText(
+                        '查看需要补充的内容',
+                        'See what information is missing',
+                      ),
+              ),
+            ],
+          )
+        : [
+            m('div.ai-external-issue-review-source', [
+              m(
+                'span.ai-external-issue-badge',
+                review.source === 'agent'
+                  ? uiText('Agent 判断', 'Agent review')
+                  : uiText('安全降级建议', 'Safe fallback guidance'),
+              ),
+              review.model
+                ? m('span.ai-external-issue-model', review.model)
+                : null,
+              review.fallbackReason
+                ? m(
+                    'span.ai-external-issue-fallback',
+                    this.externalIssueUnavailableLabel(review.fallbackReason),
+                  )
+                : null,
+            ]),
+            m(
+              'div.ai-external-issue-candidates',
+              review.candidates.map((candidate) =>
+                this.renderExternalIssueCandidate(
+                  message.id,
+                  candidate,
+                  state!,
+                ),
+              ),
+            ),
+            selected
+              ? this.renderExternalIssueConfirmation(
+                  message.id,
+                  refs,
+                  selected,
+                  state,
+                )
+              : null,
+          ],
+      state.draft
+        ? m('div.ai-external-issue-draft', [
+            m(
+              'div.ai-external-issue-draft-notice',
+              uiText(
+                '这里只生成草稿，尚未提交。请再次检查 Trace 名称、包名、路径、账号和公司信息。',
+                'This is only a draft and has not been submitted. Recheck trace names, package names, paths, accounts, and company information.',
+              ),
+            ),
+            m('strong', state.draft.title),
+            m('pre', state.draft.body),
+            state.draft.redactions.length > 0
+              ? m(
+                  'div.ai-external-issue-redactions',
+                  uiText(
+                    `已自动处理 ${state.draft.redactions.length} 处潜在敏感内容`,
+                    `${state.draft.redactions.length} potential sensitive value(s) were automatically handled`,
+                  ),
+                )
+              : null,
+            m(
+              'button.ai-external-issue-primary',
+              {
+                type: 'button',
+                onclick: () =>
+                  this.openExternalIssueDraft(message.id, state!.draft!),
+              },
+              [
+                m('i.pf-icon', 'open_in_new'),
+                m(
+                  'span',
+                  uiText(
+                    '在 GitHub 中打开（仍需你提交）',
+                    'Open in GitHub (you still submit)',
+                  ),
+                ),
+              ],
+            ),
+          ])
+        : null,
+    ]);
+  }
+
+  private renderExternalIssueCandidate(
+    messageId: string,
+    candidate: ExternalIssueReviewCandidateV1,
+    state: ExternalIssueUiState,
+  ): m.Children {
+    const selected = state.selectedCandidateId === candidate.candidateId;
+    return m(
+      `div.ai-external-issue-candidate${selected ? '.selected' : ''}`,
+      {
+        key: candidate.candidateId,
+      },
+      [
+        m(
+          'button.ai-external-issue-candidate-select',
+          {
+            type: 'button',
+            onclick: () => {
+              state.selectedCandidateId = candidate.candidateId;
+              state.draft = undefined;
+              state.phase = 'reviewed';
+              this.externalIssueStates.set(messageId, state);
+              m.redraw();
+            },
+          },
+          [
+            m('i.pf-icon', selected ? 'radio_button_checked' : 'radio_button_unchecked'),
+            m('strong', candidate.title),
+          ],
+        ),
+        m('div.ai-external-issue-badges', [
+          m(
+            `span.ai-external-issue-badge.${candidate.decision}`,
+            this.externalIssueDecisionLabel(candidate.decision),
+          ),
+          m(
+            'span.ai-external-issue-badge',
+            this.externalIssueContributionLabel(candidate.contributionKind),
+          ),
+          m('span.ai-external-issue-badge', candidate.confidence),
+        ]),
+        m('div.ai-external-issue-assessment', candidate.agentAssessment),
+        m(
+          'div.ai-external-issue-contribution',
+          [
+            m(
+              'strong',
+              uiText('你可以贡献：', 'What you can contribute: '),
+            ),
+            candidate.draftSeed.suggestedContribution,
+          ],
+        ),
+        candidate.missingEvidence.length > 0
+          ? m('ul.ai-external-issue-missing', [
+              m(
+                'li',
+                {class: 'label'},
+                uiText('仍缺少：', 'Still missing:'),
+              ),
+              ...candidate.missingEvidence.map((item) => m('li', item)),
+            ])
+          : null,
+      ],
+    );
+  }
+
+  private renderExternalIssueConfirmation(
+    messageId: string,
+    refs: NonNullable<ReturnType<typeof externalIssueSourceRefs>>,
+    candidate: ExternalIssueReviewCandidateV1,
+    state: ExternalIssueUiState,
+  ): m.Children {
+    if (candidate.decision === 'not_reportable') {
+      return m(
+        'div.ai-external-issue-blocked',
+        uiText(
+          'Agent 判断该项不适合公开反馈。',
+          'The Agent determined that this item should not be reported publicly.',
+        ),
+      );
+    }
+    if (candidate.decision === 'needs_verification') {
+      return m(
+        'div.ai-external-issue-blocked',
+        uiText(
+          '需要先补齐验证证据；当前不会生成 GitHub 草稿。',
+          'Verification evidence is required before a GitHub draft can be created.',
+        ),
+      );
+    }
+    return m('div.ai-external-issue-confirmation', [
+      ...candidate.userQuestions.map((question) =>
+        m('label.ai-external-issue-question', [
+          m('span', [
+            question.prompt,
+            question.required ? m('em', ' *') : null,
+          ]),
+          m('textarea', {
+            value: state.answers[question.questionId] ?? '',
+            rows: 2,
+            maxlength: 2000,
+            oninput: (event: InputEvent) => {
+              state.answers[question.questionId] = (
+                event.target as HTMLTextAreaElement
+              ).value;
+              state.draft = undefined;
+              this.externalIssueStates.set(messageId, state);
+            },
+          }),
+        ]),
+      ),
+      m('label.ai-external-issue-check', [
+        m('input', {
+          type: 'checkbox',
+          checked: state.securitySensitive,
+          onchange: (event: Event) => {
+            state.securitySensitive = (
+              event.target as HTMLInputElement
+            ).checked;
+            state.draft = undefined;
+            this.externalIssueStates.set(messageId, state);
+          },
+        }),
+        m(
+          'span',
+          uiText(
+            '这可能涉及安全漏洞',
+            'This may involve a security vulnerability',
+          ),
+        ),
+      ]),
+      state.securitySensitive
+        ? m('div.ai-external-issue-security', [
+            uiText(
+              '不要创建公开 Issue。请使用仓库的私有安全报告：',
+              'Do not create a public Issue. Use the repository private security report: ',
+            ),
+            m(
+              'a',
+              {
+                href: 'https://github.com/Gracker/SmartPerfetto/security/advisories/new',
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              },
+              uiText('私密报告安全漏洞', 'Report a vulnerability privately'),
+            ),
+          ])
+        : [
+            m('label.ai-external-issue-check', [
+              m('input', {
+                type: 'checkbox',
+                checked: state.sensitiveDataReviewed,
+                onchange: (event: Event) => {
+                  state.sensitiveDataReviewed = (
+                    event.target as HTMLInputElement
+                  ).checked;
+                  state.draft = undefined;
+                  this.externalIssueStates.set(messageId, state);
+                },
+              }),
+              m(
+                'span',
+                uiText(
+                  '我已检查将公开的内容，不包含 Trace 原文、私有代码、账号、路径或密钥',
+                  'I reviewed the public content and it contains no raw trace data, private code, accounts, paths, or secrets',
+                ),
+              ),
+            ]),
+            m(
+              'button.ai-external-issue-primary',
+              {
+                type: 'button',
+                disabled:
+                  state.phase === 'drafting' ||
+                  !externalIssueCandidateCanDraft(candidate, state),
+                onclick: () =>
+                  void this.requestExternalIssueDraft(
+                    messageId,
+                    refs,
+                    candidate,
+                    state,
+                  ),
+              },
+              state.phase === 'drafting'
+                ? uiText('正在生成安全草稿…', 'Building a safe draft…')
+                : uiText('生成 GitHub 草稿', 'Create GitHub draft'),
+            ),
+          ],
+    ]);
+  }
+
+  private async loadExternalIssueOpportunity(
+    messageId: string,
+    refs: NonNullable<ReturnType<typeof externalIssueSourceRefs>>,
+  ): Promise<void> {
+    const state =
+      this.externalIssueStates.get(messageId) ?? createExternalIssueUiState();
+    this.externalIssueStates.set(messageId, state);
+    try {
+      const response = await this.fetchBackend(
+        buildAssistantApiV1Url(
+          this.state.settings.backendUrl,
+          `/${encodeURIComponent(refs.sessionId)}/external-issue/opportunity`,
+        ),
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(this.externalIssueRequestRefs(refs)),
+        },
+      );
+      const payload = await response.json();
+      const opportunity = response.ok
+        ? parseExternalIssueOpportunityResponse(payload)
+        : undefined;
+      if (!opportunity) {
+        throw new Error(
+          externalIssueResponseError(
+            payload,
+            uiText(
+              '无法检查反馈机会',
+              'Unable to check feedback opportunities',
+            ),
+          ),
+        );
+      }
+      state.opportunity = opportunity;
+      state.phase = 'ready';
+      state.error = undefined;
+    } catch (error) {
+      state.phase = 'error';
+      state.error =
+        error instanceof Error ? error.message : String(error);
+    }
+    this.externalIssueStates.set(messageId, state);
+    m.redraw();
+  }
+
+  private async requestExternalIssueReview(
+    messageId: string,
+    refs: NonNullable<ReturnType<typeof externalIssueSourceRefs>>,
+  ): Promise<void> {
+    const state = this.externalIssueStates.get(messageId);
+    if (!state?.opportunity) return;
+    state.phase = 'reviewing';
+    state.error = undefined;
+    m.redraw();
+    try {
+      const response = await this.fetchBackend(
+        buildAssistantApiV1Url(
+          this.state.settings.backendUrl,
+          `/${encodeURIComponent(refs.sessionId)}/external-issue/review`,
+        ),
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(this.externalIssueRequestRefs(refs)),
+        },
+      );
+      const payload = await response.json();
+      const review = response.ok
+        ? parseExternalIssueReviewResponse(payload)
+        : undefined;
+      if (!review) {
+        throw new Error(
+          externalIssueResponseError(
+            payload,
+            uiText('Agent 判断失败', 'Agent review failed'),
+          ),
+        );
+      }
+      state.review = review;
+      state.selectedCandidateId = review.candidates.find(
+        (candidate) => candidate.decision !== 'not_reportable',
+      )?.candidateId ?? review.candidates[0]?.candidateId;
+      state.phase = 'reviewed';
+    } catch (error) {
+      state.phase = 'error';
+      state.error =
+        error instanceof Error ? error.message : String(error);
+    }
+    this.externalIssueStates.set(messageId, state);
+    m.redraw();
+  }
+
+  private async requestExternalIssueDraft(
+    messageId: string,
+    refs: NonNullable<ReturnType<typeof externalIssueSourceRefs>>,
+    candidate: ExternalIssueReviewCandidateV1,
+    state: ExternalIssueUiState,
+  ): Promise<void> {
+    if (
+      !state.review ||
+      !externalIssueCandidateCanDraft(candidate, state)
+    ) {
+      return;
+    }
+    state.phase = 'drafting';
+    state.error = undefined;
+    m.redraw();
+    try {
+      const answers = candidate.userQuestions
+        .map((question) => ({
+          questionId: question.questionId,
+          answer: state.answers[question.questionId]?.trim() ?? '',
+        }))
+        .filter((answer) => answer.answer);
+      const response = await this.fetchBackend(
+        buildAssistantApiV1Url(
+          this.state.settings.backendUrl,
+          `/${encodeURIComponent(refs.sessionId)}/external-issue/draft`,
+        ),
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            ...this.externalIssueRequestRefs(refs),
+            review: state.review,
+            candidateId: candidate.candidateId,
+            answers,
+            sensitiveDataReviewed: state.sensitiveDataReviewed,
+            securitySensitive: state.securitySensitive,
+          }),
+        },
+      );
+      const payload = await response.json();
+      const draft = response.ok
+        ? parseExternalIssueDraftResponse(payload)
+        : undefined;
+      if (!draft) {
+        throw new Error(
+          externalIssueResponseError(
+            payload,
+            uiText('GitHub 草稿生成失败', 'GitHub draft creation failed'),
+          ),
+        );
+      }
+      state.draft = draft;
+      state.phase = 'draft_ready';
+    } catch (error) {
+      state.phase = 'error';
+      state.error =
+        error instanceof Error ? error.message : String(error);
+    }
+    this.externalIssueStates.set(messageId, state);
+    m.redraw();
+  }
+
+  private openExternalIssueDraft(
+    messageId: string,
+    draft: NonNullable<ExternalIssueUiState['draft']>,
+  ): void {
+    if (
+      !isSafeExternalIssueUrl(
+        draft.githubUrl,
+        getSmartPerfettoExternalIssueUrl(),
+      )
+    ) {
+      const state = this.externalIssueStates.get(messageId);
+      if (state) {
+        state.phase = 'error';
+        state.error = uiText(
+          '后端返回了不安全的外部链接',
+          'The backend returned an unsafe external URL',
+        );
+      }
+      m.redraw();
+      return;
+    }
+    window.open(draft.githubUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  private externalIssueRequestRefs(
+    refs: NonNullable<ReturnType<typeof externalIssueSourceRefs>>,
+  ): {
+    runId: string;
+    runManifestId: string;
+    resultSnapshotId?: string;
+  } {
+    return {
+      runId: refs.runId,
+      runManifestId: refs.runManifestId,
+      ...(refs.resultSnapshotId
+        ? {resultSnapshotId: refs.resultSnapshotId}
+        : {}),
+    };
+  }
+
+  private externalIssueDecisionLabel(
+    decision: ExternalIssueDecision,
+  ): string {
+    const labels: Record<ExternalIssueDecision, [string, string]> = {
+      report: ['建议反馈', 'Ready to report'],
+      needs_user_input: ['需要你补充', 'Needs your input'],
+      needs_verification: ['需要先验证', 'Needs verification'],
+      not_reportable: ['不建议反馈', 'Not reportable'],
+    };
+    return uiText(...labels[decision]);
+  }
+
+  private externalIssueContributionLabel(
+    contribution: ExternalIssueContributionKind,
+  ): string {
+    const labels: Record<ExternalIssueContributionKind, [string, string]> = {
+      bug_report: ['Bug 反馈', 'Bug report'],
+      skill_improvement: ['Skill 改进', 'Skill improvement'],
+      strategy_improvement: ['策略改进', 'Strategy improvement'],
+      runtime_compatibility: ['Runtime 兼容', 'Runtime compatibility'],
+      documentation: ['文档', 'Documentation'],
+      ui_feedback: ['界面反馈', 'UI feedback'],
+      trace_fixture: ['Trace 测试样本', 'Trace fixture'],
+      none: ['无需贡献', 'No contribution'],
+    };
+    return uiText(...labels[contribution]);
+  }
+
+  private externalIssueUnavailableLabel(
+    reason: ExternalIssueReviewUnavailableReason | 'agent_invalid',
+  ): string {
+    const labels: Record<
+      ExternalIssueReviewUnavailableReason | 'agent_invalid',
+      [string, string]
+    > = {
+      private_analysis: ['私有分析', 'Private analysis'],
+      legacy_provider_pin_missing: [
+        '旧运行缺少 Provider 锁定',
+        'Legacy run lacks a provider pin',
+      ],
+      provider_snapshot_changed: [
+        'Provider 配置已变化',
+        'Provider configuration changed',
+      ],
+      provider_not_found: ['Provider 已不存在', 'Provider no longer exists'],
+      provider_credentials_unavailable: [
+        'Provider 凭据不可用',
+        'Provider credentials unavailable',
+      ],
+      runtime_not_supported: [
+        '该 Runtime 暂不支持独立判断',
+        'This runtime does not yet support independent review',
+      ],
+      source_artifacts_unavailable: [
+        '源分析工件不可用',
+        'Source analysis artifacts unavailable',
+      ],
+      agent_invalid: ['Agent 输出未通过校验', 'Agent output failed validation'],
+    };
+    return uiText(...labels[reason]);
+  }
+
   private renderQueryReview(
     review?: SqlQueryResult['queryReview'],
   ): m.Children {
@@ -5579,13 +6257,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private submitFeedback(
-    _messageId: string,
+    messageId: string,
     rating: 'positive' | 'negative',
   ): void {
-    if (!this.state.agentSessionId || !this.state.settings.backendUrl) return;
+    const message = this.state.messages.find(
+      (candidate) => candidate.id === messageId,
+    );
+    const refs = externalIssueSourceRefs(message?.analysisReceipt);
+    const feedbackSessionId = refs?.sessionId ?? this.state.agentSessionId;
+    if (!feedbackSessionId || !this.state.settings.backendUrl) return;
     const url = buildAssistantApiV1Url(
       this.state.settings.backendUrl,
-      `/${this.state.agentSessionId}/feedback`,
+      `/${encodeURIComponent(feedbackSessionId)}/feedback`,
     );
     const turnIndex = this.state.messages.filter(
       (msg) => msg.role === 'user',
@@ -5593,10 +6276,26 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.fetchBackend(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({rating, turnIndex}),
-    }).catch(() => {
-      /* non-blocking */
-    });
+      body: JSON.stringify(
+        externalIssueFeedbackRequest(
+          message?.analysisReceipt,
+          rating,
+          turnIndex,
+        ),
+      ),
+    })
+      .then((response) => {
+        if (!response.ok || rating !== 'negative') return;
+        if (!refs) return;
+        this.externalIssueStates.set(
+          messageId,
+          createExternalIssueUiState(),
+        );
+        void this.loadExternalIssueOpportunity(messageId, refs);
+      })
+      .catch(() => {
+        /* non-blocking */
+      });
     m.redraw();
   }
 

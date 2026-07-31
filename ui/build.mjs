@@ -184,6 +184,9 @@ function smartPerfettoRuntimeConfigScript() {
     process.env.SMARTPERFETTO_BACKEND_URL ||
     ''
   ).trim();
+  const externalIssueUrl = (
+    process.env.SMARTPERFETTO_EXTERNAL_ISSUE_URL || ''
+  ).trim();
   const config = {
     backendPort: smartPerfettoSafePort(
       process.env.SMARTPERFETTO_BACKEND_PUBLIC_PORT ||
@@ -196,6 +199,7 @@ function smartPerfettoRuntimeConfigScript() {
       '10000',
     ),
     ...(backendUrl ? {backendUrl} : {}),
+    ...(externalIssueUrl ? {externalIssueUrl} : {}),
   };
   return `<script>window.__SMARTPERFETTO_CONFIG__=${JSON.stringify(config)};</script>`;
 }
