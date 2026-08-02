@@ -7,18 +7,17 @@ import {
   buildSmartPerfettoContextHeaders,
   buildSmartPerfettoTraceProcessorProxyTarget,
   buildSmartPerfettoWorkspaceApiUrl,
-  clearSmartPerfettoIdentityContext,
-  getDefaultSmartPerfettoIdentityContext,
   getSmartPerfettoRequestContext,
   getSmartPerfettoStorageNamespace,
   getSmartPerfettoWindowId,
-  setSmartPerfettoIdentityContext,
   setSmartPerfettoWorkspaceId,
 } from './smartperfetto_request_context';
 
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
+  window.__SMARTPERFETTO_CONFIG__ = undefined;
+  window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
 });
 
 describe('SmartPerfetto frontend request context', () => {
@@ -60,6 +59,45 @@ describe('SmartPerfetto frontend request context', () => {
     });
   });
 
+  it('uses the OIDC session identity and replaces caller-supplied scope headers', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-oidc', email: 'user@example.com'},
+      tenant: {id: 'tenant-oidc', name: 'Tenant'},
+      workspace: {
+        id: 'workspace-oidc',
+        name: 'Personal Workspace',
+        kind: 'personal',
+      },
+      csrfToken: 'csrf-oidc',
+    };
+    sessionStorage.setItem('smartperfetto-window-id', 'window-oidc');
+
+    expect(setSmartPerfettoWorkspaceId('workspace-spoofed')).toBe(
+      'workspace-oidc',
+    );
+    expect(getSmartPerfettoRequestContext()).toEqual({
+      tenantId: 'tenant-oidc',
+      userId: 'user-oidc',
+      workspaceId: 'workspace-oidc',
+      windowId: 'window-oidc',
+    });
+    expect(
+      buildSmartPerfettoContextHeaders({
+        'x-tenant-id': 'tenant-spoofed',
+        'X-Workspace-Id': 'workspace-spoofed',
+      }),
+    ).toMatchObject({
+      'X-Tenant-Id': 'tenant-oidc',
+      'X-Workspace-Id': 'workspace-oidc',
+      'X-Window-Id': 'window-oidc',
+    });
+  });
+
   it('persists the workspace preference under the tenant and user namespace', () => {
     sessionStorage.setItem('smartperfetto-window-id', 'window-a');
 
@@ -78,51 +116,6 @@ describe('SmartPerfetto frontend request context', () => {
     ).toBe('workspace-a');
     expect(buildSmartPerfettoContextHeaders()).toMatchObject({
       'X-Workspace-Id': 'workspace-a',
-    });
-  });
-
-  it('switches the complete persisted identity after enterprise sign-in', () => {
-    sessionStorage.setItem('smartperfetto-window-id', 'window-a');
-
-    expect(setSmartPerfettoIdentityContext({
-      tenantId: 'tenant-enterprise',
-      userId: 'sso-user-a',
-      workspaceId: 'workspace-enterprise',
-    })).toEqual({
-      tenantId: 'tenant-enterprise',
-      userId: 'sso-user-a',
-      workspaceId: 'workspace-enterprise',
-      windowId: 'window-a',
-    });
-    expect(localStorage.getItem('smartperfetto-tenant-id')).toBe(
-      'tenant-enterprise',
-    );
-    expect(localStorage.getItem('smartperfetto-user-id')).toBe('sso-user-a');
-
-    expect(clearSmartPerfettoIdentityContext()).toEqual({
-      tenantId: 'default-dev-tenant',
-      userId: 'dev-user-123',
-      workspaceId: 'default-workspace',
-      windowId: 'window-a',
-    });
-  });
-
-  it('resolves the effective identity produced by clearing enterprise state', () => {
-    setSmartPerfettoWorkspaceId(
-      'local-workspace',
-      'default-dev-tenant',
-      'dev-user-123',
-    );
-    setSmartPerfettoIdentityContext({
-      tenantId: 'tenant-enterprise',
-      userId: 'sso-user-a',
-      workspaceId: 'workspace-enterprise',
-    });
-
-    expect(getDefaultSmartPerfettoIdentityContext()).toEqual({
-      tenantId: 'default-dev-tenant',
-      userId: 'dev-user-123',
-      workspaceId: 'local-workspace',
     });
   });
 
@@ -175,5 +168,36 @@ describe('SmartPerfetto frontend request context', () => {
       'https://backend.example/base/api/tp/lease-a/heartbeat?',
     );
     expect(target.headers).toMatchObject({'X-Window-Id': 'window-a'});
+    expect(target.credentials).toBe('include');
+  });
+
+  it('adds the OIDC CSRF token to trace processor status and heartbeat requests', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-oidc', email: 'user@example.com'},
+      tenant: {id: 'tenant-oidc', name: 'Tenant'},
+      workspace: {
+        id: 'workspace-oidc',
+        name: 'Personal Workspace',
+        kind: 'personal',
+      },
+      csrfToken: 'csrf-oidc',
+    };
+
+    const target = buildSmartPerfettoTraceProcessorProxyTarget(
+      'https://backend.example',
+      'lease-oidc',
+    );
+
+    expect(target.credentials).toBe('include');
+    expect(target.headers).toMatchObject({
+      'X-Tenant-Id': 'tenant-oidc',
+      'X-Workspace-Id': 'workspace-oidc',
+      'X-CSRF-Token': 'csrf-oidc',
+    });
   });
 });

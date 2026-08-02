@@ -49,6 +49,7 @@ import {
   getDefaultSmartPerfettoBackendUrl,
   isDefaultSmartPerfettoBackendUrl,
 } from '../../core/smartperfetto_backend_url';
+import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
 import {normalizeUiLanguagePreference} from './ui_language';
 
 export {getSmartPerfettoWindowId};
@@ -117,9 +118,10 @@ export class SessionManager {
    */
   loadSettings(): AISettings {
     try {
-      const stored =
-        localStorage.getItem(getSettingsStorageKey()) ||
-        localStorage.getItem(SETTINGS_KEY);
+      const scoped = localStorage.getItem(getSettingsStorageKey());
+      const stored = scoped || (isSmartPerfettoOidcMode()
+        ? null
+        : localStorage.getItem(SETTINGS_KEY));
       if (stored) {
         // Merge stored settings with defaults to handle new properties
         const storedSettings = JSON.parse(stored);
@@ -162,6 +164,13 @@ export class SessionManager {
     settings: AISettings,
     storedBackendUrl?: string,
   ): AISettings {
+    if (isSmartPerfettoOidcMode()) {
+      return {
+        ...settings,
+        backendUrl: getDefaultSmartPerfettoBackendUrl(),
+        backendApiKey: '',
+      };
+    }
     if (
       storedBackendUrl &&
       !isDefaultSmartPerfettoBackendUrl(storedBackendUrl)
@@ -176,11 +185,14 @@ export class SessionManager {
    */
   saveSettings(settings: AISettings): void {
     try {
+      const normalized = isSmartPerfettoOidcMode()
+        ? this.applySmartBackendUrl(settings, settings.backendUrl)
+        : settings;
       localStorage.setItem(
         getSettingsStorageKey(),
         JSON.stringify({
-          ...settings,
-          uiLanguage: normalizeUiLanguagePreference(settings.uiLanguage),
+          ...normalized,
+          uiLanguage: normalizeUiLanguagePreference(normalized.uiLanguage),
         }),
       );
     } catch {
@@ -198,9 +210,10 @@ export class SessionManager {
     traceFingerprint?: string;
   } | null {
     try {
-      const stored =
-        localStorage.getItem(getHistoryStorageKey()) ||
-        localStorage.getItem(HISTORY_KEY);
+      const scoped = localStorage.getItem(getHistoryStorageKey());
+      const stored = scoped || (isSmartPerfettoOidcMode()
+        ? null
+        : localStorage.getItem(HISTORY_KEY));
       if (!stored) return null;
 
       const parsed = JSON.parse(stored);
@@ -251,9 +264,10 @@ export class SessionManager {
 
   loadAnalysisMode(): AnalysisMode {
     try {
-      const stored =
-        localStorage.getItem(getAnalysisModeStorageKey()) ||
-        localStorage.getItem(ANALYSIS_MODE_KEY);
+      const scoped = localStorage.getItem(getAnalysisModeStorageKey());
+      const stored = scoped || (isSmartPerfettoOidcMode()
+        ? null
+        : localStorage.getItem(ANALYSIS_MODE_KEY));
       if (stored === 'fast' || stored === 'full' || stored === 'auto') {
         return stored;
       }
@@ -275,9 +289,11 @@ export class SessionManager {
    * Load all Sessions storage from localStorage.
    */
   loadSessionsStorage(): SessionsStorage {
+    const scoped = localStorage.getItem(getSessionsStorageKey());
     const parsed = this.parseSessionsStorage(
-      localStorage.getItem(getSessionsStorageKey()) ||
-        localStorage.getItem(SESSIONS_KEY),
+      scoped || (isSmartPerfettoOidcMode()
+        ? null
+        : localStorage.getItem(SESSIONS_KEY)),
     );
     this.sessionsStorageMtimeMs = parsed.mtimeMs;
     this.sessionsStorageRevision = parsed.revision;
@@ -708,11 +724,11 @@ export class SessionManager {
       const legacyWindowKey = `${PENDING_BACKEND_TRACE_KEY}:${getSmartPerfettoWindowId()}`;
       let stored = sessionStorage.getItem(scopedKey);
       let legacyStorage = false;
-      if (!stored) {
+      if (!stored && !isSmartPerfettoOidcMode()) {
         stored = sessionStorage.getItem(legacyWindowKey);
         legacyStorage = Boolean(stored);
       }
-      if (!stored) {
+      if (!stored && !isSmartPerfettoOidcMode()) {
         stored = localStorage.getItem(PENDING_BACKEND_TRACE_KEY);
         legacyStorage = Boolean(stored);
       }

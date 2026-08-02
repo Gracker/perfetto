@@ -25,7 +25,6 @@ describe('SettingsModal self-evolution binding', () => {
       onClose: vi.fn(),
       onSave: vi.fn(),
       onWorkspaceChange: vi.fn(),
-      onEnterpriseIdentityChange: vi.fn(),
       onCheckStatus: vi.fn(async () => ({connected: true})),
       onProviderSelectionChange: vi.fn(),
     };

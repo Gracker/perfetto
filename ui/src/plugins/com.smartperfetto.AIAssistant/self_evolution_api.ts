@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 
 export type SelfEvolutionProposalStatus =
@@ -180,7 +181,7 @@ export function parseSelfEvolutionSseChunk(
 export function createSelfEvolutionApi(
   backendUrl: string,
   apiKey?: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = smartPerfettoFetch,
 ): SelfEvolutionApi {
   const request = async <T>(
     path: string,

@@ -7,7 +7,6 @@ import {describe, expect, it, vi} from 'vitest';
 import {CodebasePanel} from './codebase_panel';
 import {ProviderPanel} from './provider_panel';
 import {SettingsModal, type SettingsModalAttrs} from './settings_modal';
-import {EnterpriseAuthCard} from './enterprise_auth_card';
 import {DEFAULT_SETTINGS} from './types';
 
 function findComponent(node: any, tag: unknown): any {
@@ -44,6 +43,51 @@ function findNode(node: any, predicate: (candidate: any) => boolean): any {
 }
 
 describe('SettingsModal codebase binding', () => {
+  it('keeps OIDC sign out disabled while the analysis identity is locked', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-oidc', email: 'user@example.com'},
+      tenant: {id: 'tenant-oidc', name: 'Tenant'},
+      workspace: {
+        id: 'workspace-oidc',
+        name: 'Personal Workspace',
+        kind: 'personal',
+      },
+      csrfToken: 'csrf-oidc',
+    };
+    const attrs: SettingsModalAttrs = {
+      settings: {...DEFAULT_SETTINGS},
+      workspaceContext: {
+        tenantId: 'tenant-oidc',
+        workspaceId: 'workspace-oidc',
+        userId: 'user-oidc',
+        windowId: 'window-a',
+      },
+      readOnly: true,
+      onClose: vi.fn(),
+      onSave: vi.fn(),
+      onWorkspaceChange: vi.fn(),
+      onCheckStatus: vi.fn(async () => ({connected: true})),
+      onProviderSelectionChange: vi.fn(),
+    };
+    const modal = new SettingsModal() as any;
+    const vnode = {attrs} as any;
+    modal.oninit(vnode);
+    const view = modal.view(vnode);
+    const signOut = findNode(
+      view,
+      (node) => node.tag === 'button' && /退出登录|Sign out/.test(collectText(node)),
+    );
+
+    expect(signOut?.attrs?.disabled).toBe(true);
+    window.__SMARTPERFETTO_CONFIG__ = undefined;
+    window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+  });
+
   it('exposes dialog, close action, and connection labels to assistive technology', () => {
     const attrs: SettingsModalAttrs = {
       settings: {...DEFAULT_SETTINGS},
@@ -56,7 +100,6 @@ describe('SettingsModal codebase binding', () => {
       onClose: vi.fn(),
       onSave: vi.fn(),
       onWorkspaceChange: vi.fn(),
-      onEnterpriseIdentityChange: vi.fn(),
       onCheckStatus: vi.fn(async () => ({connected: true})),
       onProviderSelectionChange: vi.fn(),
     };
@@ -72,10 +115,6 @@ describe('SettingsModal codebase binding', () => {
     expect(findNode(view, (node) => node.attrs?.['aria-label'] === 'Close settings')).toBeDefined();
     expect(findNode(view, (node) => node.attrs?.for === 'smartperfetto-workspace-id')).toBeDefined();
     expect(findNode(view, (node) => node.attrs?.id === 'smartperfetto-workspace-id')).toBeDefined();
-    expect(findComponent(view, EnterpriseAuthCard)?.attrs).toMatchObject({
-      backendUrl: DEFAULT_SETTINGS.backendUrl,
-      readOnly: false,
-    });
   });
 
   it('keeps codebase mutations on the committed backend while connection edits are unsaved', () => {
@@ -99,7 +138,6 @@ describe('SettingsModal codebase binding', () => {
       onClose: vi.fn(),
       onSave: vi.fn(),
       onWorkspaceChange: vi.fn(),
-      onEnterpriseIdentityChange: vi.fn(),
       onCheckStatus: vi.fn(async () => ({connected: true})),
       onProviderSelectionChange: vi.fn(),
       onAnalysisContextChange: vi.fn(),

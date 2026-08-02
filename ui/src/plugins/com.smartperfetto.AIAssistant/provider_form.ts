@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import m from 'mithril';
-import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 
+import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {
   type ProviderType,
   type ProviderTuning,
@@ -363,13 +363,16 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     try {
       let res: Response;
       if (this.isEdit && this.editingId) {
-        res = await fetchSmartPerfettoBackend(apiUrl(backendUrl, `/${this.editingId}`), {
-          method: 'PATCH',
-          headers: buildHeaders(apiKey),
-          body: JSON.stringify(body),
-        });
+        res = await smartPerfettoFetch(
+          apiUrl(backendUrl, `/${this.editingId}`),
+          {
+            method: 'PATCH',
+            headers: buildHeaders(apiKey),
+            body: JSON.stringify(body),
+          },
+        );
       } else {
-        res = await fetchSmartPerfettoBackend(apiUrl(backendUrl, ''), {
+        res = await smartPerfettoFetch(apiUrl(backendUrl, ''), {
           method: 'POST',
           headers: buildHeaders(apiKey),
           body: JSON.stringify(body),

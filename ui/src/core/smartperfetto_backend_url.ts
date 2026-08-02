@@ -12,6 +12,8 @@ export interface SmartPerfettoRuntimeConfig {
   backendPort?: string | number;
   frontendPort?: string | number;
   externalIssueUrl?: string;
+  authProbeRequired?: boolean;
+  oidcEnabled?: boolean;
 }
 
 declare global {

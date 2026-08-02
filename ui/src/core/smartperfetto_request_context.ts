@@ -2,6 +2,12 @@
 //
 // Shared frontend request context for SmartPerfetto backend calls.
 
+import {
+  getSmartPerfettoCsrfToken,
+  isSmartPerfettoOidcMode,
+  requireSmartPerfettoAuthSession,
+} from './smartperfetto_auth';
+
 const WINDOW_ID_KEY = 'smartperfetto-window-id';
 const TENANT_ID_KEY = 'smartperfetto-tenant-id';
 const USER_ID_KEY = 'smartperfetto-user-id';
@@ -19,12 +25,6 @@ export interface SmartPerfettoRequestContext {
   userId: string;
   workspaceId: string;
   windowId: string;
-}
-
-export interface SmartPerfettoIdentityContext {
-  tenantId: string;
-  userId: string;
-  workspaceId: string;
 }
 
 function createWindowId(): string {
@@ -49,6 +49,14 @@ function sanitizeContextId(value: unknown, fallback: string): string {
   return normalized || fallback;
 }
 
+function sanitizeRequiredContextId(value: unknown, label: string): string {
+  const sanitized = sanitizeContextId(value, '');
+  if (!sanitized) {
+    throw new Error(`SmartPerfetto OIDC session is missing ${label}`);
+  }
+  return sanitized;
+}
+
 function getLocalStorageValue(key: string): string | null {
   try {
     return localStorage.getItem(key);
@@ -65,19 +73,17 @@ function setLocalStorageValue(key: string, value: string): void {
   }
 }
 
-function removeLocalStorageValue(key: string): void {
-  try {
-    localStorage.removeItem(key);
-  } catch {
-    // Ignore storage failures in private browsing / quota edge cases.
-  }
-}
-
 function getWorkspacePreferenceKey(tenantId: string, userId: string): string {
   return `${WORKSPACE_PREFERENCE_KEY_PREFIX}:${tenantId}:${userId}`;
 }
 
 export function getSmartPerfettoTenantId(): string {
+  if (isSmartPerfettoOidcMode()) {
+    return sanitizeRequiredContextId(
+      requireSmartPerfettoAuthSession().tenant?.id,
+      'tenant id',
+    );
+  }
   return sanitizeContextId(
     getLocalStorageValue(TENANT_ID_KEY),
     DEFAULT_SMARTPERFETTO_TENANT_ID,
@@ -85,6 +91,12 @@ export function getSmartPerfettoTenantId(): string {
 }
 
 export function getSmartPerfettoUserId(): string {
+  if (isSmartPerfettoOidcMode()) {
+    return sanitizeRequiredContextId(
+      requireSmartPerfettoAuthSession().user?.id,
+      'user id',
+    );
+  }
   return sanitizeContextId(
     getLocalStorageValue(USER_ID_KEY),
     DEFAULT_SMARTPERFETTO_USER_ID,
@@ -95,22 +107,16 @@ export function getSmartPerfettoWorkspaceId(
   tenantId = getSmartPerfettoTenantId(),
   userId = getSmartPerfettoUserId(),
 ): string {
+  if (isSmartPerfettoOidcMode()) {
+    return sanitizeRequiredContextId(
+      requireSmartPerfettoAuthSession().workspace?.id,
+      'workspace id',
+    );
+  }
   return sanitizeContextId(
     getLocalStorageValue(getWorkspacePreferenceKey(tenantId, userId)),
     DEFAULT_SMARTPERFETTO_WORKSPACE_ID,
   );
-}
-
-export function getDefaultSmartPerfettoIdentityContext():
-    SmartPerfettoIdentityContext {
-  return {
-    tenantId: DEFAULT_SMARTPERFETTO_TENANT_ID,
-    userId: DEFAULT_SMARTPERFETTO_USER_ID,
-    workspaceId: getSmartPerfettoWorkspaceId(
-      DEFAULT_SMARTPERFETTO_TENANT_ID,
-      DEFAULT_SMARTPERFETTO_USER_ID,
-    ),
-  };
 }
 
 export function setSmartPerfettoWorkspaceId(
@@ -118,35 +124,15 @@ export function setSmartPerfettoWorkspaceId(
   tenantId = getSmartPerfettoTenantId(),
   userId = getSmartPerfettoUserId(),
 ): string {
+  if (isSmartPerfettoOidcMode()) {
+    return getSmartPerfettoWorkspaceId();
+  }
   const sanitized = sanitizeContextId(
     workspaceId,
     DEFAULT_SMARTPERFETTO_WORKSPACE_ID,
   );
   setLocalStorageValue(getWorkspacePreferenceKey(tenantId, userId), sanitized);
   return sanitized;
-}
-
-export function setSmartPerfettoIdentityContext(
-  identity: SmartPerfettoIdentityContext,
-): SmartPerfettoRequestContext {
-  const tenantId = sanitizeContextId(
-    identity.tenantId,
-    DEFAULT_SMARTPERFETTO_TENANT_ID,
-  );
-  const userId = sanitizeContextId(
-    identity.userId,
-    DEFAULT_SMARTPERFETTO_USER_ID,
-  );
-  setLocalStorageValue(TENANT_ID_KEY, tenantId);
-  setLocalStorageValue(USER_ID_KEY, userId);
-  setSmartPerfettoWorkspaceId(identity.workspaceId, tenantId, userId);
-  return getSmartPerfettoRequestContext();
-}
-
-export function clearSmartPerfettoIdentityContext(): SmartPerfettoRequestContext {
-  removeLocalStorageValue(TENANT_ID_KEY);
-  removeLocalStorageValue(USER_ID_KEY);
-  return getSmartPerfettoRequestContext();
 }
 
 export function getSmartPerfettoRequestContext(): SmartPerfettoRequestContext {
@@ -165,6 +151,12 @@ function resolveContext(
   context?: Partial<SmartPerfettoRequestContext>,
 ): SmartPerfettoRequestContext {
   const current = getSmartPerfettoRequestContext();
+  if (isSmartPerfettoOidcMode()) {
+    return {
+      ...current,
+      windowId: sanitizeContextId(context?.windowId, current.windowId),
+    };
+  }
   return {
     tenantId: sanitizeContextId(context?.tenantId, current.tenantId),
     userId: sanitizeContextId(context?.userId, current.userId),
@@ -219,17 +211,31 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some(key => key.toLowerCase() === lowerName);
 }
 
+function deleteHeader(headers: Record<string, string>, name: string): void {
+  const lowerName = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lowerName) delete headers[key];
+  }
+}
+
 export function buildSmartPerfettoContextHeaders(
   headers?: HeadersInit,
 ): Record<string, string> {
   const normalized = normalizeHeaders(headers);
   const context = getSmartPerfettoRequestContext();
   const next = {...normalized};
-  if (!hasHeader(next, 'x-tenant-id')) {
+  if (isSmartPerfettoOidcMode()) {
+    deleteHeader(next, 'x-tenant-id');
+    deleteHeader(next, 'x-workspace-id');
     next['X-Tenant-Id'] = context.tenantId;
-  }
-  if (!hasHeader(next, 'x-workspace-id')) {
     next['X-Workspace-Id'] = context.workspaceId;
+  } else {
+    if (!hasHeader(next, 'x-tenant-id')) {
+      next['X-Tenant-Id'] = context.tenantId;
+    }
+    if (!hasHeader(next, 'x-workspace-id')) {
+      next['X-Workspace-Id'] = context.workspaceId;
+    }
   }
   if (!hasHeader(next, 'x-window-id')) {
     next['X-Window-Id'] = context.windowId;
@@ -293,6 +299,12 @@ export function buildSmartPerfettoTraceProcessorProxyTarget(
   const pathPrefix = parsedBackend.pathname.replace(/\/+$/, '');
   const websocketBase = `${websocketProtocol}//${parsedBackend.host}${pathPrefix}`;
   const suffix = query ? `?${query}` : '';
+  const targetHeaders = buildSmartPerfettoContextHeaders(headers);
+  const oidcMode = isSmartPerfettoOidcMode();
+  if (oidcMode && !hasHeader(targetHeaders, 'x-csrf-token')) {
+    const csrfToken = getSmartPerfettoCsrfToken();
+    if (csrfToken) targetHeaders['X-CSRF-Token'] = csrfToken;
+  }
 
   return {
     mode: 'backend-lease-proxy' as const,
@@ -305,7 +317,7 @@ export function buildSmartPerfettoTraceProcessorProxyTarget(
     websocketUrl: `${websocketBase}/api/tp/${encodedLeaseId}/websocket${suffix}`,
     heartbeatUrl: `${httpBase}/heartbeat${suffix}`,
     displayName: `backend ${leaseStatus.leaseMode ?? 'unknown'} lease ${leaseId.slice(0, 8)}`,
-    headers: buildSmartPerfettoContextHeaders(headers),
+    headers: targetHeaders,
     credentials: 'include' as const,
     websocketProtocols: leaseStatus.websocketCapability?.protocol
       ? [leaseStatus.websocketCapability.protocol]

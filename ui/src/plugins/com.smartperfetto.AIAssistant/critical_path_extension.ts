@@ -9,9 +9,12 @@ import {
   getBackendUploadIdentityKey,
 } from '../../core/backend_uploader';
 import {THREAD_STATE_TRACK_KIND} from '../../public/track_kinds';
+import {
+  isSmartPerfettoOidcMode,
+  smartPerfettoFetch,
+} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
-import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 import {SETTINGS_KEY} from './types';
 import {getSettingsStorageKey} from './session_manager';
 import {uiOutputLanguage, uiText} from './ui_language';
@@ -88,6 +91,11 @@ const INLINE_BTN_CLASS = 'sp-critical-path-inline-btn';
 const DRAWER_CLASS = 'sp-critical-path-drawer';
 
 function getBackendUrl(): string {
+  const defaultBackendUrl = getDefaultSmartPerfettoBackendUrl().replace(
+    /\/+$/,
+    '',
+  );
+  if (isSmartPerfettoOidcMode()) return defaultBackendUrl;
   try {
     const settings = JSON.parse(
       localStorage.getItem(getSettingsStorageKey()) ||
@@ -100,11 +108,11 @@ function getBackendUrl(): string {
   } catch {
     // ignore
   }
-  return getDefaultSmartPerfettoBackendUrl().replace(/\/+$/, '');
+  return defaultBackendUrl;
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetchSmartPerfettoBackend(url, {
+  const response = await smartPerfettoFetch(url, {
     ...options,
     headers: buildSmartPerfettoContextHeaders(options?.headers),
   });

@@ -8,7 +8,10 @@ import {
   type AISession,
   type AISettings,
   DEFAULT_SETTINGS,
+  HISTORY_KEY,
   PENDING_BACKEND_TRACE_KEY,
+  SESSIONS_KEY,
+  SETTINGS_KEY,
 } from './types';
 import {
   SessionManager,
@@ -16,6 +19,7 @@ import {
   getSettingsStorageKey,
   getSessionsStorageKey,
 } from './session_manager';
+import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 import {setSmartPerfettoWorkspaceId} from '../../core/smartperfetto_request_context';
 
 function makeSession(sessionId: string, fingerprint: string): AISession {
@@ -34,8 +38,28 @@ function makeSession(sessionId: string, fingerprint: string): AISession {
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
+  window.__SMARTPERFETTO_CONFIG__ = undefined;
+  window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
   setSmartPerfettoWorkspaceId('default-workspace');
 });
+
+function enableOidcSession(): void {
+  window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+  window.__SMARTPERFETTO_AUTH_SESSION__ = {
+    success: true,
+    authenticated: true,
+    authMode: 'oidc',
+    status: 'ready',
+    user: {id: 'user-oidc', email: 'user@example.com'},
+    tenant: {id: 'tenant-oidc', name: 'Tenant'},
+    workspace: {
+      id: 'workspace-oidc',
+      name: 'Personal Workspace',
+      kind: 'personal',
+    },
+    csrfToken: 'csrf-oidc',
+  };
+}
 
 describe('SessionManager UI language settings', () => {
   it('loads explicit language preferences and normalizes invalid persisted data', () => {
@@ -77,6 +101,22 @@ describe('SessionManager UI language settings', () => {
       JSON.parse(localStorage.getItem(getSettingsStorageKey()) || '{}')
         .uiLanguage,
     ).toBe('auto');
+  });
+
+  it('preserves the configured backend verbatim outside OIDC mode', () => {
+    const manager = new SessionManager();
+    manager.saveSettings({
+      ...DEFAULT_SETTINGS,
+      backendUrl: 'http://localhost:9002',
+      backendApiKey: 'local-api-key',
+    });
+
+    expect(
+      JSON.parse(localStorage.getItem(getSettingsStorageKey()) || '{}'),
+    ).toMatchObject({
+      backendUrl: 'http://localhost:9002',
+      backendApiKey: 'local-api-key',
+    });
   });
 });
 
@@ -120,6 +160,69 @@ describe('SessionManager pending backend trace storage', () => {
     expect(manager.recoverPendingBackendTrace(undefined, 'lease-a')).toBe(
       'trace-lease',
     );
+  });
+});
+
+describe('SessionManager OIDC storage isolation', () => {
+  it('does not import unscoped local-mode data into a new OIDC identity', () => {
+    sessionStorage.setItem('smartperfetto-window-id', 'window-oidc');
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({...DEFAULT_SETTINGS, backendUrl: 'http://legacy-backend', uiLanguage: 'en'}),
+    );
+    localStorage.setItem(HISTORY_KEY, JSON.stringify([{role: 'user', content: 'legacy'}]));
+    localStorage.setItem(
+      SESSIONS_KEY,
+      JSON.stringify({byTrace: {legacy: [makeSession('legacy-session', 'legacy')]}}),
+    );
+    localStorage.setItem('ai-analysis-mode', 'full');
+    sessionStorage.setItem(
+      `${PENDING_BACKEND_TRACE_KEY}:window-oidc`,
+      JSON.stringify({traceId: 'legacy-window-trace', port: 9814, timestamp: Date.now()}),
+    );
+    localStorage.setItem(
+      PENDING_BACKEND_TRACE_KEY,
+      JSON.stringify({traceId: 'legacy-trace', port: 9814, timestamp: Date.now()}),
+    );
+    enableOidcSession();
+
+    const manager = new SessionManager();
+    expect(manager.loadSettings().backendUrl).not.toBe('http://legacy-backend');
+    expect(manager.loadSettings().uiLanguage).toBe('auto');
+    expect(manager.loadLegacyHistory()).toBeNull();
+    expect(manager.loadAnalysisMode()).toBe('auto');
+    expect(manager.loadSessionsStorage()).toEqual({byTrace: {}});
+    expect(manager.recoverPendingBackendTrace(9814)).toBeNull();
+  });
+
+  it('forces the runtime backend and removes backend credentials from scoped settings', () => {
+    enableOidcSession();
+    localStorage.setItem(
+      getSettingsStorageKey(),
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        backendUrl: 'https://untrusted.example.test',
+        backendApiKey: 'stale-api-key',
+        uiLanguage: 'en',
+      }),
+    );
+
+    const manager = new SessionManager();
+    const loaded = manager.loadSettings();
+    expect(loaded.backendUrl).toBe(getDefaultSmartPerfettoBackendUrl());
+    expect(loaded.backendApiKey).toBe('');
+    expect(loaded.uiLanguage).toBe('en');
+
+    manager.saveSettings({
+      ...loaded,
+      backendUrl: 'https://another-untrusted.example.test',
+      backendApiKey: 'must-not-persist',
+    });
+    const persisted = JSON.parse(
+      localStorage.getItem(getSettingsStorageKey()) || '{}',
+    );
+    expect(persisted.backendUrl).toBe(getDefaultSmartPerfettoBackendUrl());
+    expect(persisted.backendApiKey).toBe('');
   });
 });
 

@@ -24,8 +24,19 @@
  *   4. Comparison bar and mode are restored seamlessly
  */
 
+import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
+import {buildSmartPerfettoStorageKey} from '../../core/smartperfetto_request_context';
+
 const COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v2';
 const LEGACY_COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v1';
+
+export function getComparisonStateStorageKey(
+  baseKey = COMPARISON_STATE_KEY,
+): string {
+  return isSmartPerfettoOidcMode()
+    ? buildSmartPerfettoStorageKey(baseKey, 'workspace')
+    : baseKey;
+}
 
 /** Persisted comparison state — survives plugin re-instantiation. */
 export interface PersistedComparisonState {
@@ -66,14 +77,16 @@ export interface ViewportSnapshot {
 export function saveComparisonState(state: PersistedComparisonState): void {
   try {
     sessionStorage.setItem(
-      COMPARISON_STATE_KEY,
+      getComparisonStateStorageKey(),
       JSON.stringify({
         ...state,
         schemaVersion: 2,
         sourceKind: 'raw_trace_pair',
       } satisfies PersistedComparisonState),
     );
-    sessionStorage.removeItem(LEGACY_COMPARISON_STATE_KEY);
+    sessionStorage.removeItem(
+      getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
+    );
   } catch (e) {
     console.warn('[ComparisonState] Failed to save:', e);
   }
@@ -87,8 +100,10 @@ export function saveComparisonState(state: PersistedComparisonState): void {
  */
 export function restoreComparisonState(currentTraceFingerprint?: string): PersistedComparisonState | null {
   try {
-    const raw = sessionStorage.getItem(COMPARISON_STATE_KEY)
-      || sessionStorage.getItem(LEGACY_COMPARISON_STATE_KEY);
+    const raw = sessionStorage.getItem(getComparisonStateStorageKey())
+      || sessionStorage.getItem(
+        getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
+      );
     if (!raw) return null;
     const state: PersistedComparisonState = {
       ...JSON.parse(raw),
@@ -120,8 +135,10 @@ export function restoreComparisonState(currentTraceFingerprint?: string): Persis
 /** Clear comparison state (on exit comparison mode or stale). */
 export function clearComparisonState(): void {
   try {
-    sessionStorage.removeItem(COMPARISON_STATE_KEY);
-    sessionStorage.removeItem(LEGACY_COMPARISON_STATE_KEY);
+    sessionStorage.removeItem(getComparisonStateStorageKey());
+    sessionStorage.removeItem(
+      getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
+    );
   } catch { /* non-fatal */ }
 }
 

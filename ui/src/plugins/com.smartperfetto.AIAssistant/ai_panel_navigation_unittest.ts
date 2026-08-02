@@ -86,17 +86,6 @@ type MutableTestAIPanel = TestAIPanel & {
   exitComparisonMode: () => void;
   saveSettings: (settings: AIPanelState['settings']) => void;
   openSettings: () => void;
-  onEnterpriseIdentityChange: (
-    identity: {
-      tenantId: string;
-      userId: string;
-      workspaceId: string;
-    } | null,
-  ) => void;
-  deleteBackendSessionBestEffort: (
-    sessionId: string | null,
-    backendUrl: string,
-  ) => void;
 };
 
 function createMutableTestPanel(): MutableTestAIPanel {
@@ -237,26 +226,6 @@ describe('AIPanel backend binding reset', () => {
       codebaseIds: [],
       knowledgeSourceIds: [],
     });
-  });
-});
-
-describe('AIPanel enterprise identity transition', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-
-  it('keeps the current backend session when clearing an already-default identity', () => {
-    const panel = createMutableTestPanel();
-    panel.state.agentSessionId = 'agent-session-1';
-    const deleteBackendSession = vi
-      .spyOn(panel, 'deleteBackendSessionBestEffort')
-      .mockImplementation(() => {});
-
-    panel.onEnterpriseIdentityChange(null);
-
-    expect(deleteBackendSession).not.toHaveBeenCalled();
-    expect(panel.state.agentSessionId).toBe('agent-session-1');
   });
 });
 

@@ -103,6 +103,7 @@ describe('Provider catalog change events', () => {
     m.redraw.sync();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBeUndefined();
     expect(root.textContent).toContain('System Default');
 
     notifyProviderCatalogChanged({
@@ -142,7 +143,6 @@ describe('Analysis identity lock', () => {
           onClose: () => {},
           onSave,
           onWorkspaceChange,
-          onEnterpriseIdentityChange: () => {},
           onCheckStatus: async () => ({connected: true}),
           onProviderSelectionChange,
         }),
