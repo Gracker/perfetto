@@ -23,9 +23,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   } as Response;
 }
 
-function requestHeaders(callIndex: number): Record<string, string> {
+function requestHeaders(callIndex: number): Headers {
   const init = fetchMock.mock.calls[callIndex][1] as RequestInit;
-  return init.headers as Record<string, string>;
+  return new Headers(init.headers);
 }
 
 beforeEach(() => {
@@ -122,7 +122,7 @@ describe('BackendUploader request context', () => {
       new BackendUploader('http://backend').checkAvailable(),
     ).resolves.toBe(true);
 
-    expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
+    expect(requestHeaders(0).get('X-Window-Id')).toBe('window-upload');
   });
 
   it('opens an existing trace through an isolated viewer lease', async () => {
@@ -165,15 +165,14 @@ describe('BackendUploader request context', () => {
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: 'POST',
       cache: 'no-cache',
-      credentials: 'include',
       body: JSON.stringify({sessionId: 'pane-current'}),
     });
-    expect(requestHeaders(0)).toMatchObject({
-      Authorization: 'Bearer spak_test-secret',
-      'Content-Type': 'application/json',
-      'x-api-key': 'spak_test-secret',
-      'X-Window-Id': 'window-upload',
-    });
+    expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include');
+    const headers = requestHeaders(0);
+    expect(headers.get('Authorization')).toBe('Bearer spak_test-secret');
+    expect(headers.get('Content-Type')).toBe('application/json');
+    expect(headers.get('x-api-key')).toBe('spak_test-secret');
+    expect(headers.get('X-Window-Id')).toBe('window-upload');
   });
 
   it('sends the configured API key on health and upload requests', async () => {
@@ -193,10 +192,12 @@ describe('BackendUploader request context', () => {
     } as any)).resolves.toMatchObject({success: true});
 
     for (const index of [0, 1]) {
-      expect(requestHeaders(index)).toMatchObject({
-        Authorization: 'Bearer spak_test-secret',
-        'x-api-key': 'spak_test-secret',
-      });
+      expect(requestHeaders(index).get('Authorization')).toBe(
+        'Bearer spak_test-secret',
+      );
+      expect(requestHeaders(index).get('x-api-key')).toBe(
+        'spak_test-secret',
+      );
     }
   });
 
@@ -246,7 +247,7 @@ describe('BackendUploader request context', () => {
         websocketCapabilityExpiresAt: 123456,
       },
     });
-    expect(requestHeaders(0)['X-Window-Id']).toBe('window-upload');
+    expect(requestHeaders(0).get('X-Window-Id')).toBe('window-upload');
     expect(result.rpcTarget?.headers).toMatchObject({
       'X-Window-Id': 'window-upload',
     });
@@ -277,10 +278,8 @@ describe('BackendUploader request context', () => {
         websocketUrl: 'ws://127.0.0.1:9818/websocket',
       },
     });
-    expect(requestHeaders(0)).toMatchObject({
-      'Content-Type': 'application/json',
-      'X-Window-Id': 'window-upload',
-    });
+    expect(requestHeaders(0).get('Content-Type')).toBe('application/json');
+    expect(requestHeaders(0).get('X-Window-Id')).toBe('window-upload');
   });
 
   it('accepts lease-only upload responses for backend proxy mode', async () => {

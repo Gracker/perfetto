@@ -14,6 +14,10 @@ import {
 import type {HttpRpcTarget} from '../trace_processor/http_rpc_engine';
 import {getDefaultSmartPerfettoBackendUrl} from './smartperfetto_backend_url';
 import {getSmartPerfettoRequestContext} from './smartperfetto_request_context';
+import {
+  handleSmartPerfettoAuthResponse,
+  withSmartPerfettoAuth,
+} from './smartperfetto_auth';
 
 const BACKEND_CHECK_TIMEOUT_MS = 1000; // Fast timeout for health check
 const BACKEND_UPLOAD_MIN_TIMEOUT_MS = 60000;
@@ -143,14 +147,14 @@ export class BackendUploader {
     try {
       const resp = await fetchWithTimeout(
         buildSmartPerfettoWorkspaceApiUrl(this.backendUrl, 'traces', '/health'),
-        {
+        withSmartPerfettoAuth({
           method: 'GET',
           cache: 'no-cache',
-          credentials: 'include',
           headers: this.requestHeaders(),
-        },
+        }),
         BACKEND_CHECK_TIMEOUT_MS,
       );
+      handleSmartPerfettoAuthResponse(resp);
       if (resp.status === 200) {
         const data = await resp.json();
         return data.available === true;
@@ -265,14 +269,14 @@ export class BackendUploader {
     try {
       const resp = await fetchWithTimeout(
         buildSmartPerfettoWorkspaceApiUrl(this.backendUrl, 'traces', '/upload'),
-        {
+        withSmartPerfettoAuth({
           method: 'POST',
-          credentials: 'include',
           headers: this.requestHeaders(),
           body: formData,
-        },
+        }),
         computeUploadTimeoutMs(blob.size),
       );
+      handleSmartPerfettoAuthResponse(resp);
 
       if (resp.status !== 200) {
         const errorText = await resp.text();
@@ -323,7 +327,7 @@ export class BackendUploader {
           'traces',
           `/${encodeURIComponent(normalizedTraceId)}/viewer`,
         ),
-        {
+        withSmartPerfettoAuth({
           method: 'POST',
           cache: 'no-cache',
           credentials: 'include',
@@ -331,9 +335,10 @@ export class BackendUploader {
           body: JSON.stringify({
             ...(sessionId?.trim() ? {sessionId: sessionId.trim()} : {}),
           }),
-        },
+        }),
         BACKEND_VIEWER_OPEN_TIMEOUT_MS,
       );
+      handleSmartPerfettoAuthResponse(response);
       const data = (await response.json()) as {
         success?: boolean;
         error?: string;
@@ -378,16 +383,16 @@ export class BackendUploader {
           'traces',
           '/upload-url',
         ),
-        {
+        withSmartPerfettoAuth({
           method: 'POST',
-          credentials: 'include',
           headers: this.requestHeaders({
             'Content-Type': 'application/json',
           }),
           body: JSON.stringify({url, filename}),
-        },
+        }),
         BACKEND_URL_UPLOAD_TIMEOUT_MS,
       );
+      handleSmartPerfettoAuthResponse(resp);
 
       if (resp.status !== 200) {
         const errorText = await resp.text();

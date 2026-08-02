@@ -178,16 +178,92 @@ function smartPerfettoSafePort(value, fallback) {
     : fallback;
 }
 
-function smartPerfettoRuntimeConfigScript() {
-  const backendUrl = (
-    process.env.SMARTPERFETTO_BACKEND_PUBLIC_URL ||
-    process.env.SMARTPERFETTO_BACKEND_URL ||
-    ''
-  ).trim();
+function parseSmartPerfettoRuntimeEnvFile(content) {
+  const parsed = {};
+  for (const sourceLine of content.split(/\r?\n/)) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim().replace(/^export\s+/, '');
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = line.slice(separator + 1).trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.endsWith(quote)) {
+      value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, '').trim();
+    }
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+const SMARTPERFETTO_RUNTIME_ENV_FILE_KEYS = [
+  'SMARTPERFETTO_BACKEND_PUBLIC_URL',
+  'SMARTPERFETTO_BACKEND_URL',
+  'SMARTPERFETTO_OIDC_ISSUER_URL',
+  'SMARTPERFETTO_OIDC_CLIENT_ID',
+  'SMARTPERFETTO_OIDC_REDIRECT_URI',
+];
+
+function smartPerfettoRuntimeEnvFileValues() {
+  const values = {};
+  const explicitEnvFile = process.env.SMARTPERFETTO_ENV_FILE;
+  const candidates = explicitEnvFile
+    ? [explicitEnvFile]
+    : [
+      pjoin(ROOT_DIR, '../backend/.env'),
+      pjoin(ROOT_DIR, '../.env'),
+    ];
+  for (const candidate of candidates) {
+    let parsed;
+    try {
+      parsed = parseSmartPerfettoRuntimeEnvFile(
+        fs.readFileSync(candidate, 'utf8'),
+      );
+    } catch (_) {
+      continue;
+    }
+    for (const key of SMARTPERFETTO_RUNTIME_ENV_FILE_KEYS) {
+      if (values[key] === undefined && parsed[key] !== undefined) {
+        values[key] = parsed[key];
+      }
+    }
+  }
+  return values;
+}
+
+function smartPerfettoRuntimeConfig() {
+  const fileEnv = smartPerfettoRuntimeEnvFileValues();
+  const oidcEnvValue = (key) => process.env[key] ?? fileEnv[key] ?? '';
   const externalIssueUrl = (
     process.env.SMARTPERFETTO_EXTERNAL_ISSUE_URL || ''
   ).trim();
-  const config = {
+  const oidcEnabled = [
+    oidcEnvValue('SMARTPERFETTO_OIDC_ISSUER_URL'),
+    oidcEnvValue('SMARTPERFETTO_OIDC_CLIENT_ID'),
+    oidcEnvValue('SMARTPERFETTO_OIDC_REDIRECT_URI'),
+  ].some((value) => value.trim().length > 0);
+  let backendUrl = (
+    process.env.SMARTPERFETTO_BACKEND_PUBLIC_URL ||
+    process.env.SMARTPERFETTO_BACKEND_URL ||
+    (oidcEnabled
+      ? fileEnv.SMARTPERFETTO_BACKEND_PUBLIC_URL ||
+        fileEnv.SMARTPERFETTO_BACKEND_URL
+      : '') ||
+    ''
+  ).trim();
+  if (!backendUrl && oidcEnabled) {
+    try {
+      backendUrl = new URL(
+        oidcEnvValue('SMARTPERFETTO_OIDC_REDIRECT_URI'),
+      ).origin;
+    } catch {
+      backendUrl = '';
+    }
+  }
+  return {
     backendPort: smartPerfettoSafePort(
       process.env.SMARTPERFETTO_BACKEND_PUBLIC_PORT ||
       process.env.SMARTPERFETTO_BACKEND_PORT,
@@ -198,10 +274,19 @@ function smartPerfettoRuntimeConfigScript() {
       process.env.PERFETTO_UI_SERVE_PORT,
       '10000',
     ),
+    ...(oidcEnabled ? {authProbeRequired: true, oidcEnabled: true} : {}),
     ...(backendUrl ? {backendUrl} : {}),
     ...(externalIssueUrl ? {externalIssueUrl} : {}),
   };
-  return `<script>window.__SMARTPERFETTO_CONFIG__=${JSON.stringify(config)};</script>`;
+}
+
+function smartPerfettoRuntimeConfigScript() {
+  const config = smartPerfettoRuntimeConfig();
+  const serialized = JSON.stringify(config)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return `<script>window.__SMARTPERFETTO_CONFIG__=${serialized};</script>`;
 }
 
 function injectSmartPerfettoRuntimeConfig(absPath, data) {
@@ -971,7 +1056,11 @@ async function startViteDevServer() {
         `<title>${cfg.titleOverride}</title>`,
       );
     }
-    return html;
+    if (!smartPerfettoRuntimeConfig().oidcEnabled) return html;
+    return injectSmartPerfettoRuntimeConfig(
+      indexSrc,
+      Buffer.from(html),
+    ).toString('utf8');
   };
 
   // Serve /test/* from the repo (used by some e2e flows). Mirrors the
@@ -1121,10 +1210,13 @@ function startServer() {
     // sub-millisecond part of mtime would cause a permanent mismatch.
     const mtimeSec = Math.floor(stat.mtime.getTime() / 1000) * 1000;
     const mtimeStr = new Date(mtimeSec).toUTCString();
+    const isIndex = path.basename(absPath) === 'index.html';
+    const oidcIndex = isIndex && smartPerfettoRuntimeConfig().oidcEnabled;
 
     // Return 304 if the browser's cached copy is still fresh.
     const ifModifiedSince = req.headers['if-modified-since'];
     if (
+      !oidcIndex &&
       ifModifiedSince !== undefined &&
       new Date(ifModifiedSince).getTime() >= mtimeSec
     ) {
@@ -1156,8 +1248,8 @@ function startServer() {
         const head = {
           'Content-Type': cType,
           'Content-Length': body.length,
-          'Last-Modified': mtimeStr,
-          'Cache-Control': 'no-cache',
+          ...(oidcIndex ? {} : {'Last-Modified': mtimeStr}),
+          'Cache-Control': oidcIndex ? 'no-store' : 'no-cache',
         };
         if (acceptsGzip) head['Content-Encoding'] = 'gzip';
         if (cfg.crossOriginIsolation) {

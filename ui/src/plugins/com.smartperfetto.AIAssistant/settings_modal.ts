@@ -30,8 +30,11 @@ import {
   type ApplicationUpdateStatus,
 } from './application_update';
 import {SelfEvolutionPanel} from './self_evolution_panel';
-import {EnterpriseAuthCard} from './enterprise_auth_card';
-import type {EnterpriseAuthIdentity} from './enterprise_auth';
+import {
+  getSmartPerfettoAuthSession,
+  isSmartPerfettoOidcMode,
+  smartPerfettoFetch,
+} from '../../core/smartperfetto_auth';
 
 export interface SettingsModalAttrs {
   settings: AISettings;
@@ -41,9 +44,6 @@ export interface SettingsModalAttrs {
   onClose: () => void;
   onSave: (settings: AISettings) => void;
   onWorkspaceChange: (workspaceId: string) => void;
-  onEnterpriseIdentityChange: (
-    identity: EnterpriseAuthIdentity | null,
-  ) => void;
   onCheckStatus: (backendUrl: string, apiKey: string) => Promise<ServerStatus>;
   onProviderSelectionChange: () => void;
   onAnalysisContextChange?: (selection: AnalysisContextSelection) => void;
@@ -409,6 +409,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   private currentTab: SettingsTab = 'connection';
   private workspaceId = '';
   private showBackendAuth = false;
+  private oidcLogoutPending = false;
+  private oidcLogoutError = '';
   private dialogElement?: HTMLElement;
   private previouslyFocusedElement?: HTMLElement;
 
@@ -516,6 +518,74 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     );
     this.isChecking = false;
     m.redraw();
+  }
+
+  private async logoutOidc(): Promise<void> {
+    if (this.oidcLogoutPending) return;
+    this.oidcLogoutPending = true;
+    this.oidcLogoutError = '';
+    m.redraw();
+    const backendUrl = getDefaultSmartPerfettoBackendUrl().replace(/\/+$/, '');
+    try {
+      const response = await smartPerfettoFetch(`${backendUrl}/api/auth/logout`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      window.location.reload();
+    } catch {
+      this.oidcLogoutError = uiText('退出登录失败，请重试', 'Sign out failed. Try again.');
+    } finally {
+      this.oidcLogoutPending = false;
+      m.redraw();
+    }
+  }
+
+  private renderOidcIdentity(readOnly: boolean): m.Children {
+    const session = getSmartPerfettoAuthSession();
+    const userLabel =
+      session?.user?.displayName || session?.user?.email || session?.user?.id || '';
+    return m('div', {style: MODAL_STYLES.field}, [
+      m(
+        'label',
+        {style: MODAL_STYLES.fieldLabel},
+        uiText('登录账号', 'Signed-in account'),
+      ),
+      m('div', {style: MODAL_STYLES.input}, userLabel),
+      m(
+        'label',
+        {style: {...MODAL_STYLES.fieldLabel, marginTop: '12px'}},
+        uiText('个人工作区', 'Personal workspace'),
+      ),
+      m(
+        'div',
+        {style: MODAL_STYLES.input},
+        session?.workspace?.name || session?.workspace?.id || '',
+      ),
+      m(
+        'button',
+        {
+          type: 'button',
+          style: {
+            ...MODAL_STYLES.btn,
+            ...MODAL_STYLES.btnSecondary,
+            marginTop: '16px',
+          },
+          disabled: readOnly || this.oidcLogoutPending,
+          title: readOnly
+            ? uiText('分析运行期间无法退出登录', 'Sign out is unavailable while analysis is running')
+            : undefined,
+          onclick: () => void this.logoutOidc(),
+        },
+        this.oidcLogoutPending
+          ? uiText('正在退出……', 'Signing out...')
+          : uiText('退出登录', 'Sign out'),
+      ),
+      this.oidcLogoutError
+        ? m('div', {style: {...MODAL_STYLES.hint, color: COLORS.error}}, this.oidcLogoutError)
+        : null,
+    ]);
   }
 
   private renderStatusRow(
@@ -1050,10 +1120,10 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
 
   view(vnode: m.Vnode<SettingsModalAttrs>) {
     const readOnly = vnode.attrs.readOnly === true;
-    const backendBindingDirty = settingsBackendBindingChanged(
-      vnode.attrs.settings,
-      this.settings,
-    );
+    const oidcMode = isSmartPerfettoOidcMode();
+    const backendBindingDirty =
+      !oidcMode &&
+      settingsBackendBindingChanged(vnode.attrs.settings, this.settings);
     return m(
       'div',
       {style: MODAL_STYLES.overlay},
@@ -1454,7 +1524,9 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                           ),
                         ),
                       ]),
-                      m('div', {style: MODAL_STYLES.field}, [
+                      oidcMode
+                        ? this.renderOidcIdentity(readOnly)
+                        : [m('div', {style: MODAL_STYLES.field}, [
                         m(
                           'label',
                           {
@@ -1514,17 +1586,6 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                           placeholder: getDefaultSmartPerfettoBackendUrl(),
                         }),
                       ]),
-                      m(EnterpriseAuthCard, {
-                        backendUrl: vnode.attrs.settings.backendUrl,
-                        readOnly:
-                          readOnly ||
-                          settingsBackendBindingChanged(
-                            vnode.attrs.settings,
-                            this.settings,
-                          ),
-                        onIdentityChange:
-                          vnode.attrs.onEnterpriseIdentityChange,
-                      }),
                       m('div', {style: MODAL_STYLES.field}, [
                         m(
                           'button',
@@ -1602,7 +1663,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                               ),
                             ),
                           ])
-                        : null,
+                        : null],
                     ]),
 
                     m('div', {style: MODAL_STYLES.section}, [
@@ -1687,8 +1748,16 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                     style: {...MODAL_STYLES.btn, ...MODAL_STYLES.btnPrimary},
                     onclick: () => {
                       if (readOnly) return;
-                      vnode.attrs.onWorkspaceChange(this.workspaceId);
-                      vnode.attrs.onSave(this.settings);
+                      if (!oidcMode) {
+                        vnode.attrs.onWorkspaceChange(this.workspaceId);
+                        vnode.attrs.onSave(this.settings);
+                        return;
+                      }
+                      vnode.attrs.onSave({
+                        ...this.settings,
+                        backendUrl: getDefaultSmartPerfettoBackendUrl(),
+                        backendApiKey: '',
+                      });
                     },
                     disabled: readOnly,
                     title: readOnly

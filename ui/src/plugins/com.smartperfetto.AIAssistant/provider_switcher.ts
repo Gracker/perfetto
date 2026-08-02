@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import m from 'mithril';
-import {fetchSmartPerfettoBackend} from '../../core/smartperfetto_backend_fetch';
 
+import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {
   type AgentRuntimeKind,
   type ProviderConfig,
@@ -176,7 +176,7 @@ export class ProviderQuickSwitcher
   private async loadProviders() {
     this.loading = true;
     try {
-      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, ''), {
+      const res = await smartPerfettoFetch(apiUrl(this.backendUrl, ''), {
         headers: buildHeaders(this.apiKey),
       });
       if (res.ok) {
@@ -201,10 +201,13 @@ export class ProviderQuickSwitcher
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
-      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, `/${id}/activate`), {
-        method: 'POST',
-        headers: buildHeaders(this.apiKey),
-      });
+      const res = await smartPerfettoFetch(
+        apiUrl(this.backendUrl, `/${id}/activate`),
+        {
+          method: 'POST',
+          headers: buildHeaders(this.apiKey),
+        },
+      );
       if (res.ok) {
         await this.loadProviders();
         const activated = this.providers.find((p) => p.id === id);
@@ -234,7 +237,7 @@ export class ProviderQuickSwitcher
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
-      const runtimeRes = await fetchSmartPerfettoBackend(
+      const runtimeRes = await smartPerfettoFetch(
         apiUrl(this.backendUrl, `/${provider.id}/runtime`),
         {
           method: 'POST',
@@ -245,7 +248,7 @@ export class ProviderQuickSwitcher
       if (!runtimeRes.ok) return;
       if (this.isMutationLocked()) return;
 
-      const activateRes = await fetchSmartPerfettoBackend(
+      const activateRes = await smartPerfettoFetch(
         apiUrl(this.backendUrl, `/${provider.id}/activate`),
         {
           method: 'POST',
@@ -279,10 +282,13 @@ export class ProviderQuickSwitcher
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
-      const res = await fetchSmartPerfettoBackend(apiUrl(this.backendUrl, '/deactivate'), {
-        method: 'POST',
-        headers: buildHeaders(this.apiKey),
-      });
+      const res = await smartPerfettoFetch(
+        apiUrl(this.backendUrl, '/deactivate'),
+        {
+          method: 'POST',
+          headers: buildHeaders(this.apiKey),
+        },
+      );
       if (res.ok) {
         await this.loadProviders();
         this.showToast(

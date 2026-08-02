@@ -19,7 +19,10 @@ afterEach(() => {
 
 describe('codebase deletion API', () => {
   it('uses the scoped DELETE endpoint and returns cleanup counts', async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
       ok: true,
       status: 200,
       json: async () => ({
@@ -43,9 +46,12 @@ describe('codebase deletion API', () => {
       'http://backend/api/rag/codebases/codebase%2Fa',
       expect.objectContaining({
         method: 'DELETE',
-        headers: expect.objectContaining({Authorization: 'Bearer secret-key'}),
       }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBeUndefined();
+    expect(
+      new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'),
+    ).toBe('Bearer secret-key');
   });
 });
 
@@ -96,10 +102,12 @@ describe('codebase directory picker API', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       'http://backend/api/rag/codebases/directory-picker',
-      expect.objectContaining({
-        headers: expect.objectContaining({Authorization: 'Bearer secret-key'}),
-      }),
+      expect.any(Object),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBeUndefined();
+    expect(
+      new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'),
+    ).toBe('Bearer secret-key');
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       'http://backend/api/rag/codebases/directory-picker',
@@ -111,7 +119,10 @@ describe('codebase directory picker API', () => {
   });
 
   it('keeps the picker authorization attached to preview requests', async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
       ok: true,
       status: 200,
       json: async () => ({
@@ -161,7 +172,10 @@ describe('external knowledge source API', () => {
       sendToProvider: true,
       indexGeneration: 0,
     };
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
       ok: true,
       status: 201,
       json: async () => ({success: true, source}),
@@ -178,7 +192,6 @@ describe('external knowledge source API', () => {
       'http://backend/api/rag/android-internals/sources',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({Authorization: 'Bearer secret-key'}),
         body: JSON.stringify({
           rootPath: '/knowledge/wiki',
           displayName: 'Android Internals',
@@ -187,10 +200,17 @@ describe('external knowledge source API', () => {
         }),
       }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBeUndefined();
+    expect(
+      new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'),
+    ).toBe('Bearer secret-key');
   });
 
   it('reindexes a source using an encoded identifier', async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
       ok: true,
       status: 200,
       json: async () => ({success: true}),

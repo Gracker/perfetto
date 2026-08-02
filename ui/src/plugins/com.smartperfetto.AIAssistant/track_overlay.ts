@@ -36,6 +36,8 @@
 
 import {Trace} from '../../public/trace';
 import {addDebugSliceTrack} from '../../components/tracks/debug_tracks';
+import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
+import {buildSmartPerfettoStorageKey} from '../../core/smartperfetto_request_context';
 import {uiText} from './ui_language';
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,12 @@ const activeTrackNodes = new Map<OverlayId, string[]>();
 
 const OVERLAY_STORAGE_KEY = 'smartperfetto_overlay_data_v1';
 
+export function getOverlayStorageKey(): string {
+  return isSmartPerfettoOidcMode()
+    ? buildSmartPerfettoStorageKey(OVERLAY_STORAGE_KEY, 'workspace')
+    : OVERLAY_STORAGE_KEY;
+}
+
 interface PersistedOverlayStore {
   traceUuid: string;
   overlays: Record<string, {columns: string[]; rows: unknown[][]}>;
@@ -271,7 +279,8 @@ function persistOverlayData(
   rows: unknown[][],
 ): void {
   try {
-    const raw = sessionStorage.getItem(OVERLAY_STORAGE_KEY);
+    const storageKey = getOverlayStorageKey();
+    const raw = sessionStorage.getItem(storageKey);
     const store: PersistedOverlayStore = raw
       ? JSON.parse(raw)
       : {traceUuid, overlays: {}};
@@ -283,7 +292,7 @@ function persistOverlayData(
     }
 
     store.overlays[overlayId] = {columns, rows};
-    sessionStorage.setItem(OVERLAY_STORAGE_KEY, JSON.stringify(store));
+    sessionStorage.setItem(storageKey, JSON.stringify(store));
   } catch (e) {
     // sessionStorage full or unavailable — non-fatal
     console.warn('[TrackOverlay] Failed to persist overlay data:', e);
@@ -297,7 +306,8 @@ function persistOverlayData(
  */
 export async function restoreOverlayTracks(trace: Trace): Promise<void> {
   try {
-    const raw = sessionStorage.getItem(OVERLAY_STORAGE_KEY);
+    const storageKey = getOverlayStorageKey();
+    const raw = sessionStorage.getItem(storageKey);
     if (!raw) return;
 
     const store: PersistedOverlayStore = JSON.parse(raw);
@@ -320,7 +330,7 @@ export async function restoreOverlayTracks(trace: Trace): Promise<void> {
         // Stale/corrupt data — remove from storage to prevent repeated crashes
         console.warn(`[TrackOverlay] Failed to restore ${overlayId}, removing from cache:`, e);
         delete store.overlays[overlayId];
-        sessionStorage.setItem(OVERLAY_STORAGE_KEY, JSON.stringify(store));
+        sessionStorage.setItem(storageKey, JSON.stringify(store));
       }
     }
 
@@ -337,7 +347,7 @@ export async function restoreOverlayTracks(trace: Trace): Promise<void> {
 /** Clear persisted overlay data (e.g., when starting a new analysis). */
 export function clearPersistedOverlays(): void {
   try {
-    sessionStorage.removeItem(OVERLAY_STORAGE_KEY);
+    sessionStorage.removeItem(getOverlayStorageKey());
   } catch {
     // Ignore
   }

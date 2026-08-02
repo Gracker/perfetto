@@ -2,14 +2,21 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
   buildSelfEvolutionApiUrl,
+  createSelfEvolutionApi,
   parseSelfEvolutionSseChunk,
   type SelfEvolutionProposal,
 } from './self_evolution_api';
 import {proposalActions} from './self_evolution_panel';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  window.__SMARTPERFETTO_CONFIG__ = undefined;
+  window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+});
 
 describe('self-evolution frontend contract', () => {
   it('builds the dedicated admin endpoint without duplicate slashes', () => {
@@ -48,6 +55,43 @@ describe('self-evolution frontend contract', () => {
         createdAt: 1,
       },
     ]);
+  });
+
+  it('uses the authenticated fetch path for mutation requests', async () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-a', email: 'user@example.com'},
+      tenant: {id: 'tenant-a', name: 'Tenant A'},
+      workspace: {
+        id: 'workspace-a',
+        name: 'Personal Workspace',
+        kind: 'personal',
+      },
+      csrfToken: 'csrf-token-a',
+    };
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({success: true, operationId: 'operation-a'}),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      createSelfEvolutionApi('http://backend', 'secret-key').startCuration(),
+    ).resolves.toEqual({success: true, operationId: 'operation-a'});
+
+    const init = fetchMock.mock.calls[0]?.[1];
+    expect(init?.credentials).toBe('include');
+    const requestHeaders = new Headers(init?.headers);
+    expect(requestHeaders.get('Authorization')).toBe('Bearer secret-key');
+    expect(requestHeaders.get('X-CSRF-Token')).toBe('csrf-token-a');
   });
 
   it('derives only lifecycle-valid proposal actions', () => {

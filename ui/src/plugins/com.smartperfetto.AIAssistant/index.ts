@@ -43,6 +43,7 @@ import {
   setDefaultBackendUrl,
 } from '../../core/backend_uploader';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
+import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {installTracePairFrameRedrawListener} from './trace_pair_workspace';
 import {getAIAssistantSurfacePolicy} from './ai_surface_policy';
@@ -55,10 +56,13 @@ import {setUiLanguagePreference} from './ui_language';
   try {
     const settings = sessionManager.loadSettings();
     setUiLanguagePreference(settings.uiLanguage);
+    const oidcMode = isSmartPerfettoOidcMode();
     setDefaultBackendUrl(
-      settings.backendUrl || getDefaultSmartPerfettoBackendUrl(),
+      oidcMode
+        ? getDefaultSmartPerfettoBackendUrl()
+        : settings.backendUrl || getDefaultSmartPerfettoBackendUrl(),
     );
-    setDefaultBackendCredential(settings.backendApiKey);
+    setDefaultBackendCredential(oidcMode ? '' : settings.backendApiKey);
   } catch {}
 })();
 
