@@ -93,7 +93,7 @@ class TraceProcessorConfig:
 
   # The timeout in seconds for the trace processor binary starting up. If the
   # binary does not start within this time, an exception will be raised.
-  load_timeout: int = 2
+  load_timeout: int = 30
 
   # Any extra flags to pass to the trace processor binary.
   # Warning: this is a low-level option and should be used with caution.
@@ -114,7 +114,7 @@ class TraceProcessorConfig:
       ingest_ftrace_in_raw: bool = False,
       enable_dev_features=False,
       resolver_registry: Optional[ResolverRegistry] = None,
-      load_timeout: int = 2,
+      load_timeout: int = 30,
       extra_flags: Optional[List[str]] = None,
       add_sql_packages: Optional[List[Union[str, SqlPackage]]] = None,
       fetch_latest_trace_processor: bool = False,
@@ -285,6 +285,24 @@ class TraceProcessor:
     metrics.ParseFromString(response.metrics)
     return metrics
 
+  def export(self, output_path: str, export_format: str):
+    """Exports the contents of Trace Processor.
+
+    The exact contents exported are defined by `export_format`. `arrow_tar` is
+    a tar of standard Arrow files with cross-version compatibility guarantees
+    for external consumers, but it cannot be loaded back into Trace Processor.
+    `perfetto` can be loaded by a fresh Trace Processor instance from the same
+    version. Loading it in a different version may work but is not guaranteed.
+    Output is streamed directly to
+    disk without materializing the complete archive in memory.
+
+    Args:
+      output_path: Path to write the export to.
+      export_format: Either `arrow_tar` or `perfetto`.
+    """
+    with open(output_path, 'wb') as f:
+      self.http.export(f, export_format)
+
   @property
   def metadata(self) -> Dict[str, str]:
     """Returns metadata associated with this trace.
@@ -352,6 +370,11 @@ class TraceProcessor:
     del a, b, c  # Unused.
     self.close()
     return False
+
+  def __del__(self):
+    # Fallback for callers that skip close()/the context manager, so temp files
+    # and the HTTP connection don't leak (as a "ResourceWarning: unclosed file").
+    self.close()
 
   def close(self):
     if getattr(self, 'subprocess', None):

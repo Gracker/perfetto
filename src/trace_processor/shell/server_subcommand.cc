@@ -248,7 +248,7 @@ base::Status ServerSubcommand::Run(const SubcommandContext& ctx) {
     trace_file = ctx.positional_args[1];
   }
 
-  auto config = BuildConfig(*ctx.global, ctx.platform);
+  ASSIGN_OR_RETURN(Config config, BuildConfig(*ctx.global, ctx.platform));
   ASSIGN_OR_RETURN(auto tp,
                    SetupTraceProcessor(*ctx.global, config, ctx.platform));
 
@@ -334,6 +334,8 @@ base::Status ServerSubcommand::Run(const SubcommandContext& ctx) {
       }
       ASSIGN_OR_RETURN(socket_path, session::SessionSocketPath(session_name));
     } else {
+      // Anchor a relative --path before binding: daemonizing chdirs to "/".
+      socket_path = session::MakeAbsolutePath(socket_path);
       RETURN_IF_ERROR(session::ValidateAfUnixPathLength(socket_path));
       if (session_name.empty())
         session_name = socket_path;

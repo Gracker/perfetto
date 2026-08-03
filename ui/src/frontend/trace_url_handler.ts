@@ -13,13 +13,15 @@
 // limitations under the License.
 
 import m from 'mithril';
+import {reportError} from '../base/logging';
 import {tryGetTrace} from '../core/cache_manager';
 import {showModal} from '../widgets/modal';
 import {loadPermalink} from './permalink';
 import {loadAndroidBugToolInfo} from './android_bug_tool';
-import {type Route, Router} from '../core/router';
+import {Router} from '../core/router';
 import {taskTracker} from './task_tracker';
 import {AppImpl} from '../core/app_impl';
+import type {Route} from '../public/app';
 
 function getCurrentTraceUrl(): undefined | string {
   const source = AppImpl.instance.trace?.traceInfo.source;
@@ -232,9 +234,19 @@ function loadTraceFromUrl(url: string, traceFileName?: string) {
     const fileName =
       traceFileName?.trim() || url.split('/').pop() || 'local_trace.pftrace';
     const request = fetch(url)
-      .then((response) => response.blob())
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        }
+        return response.blob();
+      })
+      .catch((e) => {
+        throw new Error(
+          `Could not fetch the trace at ${url}: ${e} (ERR:trace_fetch)`,
+        );
+      })
       .then((b) => AppImpl.instance.openTraceFromFile(new File([b], fileName)))
-      .catch((e) => alert(`Could not load local trace ${e}`));
+      .catch((e) => reportError(e));
     taskTracker.trackPromise(request, 'Downloading local trace');
   } else {
     AppImpl.instance.openTraceFromUrl(url);

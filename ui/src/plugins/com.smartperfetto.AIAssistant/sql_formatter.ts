@@ -13,7 +13,7 @@ export interface PerfettoSqlFormatResult {
 const FORMAT_OPTIONS = {
   lineWidth: 80,
   indentWidth: 2,
-  keywordCase: 1 as const,
+  keywordCase: 'upper' as const,
   semicolons: true,
 };
 
@@ -46,15 +46,7 @@ export async function formatPerfettoSql(
 
   try {
     const engine = await getFormatterEngine();
-    const result = engine.runFmt(trimmed, FORMAT_OPTIONS);
-    if (result.ok) {
-      return {ok: true, text: result.text};
-    }
-    return {
-      ok: false,
-      text: trimmed,
-      error: result.text || 'SQL formatting failed',
-    };
+    return {ok: true, text: engine.format(trimmed, FORMAT_OPTIONS)};
   } catch (e) {
     return {
       ok: false,

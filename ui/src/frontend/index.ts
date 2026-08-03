@@ -18,7 +18,7 @@ import '../base/static_initializers';
 import '../assets/typefaces.scss';
 import '../assets/common.scss';
 import z from 'zod';
-import {plugins, corePlugins} from '../virtual/plugins';
+import {plugins, corePlugins} from './plugins';
 import m from 'mithril';
 import {defer} from '../base/deferred';
 import {addErrorHandler, reportError} from '../base/logging';
@@ -32,7 +32,7 @@ import {maybeShowErrorDialog} from './error_dialog';
 import {installFileDropHandler} from './file_drop_handler';
 import {HomePage} from './home_page';
 import {postMessageHandler} from './post_message_handler';
-import {type Route, Router} from '../core/router';
+import {Router} from '../core/router';
 import {checkHttpRpcConnection} from './rpc_http_dialog';
 import {maybeOpenTraceFromRoute} from './trace_url_handler';
 import {HttpRpcEngine} from '../trace_processor/http_rpc_engine';
@@ -66,6 +66,7 @@ import {type HotkeyConfig, HotkeyContext} from '../widgets/hotkey_context';
 import {sleepMs} from '../base/utils';
 import {getSmartPerfettoBackendCspSources} from '../core/smartperfetto_backend_url';
 import {getBackendUploader} from '../core/backend_uploader';
+import type {Route} from '../public/app';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -212,6 +213,7 @@ function setupContentSecurityPolicy() {
     'connect-src': [
       `'self'`,
       'ws://127.0.0.1:8037', // For the adb websocket server.
+      'http://localhost:8080', // For local llama-server.
       'https:', // Allow any HTTPS; service worker firewall adds granular filtering.
       ...getSmartPerfettoBackendCspSources(),
       'https://*.google-analytics.com',
@@ -501,23 +503,23 @@ function onCssLoaded(app: AppImpl) {
     if (handled) return;
     maybeChangeRpcPortFromFragment();
     return checkHttpRpcConnection().then(() => {
-    const route = Router.parseUrl(window.location.href);
-    if (!app.embeddedMode) {
-      installFileDropHandler();
-    }
+      const route = Router.parseUrl(window.location.href);
+      if (!app.embeddedMode) {
+        installFileDropHandler();
+      }
 
-    // Don't allow postMessage or opening trace from route when the user says
-    // that they want to reuse the already loaded trace in trace processor.
-    const traceSource = app.trace?.traceInfo.source;
-    if (traceSource && traceSource.type === 'HTTP_RPC') {
-      return;
-    }
+      // Don't allow postMessage or opening trace from route when the user says
+      // that they want to reuse the already loaded trace in trace processor.
+      const traceSource = app.trace?.traceInfo.source;
+      if (traceSource && traceSource.type === 'HTTP_RPC') {
+        return;
+      }
 
-    // Add support for opening traces from postMessage().
-    window.addEventListener('message', postMessageHandler, {passive: true});
+      // Add support for opening traces from postMessage().
+      window.addEventListener('message', postMessageHandler, {passive: true});
 
-    // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
-    // cases.
+      // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
+      // cases.
       routeChange(route);
     });
   });

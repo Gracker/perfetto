@@ -15,6 +15,8 @@
  */
 
 #include "perfetto/ext/base/utils.h"
+#include <cstdint>
+#include <limits>
 
 #include "perfetto/base/build_config.h"
 
@@ -193,7 +195,20 @@ TEST(UtilsTest, EintrWrapper) {
 }
 #endif  // LINUX | ANDROID | APPLE
 
-TEST(UtilsTest, Align) {
+TEST(UtilsTest, IsPowerOfTwo) {
+  EXPECT_FALSE(IsPowerOfTwo(0u));
+  EXPECT_TRUE(IsPowerOfTwo(1u));
+  EXPECT_TRUE(IsPowerOfTwo(2u));
+  EXPECT_FALSE(IsPowerOfTwo(3u));
+  EXPECT_TRUE(IsPowerOfTwo(4u));
+
+  constexpr uint64_t max_pow2 = static_cast<uint64_t>(1) << 63;
+  EXPECT_FALSE(IsPowerOfTwo(max_pow2 - 1));
+  EXPECT_TRUE(IsPowerOfTwo(max_pow2));
+  EXPECT_FALSE(IsPowerOfTwo(max_pow2 + 1));
+}
+
+TEST(UtilsTest, AlignUp) {
   EXPECT_EQ(0u, AlignUp<4>(0));
   EXPECT_EQ(4u, AlignUp<4>(1));
   EXPECT_EQ(4u, AlignUp<4>(3));
@@ -205,6 +220,16 @@ TEST(UtilsTest, Align) {
   EXPECT_EQ(16u, AlignUp<16>(16));
   EXPECT_EQ(32u, AlignUp<16>(17));
   EXPECT_EQ(0xffffff00u, AlignUp<16>(0xffffff00 - 1));
+}
+
+TEST(UtilsTest, AlignDown) {
+  EXPECT_EQ(0u, AlignDown(0, 4));
+  EXPECT_EQ(0u, AlignDown(1, 4));
+  EXPECT_EQ(0u, AlignDown(3, 4));
+  EXPECT_EQ(4u, AlignDown(4, 4));
+  EXPECT_EQ(4u, AlignDown(5, 4));
+
+  EXPECT_EQ(12345u, AlignDown(12345, 1));
 }
 
 TEST(UtilsTest, HexDump) {
@@ -392,6 +417,56 @@ TEST(UtilsTest, OpenFstreamAlwaysBinaryMode) {
   }
 }
 #endif
+
+TEST(UtilsTest, SaturatingAdd) {
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+
+  EXPECT_EQ(SaturatingAdd(0, 0), 0);
+  EXPECT_EQ(SaturatingAdd(123, 456), 579);
+  EXPECT_EQ(SaturatingAdd(-123, -456), -579);
+  EXPECT_EQ(SaturatingAdd(kMax, 0), kMax);
+  EXPECT_EQ(SaturatingAdd(kMin, 0), kMin);
+  EXPECT_EQ(SaturatingAdd(kMax - 1, 1), kMax);
+  EXPECT_EQ(SaturatingAdd(kMin + 1, -1), kMin);
+  EXPECT_EQ(SaturatingAdd(kMax, 1), kMax);
+  EXPECT_EQ(SaturatingAdd(kMax - 1, 2), kMax);
+  EXPECT_EQ(SaturatingAdd(kMin, -1), kMin);
+  EXPECT_EQ(SaturatingAdd(kMin + 1, -2), kMin);
+}
+
+TEST(UtilsTest, SaturatingMultiply) {
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+
+  // No overflow: behaves like a normal multiply.
+  EXPECT_EQ(SaturatingMultiply(0, 1000), 0);
+  EXPECT_EQ(SaturatingMultiply(1000, 0), 0);
+  EXPECT_EQ(SaturatingMultiply(123, 1000), 123000);
+  EXPECT_EQ(SaturatingMultiply(-123, 1000), -123000);
+  EXPECT_EQ(SaturatingMultiply(123, -1000), -123000);
+  EXPECT_EQ(SaturatingMultiply(-123, -1000), 123000);
+  EXPECT_EQ(SaturatingMultiply(kMax, 1), kMax);
+  EXPECT_EQ(SaturatingMultiply(kMin, 1), kMin);
+
+  // Positive overflow saturates to kMax (same-sign operands).
+  EXPECT_EQ(SaturatingMultiply(kMax, 1000), kMax);
+  EXPECT_EQ(SaturatingMultiply(kMax, 2), kMax);
+  EXPECT_EQ(SaturatingMultiply(kMin, -1), kMax);
+  EXPECT_EQ(SaturatingMultiply(-kMax, -2), kMax);
+
+  // Just-in-range products near kMin are not saturated.
+  EXPECT_EQ(SaturatingMultiply(kMin / 1000, 1000), -9223372036854775000);
+
+  // Negative overflow saturates to kMin (opposite-sign operands). Notably a
+  // value near INT64_MIN scaled by a positive factor must stay negative rather
+  // than wrapping to a large positive value.
+  EXPECT_EQ(SaturatingMultiply(kMin, 1000), kMin);
+  EXPECT_EQ(SaturatingMultiply(kMin, 2), kMin);
+  EXPECT_EQ(SaturatingMultiply(kMax, -2), kMin);
+  EXPECT_EQ(SaturatingMultiply(-9223372036854776, 1000), kMin);
+  EXPECT_EQ(SaturatingMultiply(1000, -9223372036854776), kMin);
+}
 
 }  // namespace
 }  // namespace base

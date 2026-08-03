@@ -58,7 +58,47 @@ describe('GpuPlugin', () => {
 
     const querySql = engine.query.mock.calls.map(([sql]) => sql).join('\n');
     expect(querySql).not.toContain('left join gpu');
+    expect(querySql).not.toContain('m.label_index');
     expect(querySql).toContain('null as gpuName');
     expect(querySql).toContain('null as gpu_name');
+  });
+
+  it('uses machine labels when the newer schema is available', async () => {
+    const engine = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('select count(*) as cnt from machine')) {
+          return scalarResult(2);
+        }
+        return emptyRowsResult();
+      }),
+      tryQuery: vi.fn(async (sql: string) => {
+        if (sql.includes('sqlite_master')) {
+          return okResult(scalarResult(1));
+        }
+        if (sql.includes('pragma_table_info')) {
+          return okResult(scalarResult(1));
+        }
+        if (sql.includes('count(*) as cnt from gpu')) {
+          return okResult(scalarResult(1));
+        }
+        if (sql.includes('from gpu_counter_group')) {
+          return errResult('no such column: name');
+        }
+        return okResult(emptyRowsResult());
+      }),
+    };
+    const trace = {
+      engine,
+      tracks: {registerTrack: vi.fn()},
+      plugins: {getPlugin: vi.fn()},
+      defaultWorkspace: {},
+    };
+
+    await expect(new GpuPlugin().onTraceLoad(trace as any)).resolves.toBeUndefined();
+
+    const querySql = engine.query.mock.calls.map(([sql]) => sql).join('\n');
+    expect(querySql).toContain('select count(*) as cnt from machine');
+    expect(querySql).toContain('m.label_index as machineLabelIndex');
+    expect(querySql).toContain('m.label_index as machine_label_index');
   });
 });

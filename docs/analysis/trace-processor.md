@@ -72,6 +72,10 @@ This will open an interactive SQL shell where you can query the trace. For
 more information on how to write queries, see the
 [Getting Started with PerfettoSQL](perfetto-sql-getting-started.md) guide.
 
+TIP: the trace file can also be a ZIP or TAR archive containing several
+traces: they are merged onto a single timeline. See
+[Merging traces with Trace Processor](/docs/analysis/merging-traces.md).
+
 For example, to see all the slices in a trace, you can run the following query:
 
 ```sql
@@ -150,7 +154,10 @@ Common flags (apply to all commands):
 #### {#subcommand-query} `query` — run SQL
 
 Loads a trace, runs one or more `;`-separated SQL statements, prints the
-result to stdout, and exits. SQL can be supplied as an inline positional
+results to stdout, and exits. Every statement's result set is printed as
+CSV, with consecutive result sets separated by a single blank line (since
+all string values are quoted, a blank line unambiguously marks a result-set
+boundary). SQL can be supplied as an inline positional
 argument, read from a file with `-f/--query-file`, or piped on stdin
 (either by passing `-` to `--query-file` or by piping when no SQL was
 specified):
