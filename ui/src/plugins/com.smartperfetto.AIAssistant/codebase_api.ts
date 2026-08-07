@@ -29,6 +29,7 @@ export interface CodebaseSummary {
   lifecycleState?: 'active' | 'deleting';
   kind: CodebaseKind;
   displayName: string;
+  rootAvailable?: boolean;
   rootAuthorization?: CodebaseRootAuthorization;
   commitHash?: string;
   vendor?: string;

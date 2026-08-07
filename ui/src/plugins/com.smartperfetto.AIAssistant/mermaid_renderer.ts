@@ -31,8 +31,211 @@
  */
 
 import {assetSrc} from '../../base/assets';
-import {decodeBase64Unicode, sanitizeHtml} from './data_formatter';
+import {decodeBase64Unicode} from './data_formatter';
 import {uiText} from './ui_language';
+
+const MERMAID_SVG_ELEMENTS = new Set([
+  'a',
+  'circle',
+  'clippath',
+  'code',
+  'defs',
+  'desc',
+  'div',
+  'ellipse',
+  'em',
+  'fedropshadow',
+  'fegaussianblur',
+  'femerge',
+  'femergenode',
+  'feoffset',
+  'filter',
+  'foreignobject',
+  'g',
+  'image',
+  'line',
+  'lineargradient',
+  'marker',
+  'mask',
+  'p',
+  'path',
+  'pattern',
+  'polygon',
+  'polyline',
+  'radialgradient',
+  'rect',
+  'span',
+  'stop',
+  'strong',
+  'style',
+  'svg',
+  'switch',
+  'text',
+  'title',
+  'tspan',
+  'use',
+]);
+
+const MERMAID_SVG_ATTRIBUTES = new Set([
+  'alignment-baseline',
+  'class',
+  'clip-path',
+  'color',
+  'cx',
+  'cy',
+  'd',
+  'dominant-baseline',
+  'dx',
+  'dy',
+  'fill',
+  'fill-opacity',
+  'filter',
+  'font-family',
+  'font-size',
+  'font-style',
+  'font-weight',
+  'height',
+  'href',
+  'id',
+  'lengthadjust',
+  'marker-end',
+  'marker-height',
+  'marker-mid',
+  'marker-start',
+  'marker-units',
+  'marker-width',
+  'mask',
+  'offset',
+  'opacity',
+  'orient',
+  'patternunits',
+  'points',
+  'pointer-events',
+  'preserveaspectratio',
+  'r',
+  'refx',
+  'refy',
+  'requiredfeatures',
+  'role',
+  'rx',
+  'ry',
+  'stddeviation',
+  'stop-color',
+  'stop-opacity',
+  'stroke',
+  'stroke-dasharray',
+  'stroke-dashoffset',
+  'stroke-linecap',
+  'stroke-linejoin',
+  'stroke-opacity',
+  'stroke-width',
+  'style',
+  'tabindex',
+  'text-anchor',
+  'textlength',
+  'transform',
+  'vector-effect',
+  'viewbox',
+  'width',
+  'x',
+  'x1',
+  'x2',
+  'xlink:href',
+  'xmlns',
+  'xmlns:xlink',
+  'y',
+  'y1',
+  'y2',
+]);
+
+const MERMAID_FRAGMENT_ATTRIBUTES = new Set(['href', 'xlink:href']);
+
+function isSafeFragmentReference(value: string): boolean {
+  const unquoted = value.trim().replace(/^(['"])(.*)\1$/, '$2');
+  return /^#[A-Za-z0-9_.:-]+$/.test(unquoted);
+}
+
+function sanitizeMermaidCss(css: string): string {
+  return css
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/@import[\s\S]*?(?:;|$)/gi, '')
+    .replace(
+      /url\s*\(\s*(['"]?)(.*?)\1\s*\)/gi,
+      (_match, _quote, value: string) =>
+        isSafeFragmentReference(value) ? `url(${value.trim()})` : 'none',
+    )
+    .replace(/expression\s*\([^)]*\)/gi, '')
+    .replace(/(?:javascript|vbscript|data)\s*:/gi, '')
+    .replace(/(?:-moz-binding|behavior)\s*:[^;}]+[;}]?/gi, '');
+}
+
+/**
+ * Preserve Mermaid's generated theme CSS without trusting arbitrary SVG HTML.
+ * Mermaid strict mode remains the primary guard; this parsed allowlist is the
+ * defense-in-depth boundary for renderer output.
+ */
+function sanitizeMermaidSvg(svg: string): string {
+  const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml');
+  const root = parsed.documentElement;
+  if (
+    root.localName.toLowerCase() !== 'svg' ||
+    parsed.querySelector('parsererror')
+  ) {
+    return '';
+  }
+
+  const elements = [root, ...Array.from(root.querySelectorAll('*'))];
+  for (const element of elements) {
+    const elementName = element.localName.toLowerCase();
+    if (!MERMAID_SVG_ELEMENTS.has(elementName)) {
+      element.remove();
+      continue;
+    }
+
+    if (elementName === 'style') {
+      const safeCss = sanitizeMermaidCss(element.textContent ?? '');
+      if (!safeCss.trim()) {
+        element.remove();
+        continue;
+      }
+      element.textContent = safeCss;
+    }
+
+    for (const attribute of Array.from(element.attributes)) {
+      const attributeName = attribute.name.toLowerCase();
+      const isMetadataAttribute =
+        attributeName.startsWith('aria-') ||
+        attributeName.startsWith('data-');
+      if (
+        attributeName.startsWith('on') ||
+        (!isMetadataAttribute &&
+          !MERMAID_SVG_ATTRIBUTES.has(attributeName))
+      ) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+
+      if (
+        MERMAID_FRAGMENT_ATTRIBUTES.has(attributeName) &&
+        !isSafeFragmentReference(attribute.value)
+      ) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+
+      if (attributeName === 'style' || /url\s*\(/i.test(attribute.value)) {
+        const safeCss = sanitizeMermaidCss(attribute.value);
+        if (!safeCss.trim()) {
+          element.removeAttribute(attribute.name);
+        } else {
+          element.setAttribute(attribute.name, safeCss);
+        }
+      }
+    }
+  }
+
+  return new XMLSerializer().serializeToString(root);
+}
 
 /**
  * Get the global Mermaid instance if loaded.
@@ -201,11 +404,12 @@ export class MermaidRenderer {
       try {
         // mermaid.render returns {svg, bindFunctions} in modern versions.
         // SECURITY: securityLevel:'strict' is the primary guard against SVG XSS.
-        // sanitizeHtml is a defense-in-depth backstop — strips onerror/onload
-        // attributes and javascript: URIs that could slip through if mermaid's
-        // strict mode is ever weakened by an upgrade.
+        // The parsed SVG allowlist is a defense-in-depth backstop that preserves
+        // Mermaid's generated theme CSS while rejecting active content.
         const result: any = await mermaid.render(renderId, code);
-        host.innerHTML = sanitizeHtml(result?.svg || '');
+        const safeSvg = sanitizeMermaidSvg(result?.svg || '');
+        if (!safeSvg) throw new Error('Mermaid returned invalid SVG');
+        host.innerHTML = safeSvg;
         if (typeof result?.bindFunctions === 'function') {
           result.bindFunctions(host);
         }

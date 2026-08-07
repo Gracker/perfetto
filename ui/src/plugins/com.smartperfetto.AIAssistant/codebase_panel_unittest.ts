@@ -8,6 +8,7 @@ import type {CodebaseSummary, ExternalKnowledgeSourceSummary} from './codebase_a
 import {
   analysisContextAfterCodebaseDelete,
   analysisContextForFeatureAvailability,
+  codebaseAvailableForOnDemandAccess,
   codebaseDeletionPending,
   codebaseHasActiveIndex,
   CodebasePanel,
@@ -20,6 +21,7 @@ function codebase(overrides: Partial<CodebaseSummary> = {}): CodebaseSummary {
     kind: 'app_source',
     displayName: 'App',
     lifecycleState: 'active',
+    rootAvailable: true,
     indexGeneration: 2,
     activeGeneration: 'codebase_2_active',
     contentFingerprint: 'fingerprint-a',
@@ -134,10 +136,35 @@ describe('codebase lifecycle contract', () => {
 
   it('never selects a registration that has entered deletion', () => {
     expect(codebaseHasActiveIndex(codebase())).toBe(true);
-    expect(codebaseHasActiveIndex(codebase({lifecycleState: 'deleting'}))).toBe(false);
+    expect(codebaseAvailableForOnDemandAccess(codebase())).toBe(true);
+    expect(codebaseAvailableForOnDemandAccess(codebase({chunkCount: 0}))).toBe(true);
+    expect(codebaseAvailableForOnDemandAccess(codebase({rootAvailable: false}))).toBe(false);
+    expect(codebaseAvailableForOnDemandAccess(codebase({lifecycleState: 'deleting'}))).toBe(false);
     expect(codebaseDeletionPending(codebase({lifecycleState: 'deleting'}))).toBe(true);
     expect(codebaseDeletionPending(codebase())).toBe(false);
     expect(codebaseHasActiveIndex(codebase({chunkCount: 0}))).toBe(false);
+  });
+
+  it('keeps an unindexed but available source selected for on-demand access', () => {
+    const panel = new CodebasePanel() as any;
+    const onSelectionChange = vi.fn();
+    panel.featureEnabled = true;
+    panel.codebases = [codebase({
+      activeGeneration: undefined,
+      contentFingerprint: undefined,
+      chunkCount: 0,
+    })];
+    panel.selection = {
+      codeAwareMode: 'metadata_only',
+      codebaseIds: ['codebase-a'],
+      knowledgeSourceIds: [],
+    };
+    panel.onSelectionChange = onSelectionChange;
+
+    panel.reconcileSelection({codebasesLoaded: true, knowledgeLoaded: false});
+
+    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(panel.selection.codebaseIds).toEqual(['codebase-a']);
   });
 
   it('removes only the deleted codebase from the analysis context', () => {

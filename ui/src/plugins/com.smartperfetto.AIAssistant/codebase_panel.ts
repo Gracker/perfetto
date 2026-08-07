@@ -193,6 +193,13 @@ export function codebaseHasActiveIndex(codebase: CodebaseSummary): boolean {
     (codebase.chunkCount ?? 0) > 0;
 }
 
+export function codebaseAvailableForOnDemandAccess(
+  codebase: CodebaseSummary,
+): boolean {
+  return (codebase.lifecycleState ?? 'active') === 'active' &&
+    codebase.rootAvailable !== false;
+}
+
 export function codebaseDeletionPending(codebase: CodebaseSummary): boolean {
   return codebase.lifecycleState === 'deleting';
 }
@@ -458,9 +465,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       next = {
         ...availableSelection,
         codebaseIds: availableSelection.codebaseIds.filter((id) => {
-        const codebase = codebases.get(id);
-        return !!codebase && codebaseHasActiveIndex(codebase) &&
-          (availableSelection.codeAwareMode !== 'provider_send' || codebase.eligibleForSendToProvider === true);
+          const codebase = codebases.get(id);
+          return !!codebase && codebaseAvailableForOnDemandAccess(codebase) &&
+            (availableSelection.codeAwareMode !== 'provider_send' ||
+              codebase.eligibleForSendToProvider === true);
         }),
       };
     }
@@ -490,7 +498,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     if (
       this.readOnly ||
       this.selection.codeAwareMode === 'off' ||
-      !codebaseHasActiveIndex(codebase) ||
+      !codebaseAvailableForOnDemandAccess(codebase) ||
       (this.selection.codeAwareMode === 'provider_send' && !codebase.eligibleForSendToProvider)
     ) return;
     const selected = new Set(this.selection.codebaseIds);
@@ -593,14 +601,22 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         codebase.indexGeneration + 1,
       );
       this.success = text(
-        `已重建 ${codebase.displayName}：${result.chunksAdded ?? 0} 个分片`,
-        `Reindexed ${codebase.displayName}: ${result.chunksAdded ?? 0} chunks`,
+        `已更新 ${codebase.displayName} 的可选索引：${result.chunksAdded ?? 0} 个分片`,
+        `Updated the optional index for ${codebase.displayName}: ${result.chunksAdded ?? 0} chunks`,
       );
       this.reindexingId = null;
       await this.load();
     } catch (e: unknown) {
       if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) return;
-      this.error = e instanceof Error ? e.message : text('重建失败', 'Reindex failed');
+      this.error = e instanceof Error
+        ? text(
+            `${e.message}；这不影响按需源码读取。`,
+            `${e.message}; on-demand source access remains available.`,
+          )
+        : text(
+            '可选索引构建失败；按需源码读取仍可使用。',
+            'Optional index build failed; on-demand source access remains available.',
+          );
     } finally {
       if (this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) {
         this.reindexingId = null;
@@ -660,9 +676,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     const deletionPending = codebaseDeletionPending(codebase);
     const selected = this.selection.codebaseIds.includes(codebase.codebaseId);
     const hasActiveIndex = codebaseHasActiveIndex(codebase);
+    const availableForOnDemandAccess = codebaseAvailableForOnDemandAccess(codebase);
     const selectionDisabled = this.readOnly ||
       this.selection.codeAwareMode === 'off' ||
-      !hasActiveIndex ||
+      !availableForOnDemandAccess ||
       (this.selection.codeAwareMode === 'provider_send' && !codebase.eligibleForSendToProvider);
     return m('div', {style: STYLES.card}, [
       m('div', {style: STYLES.cardHeader}, [
@@ -704,13 +721,22 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
               'Previous deletion cleanup is incomplete. Retrieval is already disabled; retry “Delete codebase” to finish physical cleanup.',
             ),
           )
-        : !hasActiveIndex
+        : !availableForOnDemandAccess
         ? m(
             'div',
             {style: STYLES.error},
             text(
-              '此源码尚无可用索引，请先执行重建后再选择。',
-              'This source has no active index. Reindex it before selecting it.',
+              '已注册的源码路径当前不可用，请恢复该路径后再选择。',
+              'The registered source path is unavailable. Restore it before selecting this codebase.',
+            ),
+          )
+        : !hasActiveIndex
+        ? m(
+            'div',
+            {style: {...STYLES.meta, marginTop: '8px'}},
+            text(
+              '按需搜索与读取已可用；索引是可选加速项，也用于现有补丁流程。',
+              'On-demand search and reading are ready. The index is optional acceleration and still powers the existing patch flow.',
             ),
           )
         : null,
@@ -734,7 +760,11 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
             disabled: isReindexing || this.readOnly || deletionPending,
             onclick: () => this.reindex(codebase),
           },
-          isReindexing ? text('重建中…', 'Reindexing...') : text('重建索引', 'Reindex'),
+          isReindexing
+            ? text('构建中…', 'Building...')
+            : hasActiveIndex
+              ? text('更新可选索引', 'Update optional index')
+              : text('构建可选索引', 'Build optional index'),
         ),
         m(
           'button',
@@ -1007,7 +1037,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
             'div',
             {style: STYLES.subtitle},
             this.featureEnabled
-              ? text('选择每次分析允许使用的源码树。', 'Choose source trees available to each analysis.')
+              ? text(
+                  '注册路径后即可按需搜索与读取；索引仅作为可选加速项。',
+                  'Registered paths are searchable and readable on demand; indexing is optional acceleration.',
+                )
               : text('后端已禁用源码感知分析。', 'Code-aware analysis is disabled on the backend.'),
           ),
         ]),

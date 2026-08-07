@@ -1683,6 +1683,7 @@
 .ai-message {
   display: flex;
   gap: 0;
+  min-width: 0;
   max-width: 100%;
   animation: messageSlideIn 0.2s ease-out;
 
@@ -1693,8 +1694,10 @@
   }
 
   &.ai-message-assistant {
-    align-self: flex-start;
-    max-width: 96%;
+    align-self: stretch;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 100%;
   }
 }
 
@@ -1757,7 +1760,10 @@
   }
 
   .ai-message-assistant & {
-    align-items: flex-start;
+    align-items: stretch;
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
   }
 }
 
@@ -1790,6 +1796,10 @@
   }
 
   .ai-message-assistant & {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
     background: var(--chat-ai-bubble);
     border: 1px solid var(--chat-ai-border);
     border-radius: 6px;
@@ -1861,6 +1871,8 @@
 // Alias for message content text
 .ai-msg-text,
 .ai-message-content {
+  min-width: 0;
+  max-width: 100%;
   line-height: 1.52;
 
   p {
@@ -4762,7 +4774,10 @@ tr.detail-row {
   }
 
   .ai-mermaid-diagram {
+    max-width: 100%;
     overflow-x: auto;
+    background: var(--chat-bg);
+    color: var(--chat-text);
 
     svg {
       max-width: 100%;
