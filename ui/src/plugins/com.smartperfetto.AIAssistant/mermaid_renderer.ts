@@ -36,6 +36,7 @@ import {uiText} from './ui_language';
 
 const MERMAID_SVG_ELEMENTS = new Set([
   'a',
+  'br',
   'circle',
   'clippath',
   'code',
@@ -175,11 +176,15 @@ function sanitizeMermaidCss(css: string): string {
  * defense-in-depth boundary for renderer output.
  */
 function sanitizeMermaidSvg(svg: string): string {
-  const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml');
-  const root = parsed.documentElement;
+  // Mermaid uses XHTML inside <foreignObject> and serializes HTML void
+  // elements such as <br> without XML self-closing syntax. Parse through the
+  // browser's HTML/SVG integration rules, then enforce a single SVG root.
+  const parsed = new DOMParser().parseFromString(svg, 'text/html');
+  const root = parsed.body.firstElementChild;
   if (
-    root.localName.toLowerCase() !== 'svg' ||
-    parsed.querySelector('parsererror')
+    parsed.body.children.length !== 1 ||
+    root?.localName.toLowerCase() !== 'svg' ||
+    root.namespaceURI !== 'http://www.w3.org/2000/svg'
   ) {
     return '';
   }
@@ -234,7 +239,7 @@ function sanitizeMermaidSvg(svg: string): string {
     }
   }
 
-  return new XMLSerializer().serializeToString(root);
+  return root.outerHTML;
 }
 
 /**

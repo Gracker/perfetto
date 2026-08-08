@@ -18,6 +18,52 @@ afterEach(() => {
 });
 
 describe('MermaidRenderer', () => {
+  it('renders real Mermaid flowcharts with multiline HTML labels', async () => {
+    const svgPrototype = SVGElement.prototype as SVGElement & {
+      getBBox?: () => DOMRect;
+      getComputedTextLength?: () => number;
+    };
+    const originalGetBBox = svgPrototype.getBBox;
+    const originalGetComputedTextLength =
+      svgPrototype.getComputedTextLength;
+    svgPrototype.getBBox = () =>
+      ({x: 0, y: 0, width: 100, height: 40}) as DOMRect;
+    svgPrototype.getComputedTextLength = () => 100;
+    const mermaidModuleName = ['mer', 'maid'].join('');
+    const mermaidModule = (await import(mermaidModuleName)) as {
+      default: unknown;
+    };
+    (globalThis as {mermaid?: unknown}).mermaid = mermaidModule.default;
+
+    const container = document.createElement('div');
+    const host = document.createElement('div');
+    host.className = 'ai-mermaid-diagram';
+    host.dataset.mermaidB64 = encodeBase64Unicode(`graph TD
+  A["Cold Start (1339ms)"] --> B["bindApplication 阶段<br/>~569ms"]
+  B --> C["⭐ 合成 CPU 负载"]`);
+    container.appendChild(host);
+
+    try {
+      await new MermaidRenderer().renderMermaidInElement(container);
+
+      expect(host.querySelector('.ai-mermaid-error')).toBeNull();
+      expect(host.querySelector('svg')).not.toBeNull();
+      expect(host.querySelector('foreignObject br')).not.toBeNull();
+      expect(host.textContent).toContain('bindApplication 阶段');
+    } finally {
+      if (originalGetBBox) {
+        svgPrototype.getBBox = originalGetBBox;
+      } else {
+        delete svgPrototype.getBBox;
+      }
+      if (originalGetComputedTextLength) {
+        svgPrototype.getComputedTextLength = originalGetComputedTextLength;
+      } else {
+        delete svgPrototype.getComputedTextLength;
+      }
+    }
+  }, 15_000);
+
   it('preserves safe Mermaid theme CSS while removing active SVG content', async () => {
     const initialize = vi.fn();
     const render = vi.fn().mockResolvedValue({
