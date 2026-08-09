@@ -166,6 +166,27 @@ describe('AIPanel backend binding reset', () => {
     sessionStorage.clear();
   });
 
+  it('does not include the backend credential in codebase label cache identity', () => {
+    const panel = new AIPanel() as any;
+    panel.state.settings = {
+      ...panel.state.settings,
+      backendUrl: 'http://backend.example///',
+      backendApiKey: 'secret-token',
+    };
+
+    const firstKey = panel.analysisContextCodebaseScopeKey();
+    panel.state.settings = {
+      ...panel.state.settings,
+      backendApiKey: 'rotated-secret-token',
+    };
+    const rotatedCredentialKey = panel.analysisContextCodebaseScopeKey();
+
+    expect(rotatedCredentialKey).toBe(firstKey);
+    expect(firstKey).not.toContain('secret-token');
+    expect(firstKey).not.toContain('rotated-secret-token');
+    expect(firstKey.split('\0')[0]).toBe('http://backend.example');
+  });
+
   it('loads the destination partition for a URL-only change', () => {
     const panel = createMutableTestPanel();
     const original = {

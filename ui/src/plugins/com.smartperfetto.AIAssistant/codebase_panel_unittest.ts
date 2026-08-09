@@ -13,6 +13,7 @@ import {
   codebaseHasActiveIndex,
   CodebasePanel,
   externalKnowledgeSourceHasActiveIndex,
+  optionalIndexCopyForActiveRoot,
 } from './codebase_panel';
 
 function codebase(overrides: Partial<CodebaseSummary> = {}): CodebaseSummary {
@@ -165,6 +166,9 @@ describe('codebase lifecycle contract', () => {
 
     expect(onSelectionChange).not.toHaveBeenCalled();
     expect(panel.selection.codebaseIds).toEqual(['codebase-a']);
+    expect(optionalIndexCopyForActiveRoot()).toContain('needs no rebuild');
+    expect(optionalIndexCopyForActiveRoot()).toContain('GitNexus index');
+    expect(optionalIndexCopyForActiveRoot()).toContain('optional');
   });
 
   it('removes only the deleted codebase from the analysis context', () => {

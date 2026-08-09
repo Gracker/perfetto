@@ -235,9 +235,12 @@ import {
   EMPTY_ANALYSIS_CONTEXT,
   loadAnalysisContext,
   normalizeAnalysisContext,
+  selectedCodebaseLabels,
+  type SelectedCodebaseLabelDescriptor,
   sameAnalysisContext,
   saveAnalysisContext,
 } from './analysis_context';
+import {listCodebases} from './codebase_api';
 import type {
   SmartDisplayedScene,
   SmartScenePreviewPayload,
@@ -246,6 +249,8 @@ import type {
 } from './types';
 
 const DEBUG_AI_PANEL = false;
+const MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS = 32;
+const ANALYSIS_CONTEXT_CODEBASE_RETRY_DELAY_MS = 15_000;
 const MODEL_BACKED_COMMANDS = new Set([
   '/analyze',
   '/slow',
@@ -662,6 +667,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private applicationUpdatePollTimer: ReturnType<typeof setTimeout> | null =
     null;
   private applicationUpdatePollAttempts = 0;
+  private analysisContextCodebaseDescriptors = new Map<
+    string,
+    SelectedCodebaseLabelDescriptor
+  >();
+  private analysisContextCodebaseIdentityKey = '';
+  private analysisContextCodebaseRequestKey = '';
+  private analysisContextCodebaseFailedRequestKey = '';
+  private analysisContextCodebaseRetryAfterMs = 0;
+  private analysisContextCodebaseEpoch = 0;
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
@@ -6026,14 +6040,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private renderAnalysisContextIndicator(): m.Children {
+    this.ensureAnalysisContextCodebaseLabels();
     const selection = normalizeAnalysisContext(this.state.analysisContext);
     const sourceIds =
       selection.codeAwareMode === 'off' ? [] : selection.codebaseIds;
+    const sourceLabels = selectedCodebaseLabels(
+      sourceIds,
+      [...this.analysisContextCodebaseDescriptors.values()],
+    );
+    const sourceLabelText = sourceLabels.map((item) => item.label).join(', ');
     const parts = [
       sourceIds.length > 0
         ? uiText(
-            `源码 ${sourceIds.length}（${selection.codeAwareMode === 'provider_send' ? '脱敏正文' : '仅元数据'}）`,
-            `${sourceIds.length} source codebase(s) (${selection.codeAwareMode === 'provider_send' ? 'redacted content' : 'metadata only'})`,
+            `源码 ${sourceLabelText}（${selection.codeAwareMode === 'provider_send' ? '脱敏正文' : '仅元数据'}）`,
+            `Source ${sourceLabelText} (${selection.codeAwareMode === 'provider_send' ? 'redacted content' : 'metadata only'})`,
           )
         : '',
       selection.knowledgeSourceIds.length > 0
@@ -6044,9 +6064,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : '',
     ].filter(Boolean);
     if (parts.length === 0) return null;
-    const identifiers = [...sourceIds, ...selection.knowledgeSourceIds].join(
-      ', ',
-    );
+    const identifiers = [
+      ...sourceLabels.map((item) => item.label),
+      ...selection.knowledgeSourceIds,
+    ].join(', ');
     return m(
       'div.ai-context-indicator.ai-analysis-context-indicator',
       {
@@ -6467,6 +6488,138 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.analysisMode = 'full';
       sessionManager.saveAnalysisMode('full');
     }
+    this.ensureAnalysisContextCodebaseLabels();
+  }
+
+  private analysisContextCodebaseScopeKey(): string {
+    const context = getSmartPerfettoRequestContext();
+    return [
+      this.state.settings.backendUrl.replace(/\/+$/, ''),
+      context.tenantId,
+      context.workspaceId,
+      context.userId,
+    ].join('\0');
+  }
+
+  private resetAnalysisContextCodebaseCache(identityKey: string): void {
+    this.analysisContextCodebaseDescriptors.clear();
+    this.analysisContextCodebaseRequestKey = '';
+    this.analysisContextCodebaseFailedRequestKey = '';
+    this.analysisContextCodebaseRetryAfterMs = 0;
+    this.analysisContextCodebaseIdentityKey = identityKey;
+    this.analysisContextCodebaseEpoch++;
+  }
+
+  private analysisContextCodebaseRequestIsCurrent(
+    epoch: number,
+    backendUrl: string,
+    apiKey: string,
+    identityKey: string,
+    requestKey: string,
+  ): boolean {
+    return epoch === this.analysisContextCodebaseEpoch &&
+      backendUrl === this.state.settings.backendUrl &&
+      apiKey === (this.state.settings.backendApiKey || '') &&
+      identityKey === this.analysisContextCodebaseIdentityKey &&
+      requestKey === this.currentAnalysisContextCodebaseRequestKey(identityKey);
+  }
+
+  private currentAnalysisContextCodebaseRequestKey(identityKey: string): string {
+    const selection = normalizeAnalysisContext(this.state.analysisContext);
+    const selectedIds = selection.codeAwareMode === 'off'
+      ? []
+      : selection.codebaseIds.slice(0, MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS);
+    return selectedIds.length > 0
+      ? `${identityKey}\0${selectedIds.join('\0')}`
+      : '';
+  }
+
+  private ensureAnalysisContextCodebaseLabels(): void {
+    const identityKey = this.analysisContextCodebaseScopeKey();
+    if (identityKey !== this.analysisContextCodebaseIdentityKey) {
+      this.resetAnalysisContextCodebaseCache(identityKey);
+    }
+
+    const selection = normalizeAnalysisContext(this.state.analysisContext);
+    const selectedIds = selection.codeAwareMode === 'off'
+      ? []
+      : selection.codebaseIds.slice(0, MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS);
+    if (selectedIds.length === 0) {
+      if (
+        this.analysisContextCodebaseDescriptors.size > 0 ||
+        this.analysisContextCodebaseRequestKey
+      ) {
+        this.analysisContextCodebaseDescriptors.clear();
+        this.analysisContextCodebaseRequestKey = '';
+        this.analysisContextCodebaseFailedRequestKey = '';
+        this.analysisContextCodebaseRetryAfterMs = 0;
+        this.analysisContextCodebaseEpoch++;
+      }
+      return;
+    }
+
+    const missingSelectedDescriptor = selectedIds.some(
+      (id) => !this.analysisContextCodebaseDescriptors.has(id),
+    );
+    const requestKey = this.currentAnalysisContextCodebaseRequestKey(identityKey);
+    if (
+      requestKey === this.analysisContextCodebaseFailedRequestKey &&
+      Date.now() < this.analysisContextCodebaseRetryAfterMs
+    ) {
+      return;
+    }
+    if (
+      !missingSelectedDescriptor ||
+      requestKey === this.analysisContextCodebaseRequestKey
+    ) {
+      return;
+    }
+
+    const epoch = ++this.analysisContextCodebaseEpoch;
+    const backendUrl = this.state.settings.backendUrl;
+    const apiKey = this.state.settings.backendApiKey || '';
+    this.analysisContextCodebaseRequestKey = requestKey;
+    void listCodebases(backendUrl, apiKey)
+      .then(({codebases}) => {
+        if (!this.analysisContextCodebaseRequestIsCurrent(
+          epoch,
+          backendUrl,
+          apiKey,
+          identityKey,
+          requestKey,
+        )) {
+          return;
+        }
+        const selected = new Set(selectedIds);
+        this.analysisContextCodebaseDescriptors = new Map(
+          codebases
+            .filter((codebase) => selected.has(codebase.codebaseId))
+            .slice(0, MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS)
+            .map((codebase) => [codebase.codebaseId, {
+              codebaseId: codebase.codebaseId,
+              displayName: codebase.displayName,
+            }]),
+        );
+        this.analysisContextCodebaseFailedRequestKey = '';
+        this.analysisContextCodebaseRetryAfterMs = 0;
+        m.redraw();
+      })
+      .catch(() => {
+        if (!this.analysisContextCodebaseRequestIsCurrent(
+          epoch,
+          backendUrl,
+          apiKey,
+          identityKey,
+          requestKey,
+        )) {
+          return;
+        }
+        this.analysisContextCodebaseRequestKey = '';
+        this.analysisContextCodebaseFailedRequestKey = requestKey;
+        this.analysisContextCodebaseRetryAfterMs =
+          Date.now() + ANALYSIS_CONTEXT_CODEBASE_RETRY_DELAY_MS;
+        m.redraw();
+      });
   }
 
   private onAnalysisContextChange(selection: AnalysisContextSelection): void {
@@ -6487,6 +6640,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       getSmartPerfettoRequestContext(),
       normalized,
     );
+    this.ensureAnalysisContextCodebaseLabels();
     if (hadSession) {
       this.retireBackendAgentSession();
       this.addMessage({

@@ -9,12 +9,26 @@ import type {
 } from './types';
 
 const STORAGE_KEY = 'smartperfetto-analysis-context-v1';
+const MAX_CODEBASE_LABEL_LENGTH = 48;
+const SHORT_CODEBASE_ID_LENGTH = 16;
 
 export const EMPTY_ANALYSIS_CONTEXT: AnalysisContextSelection = {
   codeAwareMode: 'off',
   codebaseIds: [],
   knowledgeSourceIds: [],
 };
+
+export interface SelectedCodebaseLabelDescriptor {
+  [key: string]: unknown;
+  codebaseId?: unknown;
+  displayName?: unknown;
+}
+
+export interface SelectedCodebaseLabel {
+  codebaseId: string;
+  label: string;
+  known: boolean;
+}
 
 function normalizedIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -27,6 +41,62 @@ function normalizedIds(value: unknown): string[] {
 
 function normalizedMode(value: unknown): CodeAwareAnalysisMode {
   return value === 'metadata_only' || value === 'provider_send' ? value : 'off';
+}
+
+function compactLabel(value: string, maxLength: number): string {
+  return value.length > maxLength
+    ? `${value.slice(0, Math.max(1, maxLength - 1))}…`
+    : value;
+}
+
+function containsAbsolutePath(value: string): boolean {
+  return /(^|[\s(["'])((~\/)|\/|[A-Za-z]:[\\/]|\\\\)/.test(value);
+}
+
+export function shortCodebaseId(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return 'unknown';
+  const parts = raw.split(/[\\/]/).filter(Boolean);
+  const leaf = parts.length > 0 ? parts[parts.length - 1] : raw;
+  return compactLabel(leaf, SHORT_CODEBASE_ID_LENGTH);
+}
+
+function safeCodebaseDisplayName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized || containsAbsolutePath(normalized)) return undefined;
+  return compactLabel(normalized, MAX_CODEBASE_LABEL_LENGTH);
+}
+
+export function selectedCodebaseLabels(
+  selectedCodebaseIds: readonly string[],
+  descriptors: readonly SelectedCodebaseLabelDescriptor[],
+): SelectedCodebaseLabel[] {
+  const descriptorById = new Map<string, SelectedCodebaseLabelDescriptor>();
+  for (const descriptor of descriptors) {
+    if (typeof descriptor.codebaseId !== 'string') continue;
+    const codebaseId = descriptor.codebaseId.trim();
+    if (!codebaseId) continue;
+    descriptorById.set(codebaseId, descriptor);
+  }
+
+  const labels = normalizedIds([...selectedCodebaseIds]).map((codebaseId) => {
+    const displayName = safeCodebaseDisplayName(
+      descriptorById.get(codebaseId)?.displayName,
+    );
+    return {
+      codebaseId,
+      label: displayName || shortCodebaseId(codebaseId),
+      known: Boolean(displayName),
+    };
+  });
+  const labelCounts = labels.reduce((counts, item) => {
+    counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
+  return labels.map((item) => (labelCounts.get(item.label) ?? 0) > 1
+    ? {...item, label: `${item.label} (${shortCodebaseId(item.codebaseId)})`}
+    : item);
 }
 
 export function normalizeAnalysisContext(value: unknown): AnalysisContextSelection {

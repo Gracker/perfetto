@@ -200,6 +200,13 @@ export function codebaseAvailableForOnDemandAccess(
     codebase.rootAvailable !== false;
 }
 
+export function optionalIndexCopyForActiveRoot(): string {
+  return text(
+    '该注册路径已可直接按需搜索/读取，无需重建。GitNexus 本地索引若已安装或可用，只作为可选导航；缺失、过期或失败时会回退。SmartPerfetto 索引仍是可选的语义/补丁加速。',
+    'This registered path is ready for bounded search/read and needs no rebuild. A local GitNexus index, when installed or available, is optional navigation only; missing, stale, or failed indexes fall back. The SmartPerfetto index remains optional semantic and patch acceleration.',
+  );
+}
+
 export function codebaseDeletionPending(codebase: CodebaseSummary): boolean {
   return codebase.lifecycleState === 'deleting';
 }
@@ -734,10 +741,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         ? m(
             'div',
             {style: {...STYLES.meta, marginTop: '8px'}},
-            text(
-              '按需搜索与读取已可用；索引是可选加速项，也用于现有补丁流程。',
-              'On-demand search and reading are ready. The index is optional acceleration and still powers the existing patch flow.',
-            ),
+            optionalIndexCopyForActiveRoot(),
           )
         : null,
       m('div', {style: STYLES.actions}, [
