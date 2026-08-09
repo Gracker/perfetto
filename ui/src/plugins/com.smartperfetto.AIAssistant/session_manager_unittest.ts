@@ -190,7 +190,7 @@ describe('SessionManager OIDC storage isolation', () => {
     expect(manager.loadSettings().backendUrl).not.toBe('http://legacy-backend');
     expect(manager.loadSettings().uiLanguage).toBe('auto');
     expect(manager.loadLegacyHistory()).toBeNull();
-    expect(manager.loadAnalysisMode()).toBe('auto');
+    expect(manager.loadAnalysisMode()).toBe('conversation');
     expect(manager.loadSessionsStorage()).toEqual({byTrace: {}});
     expect(manager.recoverPendingBackendTrace(9814)).toBeNull();
   });
@@ -223,6 +223,18 @@ describe('SessionManager OIDC storage isolation', () => {
     );
     expect(persisted.backendUrl).toBe(getDefaultSmartPerfettoBackendUrl());
     expect(persisted.backendApiKey).toBe('');
+  });
+});
+
+describe('SessionManager analysis mode', () => {
+  it('defaults new workspaces to conversation mode', () => {
+    expect(new SessionManager().loadAnalysisMode()).toBe('conversation');
+  });
+
+  it('persists and restores the last explicitly selected mode', () => {
+    const manager = new SessionManager();
+    manager.saveAnalysisMode('full');
+    expect(new SessionManager().loadAnalysisMode()).toBe('full');
   });
 });
 

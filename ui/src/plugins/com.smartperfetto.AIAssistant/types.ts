@@ -89,6 +89,8 @@ export interface Message {
   quickRun?: QuickRunReceipt;
   analysisReceipt?: AnalysisReceipt;
   uiActionProposals?: UiActionProposalV1[];
+  /** Compact provenance shown only for dedicated conversation answers. */
+  conversationEvidence?: Array<{id: string; label: string; source?: string}>;
 }
 
 export interface QuickRunReceipt {
@@ -999,7 +1001,7 @@ export interface AIPanelState {
    * Analysis mode toggle: 'fast' (quick path) / 'full' (pipeline) / 'auto' (classifier-driven).
    *  Persisted in localStorage under ANALYSIS_MODE_KEY.
    */
-  analysisMode: 'fast' | 'full' | 'auto';
+  analysisMode: 'conversation' | 'fast' | 'full' | 'auto';
   /** Source/RAG authorization boundary; changing it always starts a new agent session. */
   analysisContext: AnalysisContextSelection;
   /** Whether the compact analysis mode menu in the input bar is open. */

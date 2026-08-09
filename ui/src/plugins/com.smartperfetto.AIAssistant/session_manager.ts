@@ -56,7 +56,7 @@ export {getSmartPerfettoWindowId};
 
 const PINNED_RESULTS_KEY = 'smartperfetto-pinned-results';
 const ANALYSIS_MODE_KEY = 'ai-analysis-mode';
-type AnalysisMode = 'fast' | 'full' | 'auto';
+export type AnalysisMode = 'conversation' | 'fast' | 'full' | 'auto';
 
 /**
  * Generates a unique ID for messages and sessions.
@@ -268,13 +268,18 @@ export class SessionManager {
       const stored = scoped || (isSmartPerfettoOidcMode()
         ? null
         : localStorage.getItem(ANALYSIS_MODE_KEY));
-      if (stored === 'fast' || stored === 'full' || stored === 'auto') {
+      if (
+        stored === 'conversation' ||
+        stored === 'fast' ||
+        stored === 'full' ||
+        stored === 'auto'
+      ) {
         return stored;
       }
     } catch {
       // Ignore storage errors.
     }
-    return 'auto';
+    return 'conversation';
   }
 
   saveAnalysisMode(mode: AnalysisMode): void {

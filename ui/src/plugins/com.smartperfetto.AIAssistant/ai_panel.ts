@@ -116,6 +116,20 @@ import type {
   TeachingTrackHint,
   TeachingWarning,
 } from './types';
+import {resolveChatInputKeyAction} from './chat_input';
+import {
+  cancelConversationRun,
+  streamConversationRun,
+  type ConversationFullHandoff,
+  type ConversationRunReceipt,
+} from './conversation_client';
+import {
+  appendConversationMessage,
+  clearConversationStore,
+  loadConversationStore,
+  saveConversationStore,
+} from './conversation_store';
+import {ConversationStartQueue} from './conversation_start_queue';
 import {
   createStreamingFlowState,
   createStreamingAnswerState,
@@ -659,6 +673,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private transientSaverRef: (() => TransientState) | null = null;
   private analysisModeMenuClickHandler: ((event: MouseEvent) => void) | null =
     null;
+  private isInputComposing = false;
+  private conversationHistoryHydrated = false;
+  private conversationRequestOrdinal = 0;
+  private activeConversationRun?: ConversationRunReceipt;
+  private pendingFullAnalysisHandoff?: ConversationFullHandoff;
+  private conversationStartQueue?: ConversationStartQueue;
+  private conversationStartQueueBackendUrl = '';
   private analysisModeMenuKeydownHandler:
     | ((event: KeyboardEvent) => void)
     | null = null;
@@ -2491,6 +2512,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 重置状态，准备迎接新 Trace
    */
   private resetStateForNewTrace(): void {
+    this.conversationHistoryHydrated = false;
     this.state.messages = [];
     this.state.commandHistory = [];
     this.state.historyIndex = -1;
@@ -3229,6 +3251,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   view(vnode: m.Vnode<AIPanelAttrs>) {
+    if (this.state.analysisMode === 'conversation') {
+      this.hydrateConversationHistory();
+    }
     // Detect selection changes and update slice card state.
     this.updateSliceCard();
 
@@ -3262,6 +3287,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const hasUploadInProgress = backendUploadState.state === 'uploading';
     const isInRpcMode =
       engineInRpcMode || hasBackendTrace || hasUploadInProgress;
+    const canSendFromCurrentSurface =
+      isInRpcMode || this.state.analysisMode === 'conversation';
 
     // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
     const sessions = isInRpcMode ? this.getCurrentTraceSessions() : [];
@@ -3839,6 +3866,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   this.renderTableSourceContext(
                                     msg.sourceContext,
                                   ),
+                                  msg.conversationEvidence?.length
+                                    ? m('details.ai-conversation-sources', [
+                                        m('summary', uiText(
+                                          `来源 ${msg.conversationEvidence.length}`,
+                                          `${msg.conversationEvidence.length} source(s)`,
+                                        )),
+                                        m('ul', msg.conversationEvidence.map(
+                                          (item) => m('li', [
+                                            item.label,
+                                            item.source ? ` · ${item.source}` : '',
+                                          ]),
+                                        )),
+                                      ])
+                                    : null,
 
                                   // Detailed HTML report link and authenticated download action.
                                   msg.reportUrl
@@ -4453,7 +4494,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       : null,
 
                     // Inline disconnection banner — shown when backend drops mid-conversation
-                    !isInRpcMode && this.state.messages.length > 0
+                    !isInRpcMode &&
+                      this.state.analysisMode !== 'conversation' &&
+                      this.state.messages.length > 0
                       ? m('div.ai-disconnect-banner', [
                           m('i.pf-icon', 'cloud_off'),
                           m(
@@ -4481,9 +4524,27 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                 : null,
 
               // Input Area - always show (disabled when disconnected)
-              isInRpcMode || this.state.messages.length > 0
+              isInRpcMode ||
+              this.state.analysisMode === 'conversation' ||
+              this.state.messages.length > 0
                 ? m('div.ai-input-area', [
                     this.renderAnalysisContextIndicator(),
+                    this.state.analysisMode === 'conversation'
+                      ? m('div.ai-context-indicator', [
+                          m('i.pf-icon', this.state.backendTraceId ? 'attachment' : 'chat'),
+                          this.state.backendTraceId
+                            ? uiText('已附加当前 Trace 上下文', 'Current trace context attached')
+                            : uiText('未附加 Trace', 'No trace attached'),
+                        ])
+                      : null,
+                    this.pendingFullAnalysisHandoff && !this.state.isLoading
+                      ? m('div.ai-context-indicator', [
+                          m('span', uiText('这个问题建议使用完整分析。', 'Full analysis is recommended for this question.')),
+                          m('button', {
+                            onclick: () => this.startRecommendedFullAnalysis(),
+                          }, uiText('开始完整分析', 'Start full analysis')),
+                        ])
+                      : null,
                     // Conversation context indicator
                     this.state.messages.length > 0 && this.state.agentSessionId
                       ? m(
@@ -4499,14 +4560,25 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m('div.ai-input-wrapper', [
                       m('textarea#ai-input.ai-input', {
                         'class':
-                          this.state.isLoading || !isInRpcMode
+                          (this.state.isLoading && this.state.analysisMode !== 'conversation') ||
+                          !canSendFromCurrentSurface
                             ? 'disabled'
                             : '',
                         'aria-label': uiText(
                           '输入分析问题',
                           'Enter an analysis question',
                         ),
-                        'placeholder': !isInRpcMode
+                        'placeholder': this.state.analysisMode === 'conversation'
+                          ? hasBackendTrace
+                            ? uiText(
+                                '围绕当前 Trace 对话；需要时我会查询证据...',
+                                'Discuss the current trace; I will query evidence when needed...',
+                              )
+                            : uiText(
+                                '输入问题；当前不会使用 Trace 证据...',
+                                'Ask a question; no trace evidence is attached...',
+                              )
+                          : !isInRpcMode
                           ? uiText(
                               'AI 后端未连接...',
                               'AI backend is not connected...',
@@ -4529,7 +4601,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         },
                         'onkeydown': (e: KeyboardEvent) =>
                           this.handleKeyDown(e),
-                        'disabled': this.state.isLoading || !isInRpcMode,
+                        'oncompositionstart': () => {
+                          this.isInputComposing = true;
+                        },
+                        'oncompositionend': () => {
+                          this.isInputComposing = false;
+                        },
+                        'disabled':
+                          (this.state.isLoading && this.state.analysisMode !== 'conversation') ||
+                          !canSendFromCurrentSurface,
                       }),
                       m('div.ai-input-controls', [
                         this.renderPresetQuestionButtons(isInRpcMode),
@@ -4544,7 +4624,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           onActivate: () => this.onProviderSelectionChange(),
                         }),
                         m('div.ai-input-divider'),
-                        this.state.isLoading
+                        this.state.isLoading && this.state.analysisMode !== 'conversation'
                           ? m(
                               'button.ai-send-btn.ai-stop-btn',
                               {
@@ -4556,9 +4636,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           : m(
                               'button.ai-send-btn',
                               {
-                                'class': !isInRpcMode ? 'disabled' : '',
+                                'class': !canSendFromCurrentSurface ? 'disabled' : '',
                                 'onclick': () => this.sendMessage(),
-                                'disabled': !isInRpcMode,
+                                'disabled': !canSendFromCurrentSurface,
                                 'title': uiText(
                                   '发送（Enter）',
                                   'Send (Enter)',
@@ -6094,6 +6174,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       !!this.state.referenceTraceId || privateContextRequiresFull;
     const modes = [
       {
+        id: 'conversation',
+        icon: '💬',
+        label: uiText('对话', 'Chat'),
+        title: uiText(
+          '先理解和回答；需要信息时会停下来问你，必要时再建议完整分析',
+          'Understand and answer first; pause for clarification and recommend full analysis only when needed.',
+        ),
+      },
+      {
         id: 'fast',
         icon: '⚡',
         label: uiText('快速', 'Fast'),
@@ -6121,7 +6210,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
       },
     ] as const;
-    const currentMode = modes.find((mode) => mode.id === current) ?? modes[2];
+    const currentMode = modes.find((mode) => mode.id === current) ?? modes[0];
     return m('div.ai-mode-selector', [
       m(
         'button.ai-mode-trigger',
@@ -6188,15 +6277,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * Switch analysis mode. Changing mode mid-session clears agentSessionId so the backend
    *  starts a fresh SDK session and avoids context mix between quick and full paths.
    */
-  private onAnalysisModeChange(newMode: 'fast' | 'full' | 'auto'): void {
+  private onAnalysisModeChange(
+    newMode: 'conversation' | 'fast' | 'full' | 'auto',
+  ): void {
     if (this.isAnalysisIdentityLocked()) return;
     if (newMode === this.state.analysisMode) return;
-    const hadSession = !!this.state.agentSessionId;
+    const previousMode = this.state.analysisMode;
+    const hadAgentSession = !!this.state.agentSessionId;
+    const hadSession = hadAgentSession || Boolean(
+      loadConversationStore(this.state.settings.backendUrl).sessionId,
+    );
     this.state.analysisMode = newMode;
     sessionManager.saveAnalysisMode(newMode);
-    if (hadSession) {
+    if (hadAgentSession) {
       this.retireBackendAgentSession();
+    }
+    if (hadSession) {
       const label = {
+        conversation: uiText('对话', 'Chat'),
         fast: uiText('快速', 'Fast'),
         full: uiText('完整', 'Full'),
         auto: uiText('智能', 'Auto'),
@@ -6211,14 +6309,22 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         timestamp: Date.now(),
       });
     }
+    if (previousMode === 'conversation' || newMode === 'conversation') {
+      this.resetConversationSession(true);
+    }
     m.redraw();
   }
 
   private onProviderSelectionChange(): void {
     if (this.isAnalysisIdentityLocked()) return;
-    const hadSession = !!this.state.agentSessionId;
-    if (hadSession) {
+    const hadAgentSession = !!this.state.agentSessionId;
+    const hadSession = hadAgentSession || Boolean(
+      loadConversationStore(this.state.settings.backendUrl).sessionId,
+    );
+    if (hadAgentSession) {
       this.retireBackendAgentSession();
+    }
+    if (hadSession) {
       this.addMessage({
         id: this.generateId(),
         role: 'system',
@@ -6229,6 +6335,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         timestamp: Date.now(),
       });
     }
+    this.resetConversationSession();
     this.refreshServerStatus();
     m.redraw();
   }
@@ -6626,7 +6733,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.isAnalysisIdentityLocked()) return;
     const normalized = normalizeAnalysisContext(selection);
     if (sameAnalysisContext(normalized, this.state.analysisContext)) return;
-    const hadSession = !!this.state.agentSessionId;
+    const hadAgentSession = !!this.state.agentSessionId;
+    const hadSession = hadAgentSession || Boolean(
+      loadConversationStore(this.state.settings.backendUrl).sessionId,
+    );
     this.state.analysisContext = normalized;
     const promotedToFull =
       analysisContextRequiresFullMode(normalized) &&
@@ -6640,9 +6750,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       getSmartPerfettoRequestContext(),
       normalized,
     );
+    this.resetConversationSession();
     this.ensureAnalysisContextCodebaseLabels();
     if (hadSession) {
-      this.retireBackendAgentSession();
+      if (hadAgentSession) this.retireBackendAgentSession();
       this.addMessage({
         id: this.generateId(),
         role: 'system',
@@ -7535,15 +7646,23 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      this.sendMessage();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      this.navigateHistory(-1);
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      this.navigateHistory(1);
+    const action = resolveChatInputKeyAction(e, this.isInputComposing);
+    switch (action) {
+      case 'submit':
+        e.preventDefault();
+        this.sendMessage();
+        break;
+      case 'history_previous':
+        e.preventDefault();
+        this.navigateHistory(-1);
+        break;
+      case 'history_next':
+        e.preventDefault();
+        this.navigateHistory(1);
+        break;
+      case 'newline':
+      case 'ignore':
+        break;
     }
   }
 
@@ -7578,7 +7697,10 @@ Click ⚙️ to configure backend connection.`,
       );
     }
 
-    if (!input || this.state.isLoading) return;
+    if (
+      !input ||
+      (this.state.isLoading && this.state.analysisMode !== 'conversation')
+    ) return;
     if (this.shouldBlockModelBackedRequest(input)) {
       this.addAiDisabledMessage(
         input.startsWith('/') ? input.split(/\s+/)[0] : 'analysis',
@@ -10336,12 +10458,223 @@ Click ⚙️ to configure backend connection.`,
     }
   }
 
+  private hydrateConversationHistory(): void {
+    if (this.conversationHistoryHydrated) return;
+    this.conversationHistoryHydrated = true;
+    const store = loadConversationStore(this.state.settings.backendUrl);
+    const knownIds = new Set(this.state.messages.map((message) => message.id));
+    for (const message of store.messages) {
+      if (knownIds.has(message.id)) continue;
+      this.state.messages.push({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        timestamp: message.timestamp,
+        conversationEvidence: message.evidence,
+      });
+      knownIds.add(message.id);
+    }
+    this.pendingFullAnalysisHandoff = [...store.messages].reverse().find(
+      (message) => message.fullHandoff,
+    )?.fullHandoff;
+  }
+
+  private getConversationStartQueue(): ConversationStartQueue {
+    const backendUrl = this.state.settings.backendUrl;
+    if (
+      this.conversationStartQueue &&
+      this.conversationStartQueueBackendUrl === backendUrl
+    ) {
+      return this.conversationStartQueue;
+    }
+    this.conversationStartQueueBackendUrl = backendUrl;
+    this.conversationStartQueue = new ConversationStartQueue(
+      () => loadConversationStore(backendUrl).sessionId,
+      (sessionId) => {
+        const store = loadConversationStore(backendUrl);
+        saveConversationStore({...store, sessionId});
+      },
+    );
+    return this.conversationStartQueue;
+  }
+
+  private resetConversationSession(
+    clearLoading = this.state.analysisMode === 'conversation',
+  ): void {
+    ++this.conversationRequestOrdinal;
+    this.getConversationStartQueue().reset();
+    const store = loadConversationStore(this.state.settings.backendUrl);
+    saveConversationStore({...store, sessionId: undefined, traceId: undefined});
+    this.pendingFullAnalysisHandoff = undefined;
+    const active = this.activeConversationRun;
+    this.activeConversationRun = undefined;
+    if (active) {
+      void cancelConversationRun(
+        {
+          backendUrl: this.state.settings.backendUrl,
+          apiKey: this.state.settings.backendApiKey,
+        },
+        active.sessionId,
+        active.runId,
+      ).catch(() => undefined);
+    }
+    if (clearLoading) {
+      this.setLoadingState(false);
+    }
+  }
+
+  private async handleConversationMessage(message: string): Promise<void> {
+    const config = {
+      backendUrl: this.state.settings.backendUrl,
+      apiKey: this.state.settings.backendApiKey,
+    };
+    let store = loadConversationStore(config.backendUrl);
+    if (
+      store.sessionId &&
+      store.traceId &&
+      store.traceId !== this.state.backendTraceId
+    ) {
+      this.resetConversationSession();
+      store = loadConversationStore(config.backendUrl);
+    }
+    const ordinal = ++this.conversationRequestOrdinal;
+    const userMessage = [...this.state.messages].reverse().find(
+      (candidate) => candidate.role === 'user' && candidate.content === message,
+    );
+    store = appendConversationMessage(config.backendUrl, {
+      id: userMessage?.id ?? this.generateId(),
+      role: 'user',
+      content: message,
+      timestamp: userMessage?.timestamp ?? Date.now(),
+    }, store.sessionId);
+    this.setLoadingState(true);
+    this.state.loadingPhase = uiText('正在理解问题…', 'Understanding the question…');
+    m.redraw();
+
+    try {
+      const receipt = await this.getConversationStartQueue().enqueue(config, {
+        query: message,
+        traceId: this.state.backendTraceId ?? undefined,
+        analysisContext: this.state.analysisContext,
+      });
+      if (ordinal !== this.conversationRequestOrdinal) {
+        await cancelConversationRun(config, receipt.sessionId, receipt.runId)
+          .catch(() => undefined);
+        return;
+      }
+      this.activeConversationRun = receipt;
+      store = loadConversationStore(config.backendUrl);
+      saveConversationStore({
+        ...store,
+        sessionId: receipt.sessionId,
+        traceId: this.state.backendTraceId ?? undefined,
+      });
+      const outcome = await streamConversationRun(config, receipt, {
+        onEvent: (event) => {
+          if (ordinal !== this.conversationRequestOrdinal) return;
+          if (event.type !== 'runtime_update' || !event.data || typeof event.data !== 'object') return;
+          const update = (event.data as {update?: unknown}).update;
+          const content = update && typeof update === 'object'
+            ? (update as {content?: unknown}).content
+            : undefined;
+          const phase = typeof content === 'string'
+            ? content
+            : content && typeof content === 'object' && typeof (content as {message?: unknown}).message === 'string'
+              ? String((content as {message: string}).message)
+              : '';
+          if (phase) {
+            this.state.loadingPhase = phase;
+            m.redraw();
+          }
+        },
+      });
+      if (ordinal !== this.conversationRequestOrdinal || outcome.kind === 'cancelled') return;
+      const assistantMessage = {
+        id: this.generateId(),
+        role: 'assistant' as const,
+        content: outcome.message,
+        timestamp: Date.now(),
+        conversationEvidence: outcome.evidence,
+      };
+      this.addMessage(assistantMessage);
+      appendConversationMessage(config.backendUrl, {
+        id: assistantMessage.id,
+        role: assistantMessage.role,
+        content: assistantMessage.content,
+        timestamp: assistantMessage.timestamp,
+        evidence: outcome.evidence,
+        outcomeKind: outcome.kind,
+        ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
+      }, receipt.sessionId);
+      this.pendingFullAnalysisHandoff = outcome.kind === 'recommend_full'
+        ? outcome.handoff
+        : undefined;
+    } catch (error) {
+      if (ordinal !== this.conversationRequestOrdinal) return;
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: uiText(
+          `对话失败：${error instanceof Error ? error.message : String(error)}`,
+          `Conversation failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+        timestamp: Date.now(),
+      });
+    } finally {
+      if (ordinal === this.conversationRequestOrdinal) {
+        this.activeConversationRun = undefined;
+        this.setLoadingState(false);
+      }
+      m.redraw();
+    }
+  }
+
+  private startRecommendedFullAnalysis(): void {
+    const handoff = this.pendingFullAnalysisHandoff;
+    if (!handoff || this.state.isLoading) return;
+    this.pendingFullAnalysisHandoff = undefined;
+    this.onAnalysisModeChange('full');
+    const assumptions = handoff.assumptions.length > 0
+      ? `\nAssumptions:\n- ${handoff.assumptions.join('\n- ')}`
+      : '';
+    const evidence = handoff.evidence.length > 0
+      ? `\nExisting evidence:\n- ${handoff.evidence.map((item) => item.label).join('\n- ')}`
+      : '';
+    this.state.input = `${handoff.question}\n\nScope: ${handoff.scope}${assumptions}${evidence}`;
+    void this.sendMessage();
+  }
+
+  private async cancelConversationAnalysis(): Promise<void> {
+    const active = this.activeConversationRun;
+    if (!active) return;
+    ++this.conversationRequestOrdinal;
+    try {
+      await cancelConversationRun(
+        {
+          backendUrl: this.state.settings.backendUrl,
+          apiKey: this.state.settings.backendApiKey,
+        },
+        active.sessionId,
+        active.runId,
+      );
+    } finally {
+      this.activeConversationRun = undefined;
+      this.setLoadingState(false);
+      m.redraw();
+    }
+  }
+
   private async handleChatMessage(message: string) {
     if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] handleChatMessage called with:', message);
     }
     if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] backendTraceId:', this.state.backendTraceId);
+    }
+
+    if (this.state.analysisMode === 'conversation') {
+      await this.handleConversationMessage(message);
+      return;
     }
 
     // Check if trace is uploaded to backend
@@ -11006,6 +11339,9 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private cancelAnalysis(): Promise<void> {
+    if (this.state.analysisMode === 'conversation') {
+      return this.cancelConversationAnalysis();
+    }
     if (this.analysisCancellationRequest) {
       return this.analysisCancellationRequest;
     }
@@ -13325,6 +13661,9 @@ Click ⚙️ to configure backend connection.`,
     this.flushSessionSave();
     this.saveCurrentSession();
     this.retireBackendAgentSession();
+    this.resetConversationSession(true);
+    clearConversationStore(this.state.settings.backendUrl);
+    this.conversationHistoryHydrated = true;
 
     // Do not delete backend trace resources when clearing chat.
     // Clear-chat resets conversation state only and preserves trace continuity.

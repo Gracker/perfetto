@@ -25,7 +25,6 @@ import {Button} from '../widgets/button';
 import {Intent} from '../widgets/common';
 import {Popup, PopupPosition} from '../widgets/popup';
 import {Omnibox} from './omnibox';
-import {isTimelineRouteActive} from './timeline_route';
 
 const AI_ASSISTANT_OPEN_COMMAND = 'com.smartperfetto.AIAssistant.OpenPanel';
 
@@ -124,8 +123,7 @@ export class Topbar implements m.ClassComponent<TopbarAttrs> {
     );
   }
 
-  private renderAIAssistantEntry(trace: TraceImpl | undefined): m.Children {
-    if (!trace || !isTimelineRouteActive()) return null;
+  private renderAIAssistantEntry(_trace: TraceImpl | undefined): m.Children {
     const commands = AppImpl.instance.commands;
     if (!commands.hasCommand(AI_ASSISTANT_OPEN_COMMAND)) return null;
     return m(

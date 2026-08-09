@@ -17,6 +17,7 @@
 // limitations under the License.
 
 import './styles.scss';
+import m from 'mithril';
 import {isTimelineRouteActive} from '../../frontend/timeline_route';
 import type {App} from '../../public/app';
 import type {PerfettoPlugin} from '../../public/plugin';
@@ -49,6 +50,8 @@ import {installTracePairFrameRedrawListener} from './trace_pair_workspace';
 import {getAIAssistantSurfacePolicy} from './ai_surface_policy';
 import {sessionManager} from './session_manager';
 import {setUiLanguagePreference} from './ui_language';
+import {ConversationPage} from './conversation_page';
+import {resolveAssistantOpenTarget} from './assistant_navigation';
 
 // Inject smart-detected backend URL at module load time, BEFORE any trace
 // auto-upload kicks in.
@@ -88,11 +91,23 @@ export default class implements PerfettoPlugin {
 
   static onActivate(app: App): void {
     if (!getAIAssistantSurfacePolicy().registerCommands) return;
+    app.pages.registerPage({
+      route: '/assistant',
+      render: () => m(ConversationPage, {app}),
+    });
     app.commands.registerCommand({
       id: 'com.smartperfetto.AIAssistant.OpenPanel',
       name: 'Open AI Assistant',
       callback: () => {
-        toggleSidebarPanel();
+        const target = resolveAssistantOpenTarget({
+          hasTrace: Boolean(app.trace),
+          timelineRouteActive: isTimelineRouteActive(),
+        });
+        if (target === 'trace_panel') {
+          toggleSidebarPanel();
+        } else {
+          app.navigate('#!/assistant');
+        }
       },
     });
 

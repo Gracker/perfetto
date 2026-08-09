@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2024-2026 Gracker (Chris)
+// This file is part of SmartPerfetto. See LICENSE for details.
+
+import m from 'mithril';
+import type {App} from '../../public/app';
+import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+import {loadAnalysisContext} from './analysis_context';
+import {formatMessage} from './data_formatter';
+import {resolveChatInputKeyAction} from './chat_input';
+import {
+  cancelConversationRun,
+  streamConversationRun,
+  type ConversationFullHandoff,
+  type ConversationRunReceipt,
+} from './conversation_client';
+import {
+  appendConversationMessage,
+  clearConversationStore,
+  loadConversationStore,
+  saveConversationStore,
+  type StoredConversation,
+  type StoredConversationMessage,
+} from './conversation_store';
+import {sessionManager} from './session_manager';
+import {ConversationStartQueue} from './conversation_start_queue';
+import {uiText} from './ui_language';
+
+function messageId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function renderMessageContent(message: StoredConversationMessage): m.Vnode {
+  return m('div.ai-conversation-page-message-content', {
+    oncreate: ({dom}) => {
+      (dom as HTMLElement).innerHTML = formatMessage(message.content);
+    },
+    onupdate: ({dom}) => {
+      (dom as HTMLElement).innerHTML = formatMessage(message.content);
+    },
+  });
+}
+
+export class ConversationPage implements m.ClassComponent<{app: App}> {
+  private readonly settings = sessionManager.loadSettings();
+  private store: StoredConversation = loadConversationStore(this.settings.backendUrl);
+  private readonly startQueue = new ConversationStartQueue(
+    () => this.store.sessionId,
+    (sessionId) => {
+      this.store = {...this.store, sessionId};
+      saveConversationStore(this.store);
+    },
+  );
+  private input = '';
+  private isComposing = false;
+  private activeReceipt?: ConversationRunReceipt;
+  private requestOrdinal = 0;
+  private error = '';
+
+  view({attrs}: m.Vnode<{app: App}>): m.Children {
+    const pendingHandoff = [...this.store.messages].reverse().find(
+      (message) => message.fullHandoff,
+    )?.fullHandoff;
+    return m('main.ai-conversation-page', [
+      m('header.ai-conversation-page-header', [
+        m('div', [
+          m('h1', uiText('AI 对话', 'AI Conversation')),
+          m('p', uiText(
+            '当前未附加 Trace。可以讨论需求、性能原理、分析方法和已授权源码；Trace 结论会明确标注证据边界。',
+            'No trace is attached. Discuss requirements, performance concepts, analysis methods, or authorized source code; trace claims will state their evidence boundary.',
+          )),
+        ]),
+        m('button', {
+          onclick: () => void this.startNewConversation(),
+        }, uiText('新对话', 'New conversation')),
+      ]),
+      m('section.ai-conversation-page-thread',
+        this.store.messages.length > 0
+          ? this.store.messages.map((message) => m(
+              `article.ai-conversation-page-message.ai-conversation-page-message-${message.role}`,
+              {key: message.id},
+              [
+                m('div.ai-conversation-page-role', message.role === 'user' ? uiText('你', 'You') : 'AI'),
+                renderMessageContent(message),
+                message.evidence?.length
+                  ? m('details.ai-conversation-sources', [
+                      m('summary', uiText(
+                        `来源 ${message.evidence.length}`,
+                        `${message.evidence.length} source(s)`,
+                      )),
+                      m('ul', message.evidence.map((item) => m('li', [
+                        item.label,
+                        item.source ? ` · ${item.source}` : '',
+                      ]))),
+                    ])
+                  : null,
+              ],
+            ))
+          : m('div.ai-conversation-page-empty', [
+              m('h2', uiText('从问题开始，不从流程开始', 'Start with the question, not a workflow')),
+              m('p', uiText(
+                '我会先理解你的目标；信息不够时会停下来问你，而不是自行跑完整分析。',
+                'The assistant first understands your goal and pauses for missing information instead of launching a full analysis by itself.',
+              )),
+            ]),
+      ),
+      pendingHandoff
+        ? this.renderFullHandoff(attrs.app, pendingHandoff)
+        : null,
+      this.activeReceipt
+        ? m('div.ai-conversation-page-running', uiText(
+            '正在回答。你可以继续输入来修正方向；新消息会先停止当前运行。',
+            'Answering. You can send another message to steer the response; it will stop the current run first.',
+          ))
+        : null,
+      this.error ? m('div.ai-conversation-page-error', this.error) : null,
+      m('footer.ai-conversation-page-composer', [
+        m('textarea', {
+          value: this.input,
+          placeholder: uiText(
+            '输入问题；Enter 发送，Shift+Enter 换行',
+            'Enter a question; Enter sends and Shift+Enter adds a line',
+          ),
+          oninput: (event: Event) => {
+            this.input = (event.target as HTMLTextAreaElement).value;
+          },
+          oncompositionstart: () => { this.isComposing = true; },
+          oncompositionend: () => { this.isComposing = false; },
+          onkeydown: (event: KeyboardEvent) => {
+            const action = resolveChatInputKeyAction(event, this.isComposing);
+            if (action === 'submit') {
+              event.preventDefault();
+              void this.send();
+            }
+          },
+        }),
+        m('button.ai-conversation-page-send', {
+          disabled: !this.input.trim(),
+          onclick: () => void this.send(),
+        }, this.activeReceipt ? uiText('修正方向', 'Steer') : uiText('发送', 'Send')),
+      ]),
+    ]);
+  }
+
+  private renderFullHandoff(app: App, handoff: ConversationFullHandoff): m.Children {
+    return m('aside.ai-conversation-full-handoff', [
+      m('div', [
+        m('strong', uiText('建议使用完整分析', 'Full analysis recommended')),
+        m('span', ` · ${handoff.scope}`),
+      ]),
+      m('button', {
+        onclick: () => app.navigate('#!/viewer'),
+        title: uiText(
+          '完整分析需要先打开或上传 Trace；交接信息会保留。',
+          'Open or upload a trace before full analysis. The handoff will be preserved.',
+        ),
+      }, uiText('打开 Trace 后继续', 'Open a trace to continue')),
+    ]);
+  }
+
+  private async startNewConversation(): Promise<void> {
+    const active = this.activeReceipt;
+    ++this.requestOrdinal;
+    this.activeReceipt = undefined;
+    this.startQueue.reset();
+    this.store = clearConversationStore(this.settings.backendUrl);
+    this.input = '';
+    this.error = '';
+    m.redraw();
+    if (!active) return;
+    await cancelConversationRun({
+      backendUrl: this.settings.backendUrl,
+      apiKey: this.settings.backendApiKey,
+    }, active.sessionId, active.runId).catch(() => undefined);
+  }
+
+  private async send(): Promise<void> {
+    const query = this.input.trim();
+    if (!query) return;
+    if (this.store.traceId) {
+      this.startQueue.reset();
+      this.store = {...this.store, sessionId: undefined, traceId: undefined};
+      saveConversationStore(this.store);
+    }
+    const ordinal = ++this.requestOrdinal;
+    this.input = '';
+    this.error = '';
+    this.store = appendConversationMessage(this.settings.backendUrl, {
+      id: messageId('user'),
+      role: 'user',
+      content: query,
+      timestamp: Date.now(),
+    }, this.store.sessionId);
+    m.redraw();
+    try {
+      const receipt = await this.startQueue.enqueue({
+        backendUrl: this.settings.backendUrl,
+        apiKey: this.settings.backendApiKey,
+      }, {
+        query,
+        analysisContext: loadAnalysisContext(
+          this.settings.backendUrl,
+          getSmartPerfettoRequestContext(),
+        ),
+      });
+      if (ordinal !== this.requestOrdinal) {
+        await cancelConversationRun({
+          backendUrl: this.settings.backendUrl,
+          apiKey: this.settings.backendApiKey,
+        }, receipt.sessionId, receipt.runId).catch(() => undefined);
+        return;
+      }
+      this.activeReceipt = receipt;
+      m.redraw();
+      const outcome = await streamConversationRun({
+        backendUrl: this.settings.backendUrl,
+        apiKey: this.settings.backendApiKey,
+      }, receipt);
+      if (ordinal !== this.requestOrdinal || outcome.kind === 'cancelled') return;
+      this.store = appendConversationMessage(this.settings.backendUrl, {
+        id: messageId('assistant'),
+        role: 'assistant',
+        content: outcome.message,
+        timestamp: Date.now(),
+        evidence: outcome.evidence,
+        outcomeKind: outcome.kind,
+        ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
+      }, receipt.sessionId);
+    } catch (error) {
+      if (ordinal === this.requestOrdinal) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      if (ordinal === this.requestOrdinal) this.activeReceipt = undefined;
+      m.redraw();
+    }
+  }
+}
