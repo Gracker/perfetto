@@ -5,7 +5,10 @@
 import m from 'mithril';
 import type {App} from '../../public/app';
 import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
-import {loadAnalysisContext} from './analysis_context';
+import {
+  analysisContextRequiresFullMode,
+  loadAnalysisContext,
+} from './analysis_context';
 import {formatMessage} from './data_formatter';
 import {resolveChatInputKeyAction} from './chat_input';
 import {
@@ -24,6 +27,7 @@ import {
 } from './conversation_store';
 import {sessionManager} from './session_manager';
 import {ConversationStartQueue} from './conversation_start_queue';
+import {conversationTraceContextResetNotice} from './conversation_context_notice';
 import {uiText} from './ui_language';
 
 function messageId(prefix: string): string {
@@ -181,8 +185,18 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       this.startQueue.reset();
       this.store = {...this.store, sessionId: undefined, traceId: undefined};
       saveConversationStore(this.store);
+      this.store = appendConversationMessage(this.settings.backendUrl, {
+        id: messageId('assistant'),
+        role: 'assistant',
+        content: conversationTraceContextResetNotice(),
+        timestamp: Date.now(),
+      });
     }
     const ordinal = ++this.requestOrdinal;
+    const analysisContext = loadAnalysisContext(
+      this.settings.backendUrl,
+      getSmartPerfettoRequestContext(),
+    );
     this.input = '';
     this.error = '';
     this.store = appendConversationMessage(this.settings.backendUrl, {
@@ -190,6 +204,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       role: 'user',
       content: query,
       timestamp: Date.now(),
+      privateContent: analysisContextRequiresFullMode(analysisContext),
     }, this.store.sessionId);
     m.redraw();
     try {
@@ -198,10 +213,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         apiKey: this.settings.backendApiKey,
       }, {
         query,
-        analysisContext: loadAnalysisContext(
-          this.settings.backendUrl,
-          getSmartPerfettoRequestContext(),
-        ),
+        analysisContext,
       });
       if (ordinal !== this.requestOrdinal) {
         await cancelConversationRun({

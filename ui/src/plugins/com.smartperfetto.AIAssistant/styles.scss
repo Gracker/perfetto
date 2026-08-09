@@ -4712,6 +4712,13 @@ tr.detail-row {
   &:hover {
     background: var(--chat-bg);
   }
+
+  &:disabled {
+    cursor: default;
+    border-color: var(--chat-border);
+    background: var(--chat-bg);
+    color: var(--chat-text-secondary);
+  }
 }
 
 // ----------------------------------------------------------------------------

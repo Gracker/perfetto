@@ -191,9 +191,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         );
       }
       this.success = text('提供商已激活', 'Provider activated successfully');
-      await this.loadData();
       this.publishProviderCatalogChanged('activated');
       this.onProviderSelectionChange?.();
+      await this.loadData();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
       this.error =
@@ -220,9 +220,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         '已切换到系统默认配置（.env）',
         'Switched to system default (.env)',
       );
-      await this.loadData();
       this.publishProviderCatalogChanged('deactivated');
       this.onProviderSelectionChange?.();
+      await this.loadData();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
       this.error =
@@ -234,6 +234,9 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   }
 
   private async deleteProvider(id: string) {
+    const deletedProviderWasActive = this.providers.some(
+      provider => provider.id === id && provider.isActive,
+    );
     this.deleting = id;
     m.redraw();
 
@@ -249,8 +252,11 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       }
       this.success = text('提供商已删除', 'Provider deleted');
       this.deleting = null;
-      await this.loadData();
       this.publishProviderCatalogChanged('deleted');
+      if (deletedProviderWasActive) {
+        this.onProviderSelectionChange?.();
+      }
+      await this.loadData();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
       this.error =

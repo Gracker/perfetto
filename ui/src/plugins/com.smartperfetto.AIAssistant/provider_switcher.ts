@@ -178,6 +178,7 @@ export class ProviderQuickSwitcher
     try {
       const res = await smartPerfettoFetch(apiUrl(this.backendUrl, ''), {
         headers: buildHeaders(this.apiKey),
+        cache: 'no-store',
       });
       if (res.ok) {
         const data = await res.json();
@@ -198,6 +199,8 @@ export class ProviderQuickSwitcher
   ) {
     if (this.isMutationLocked()) return;
     this.activating = true;
+    this.open = false;
+    this.focusIndex = -1;
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
@@ -209,12 +212,14 @@ export class ProviderQuickSwitcher
         },
       );
       if (res.ok) {
+        const activatedName = this.providers.find((p) => p.id === id)?.name;
+        this.publishProviderCatalogChanged('activated');
+        vnode?.attrs.onActivate?.();
         await this.loadProviders();
         const activated = this.providers.find((p) => p.id === id);
-        if (activated) {
-          this.showToast(`✶ Switched to ${activated.name}`);
-          this.publishProviderCatalogChanged('activated');
-          vnode?.attrs.onActivate?.();
+        const providerName = activated?.name ?? activatedName;
+        if (providerName) {
+          this.showToast(`✶ Switched to ${providerName}`);
         }
       }
     } catch {
@@ -234,6 +239,8 @@ export class ProviderQuickSwitcher
   ) {
     if (this.isMutationLocked()) return;
     this.activating = true;
+    this.open = false;
+    this.focusIndex = -1;
     m.redraw();
     try {
       if (this.isMutationLocked()) return;
@@ -246,8 +253,21 @@ export class ProviderQuickSwitcher
         },
       );
       if (!runtimeRes.ok) return;
-      if (this.isMutationLocked()) return;
 
+      if (provider.isActive) {
+        this.publishProviderCatalogChanged('runtime-switched');
+        vnode?.attrs.onActivate?.();
+        await this.loadProviders();
+        this.showToast(
+          uiText(
+            `✶ 已切换到 ${provider.name} · ${providerRuntimeLabel(runtime)}`,
+            `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
+          ),
+        );
+        return;
+      }
+
+      if (this.isMutationLocked()) return;
       const activateRes = await smartPerfettoFetch(
         apiUrl(this.backendUrl, `/${provider.id}/activate`),
         {
@@ -256,15 +276,15 @@ export class ProviderQuickSwitcher
         },
       );
       if (activateRes.ok) {
-        await this.loadProviders();
+        this.publishProviderCatalogChanged('runtime-switched');
+        vnode?.attrs.onActivate?.();
         this.showToast(
           uiText(
             `✶ 已切换到 ${provider.name} · ${providerRuntimeLabel(runtime)}`,
             `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
           ),
         );
-        this.publishProviderCatalogChanged('runtime-switched');
-        vnode?.attrs.onActivate?.();
+        await this.loadProviders();
       }
     } catch {
       // Silent fail
@@ -290,12 +310,12 @@ export class ProviderQuickSwitcher
         },
       );
       if (res.ok) {
-        await this.loadProviders();
+        this.publishProviderCatalogChanged('deactivated');
+        vnode?.attrs.onActivate?.();
         this.showToast(
           uiText('✶ 已切换到系统默认配置', '✶ Switched to System Default'),
         );
-        this.publishProviderCatalogChanged('deactivated');
-        vnode?.attrs.onActivate?.();
+        await this.loadProviders();
       }
     } catch {
       // Silent fail
@@ -370,9 +390,23 @@ export class ProviderQuickSwitcher
           disabled: mutationDisabled,
         },
         [
-          this.activating
-            ? m('span', {style: {fontSize: '12px'}}, '⏳')
-            : renderProviderIcon(active ? active.type : 'custom', 16),
+          m(
+            'span',
+            {
+              style: {
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '16px',
+                height: '16px',
+                flexShrink: 0,
+                fontSize: '12px',
+              },
+            },
+            this.activating
+              ? '⏳'
+              : renderProviderIcon(active ? active.type : 'custom', 16),
+          ),
           m(
             'span',
             {

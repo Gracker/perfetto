@@ -113,6 +113,59 @@ function findVNodeByTitle(node: any, title: string): any {
   return findVNodeByTitle(node.children, title);
 }
 
+describe('AIPanel conversation selection context', () => {
+  it('omits Perfetto\'s negative duration sentinel for an open slice', async () => {
+    const panel = new AIPanel() as any;
+    panel.trace = {
+      selection: {
+        selection: {
+          kind: 'track_event',
+          trackUri: '/process_1/actual_frames',
+          eventId: 2303,
+          ts: 272934569375384n,
+          dur: -1n,
+        },
+      },
+    };
+
+    await expect(panel.captureSelectionContext()).resolves.toEqual({
+      kind: 'track_event',
+      source: 'track_event_selection',
+      trackUri: '/process_1/actual_frames',
+      eventId: 2303,
+      ts: 272934569375384,
+    });
+  });
+
+  it('captures the current Perfetto selection before starting a conversation turn', async () => {
+    const panel = new AIPanel() as any;
+    const selectionContext = {
+      kind: 'track_event',
+      source: 'track_event_selection',
+      trackUri: '/process_1/thread_2',
+      eventId: 42,
+      ts: 1000,
+      dur: 250,
+      name: 'monitor contention',
+      threadName: 'main',
+      processName: 'com.example.app',
+    };
+    panel.state.analysisMode = 'conversation';
+    panel.captureSelectionContext = vi.fn(async () => selectionContext);
+    panel.handleConversationMessage = vi.fn(async () => undefined);
+
+    await panel.handleChatMessage('分析当前选择的这一段');
+
+    expect(panel.captureSelectionContext).toHaveBeenCalledWith(
+      '分析当前选择的这一段',
+    );
+    expect(panel.handleConversationMessage).toHaveBeenCalledWith(
+      '分析当前选择的这一段',
+      selectionContext,
+    );
+  });
+});
+
 describe('AIPanel analysis mode menu', () => {
   afterEach(() => {
     document.body.innerHTML = '';
@@ -285,7 +338,105 @@ describe('AIPanel language identity', () => {
   });
 });
 
+describe('AIPanel Provider identity reconciliation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('retires committed Provider identity even if analysis locks in flight', () => {
+    const panel = new AIPanel() as any;
+    panel.state.agentSessionId = 'agent-session-before-runtime-switch';
+    panel.state.isLoading = true;
+    const retireSession = vi
+      .spyOn(panel, 'retireBackendAgentSession')
+      .mockImplementation(() => {});
+    const resetConversation = vi
+      .spyOn(panel, 'resetConversationSession')
+      .mockImplementation(() => {});
+    const refreshStatus = vi
+      .spyOn(panel, 'refreshServerStatus')
+      .mockImplementation(() => {});
+    vi.spyOn(panel, 'addMessage').mockImplementation(() => {});
+
+    panel.onProviderSelectionChange();
+
+    expect(retireSession).toHaveBeenCalledOnce();
+    expect(resetConversation).toHaveBeenCalledOnce();
+    expect(refreshStatus).toHaveBeenCalledOnce();
+  });
+
+  it('cancels an analysis receipt that arrives after Provider commit', async () => {
+    const panel = new AIPanel() as any;
+    panel.state.analysisMode = 'full';
+    panel.state.backendTraceId = 'backend-current';
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+      },
+      notes: {removeNote: vi.fn()},
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.listenToAgentSSE = vi.fn(async () => {});
+    panel.saveCurrentSession = vi.fn();
+    vi.spyOn(panel, 'resetConversationSession').mockImplementation(() => {});
+    vi.spyOn(panel, 'refreshServerStatus').mockImplementation(() => {});
+    let resolveAnalyze: ((response: Response) => void) | undefined;
+    const analyzeResponse = new Promise<Response>((resolve) => {
+      resolveAnalyze = resolve;
+    });
+    panel.fetchBackend = vi.fn(async (url: string) => {
+      if (url.endsWith('/analyze')) return analyzeResponse;
+      return new Response(JSON.stringify({
+        success: true,
+        sessionId: 'agent-provider-stale',
+        runId: 'run-provider-stale',
+        status: 'cancelled',
+        outcome: 'cancelled',
+      }), {status: 200});
+    });
+
+    const analysisPromise = panel.handleChatMessage('analysis under old Provider');
+    await vi.waitFor(() => expect(panel.fetchBackend).toHaveBeenCalledTimes(1));
+    expect(panel.state.agentSessionId).toBeNull();
+
+    panel.onProviderSelectionChange();
+    resolveAnalyze?.(new Response(JSON.stringify({
+      success: true,
+      sessionId: 'agent-provider-stale',
+      runId: 'run-provider-stale',
+      isNewSession: true,
+    }), {status: 200}));
+    await analysisPromise;
+
+    expect(panel.fetchBackend).toHaveBeenCalledTimes(3);
+    expect(panel.fetchBackend.mock.calls[1][0]).toContain(
+      '/agent-provider-stale/cancel',
+    );
+    expect(panel.fetchBackend.mock.calls[2][1]?.method).toBe('DELETE');
+    expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
+    expect(panel.state.agentSessionId).toBeNull();
+  });
+});
+
 describe('AIPanel header tool panels', () => {
+  it('distinguishes RPC loading from an AI backend attachment', () => {
+    const panel = new AIPanel() as any;
+
+    panel.state.backendTraceId = null;
+    expect(panel.formatBackendTraceStatusTitle()).toBe(
+      'Trace 已通过 RPC 加载；正在等待 AI 后端上传',
+    );
+    expect(panel.formatBackendTraceStatusTitle()).not.toContain('null');
+
+    panel.state.backendTraceId = 'trace-123';
+    expect(panel.formatBackendTraceStatusTitle()).toBe(
+      'Trace 已附加到 AI 后端：trace-123',
+    );
+  });
+
   it('opens the dual-trace shell before a history trace is selected', () => {
     const panel = createMutableTestPanel();
     panel.state.backendTraceId = 'backend-current';
@@ -1209,6 +1360,7 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('sends live dual-trace workspace context with analysis requests', async () => {
     const panel = new AIPanel() as any;
+    panel.state.analysisMode = 'full';
     panel.state.backendTraceId = 'backend-current';
     panel.state.currentTraceFingerprint = 'fingerprint-current';
     panel.state.referenceTraceId = 'backend-reference';
@@ -1315,6 +1467,7 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('cancels a session that arrives after stop was requested', async () => {
     const panel = createMutableTestPanel();
+    panel.state.analysisMode = 'full';
     panel.state.backendTraceId = 'backend-current';
     panel.trace = {
       traceInfo: {
@@ -1396,6 +1549,7 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('waits for the new run identity before stopping a continued session', async () => {
     const panel = createMutableTestPanel();
+    panel.state.analysisMode = 'full';
     panel.state.backendTraceId = 'backend-current';
     panel.state.agentSessionId = 'agent-existing';
     panel.state.agentRunId = 'run-completed';
@@ -1482,6 +1636,7 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('sends the established run identity when stopping an active SSE run', async () => {
     const panel = createMutableTestPanel();
+    panel.state.analysisMode = 'full';
     panel.state.backendTraceId = 'backend-current';
     panel.trace = {
       traceInfo: {
@@ -1548,6 +1703,7 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('sends the established run identity when Story cancels an agent analysis', async () => {
     const panel = createMutableTestPanel();
+    panel.state.analysisMode = 'full';
     panel.state.agentSessionId = 'agent-story';
     panel.state.agentRunId = 'run-story';
     panel.state.storyState.status = 'running';
@@ -1589,6 +1745,7 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('does not reconnect an empty session when a pre-session stop fails', async () => {
     const panel = createMutableTestPanel();
+    panel.state.analysisMode = 'full';
     panel.state.backendTraceId = 'backend-current';
     panel.state.agentSessionId = '';
     panel.trace = {

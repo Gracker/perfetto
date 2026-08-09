@@ -15,6 +15,7 @@ import {
 } from './types';
 import {
   SessionManager,
+  getHistoryStorageKey,
   getPendingBackendTraceStorageKey,
   getSettingsStorageKey,
   getSessionsStorageKey,
@@ -235,6 +236,32 @@ describe('SessionManager analysis mode', () => {
     const manager = new SessionManager();
     manager.saveAnalysisMode('full');
     expect(new SessionManager().loadAnalysisMode()).toBe('full');
+  });
+});
+
+describe('SessionManager private message persistence', () => {
+  it('projects marked private user content in legacy history and AISession storage', () => {
+    const privateCanary = 'private-query-canary-must-not-persist';
+    const privateMessage = {
+      id: 'private-user-message',
+      role: 'user' as const,
+      content: privateCanary,
+      timestamp: Date.now(),
+      privateContent: true,
+    };
+    const manager = new SessionManager();
+
+    manager.saveHistory([privateMessage], null, 'trace-private');
+    const session = makeSession('private-session', 'trace-private');
+    session.messages = [privateMessage];
+    manager.saveSessionsStorage({byTrace: {'trace-private': [session]}});
+
+    const legacyRaw = localStorage.getItem(getHistoryStorageKey()) || '';
+    const sessionsRaw = localStorage.getItem(getSessionsStorageKey()) || '';
+    expect(legacyRaw).not.toContain(privateCanary);
+    expect(sessionsRaw).not.toContain(privateCanary);
+    expect(legacyRaw).toContain('PRIVATE_QUERY_REFERENCE');
+    expect(sessionsRaw).toContain('PRIVATE_QUERY_REFERENCE');
   });
 });
 

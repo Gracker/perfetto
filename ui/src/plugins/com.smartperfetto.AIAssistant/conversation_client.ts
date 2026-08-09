@@ -5,7 +5,7 @@
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
-import type {AnalysisContextSelection} from './types';
+import type {AnalysisContextSelection, SelectionContext} from './types';
 
 export interface ConversationEvidenceRef {
   id: string;
@@ -43,6 +43,7 @@ export interface StartConversationInput {
   sessionId?: string;
   traceId?: string;
   analysisContext?: AnalysisContextSelection;
+  selectionContext?: SelectionContext;
   signal?: AbortSignal;
 }
 
@@ -76,6 +77,14 @@ export function isConversationNotFoundError(error: unknown): boolean {
     (error.code === 'CONVERSATION_NOT_FOUND' || error.message === 'Conversation not found');
 }
 
+export function conversationTraceContextChanged(
+  previousTraceId: string | undefined,
+  nextTraceId: string | undefined,
+): boolean {
+  const normalize = (value: string | undefined) => value?.trim() || undefined;
+  return normalize(previousTraceId) !== normalize(nextTraceId);
+}
+
 async function readError(response: Response): Promise<ConversationClientError> {
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   const message = typeof payload.error === 'string'
@@ -90,7 +99,17 @@ export async function startConversationTurn(
   input: StartConversationInput,
 ): Promise<ConversationRunReceipt> {
   const url = buildAssistantApiV1Url(config.backendUrl, '/conversation');
-  const selection = input.analysisContext;
+  const analysisContext = input.analysisContext;
+  const options = {
+    ...(analysisContext ? {
+      codeAwareMode: analysisContext.codeAwareMode,
+      codebaseIds: analysisContext.codebaseIds,
+      knowledgeSourceIds: analysisContext.knowledgeSourceIds,
+    } : {}),
+    ...(input.selectionContext
+      ? {selectionContext: input.selectionContext}
+      : {}),
+  };
   const response = await smartPerfettoFetch(url, {
     method: 'POST',
     headers: requestHeaders(config),
@@ -99,13 +118,7 @@ export async function startConversationTurn(
       query: input.query,
       ...(input.sessionId ? {sessionId: input.sessionId} : {}),
       ...(input.traceId ? {traceId: input.traceId} : {}),
-      ...(selection ? {
-        options: {
-          codeAwareMode: selection.codeAwareMode,
-          codebaseIds: selection.codebaseIds,
-          knowledgeSourceIds: selection.knowledgeSourceIds,
-        },
-      } : {}),
+      ...(Object.keys(options).length > 0 ? {options} : {}),
     }),
   });
   if (!response.ok) throw await readError(response);

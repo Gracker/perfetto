@@ -312,16 +312,19 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             },
             m('span.pf-icon', this.copySuccess ? 'check' : 'content_copy'),
           ),
-          // Pin button (icon only) - only show if query exists
+          // Save button (icon only) - only show if query exists
           onPin && query
             ? m(
                 'button.sql-result-action.icon-only',
                 {
                   class: this.pinSuccess ? 'active' : '',
                   onclick: () => this.pinResults(query, columns, rows, onPin),
-                  title: uiText('固定结果', 'Pin results'),
+                  title: uiText('收藏结果', 'Save results'),
                 },
-                m('span.pf-icon', this.pinSuccess ? 'check' : 'push_pin'),
+                m(
+                  'span.pf-icon',
+                  this.pinSuccess ? 'bookmark_added' : 'bookmark_add',
+                ),
               )
             : null,
           // Stats toggle (icon only)

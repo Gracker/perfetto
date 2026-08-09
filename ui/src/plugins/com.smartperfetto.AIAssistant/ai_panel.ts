@@ -119,6 +119,7 @@ import type {
 import {resolveChatInputKeyAction} from './chat_input';
 import {
   cancelConversationRun,
+  conversationTraceContextChanged,
   streamConversationRun,
   type ConversationFullHandoff,
   type ConversationRunReceipt,
@@ -130,6 +131,7 @@ import {
   saveConversationStore,
 } from './conversation_store';
 import {ConversationStartQueue} from './conversation_start_queue';
+import {conversationTraceContextResetNotice} from './conversation_context_notice';
 import {
   createStreamingFlowState,
   createStreamingAnswerState,
@@ -189,6 +191,8 @@ import {
   buildPinnedResultForUiAction,
   executeUiNavigationProposal,
   findUiActionEvidenceMessage,
+  isUiActionProposalCollected,
+  uiActionProposalDisplayTitle,
   uiActionProposalIcon,
 } from './ui_action_proposals';
 import {buildTracePairContext as buildTracePairContextPayload} from './trace_pair_context';
@@ -3250,6 +3254,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
   }
 
+  private formatBackendTraceStatusTitle(): string {
+    const traceId = this.state.backendTraceId?.trim();
+    return traceId
+      ? uiText(
+          `Trace 已附加到 AI 后端：${traceId}`,
+          `Trace attached to AI backend: ${traceId}`,
+        )
+      : uiText(
+          'Trace 已通过 RPC 加载；正在等待 AI 后端上传',
+          'Trace loaded via RPC; waiting for AI backend upload',
+        );
+  }
+
   view(vnode: m.Vnode<AIPanelAttrs>) {
     if (this.state.analysisMode === 'conversation') {
       this.hydrateConversationHistory();
@@ -3426,10 +3443,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             // Backend trace status
             isInRpcMode
               ? m('span.ai-status-dot.backend', {
-                  title: uiText(
-                    `Trace 已上传：${this.state.backendTraceId}`,
-                    `Trace uploaded: ${this.state.backendTraceId}`,
-                  ),
+                  title: this.formatBackendTraceStatusTitle(),
                 })
               : null,
             isInRpcMode ? m('span.ai-status-text.backend', 'RPC') : null,
@@ -4157,15 +4171,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                         timestamp: Date.now(),
                                                       }),
                                                     title: uiText(
-                                                      '固定结果',
-                                                      'Pin result',
+                                                      '收藏结果',
+                                                      'Save result',
                                                     ),
                                                   },
                                                   [
-                                                    m('i.pf-icon', 'push_pin'),
+                                                    m(
+                                                      'i.pf-icon',
+                                                      'bookmark_add',
+                                                    ),
                                                     m(
                                                       'span',
-                                                      uiText('固定', 'Pin'),
+                                                      uiText('收藏', 'Save'),
                                                     ),
                                                   ],
                                                 )
@@ -6030,20 +6047,41 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (!proposals || proposals.length === 0) return null;
     return m(
       'div.ai-ui-action-proposals',
-      proposals.map((proposal) =>
-        m(
+      proposals.map((proposal) => {
+        const collected = isUiActionProposalCollected(
+          proposal,
+          this.state.pinnedResults,
+        );
+        const displayTitle = uiActionProposalDisplayTitle(
+          proposal,
+          collected
+            ? uiText('已收藏', 'Saved')
+            : uiText('收藏证据', 'Save evidence'),
+        );
+        return m(
           'button.ai-ui-action-btn',
           {
             key: proposal.id,
-            title: proposal.reason,
-            onclick: () => this.handleUiActionProposal(proposal),
+            title: collected
+              ? uiText(
+                  '已收藏到当前会话；输入 /pins 查看。',
+                  'Saved in this conversation; use /pins to view it.',
+                )
+              : proposal.reason,
+            disabled: collected,
+            onclick: collected
+              ? undefined
+              : () => this.handleUiActionProposal(proposal),
           },
           [
-            m('i.pf-icon', uiActionProposalIcon(proposal.kind)),
-            m('span', proposal.title),
+            m(
+              'i.pf-icon',
+              collected ? 'bookmark_added' : uiActionProposalIcon(proposal.kind),
+            ),
+            m('span', displayTitle),
           ],
-        ),
-      ),
+        );
+      }),
     );
   }
 
@@ -6061,11 +6099,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
+    if (isUiActionProposalCollected(proposal, this.state.pinnedResults)) {
+      return;
+    }
+
     const target = findUiActionEvidenceMessage(proposal, this.state.messages);
     if (!target) {
       this.showUiActionError(
         proposal,
-        'matching evidence table is not available in this conversation',
+        'matching evidence or result is not available in this conversation',
       );
       return;
     }
@@ -6077,19 +6119,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
-    const pinned = buildPinnedResultForUiAction(
-      proposal,
-      target,
-      this.generateId(),
+    this.storePinnedResult(
+      buildPinnedResultForUiAction(proposal, target, proposal.id),
     );
-    if (!pinned) {
-      this.showUiActionError(
-        proposal,
-        'matching evidence message has no table payload',
-      );
-      return;
-    }
-    this.storePinnedResult(pinned);
   }
 
   private scrollToUiActionMessage(messageId: string): void {
@@ -6103,11 +6135,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private showUiActionError(proposal: UiActionProposalV1, error: string): void {
     const localizedError =
       error ===
-      'matching evidence table is not available in this conversation'
-        ? uiText('此对话中没有匹配的证据表', error)
-        : error === 'matching evidence message has no table payload'
-          ? uiText('匹配的证据消息没有表格数据', error)
-          : error;
+      'matching evidence or result is not available in this conversation'
+        ? uiText('此对话中没有匹配的证据或结果', error)
+        : error;
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
@@ -6316,7 +6346,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private onProviderSelectionChange(): void {
-    if (this.isAnalysisIdentityLocked()) return;
+    // Provider surfaces call this only after the backend mutation commits. The
+    // analysis lock may have started while that request was in flight, so the
+    // committed identity must still retire every session that captured the old
+    // Provider/runtime. Mutation entry points enforce the pre-request lock.
+    this.analysisRequestCoordinator.requestCancel();
     const hadAgentSession = !!this.state.agentSessionId;
     const hadSession = hadAgentSession || Boolean(
       loadConversationStore(this.state.settings.backendUrl).sessionId,
@@ -7048,7 +7082,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   // loadPinnedResults 已移至 Session 中管理
 
   private savePinnedResults() {
-    sessionManager.savePinnedResults(this.state.pinnedResults);
+    this.saveCurrentSession();
   }
 
   // ============ Session 管理方法 ============
@@ -7268,6 +7302,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private storePinnedResult(pinnedResult: PinnedResult): void {
+    if (
+      this.state.pinnedResults.some((result) => result.id === pinnedResult.id)
+    ) {
+      return;
+    }
     this.state.pinnedResults = [
       pinnedResult,
       ...this.state.pinnedResults,
@@ -7279,8 +7318,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       id: this.generateId(),
       role: 'assistant',
       content: uiText(
-        '📌 **结果已固定！**\n\n查询结果已经保存。使用 `/pins` 查看全部固定结果。',
-        '📌 **Result pinned!**\n\nThe query result was saved. Use `/pins` to view all pinned results.',
+        '🔖 **结果已收藏到当前会话**\n\n使用 `/pins` 查看收藏结果。这不会固定时间线泳道，也不会自动加入后续 AI 上下文。',
+        '🔖 **Result saved in this conversation**\n\nUse `/pins` to view saved results. This does not pin a timeline track or automatically add the result to later AI context.',
       ),
       timestamp: Date.now(),
     });
@@ -7391,8 +7430,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
         '',
         uiText(
-          '仍可继续使用 SQL 查询、时间跳转、ANR/Jank 检测、Pin、Provider 配置/切换，以及已有报告读取。',
-          'SQL queries, timeline navigation, ANR/Jank detection, pins, provider configuration/switching, and existing reports remain available.',
+          '仍可继续使用 SQL 查询、时间跳转、ANR/Jank 检测、结果收藏、Provider 配置/切换，以及已有报告读取。',
+          'SQL queries, timeline navigation, ANR/Jank detection, saved results, provider configuration/switching, and existing reports remain available.',
         ),
       ].join('\n'),
       timestamp: Date.now(),
@@ -7611,7 +7650,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 * \`/jank\` - 查找卡顿帧
 * \`/slow\` - 分析慢操作（后端）
 * \`/memory\` - 分析内存（后端）
-* \`/pins\` - 查看固定的查询结果
+* \`/pins\` - 查看当前会话收藏的结果
 * \`/clear\` - 清空对话
 * \`/help\` - 显示帮助
 
@@ -7635,7 +7674,7 @@ I can help you analyze Perfetto traces. Here are some things you can ask:
 * \`/jank\` - Find janky frames
 * \`/slow\` - Analyze slow operations (backend)
 * \`/memory\` - Analyze memory usage (backend)
-* \`/pins\` - View pinned query results
+* \`/pins\` - View results saved in this conversation
 * \`/clear\` - Clear chat history
 * \`/help\` - Show this help
 
@@ -7744,6 +7783,9 @@ Click ⚙️ to configure backend connection.`,
       content: input,
       timestamp: Date.now(),
       model: this.serverStatus.model,
+      ...(analysisContextRequiresFullMode(this.state.analysisContext)
+        ? {privateContent: true}
+        : {}),
     });
 
     this.state.input = '';
@@ -8441,8 +8483,8 @@ Click ⚙️ to configure backend connection.`,
         id: this.generateId(),
         role: 'assistant',
         content: uiText(
-          '**还没有固定结果。**\n\n使用 SQL 结果上的 📌 固定按钮将其保存到这里。',
-          '**No pinned results yet.**\n\nUse the 📌 Pin button on SQL results to save them here.',
+          '**当前会话还没有收藏结果。**\n\n使用分析证据、证据表或 SQL 结果上的 🔖 收藏证据按钮将其保存到这里。',
+          '**No results have been saved in this conversation.**\n\nUse the 🔖 Save evidence button on an analysis insight, evidence table, or SQL result.',
         ),
         timestamp: Date.now(),
       });
@@ -8452,9 +8494,15 @@ Click ⚙️ to configure backend connection.`,
     const pinsList = this.state.pinnedResults
       .map((pin, index) => {
         const date = new Date(pin.timestamp).toLocaleString();
+        const snapshotLabel = pin.evidence
+          ? uiText(
+              `证据快照${pin.evidence.truncated ? '（摘要）' : ''}`,
+              `evidence snapshot${pin.evidence.truncated ? ' (summary)' : ''}`,
+            )
+          : uiText(`${pin.rows.length} 行`, `${pin.rows.length} rows`);
         return uiText(
-          `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${pin.rows.length} 行 • ${date}`,
-          `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${pin.rows.length} rows • ${date}`,
+          `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${snapshotLabel} • ${date}`,
+          `**${index + 1}.** ${pin.query.substring(0, 60)}${pin.query.length > 60 ? '...' : ''}\n   - ${snapshotLabel} • ${date}`,
         );
       })
       .join('\n\n');
@@ -8463,8 +8511,8 @@ Click ⚙️ to configure backend connection.`,
       id: this.generateId(),
       role: 'assistant',
       content: uiText(
-        `**📌 已固定结果（${this.state.pinnedResults.length}）**\n\n${pinsList}\n\n可在对话历史中的任一结果上使用固定按钮。`,
-        `**📌 Pinned Results (${this.state.pinnedResults.length})**\n\n${pinsList}\n\nClick on any result in the chat history to use the Pin button.`,
+        `**🔖 当前会话收藏结果（${this.state.pinnedResults.length}）**\n\n${pinsList}\n\n收藏只保存结果快照，不会固定时间线泳道，也不会自动加入后续 AI 上下文。`,
+        `**🔖 Results saved in this conversation (${this.state.pinnedResults.length})**\n\n${pinsList}\n\nSaving keeps a result snapshot; it does not pin a timeline track or automatically add the result to later AI context.`,
       ),
       timestamp: Date.now(),
     });
@@ -9919,13 +9967,14 @@ Click ⚙️ to configure backend connection.`,
         this.state.sliceCardInfo?.id === sel.eventId
           ? this.state.sliceCardInfo
           : null;
+      const duration = sel.dur === undefined ? undefined : Number(sel.dur);
       const ctx: SelectionContext = {
         kind: 'track_event',
         source: 'track_event_selection',
         trackUri: sel.trackUri,
         eventId: sel.eventId,
         ts: Number(sel.ts),
-        dur: sel.dur !== undefined ? Number(sel.dur) : undefined,
+        ...(duration !== undefined && duration >= 0 ? {dur: duration} : {}),
       };
       if (cardInfo) {
         ctx.name = cardInfo.name;
@@ -10470,6 +10519,7 @@ Click ⚙️ to configure backend connection.`,
         role: message.role,
         content: message.content,
         timestamp: message.timestamp,
+        privateContent: message.privateContent,
         conversationEvidence: message.evidence,
       });
       knownIds.add(message.id);
@@ -10523,7 +10573,10 @@ Click ⚙️ to configure backend connection.`,
     }
   }
 
-  private async handleConversationMessage(message: string): Promise<void> {
+  private async handleConversationMessage(
+    message: string,
+    selectionContext?: SelectionContext | null,
+  ): Promise<void> {
     const config = {
       backendUrl: this.state.settings.backendUrl,
       apiKey: this.state.settings.backendApiKey,
@@ -10531,10 +10584,18 @@ Click ⚙️ to configure backend connection.`,
     let store = loadConversationStore(config.backendUrl);
     if (
       store.sessionId &&
-      store.traceId &&
-      store.traceId !== this.state.backendTraceId
+      conversationTraceContextChanged(
+        store.traceId,
+        this.state.backendTraceId ?? undefined,
+      )
     ) {
       this.resetConversationSession();
+      this.addMessage({
+        id: this.generateId(),
+        role: 'system',
+        content: conversationTraceContextResetNotice(),
+        timestamp: Date.now(),
+      });
       store = loadConversationStore(config.backendUrl);
     }
     const ordinal = ++this.conversationRequestOrdinal;
@@ -10546,6 +10607,8 @@ Click ⚙️ to configure backend connection.`,
       role: 'user',
       content: message,
       timestamp: userMessage?.timestamp ?? Date.now(),
+      privateContent: userMessage?.privateContent ??
+        analysisContextRequiresFullMode(this.state.analysisContext),
     }, store.sessionId);
     this.setLoadingState(true);
     this.state.loadingPhase = uiText('正在理解问题…', 'Understanding the question…');
@@ -10556,6 +10619,7 @@ Click ⚙️ to configure backend connection.`,
         query: message,
         traceId: this.state.backendTraceId ?? undefined,
         analysisContext: this.state.analysisContext,
+        ...(selectionContext ? {selectionContext} : {}),
       });
       if (ordinal !== this.conversationRequestOrdinal) {
         await cancelConversationRun(config, receipt.sessionId, receipt.runId)
@@ -10673,7 +10737,8 @@ Click ⚙️ to configure backend connection.`,
     }
 
     if (this.state.analysisMode === 'conversation') {
-      await this.handleConversationMessage(message);
+      const selectionContext = await this.captureSelectionContext(message);
+      await this.handleConversationMessage(message, selectionContext);
       return;
     }
 
@@ -13412,7 +13477,7 @@ Click ⚙️ to configure backend connection.`,
 | \`/teaching-pipeline\` | 检测渲染管线并展示教学信息 |
 | \`/scene\` | 识别 Trace 中的操作场景 |
 | \`/export [csv|json]\` | 导出会话结果 |
-| \`/pins\` | 查看固定的查询结果 |
+| \`/pins\` | 查看当前会话收藏的结果 |
 | \`/clear\` | 清空对话记录 |
 | \`/help\` | 显示帮助 |
 | \`/settings\` | 打开设置 |
@@ -13421,7 +13486,7 @@ Click ⚙️ to configure backend connection.`,
 - 使用方向键浏览命令历史
 - Shift+Enter 换行，Enter 发送
 - 点击 CSV 或 JSON 按钮导出查询结果
-- 点击 Pin 保存查询结果`,
+- 点击 🔖 收藏按钮保存查询结果`,
       `**AI Assistant commands:**
 
 | Command | Description |
@@ -13436,7 +13501,7 @@ Click ⚙️ to configure backend connection.`,
 | \`/teaching-pipeline\` | Detect the rendering pipeline and show tutorial details |
 | \`/scene\` | Reconstruct user-interaction scenes in the trace |
 | \`/export [csv|json]\` | Export session results |
-| \`/pins\` | View pinned query results |
+| \`/pins\` | View results saved in this conversation |
 | \`/clear\` | Clear chat history |
 | \`/help\` | Show this help |
 | \`/settings\` | Open settings |
@@ -13445,7 +13510,7 @@ Click ⚙️ to configure backend connection.`,
 - Use arrow keys to navigate command history
 - Shift+Enter for new line, Enter to send
 - Click 📄 CSV or 📋 JSON buttons to export query results
-- Click 📌 Pin to save query results for later`,
+- Click 🔖 Save to keep a query result in this conversation`,
     );
   }
 

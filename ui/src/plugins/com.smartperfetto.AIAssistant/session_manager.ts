@@ -51,10 +51,10 @@ import {
 } from '../../core/smartperfetto_backend_url';
 import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
 import {normalizeUiLanguagePreference} from './ui_language';
+import {projectMessageForStorage} from './private_message_storage';
 
 export {getSmartPerfettoWindowId};
 
-const PINNED_RESULTS_KEY = 'smartperfetto-pinned-results';
 const ANALYSIS_MODE_KEY = 'ai-analysis-mode';
 export type AnalysisMode = 'conversation' | 'fast' | 'full' | 'auto';
 
@@ -90,10 +90,6 @@ export function getHistoryStorageKey(): string {
 
 export function getSessionsStorageKey(): string {
   return buildSmartPerfettoStorageKey(SESSIONS_KEY, 'workspace');
-}
-
-export function getPinnedResultsStorageKey(): string {
-  return buildSmartPerfettoStorageKey(PINNED_RESULTS_KEY, 'workspace');
 }
 
 export function getAnalysisModeStorageKey(): string {
@@ -238,25 +234,11 @@ export class SessionManager {
   ): void {
     try {
       const data = {
-        messages,
+        messages: this.trimStorageMessages(messages),
         backendTraceId,
         traceFingerprint,
       };
       localStorage.setItem(getHistoryStorageKey(), JSON.stringify(data));
-    } catch {
-      // Ignore errors
-    }
-  }
-
-  /**
-   * Save pinned results to localStorage.
-   */
-  savePinnedResults(pinnedResults: PinnedResult[]): void {
-    try {
-      localStorage.setItem(
-        getPinnedResultsStorageKey(),
-        JSON.stringify(pinnedResults),
-      );
     } catch {
       // Ignore errors
     }
@@ -340,7 +322,7 @@ export class SessionManager {
     return messages.map((msg) => {
       // P2-9: Strip large data fields that are not essential for session restore
       const trimmed: Message = {
-        ...msg,
+        ...projectMessageForStorage(msg),
         chartData: undefined,
         metricData: undefined,
       };

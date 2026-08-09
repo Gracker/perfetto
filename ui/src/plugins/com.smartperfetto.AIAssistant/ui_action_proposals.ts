@@ -11,6 +11,7 @@ export type UiActionExecutionResult =
   | {ok: false; error: string};
 
 const TIMELINE_CONTEXT_NS = BigInt(10_000_000);
+const MAX_PINNED_EVIDENCE_TEXT_LENGTH = 4_000;
 
 function parseNs(value: string): bigint | null {
   return /^(?:0|[1-9]\d{0,30})$/.test(value) ? BigInt(value) : null;
@@ -97,6 +98,7 @@ export function executeUiNavigationProposal(
       time: {
         start: Time.fromRaw(viewStartNs),
         end: Time.fromRaw(viewEndNs),
+        behavior: 'focus',
       },
     });
     return {ok: true};
@@ -156,17 +158,57 @@ export function buildPinnedResultForUiAction(
   proposal: UiActionProposalV1,
   message: Message,
   id: string,
-): PinnedResult | undefined {
+): PinnedResult {
   const sqlResult = message.sqlResult;
-  if (!sqlResult) return undefined;
-  const query = sqlResult.query || sqlResult.sourceContext?.title || proposal.title;
+  const sourceContext = sqlResult?.sourceContext || message.sourceContext;
+  const content = message.content.trim();
+  const evidence = !sqlResult && (sourceContext || content)
+    ? {
+        ...(content
+          ? {
+              content: content.slice(0, MAX_PINNED_EVIDENCE_TEXT_LENGTH),
+              truncated: content.length > MAX_PINNED_EVIDENCE_TEXT_LENGTH,
+            }
+          : {}),
+        ...(sourceContext?.source ? {source: sourceContext.source} : {}),
+        ...(sourceContext?.evidenceRefId
+          ? {evidenceRefId: sourceContext.evidenceRefId}
+          : {}),
+      }
+    : undefined;
+  const query = sqlResult?.query || sourceContext?.title || proposal.title;
   return {
     id,
     query,
-    columns: sqlResult.columns,
-    rows: sqlResult.rows.slice(0, 100),
+    columns: sqlResult?.columns || [],
+    rows: sqlResult?.rows.slice(0, 100) || [],
     timestamp: Date.now(),
+    ...(evidence ? {evidence} : {}),
   };
+}
+
+export function isUiActionProposalCollected(
+  proposal: UiActionProposalV1,
+  pinnedResults: readonly PinnedResult[],
+): boolean {
+  return (
+    proposal.kind === 'pin_evidence' &&
+    pinnedResults.some((result) => result.id === proposal.id)
+  );
+}
+
+const LEGACY_EVIDENCE_ACTION_PREFIX =
+  /^(?:固定证据|收藏证据|Pin evidence|Save evidence)(?:\s+|$)/iu;
+
+export function uiActionProposalDisplayTitle(
+  proposal: UiActionProposalV1,
+  prefix: string,
+): string {
+  if (proposal.kind !== 'pin_evidence') return proposal.title;
+  const target = proposal.title
+    .replace(LEGACY_EVIDENCE_ACTION_PREFIX, '')
+    .trim();
+  return target ? `${prefix} ${target}` : prefix;
 }
 
 export function uiActionProposalIcon(kind: UiActionProposalV1['kind']): string {
@@ -178,6 +220,6 @@ export function uiActionProposalIcon(kind: UiActionProposalV1['kind']): string {
     case 'open_evidence_table':
       return 'table_view';
     case 'pin_evidence':
-      return 'push_pin';
+      return 'bookmark_add';
   }
 }

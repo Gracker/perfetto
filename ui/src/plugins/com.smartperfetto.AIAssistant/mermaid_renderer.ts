@@ -249,6 +249,24 @@ function getMermaid(): any | undefined {
   return (globalThis as any).mermaid;
 }
 
+function normalizeMermaidSource(code: string): string {
+  const normalizedBreaks = code.replace(/<br\s*\/?>/gi, '<br/>');
+  if (!/^\s*sequenceDiagram\b/m.test(normalizedBreaks)) {
+    return normalizedBreaks;
+  }
+
+  return normalizedBreaks
+    .split('\n')
+    .map((line) => {
+      const colonIndex = line.indexOf(':');
+      if (colonIndex < 0) return line;
+      const prefix = line.slice(0, colonIndex);
+      if (!/(?:--?>>?|--?x|--?\)|<<--?>>?)/.test(prefix)) return line;
+      return `${prefix}:${line.slice(colonIndex + 1).replace(/#/g, '#35;')}`;
+    })
+    .join('\n');
+}
+
 /**
  * Mermaid renderer class for managing diagram rendering.
  *
@@ -398,9 +416,9 @@ export class MermaidRenderer {
         continue;
       }
 
-      // Sanitize HTML tags that break securityLevel:'strict' rendering.
-      // LLMs often generate <br/> for line breaks in node labels — replace with \n.
-      code = code.replace(/<br\s*\/?>/gi, '\n');
+      // Normalize the only inline HTML tag we intentionally support and escape
+      // sequence-message hashes without touching flowchart color literals.
+      code = normalizeMermaidSource(code);
 
       const renderId = `ai-mermaid-${Math.random().toString(36).slice(2)}`;
       host.classList.add('mermaid');

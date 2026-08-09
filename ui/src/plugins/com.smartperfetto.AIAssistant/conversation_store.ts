@@ -8,6 +8,7 @@ import type {
   ConversationFullHandoff,
   ConversationOutcome,
 } from './conversation_client';
+import {projectMessageForStorage} from './private_message_storage';
 
 const CONVERSATION_STORE_KEY = 'smartperfetto-conversation';
 
@@ -16,6 +17,7 @@ export interface StoredConversationMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  privateContent?: boolean;
   evidence?: ConversationEvidenceRef[];
   outcomeKind?: ConversationOutcome['kind'];
   fullHandoff?: ConversationFullHandoff;
@@ -61,7 +63,7 @@ export function saveConversationStore(store: StoredConversation): void {
   try {
     localStorage.setItem(storageKey(), JSON.stringify({
       ...store,
-      messages: store.messages.slice(-200),
+      messages: store.messages.slice(-200).map(projectMessageForStorage),
       updatedAt: Date.now(),
     }));
   } catch {

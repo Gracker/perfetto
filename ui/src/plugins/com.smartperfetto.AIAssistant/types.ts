@@ -53,6 +53,8 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  /** Raw content is memory-only; browser persistence stores a safe marker. */
+  privateContent?: boolean;
   flowTag?:
     | 'streaming_flow'
     | 'answer_stream'
@@ -1086,8 +1088,20 @@ export interface AreaCardInfo {
   jankCount: number;
 }
 
+/** Evidence metadata kept with a saved result when the source is not a table. */
+export interface PinnedEvidenceSnapshot {
+  content?: string;
+  source?: string;
+  evidenceRefId?: string;
+  truncated?: boolean;
+}
+
 /**
- * A pinned SQL query result.
+ * A result snapshot saved in the current AI session.
+ *
+ * SQL results keep their columns and rows. Non-table evidence keeps an empty
+ * table payload for backward compatibility and stores the evidence text and
+ * provenance in `evidence`.
  */
 export interface PinnedResult {
   id: string;
@@ -1095,6 +1109,7 @@ export interface PinnedResult {
   columns: string[];
   rows: any[][];
   timestamp: number;
+  evidence?: PinnedEvidenceSnapshot;
 }
 
 /**
