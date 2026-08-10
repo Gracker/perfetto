@@ -3,7 +3,6 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {expect, test} from '@playwright/test';
-import {writeFile} from 'fs/promises';
 import {providerState} from './provider_stub_helper';
 import {
   parseAnalyzePayload,
@@ -46,18 +45,7 @@ test('keeps heavy/light analysis stable through window operations and confirms s
         ),
     );
     await page.waitForTimeout(300);
-    if (process.env.SMARTPERFETTO_E2E_HEADLESS === '0') {
-      await page.screenshot({path: testInfo.outputPath(name)});
-      return;
-    }
-    const cdp = await page.context().newCDPSession(page);
-    const screenshot = await cdp.send('Page.captureScreenshot', {
-      format: 'png',
-      fromSurface: false,
-      captureBeyondViewport: false,
-    });
-    await cdp.detach();
-    await writeFile(testInfo.outputPath(name), Buffer.from(screenshot.data, 'base64'));
+    await page.screenshot({path: testInfo.outputPath(name)});
   };
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
