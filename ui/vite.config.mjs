@@ -130,6 +130,14 @@ function pluginEmbedMinimalSourceMap() {
 // ('../plugins' → '../plugins/index') before Vite's filesystem resolver runs.
 function makeSynthModulePlugin({name, modules}) {
   const PREFIX = '\0' + name + ':';
+  const moduleIdFor = (filename) =>
+    path.relative(ROOT_DIR, filename).split(path.sep).join('/');
+  const generatorsById = new Map(
+    Object.entries(modules).map(([filename, generate]) => [
+      moduleIdFor(filename),
+      generate,
+    ]),
+  );
   return {
     name,
     enforce: 'pre',
@@ -150,12 +158,12 @@ function makeSynthModulePlugin({name, modules}) {
             );
           }
         }
-        return PREFIX + candidate;
+        return PREFIX + moduleIdFor(candidate);
       }
     },
     load(id) {
       if (!id.startsWith(PREFIX)) return;
-      const gen = modules[id.slice(PREFIX.length)];
+      const gen = generatorsById.get(id.slice(PREFIX.length));
       if (gen) return gen(this);
     },
   };

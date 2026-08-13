@@ -42,7 +42,11 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    include: ['src/**/*_unittest.ts', 'src/**/*_jsdomtest.ts'],
+    include: [
+      'src/**/*_unittest.ts',
+      'src/**/*_jsdomtest.ts',
+      'vite_config_unittest.ts',
+    ],
     // Registers @testing-library/jest-dom matchers (toBeInTheDocument, etc.).
     setupFiles: ['vitest.setup.ts'],
   },
