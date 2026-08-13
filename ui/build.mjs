@@ -70,6 +70,7 @@ import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import {fileURLToPath} from 'node:url';
+import {syntaqlitePerfettoCompilerArgs} from './syntaqlite_build.mjs';
 
 const pjoin = path.join;
 const __filename = fileURLToPath(import.meta.url);
@@ -906,13 +907,9 @@ function buildSyntaqlitePerfettoDialect() {
     // macOS can run hermetic toolchains whose downloaded script carries local
     // provenance metadata; direct child_process execution is otherwise killed
     // before the script can delegate to Python.
-    exec('/bin/sh', [emcc,
-      '-O2',
-      '-sSIDE_MODULE=2',
-      '-sEXPORTED_FUNCTIONS=_syntaqlite_perfetto_dialect_template',
-      '-o',
-      dst,
-      src,
+    exec('/bin/sh', [
+      emcc,
+      ...syntaqlitePerfettoCompilerArgs(ROOT_DIR, src, dst),
     ]);
   } finally {
     if (prevEmConfig === undefined) delete process.env.EM_CONFIG;
