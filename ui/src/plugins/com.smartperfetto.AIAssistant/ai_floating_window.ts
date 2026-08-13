@@ -38,6 +38,8 @@ import {isTimelineRouteActive} from '../../frontend/timeline_route';
 import type {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {AIPanel} from './ai_panel';
+import type {AnalysisBackendConnection} from './analysis_backend_connection';
+import {PageAuthGate} from './page_auth_lifecycle';
 import {uiText} from './ui_language';
 import {
   applyFloatingSnapLayout,
@@ -351,6 +353,7 @@ const LAYOUT_MENU_STYLES = {
 interface FloatingWindowAttrs {
   trace: Trace;
   tracePairWorkspaceController: TracePairWorkspaceController;
+  analysisBackendConnection?: AnalysisBackendConnection;
 }
 
 class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
@@ -538,10 +541,13 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
         m(
           'div',
           {style: STYLES.content},
-          m(AIPanel, {
-            engine: attrs.trace.engine,
-            trace: attrs.trace,
-            tracePairWorkspaceController: attrs.tracePairWorkspaceController,
+          m(PageAuthGate, {
+            content: m(AIPanel, {
+              engine: attrs.trace.engine,
+              trace: attrs.trace,
+              tracePairWorkspaceController: attrs.tracePairWorkspaceController,
+              analysisBackendConnection: attrs.analysisBackendConnection,
+            }),
           }),
         ),
 
@@ -716,6 +722,7 @@ function clearDockSpace(): void {
 export function setupFloatingWindow(
   trace: Trace,
   tracePairWorkspaceController: TracePairWorkspaceController,
+  analysisBackendConnection?: AnalysisBackendConnection,
 ): FloatingWindowHandle {
   // Reuse an existing host if a previous trace left one behind (defensive),
   // otherwise create a fresh div. Keep it under `.pf-ui-main` so Perfetto
@@ -733,9 +740,17 @@ export function setupFloatingWindow(
       const mode = getFloatingState().mode;
       const assistantSurface =
         mode === 'floating'
-          ? m(FloatingWindow, {trace, tracePairWorkspaceController})
+          ? m(FloatingWindow, {
+              trace,
+              tracePairWorkspaceController,
+              analysisBackendConnection,
+            })
           : mode === 'sidebar'
-            ? m(SidebarPanel, {trace, tracePairWorkspaceController})
+            ? m(SidebarPanel, {
+                trace,
+                tracePairWorkspaceController,
+                analysisBackendConnection,
+              })
             : null;
       return m.fragment({}, [
         m(TracePairWorkspace, {controller: tracePairWorkspaceController}),

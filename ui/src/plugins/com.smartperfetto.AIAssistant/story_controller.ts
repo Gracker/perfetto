@@ -50,6 +50,7 @@ export interface StoryControllerContext {
   pinTracksFromInstructions(
     instructions: ScenePinInstruction[],
     activeProcesses: Array<{processName: string; frameCount: number}>,
+    isCurrent: () => boolean,
   ): Promise<void>;
 
   // ── Scene state sync (writes AIPanel.state.detectedScenes) ──
@@ -57,6 +58,13 @@ export interface StoryControllerContext {
 
   /** Optional debug flag — when true, verbose console.log() messages are emitted */
   debug?: boolean;
+}
+
+export class StoryControllerInvalidatedError extends Error {
+  constructor() {
+    super('Story controller was invalidated');
+    this.name = 'StoryControllerInvalidatedError';
+  }
 }
 
 function sceneProgressFallback(
@@ -114,9 +122,45 @@ export function buildSceneProgressContent(input: {
  */
 export class StoryController {
   private ctx: StoryControllerContext;
+  private generation = 0;
+  private disposed = false;
+  private activeControllers = new Set<AbortController>();
 
   constructor(ctx: StoryControllerContext) {
     this.ctx = ctx;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.generation += 1;
+    for (const controller of this.activeControllers) controller.abort();
+    this.activeControllers.clear();
+  }
+
+  isDisposed(): boolean {
+    return this.disposed;
+  }
+
+  private beginOperation(): {generation: number; controller: AbortController} {
+    if (this.disposed) throw new StoryControllerInvalidatedError();
+    const controller = new AbortController();
+    this.activeControllers.add(controller);
+    return {generation: this.generation, controller};
+  }
+
+  private finishOperation(controller: AbortController): void {
+    this.activeControllers.delete(controller);
+  }
+
+  private assertCurrent(generation: number): void {
+    if (this.disposed || generation !== this.generation) {
+      throw new StoryControllerInvalidatedError();
+    }
+  }
+
+  private isCurrent(generation: number): boolean {
+    return !this.disposed && generation === this.generation;
   }
 
   private debugLog(...args: any[]): void {
@@ -129,35 +173,49 @@ export class StoryController {
    * before committing to the heavy pipeline.
    */
   async preview(traceId: string): Promise<StoryPreviewResult> {
-    const url = buildAssistantApiV1Url(
-      this.ctx.getBackendUrl(),
-      '/scene-reconstruct/preview',
-    );
-    const response = await this.ctx.fetchBackend(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept-Language': uiOutputLanguage(),
-      },
-      body: JSON.stringify({traceId, outputLanguage: uiOutputLanguage()}),
-    });
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(
-        (errData as any).error ||
-          uiText(
-            `预览失败：HTTP ${response.status}`,
-            `Preview failed: HTTP ${response.status}`,
-          ),
+    const {generation, controller} = this.beginOperation();
+    try {
+      const url = buildAssistantApiV1Url(
+        this.ctx.getBackendUrl(),
+        '/scene-reconstruct/preview',
       );
+      const response = await this.ctx.fetchBackend(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept-Language': uiOutputLanguage(),
+        },
+        body: JSON.stringify({traceId, outputLanguage: uiOutputLanguage()}),
+      });
+      this.assertCurrent(generation);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        this.assertCurrent(generation);
+        throw new Error(
+          (errData as any).error ||
+            uiText(
+              `预览失败：HTTP ${response.status}`,
+              `Preview failed: HTTP ${response.status}`,
+            ),
+        );
+      }
+      const data = await response.json();
+      this.assertCurrent(generation);
+      if (!(data as any).success) {
+        throw new Error(
+          (data as any).error || uiText('预览请求失败', 'Preview request failed'),
+        );
+      }
+      return data as StoryPreviewResult;
+    } catch (error) {
+      if (!this.isCurrent(generation)) {
+        throw new StoryControllerInvalidatedError();
+      }
+      throw error;
+    } finally {
+      this.finishOperation(controller);
     }
-    const data = await response.json();
-    if (!(data as any).success) {
-      throw new Error(
-        (data as any).error || uiText('预览请求失败', 'Preview request failed'),
-      );
-    }
-    return data as StoryPreviewResult;
   }
 
   /**
@@ -165,28 +223,43 @@ export class StoryController {
    * GET /scene-reconstruct/report/:reportId
    */
   async loadReport(reportId: string): Promise<any> {
-    const url = buildAssistantApiV1Url(
-      this.ctx.getBackendUrl(),
-      `/scene-reconstruct/report/${encodeURIComponent(reportId)}?outputLanguage=${encodeURIComponent(uiOutputLanguage())}`,
-    );
-    const response = await this.ctx.fetchBackend(url);
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(
-        (errData as any).error ||
-          uiText(
-            `加载报告失败：HTTP ${response.status}`,
-            `Load report failed: HTTP ${response.status}`,
-          ),
+    const {generation, controller} = this.beginOperation();
+    try {
+      const url = buildAssistantApiV1Url(
+        this.ctx.getBackendUrl(),
+        `/scene-reconstruct/report/${encodeURIComponent(reportId)}?outputLanguage=${encodeURIComponent(uiOutputLanguage())}`,
       );
+      const response = await this.ctx.fetchBackend(url, {
+        signal: controller.signal,
+      });
+      this.assertCurrent(generation);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        this.assertCurrent(generation);
+        throw new Error(
+          (errData as any).error ||
+            uiText(
+              `加载报告失败：HTTP ${response.status}`,
+              `Load report failed: HTTP ${response.status}`,
+            ),
+        );
+      }
+      const data = await response.json();
+      this.assertCurrent(generation);
+      if (!(data as any).success) {
+        throw new Error(
+          (data as any).error || uiText('加载报告失败', 'Failed to load report'),
+        );
+      }
+      return (data as any).report;
+    } catch (error) {
+      if (!this.isCurrent(generation)) {
+        throw new StoryControllerInvalidatedError();
+      }
+      throw error;
+    } finally {
+      this.finishOperation(controller);
     }
-    const data = await response.json();
-    if (!(data as any).success) {
-      throw new Error(
-        (data as any).error || uiText('加载报告失败', 'Failed to load report'),
-      );
-    }
-    return (data as any).report;
   }
 
   /**
@@ -194,6 +267,7 @@ export class StoryController {
    * Equivalent to the old AIPanel.handleSceneReconstructCommand().
    */
   async start(opts?: {forceRefresh?: boolean}): Promise<void> {
+    const {generation, controller} = this.beginOperation();
     const backendTraceId = this.ctx.getBackendTraceId();
     if (!backendTraceId) {
       this.ctx.addMessage({
@@ -205,13 +279,13 @@ export class StoryController {
         ),
         timestamp: Date.now(),
       });
+      this.finishOperation(controller);
       return;
     }
 
     this.ctx.setLoadingState(true);
     m.redraw();
 
-    // Add initial progress message
     const progressMessageId = this.ctx.generateId();
     this.ctx.addMessage({
       id: progressMessageId,
@@ -226,11 +300,11 @@ export class StoryController {
     this.debugLog('Scene reconstruction request with traceId:', backendTraceId);
 
     try {
-      // Start scene reconstruction
       const response = await this.ctx.fetchBackend(
         buildAssistantApiV1Url(this.ctx.getBackendUrl(), '/scene-reconstruct'),
         {
           method: 'POST',
+          signal: controller.signal,
           headers: {
             'Content-Type': 'application/json',
             'Accept-Language': uiOutputLanguage(),
@@ -246,10 +320,12 @@ export class StoryController {
           }),
         },
       );
+      this.assertCurrent(generation);
 
       if (!response.ok) {
         try {
           const errorData = await response.json();
+          this.assertCurrent(generation);
           console.error(
             '[StoryController] Scene reconstruction error response:',
             errorData,
@@ -259,11 +335,13 @@ export class StoryController {
               `HTTP ${response.status}: ${response.statusText}`,
           );
         } catch (parseErr) {
+          if (parseErr instanceof StoryControllerInvalidatedError) throw parseErr;
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
       }
 
       const data = await response.json();
+      this.assertCurrent(generation);
       if (!data.success || !data.analysisId) {
         throw new Error(
           data.error ||
@@ -276,10 +354,19 @@ export class StoryController {
         'Scene reconstruction started with analysisId:',
         analysisId,
       );
-
-      // Connect to SSE for real-time updates
-      await this.connectToSSE(analysisId, progressMessageId);
+      await this.connectToSSE(
+        analysisId,
+        progressMessageId,
+        generation,
+        controller.signal,
+      );
+      this.assertCurrent(generation);
+      this.ctx.setLoadingState(false);
+      m.redraw();
     } catch (error: any) {
+      if (!this.isCurrent(generation)) {
+        throw new StoryControllerInvalidatedError();
+      }
       console.error('[StoryController] Scene reconstruction error:', error);
       this.ctx.updateMessage(progressMessageId, {
         content: uiText(
@@ -289,12 +376,10 @@ export class StoryController {
       });
       this.ctx.setLoadingState(false);
       m.redraw();
-      // Re-throw so the Story Panel state machine can transition to 'failed'.
       throw error;
+    } finally {
+      this.finishOperation(controller);
     }
-
-    this.ctx.setLoadingState(false);
-    m.redraw();
   }
 
   /**
@@ -304,6 +389,8 @@ export class StoryController {
   private async connectToSSE(
     analysisId: string,
     progressMessageId: string,
+    generation: number,
+    operationSignal: AbortSignal,
   ): Promise<void> {
     const sceneSseUrl = buildAssistantApiV1Url(
       this.ctx.getBackendUrl(),
@@ -341,6 +428,8 @@ export class StoryController {
 
     // Use AbortController for timeout (5 minutes)
     const abortController = new AbortController();
+    const abortForOperation = () => abortController.abort();
+    operationSignal.addEventListener('abort', abortForOperation, {once: true});
     const timeoutId = setTimeout(
       () => {
         console.warn('[StoryController] Scene SSE timeout');
@@ -354,6 +443,7 @@ export class StoryController {
       const response = await this.ctx.fetchBackend(sceneSseUrl, {
         signal: abortController.signal,
       });
+      this.assertCurrent(generation);
 
       if (!response.ok) {
         throw new Error(`Scene SSE connection failed: ${response.statusText}`);
@@ -374,6 +464,7 @@ export class StoryController {
         if (abortController.signal.aborted) break;
 
         const {done, value} = await reader.read();
+        this.assertCurrent(generation);
         if (done) {
           this.debugLog('Scene SSE stream ended normally');
           reader.releaseLock();
@@ -421,6 +512,7 @@ export class StoryController {
                 scenes,
                 findings,
                 trackEvents,
+                generation,
               );
 
               // Terminal events
@@ -452,9 +544,10 @@ export class StoryController {
                   trackEvents,
                   narrative,
                   findings,
+                  generation,
                 );
-                this.autoPinTracks(scenes);
-                // Update scene navigation bar with reconstruction results
+                await this.autoPinTracks(scenes, generation);
+                this.assertCurrent(generation);
                 this.ctx.setDetectedScenes(scenes);
                 m.redraw();
                 return;
@@ -483,14 +576,19 @@ export class StoryController {
         trackEvents,
         narrative,
         findings,
+        generation,
       );
-      this.autoPinTracks(scenes);
-      // Update scene navigation bar with reconstruction results
+      await this.autoPinTracks(scenes, generation);
+      this.assertCurrent(generation);
       this.ctx.setDetectedScenes(scenes);
       m.redraw();
     } catch (e: any) {
+      if (!this.isCurrent(generation)) {
+        throw new StoryControllerInvalidatedError();
+      }
       if (
         abortController.signal.aborted &&
+        this.isCurrent(generation) &&
         !e.message?.includes('Scene reconstruction')
       ) {
         throw new Error('Scene reconstruction timeout');
@@ -498,6 +596,7 @@ export class StoryController {
       throw e;
     } finally {
       clearTimeout(timeoutId);
+      operationSignal.removeEventListener('abort', abortForOperation);
     }
   }
 
@@ -514,7 +613,9 @@ export class StoryController {
     scenes: any[],
     findings: any[],
     trackEvents: any[],
+    generation: number,
   ): void {
+    this.assertCurrent(generation);
     const data = unwrapEventData(rawData);
 
     switch (eventType) {
@@ -622,6 +723,7 @@ export class StoryController {
               overlayId,
               envelope.data.columns,
               envelope.data.rows,
+              () => this.isCurrent(generation),
             ).catch((err: Error) =>
               console.warn(
                 '[StoryController] Overlay track creation failed:',
@@ -727,7 +829,9 @@ export class StoryController {
     _trackEvents: any[],
     narrative: string,
     _findings: any[],
+    generation: number,
   ): void {
+    this.assertCurrent(generation);
     if (scenes.length === 0) {
       this.ctx.updateMessage(messageId, {
         content: uiText(
@@ -804,7 +908,11 @@ export class StoryController {
    * Auto-pin tracks based on detected scene types.
    * Equivalent to the old AIPanel.autoPinTracksForScenes().
    */
-  private async autoPinTracks(scenes: any[]): Promise<void> {
+  private async autoPinTracks(
+    scenes: any[],
+    generation: number,
+  ): Promise<void> {
+    this.assertCurrent(generation);
     const trace = this.ctx.getTrace();
     if (!trace || scenes.length === 0) return;
 
@@ -842,6 +950,11 @@ export class StoryController {
     );
 
     // Delegate to AIPanel via ctx
-    await this.ctx.pinTracksFromInstructions(allInstructions, activeProcesses);
+    await this.ctx.pinTracksFromInstructions(
+      allInstructions,
+      activeProcesses,
+      () => this.isCurrent(generation),
+    );
+    this.assertCurrent(generation);
   }
 }

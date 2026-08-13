@@ -19,6 +19,7 @@ import {VERSION} from '../virtual/version';
 import {HttpRpcEngine} from '../trace_processor/http_rpc_engine';
 import {showModal} from '../widgets/modal';
 import {AppImpl} from '../core/app_impl';
+import {isSmartPerfettoOidcMode} from '../core/smartperfetto_auth';
 
 const CURRENT_API_VERSION =
   protos.TraceProcessorApiVersion.TRACE_PROCESSOR_CURRENT_API_VERSION;
@@ -149,6 +150,11 @@ Trace processor RPC API: ${tpStatus.apiVersion}
 // consistent UX (i.e. so that the user can tell if the RPC is working without
 // having to open a trace).
 export async function checkHttpRpcConnection(): Promise<void> {
+  if (isSmartPerfettoOidcMode()) {
+    AppImpl.instance.httpRpc.httpRpcAvailable = false;
+    AppImpl.instance.httpRpc.newEngineMode = 'FORCE_BUILTIN_WASM';
+    return;
+  }
   const state = await HttpRpcEngine.checkConnection();
   AppImpl.instance.httpRpc.httpRpcAvailable = state.connected;
   if (!state.connected) {

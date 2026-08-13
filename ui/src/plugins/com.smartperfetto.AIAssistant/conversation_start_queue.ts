@@ -12,6 +12,13 @@ import {
 
 type ConversationStartInput = Omit<StartConversationInput, 'sessionId'>;
 
+export class ConversationStartInvalidatedError extends Error {
+  constructor() {
+    super('Conversation start was invalidated');
+    this.name = 'ConversationStartInvalidatedError';
+  }
+}
+
 /**
  * Serializes only the short HTTP start handshake. Model runs remain concurrent
  * with the UI, so a later turn can steer/cancel the active run after it has a
@@ -33,9 +40,10 @@ export class ConversationStartQueue {
   ): Promise<ConversationRunReceipt> {
     const generation = this.generation;
     const operation = this.tail.then(async () => {
-      const sessionId = generation === this.generation
-        ? this.readSessionId()
-        : undefined;
+      if (generation !== this.generation) {
+        throw new ConversationStartInvalidatedError();
+      }
+      const sessionId = this.readSessionId();
       let receipt: ConversationRunReceipt;
       try {
         receipt = await this.start(config, {
@@ -50,13 +58,19 @@ export class ConversationStartQueue {
         this.writeSessionId(receipt.sessionId);
       }
       return receipt;
-    });
+    })
+      .then((response) => {
+        if (generation !== this.generation) {
+          throw new ConversationStartInvalidatedError();
+        }
+        return response;
+      });
     this.tail = operation.then(() => undefined, () => undefined);
     return operation;
   }
 
-  reset(): void {
+  reset(options: {persist?: boolean} = {}): void {
     this.generation += 1;
-    this.writeSessionId(undefined);
+    if (options.persist !== false) this.writeSessionId(undefined);
   }
 }

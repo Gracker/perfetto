@@ -66,6 +66,7 @@ import {type HotkeyConfig, HotkeyContext} from '../widgets/hotkey_context';
 import {sleepMs} from '../base/utils';
 import {getSmartPerfettoBackendCspSources} from '../core/smartperfetto_backend_url';
 import {getBackendUploader} from '../core/backend_uploader';
+import {isSmartPerfettoOidcMode} from '../core/smartperfetto_auth';
 import type {Route} from '../public/app';
 
 // =============================================================================
@@ -139,6 +140,11 @@ async function maybeOpenSmartPerfettoDualTracePane(
   const isDualTrace =
     route.args.smartperfettoDualTrace === true ||
     route.args.smartperfettoDualTrace === 'true';
+  if (isSmartPerfettoOidcMode() && isDualTrace) {
+    console.warn('[SmartPerfetto] OIDC Viewer does not open backend dual-trace panes');
+    app.httpRpc.httpRpcAvailable = false;
+    return true;
+  }
   const traceId = route.args.smartperfettoTraceId;
   if (!isDualTrace || typeof traceId !== 'string' || !traceId.trim()) {
     return false;
@@ -499,29 +505,35 @@ function onCssLoaded(app: AppImpl) {
   // Don't auto-open any trace URLs until we get a response here because we may
   // accidentially clober the state of an open trace processor instance
   // otherwise.
+  const finishStartup = (): void => {
+    const route = Router.parseUrl(window.location.href);
+    if (!app.embeddedMode) {
+      installFileDropHandler();
+    }
+
+    // Don't allow postMessage or opening trace from route when the user says
+    // that they want to reuse the already loaded trace in trace processor.
+    const traceSource = app.trace?.traceInfo.source;
+    if (traceSource && traceSource.type === 'HTTP_RPC') {
+      return;
+    }
+
+    // Add support for opening traces from postMessage().
+    window.addEventListener('message', postMessageHandler, {passive: true});
+
+    // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
+    // cases.
+    routeChange(route);
+  };
+
   void maybeOpenSmartPerfettoDualTracePane(app).then((handled) => {
     if (handled) return;
+    if (isSmartPerfettoOidcMode()) {
+      finishStartup();
+      return;
+    }
     maybeChangeRpcPortFromFragment();
-    return checkHttpRpcConnection().then(() => {
-      const route = Router.parseUrl(window.location.href);
-      if (!app.embeddedMode) {
-        installFileDropHandler();
-      }
-
-      // Don't allow postMessage or opening trace from route when the user says
-      // that they want to reuse the already loaded trace in trace processor.
-      const traceSource = app.trace?.traceInfo.source;
-      if (traceSource && traceSource.type === 'HTTP_RPC') {
-        return;
-      }
-
-      // Add support for opening traces from postMessage().
-      window.addEventListener('message', postMessageHandler, {passive: true});
-
-      // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
-      // cases.
-      routeChange(route);
-    });
+    return checkHttpRpcConnection().then(finishStartup);
   });
 
   // Initialize plugins, now that we are ready to go.
@@ -549,6 +561,7 @@ function onWindowLoaded() {
 // For security reasons, this requires toggling a flag. Detect this and tell the
 // user what to do in this case.
 function maybeChangeRpcPortFromFragment() {
+  if (isSmartPerfettoOidcMode()) return;
   const route = Router.parseUrl(window.location.href);
   if (route.args.rpc_port !== undefined) {
     if (!CSP_WS_PERMISSIVE_PORT.get()) {

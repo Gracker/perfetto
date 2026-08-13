@@ -24,11 +24,29 @@
  *   4. Comparison bar and mode are restored seamlessly
  */
 
-import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
+import {
+  getSmartPerfettoAuthSessionGeneration,
+  isSmartPerfettoOidcMode,
+} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoStorageKey} from '../../core/smartperfetto_request_context';
 
 const COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v2';
 const LEGACY_COMPARISON_STATE_KEY = 'smartperfetto_comparison_state_v1';
+const oidcComparisonState = new Map<string, PersistedComparisonState>();
+let activeOidcComparisonKey: string | undefined;
+let activeOidcComparisonGeneration = getSmartPerfettoAuthSessionGeneration();
+
+function bindOidcComparisonIdentity(key: string): void {
+  const generation = getSmartPerfettoAuthSessionGeneration();
+  if (
+    (activeOidcComparisonKey && activeOidcComparisonKey !== key) ||
+    generation !== activeOidcComparisonGeneration
+  ) {
+    oidcComparisonState.clear();
+  }
+  activeOidcComparisonKey = key;
+  activeOidcComparisonGeneration = generation;
+}
 
 export function getComparisonStateStorageKey(
   baseKey = COMPARISON_STATE_KEY,
@@ -76,13 +94,24 @@ export interface ViewportSnapshot {
 /** Save comparison state to sessionStorage before trace switch. */
 export function saveComparisonState(state: PersistedComparisonState): void {
   try {
+    const normalized = {
+      ...state,
+      schemaVersion: 2 as const,
+      sourceKind: 'raw_trace_pair' as const,
+    } satisfies PersistedComparisonState;
+    if (isSmartPerfettoOidcMode()) {
+      const key = getComparisonStateStorageKey();
+      bindOidcComparisonIdentity(key);
+      oidcComparisonState.set(key, normalized);
+      sessionStorage.removeItem(key);
+      sessionStorage.removeItem(
+        getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
+      );
+      return;
+    }
     sessionStorage.setItem(
       getComparisonStateStorageKey(),
-      JSON.stringify({
-        ...state,
-        schemaVersion: 2,
-        sourceKind: 'raw_trace_pair',
-      } satisfies PersistedComparisonState),
+      JSON.stringify(normalized),
     );
     sessionStorage.removeItem(
       getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
@@ -100,7 +129,14 @@ export function saveComparisonState(state: PersistedComparisonState): void {
  */
 export function restoreComparisonState(currentTraceFingerprint?: string): PersistedComparisonState | null {
   try {
-    const raw = sessionStorage.getItem(getComparisonStateStorageKey())
+    const storageKey = getComparisonStateStorageKey();
+    if (isSmartPerfettoOidcMode()) bindOidcComparisonIdentity(storageKey);
+    const memoryState = isSmartPerfettoOidcMode()
+      ? oidcComparisonState.get(storageKey)
+      : undefined;
+    const raw = memoryState
+      ? JSON.stringify(memoryState)
+      : sessionStorage.getItem(storageKey)
       || sessionStorage.getItem(
         getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
       );
@@ -135,7 +171,9 @@ export function restoreComparisonState(currentTraceFingerprint?: string): Persis
 /** Clear comparison state (on exit comparison mode or stale). */
 export function clearComparisonState(): void {
   try {
-    sessionStorage.removeItem(getComparisonStateStorageKey());
+    const storageKey = getComparisonStateStorageKey();
+    oidcComparisonState.delete(storageKey);
+    sessionStorage.removeItem(storageKey);
     sessionStorage.removeItem(
       getComparisonStateStorageKey(LEGACY_COMPARISON_STATE_KEY),
     );

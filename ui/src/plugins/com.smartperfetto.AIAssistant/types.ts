@@ -55,6 +55,8 @@ export interface Message {
   timestamp: number;
   /** Raw content is memory-only; browser persistence stores a safe marker. */
   privateContent?: boolean;
+  /** Page-scoped status that must never survive browser storage. */
+  transient?: boolean;
   flowTag?:
     | 'streaming_flow'
     | 'answer_stream'

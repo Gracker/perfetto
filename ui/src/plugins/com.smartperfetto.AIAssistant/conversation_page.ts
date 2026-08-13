@@ -4,7 +4,7 @@
 
 import m from 'mithril';
 import type {App} from '../../public/app';
-import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+
 import {
   analysisContextRequiresFullMode,
   loadAnalysisContext,
@@ -20,15 +20,23 @@ import {
 import {
   appendConversationMessage,
   clearConversationStore,
+  clearConversationRuntimeIdentities,
   loadConversationStore,
   saveConversationStore,
   type StoredConversation,
   type StoredConversationMessage,
 } from './conversation_store';
 import {sessionManager} from './session_manager';
-import {ConversationStartQueue} from './conversation_start_queue';
+import {
+  ConversationStartInvalidatedError,
+  ConversationStartQueue,
+} from './conversation_start_queue';
 import {conversationTraceContextResetNotice} from './conversation_context_notice';
 import {uiText} from './ui_language';
+import {
+  PageAuthLifecycle,
+  type PageAuthTransition,
+} from './page_auth_lifecycle';
 
 function messageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -46,6 +54,9 @@ function renderMessageContent(message: StoredConversationMessage): m.Vnode {
 }
 
 export class ConversationPage implements m.ClassComponent<{app: App}> {
+  private readonly authLifecycle = new PageAuthLifecycle(
+    (transition) => this.handleAuthTransition(transition),
+  );
   private readonly settings = sessionManager.loadSettings();
   private store: StoredConversation = loadConversationStore(this.settings.backendUrl);
   private readonly startQueue = new ConversationStartQueue(
@@ -58,8 +69,26 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   private input = '';
   private isComposing = false;
   private activeReceipt?: ConversationRunReceipt;
+  private activeController?: AbortController;
   private requestOrdinal = 0;
   private error = '';
+
+  oncreate(): void {
+    this.authLifecycle.mount();
+  }
+
+  onremove(): void {
+    ++this.requestOrdinal;
+    this.activeController?.abort();
+    this.activeController = undefined;
+    this.activeReceipt = undefined;
+    const authState = this.authLifecycle.getState();
+    if (authState.kind === 'ready' && authState.authority.oidc) {
+      this.startQueue.reset({persist: false});
+      clearConversationRuntimeIdentities();
+    }
+    this.authLifecycle.dispose();
+  }
 
   view({attrs}: m.Vnode<{app: App}>): m.Children {
     const pendingHandoff = [...this.store.messages].reverse().find(
@@ -163,15 +192,19 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   }
 
   private async startNewConversation(): Promise<void> {
+    const authority = this.authLifecycle.capture();
+    if (!authority) return;
     const active = this.activeReceipt;
     ++this.requestOrdinal;
+    this.activeController?.abort();
+    this.activeController = undefined;
     this.activeReceipt = undefined;
     this.startQueue.reset();
     this.store = clearConversationStore(this.settings.backendUrl);
     this.input = '';
     this.error = '';
     m.redraw();
-    if (!active) return;
+    if (!active || !this.authLifecycle.isCurrent(authority)) return;
     await cancelConversationRun({
       backendUrl: this.settings.backendUrl,
       apiKey: this.settings.backendApiKey,
@@ -181,6 +214,17 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   private async send(): Promise<void> {
     const query = this.input.trim();
     if (!query) return;
+    const authority = this.authLifecycle.capture();
+    if (!authority) {
+      this.error = uiText(
+        '登录会话尚未就绪，请重新登录后重试。',
+        'Your sign-in session is not ready. Sign in again and retry.',
+      );
+      return;
+    }
+    const controller = this.authLifecycle.createAbortController(authority);
+    this.activeController?.abort();
+    this.activeController = controller;
     if (this.store.traceId) {
       this.startQueue.reset();
       this.store = {...this.store, sessionId: undefined, traceId: undefined};
@@ -195,7 +239,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     const ordinal = ++this.requestOrdinal;
     const analysisContext = loadAnalysisContext(
       this.settings.backendUrl,
-      getSmartPerfettoRequestContext(),
+      authority.context,
     );
     this.input = '';
     this.error = '';
@@ -214,8 +258,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       }, {
         query,
         analysisContext,
+        signal: controller.signal,
       });
-      if (ordinal !== this.requestOrdinal) {
+      if (
+        ordinal !== this.requestOrdinal ||
+        !this.authLifecycle.isCurrent(authority)
+      ) {
         await cancelConversationRun({
           backendUrl: this.settings.backendUrl,
           apiKey: this.settings.backendApiKey,
@@ -227,8 +275,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       const outcome = await streamConversationRun({
         backendUrl: this.settings.backendUrl,
         apiKey: this.settings.backendApiKey,
-      }, receipt);
-      if (ordinal !== this.requestOrdinal || outcome.kind === 'cancelled') return;
+      }, receipt, {signal: controller.signal});
+      if (
+        ordinal !== this.requestOrdinal ||
+        !this.authLifecycle.isCurrent(authority) ||
+        outcome.kind === 'cancelled'
+      ) return;
       this.store = appendConversationMessage(this.settings.backendUrl, {
         id: messageId('assistant'),
         role: 'assistant',
@@ -239,12 +291,42 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
       }, receipt.sessionId);
     } catch (error) {
+      if (
+        controller.signal.aborted ||
+        error instanceof ConversationStartInvalidatedError ||
+        !this.authLifecycle.isCurrent(authority)
+      ) return;
       if (ordinal === this.requestOrdinal) {
         this.error = error instanceof Error ? error.message : String(error);
       }
     } finally {
+      this.authLifecycle.releaseAbortController(controller);
+      if (this.activeController === controller) {
+        this.activeController = undefined;
+      }
       if (ordinal === this.requestOrdinal) this.activeReceipt = undefined;
       m.redraw();
     }
+  }
+
+  private handleAuthTransition(transition: PageAuthTransition): void {
+    if (!transition.authorityChanged) return;
+    ++this.requestOrdinal;
+    this.activeController?.abort();
+    this.activeController = undefined;
+    this.activeReceipt = undefined;
+    this.startQueue.reset({persist: false});
+    clearConversationRuntimeIdentities();
+    if (transition.current.kind === 'ready') {
+      this.store = loadConversationStore(this.settings.backendUrl);
+      this.error = '';
+    } else {
+      this.store = {
+        ...this.store,
+        sessionId: undefined,
+        traceId: undefined,
+      };
+    }
+    m.redraw();
   }
 }

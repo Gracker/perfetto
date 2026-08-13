@@ -19,6 +19,8 @@ import m from 'mithril';
 import type {Trace} from '../../public/trace';
 import {Icon} from '../../widgets/icon';
 import {AIPanel} from './ai_panel';
+import {PageAuthGate} from './page_auth_lifecycle';
+import type {AnalysisBackendConnection} from './analysis_backend_connection';
 import {uiText} from './ui_language';
 import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {
@@ -131,6 +133,7 @@ function startResize(e: MouseEvent): void {
 export interface SidebarPanelAttrs {
   trace: Trace;
   tracePairWorkspaceController: TracePairWorkspaceController;
+  analysisBackendConnection?: AnalysisBackendConnection;
 }
 
 export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
@@ -142,6 +145,7 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
       this.renderExpanded(
         attrs.trace,
         attrs.tracePairWorkspaceController,
+        attrs.analysisBackendConnection,
         s.sidebar.width,
         s.sidebar.height,
         s.sidebar.layout,
@@ -195,6 +199,7 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
   private renderExpanded(
     trace: Trace,
     tracePairWorkspaceController: TracePairWorkspaceController,
+    analysisBackendConnection: AnalysisBackendConnection | undefined,
     width: number,
     height: number,
     layout: 'right' | 'bottom',
@@ -222,11 +227,14 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
         // Content: AIPanel
         m(
           '.ai-sidebar-content',
-          m(AIPanel, {
-            key: 'analysis-request-owner',
-            engine: trace.engine,
-            trace,
-            tracePairWorkspaceController,
+          m(PageAuthGate, {
+            content: m(AIPanel, {
+              key: 'analysis-request-owner',
+              engine: trace.engine,
+              trace,
+              tracePairWorkspaceController,
+              analysisBackendConnection,
+            }),
           }),
         ),
       ],

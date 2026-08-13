@@ -3,6 +3,7 @@
 // Shared frontend request context for SmartPerfetto backend calls.
 
 import {
+  getSmartPerfettoAuthSession,
   getSmartPerfettoCsrfToken,
   isSmartPerfettoOidcMode,
   requireSmartPerfettoAuthSession,
@@ -145,6 +146,19 @@ export function getSmartPerfettoRequestContext(): SmartPerfettoRequestContext {
     workspaceId,
     windowId: getSmartPerfettoWindowId(),
   };
+}
+
+export function tryGetSmartPerfettoRequestContext():
+  | SmartPerfettoRequestContext
+  | undefined {
+  try {
+    if (isSmartPerfettoOidcMode() && !getSmartPerfettoAuthSession()) {
+      return undefined;
+    }
+    return getSmartPerfettoRequestContext();
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveContext(

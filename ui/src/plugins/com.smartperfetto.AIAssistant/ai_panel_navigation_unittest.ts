@@ -33,6 +33,11 @@ import type {AIPanelState} from './types';
 import {setUiLanguagePreference, uiText} from './ui_language';
 import {saveAnalysisContext} from './analysis_context';
 import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+import {
+  backendUploadSourceKey,
+  getBackendUploadIdentityKey,
+} from '../../core/backend_uploader';
+import {setBackendUploadState} from '../../core/backend_upload_state';
 
 beforeEach(() => {
   setUiLanguagePreference('zh-CN');
@@ -111,6 +116,19 @@ function findVNodeByTitle(node: any, title: string): any {
   }
   if (node.attrs?.title === title) return node;
   return findVNodeByTitle(node.children, title);
+}
+
+function findVNodeById(node: any, id: string): any {
+  if (node === null || node === undefined || node === false) return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findVNodeById(child, id);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (node.attrs?.id === id) return node;
+  return findVNodeById(node.children, id);
 }
 
 describe('AIPanel conversation selection context', () => {
@@ -419,6 +437,153 @@ describe('AIPanel Provider identity reconciliation', () => {
     expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
     expect(panel.state.agentSessionId).toBeNull();
   });
+});
+
+describe('AIPanel page-scoped backend connection', () => {
+  afterEach(() => {
+    window.__SMARTPERFETTO_CONFIG__ = undefined;
+    window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+    setBackendUploadState({state: 'idle'});
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('does not attach an OIDC upload candidate before the page connection is ready', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-a', email: 'user-a@example.test'},
+      tenant: {id: 'tenant-a', name: 'Tenant A'},
+      workspace: {id: 'workspace-a', name: 'Workspace A', kind: 'personal'},
+      csrfToken: 'csrf-a',
+    };
+    const panel = createMutableTestPanel() as any;
+    const source = {
+      type: 'ARRAY_BUFFER',
+      buffer: new Uint8Array([1, 2, 3]).buffer,
+      fileName: 'current.trace',
+    } as const;
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+        source,
+      },
+    };
+    panel.engine = {mode: 'WASM'};
+    panel.analysisBackendConnection = {
+      getSnapshot: () => ({state: 'preparing'}),
+      connectOidc: vi.fn(() => new Promise<void>(() => {})),
+    };
+    const sourceKey = backendUploadSourceKey(source as any);
+    const backendIdentityKey = getBackendUploadIdentityKey(
+      panel.state.settings.backendUrl,
+      sourceKey,
+    );
+    setBackendUploadState({
+      backendIdentityKey,
+      uploadToken: 'upload-current',
+      sourceKey,
+      state: 'ready',
+      traceId: 'backend-candidate',
+      leaseId: 'lease-candidate',
+      rpcTarget: {
+        mode: 'backend-lease-proxy',
+        targetOwner: 'smartperfetto-backend',
+        leaseId: 'lease-candidate',
+        statusUrl: 'http://backend/status',
+        websocketUrl: 'ws://backend/websocket',
+        heartbeatUrl: 'http://backend/heartbeat',
+        credentials: 'include',
+      },
+    });
+
+    panel.handleTraceChange();
+
+    expect(panel.state.backendTraceId).toBeNull();
+  });
+
+  it('describes OIDC ready state as WASM Viewer plus page-scoped AI backend', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    const panel = createMutableTestPanel() as any;
+    panel.analysisBackendConnection = {
+      getSnapshot: () => ({
+        state: 'ready',
+        traceId: 'backend-ready',
+        target: {
+          mode: 'backend-lease-proxy',
+          targetOwner: 'smartperfetto-backend',
+          leaseMode: 'shared',
+          statusUrl: 'http://backend/status',
+          websocketUrl: 'ws://backend/websocket',
+        },
+      }),
+    };
+
+    panel.addRpcModeWelcomeMessage();
+
+    const content = panel.state.messages.at(-1)?.content ?? '';
+    expect(content).toContain('Viewer 仍使用 WASM');
+    expect(content).toContain('当前页面独立的 AI 后端');
+    expect(content).not.toContain('前后端共享同一个 trace_processor');
+  });
+
+  it('keeps full analysis disabled while an OIDC upload candidate is preparing', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-a', email: 'user-a@example.test'},
+      tenant: {id: 'tenant-a', name: 'Tenant A'},
+      workspace: {id: 'workspace-a', name: 'Workspace A', kind: 'personal'},
+      csrfToken: 'csrf-a',
+    };
+    const panel = createMutableTestPanel() as any;
+    const source = {
+      type: 'ARRAY_BUFFER',
+      buffer: new Uint8Array([1, 2, 3]).buffer,
+      fileName: 'current.trace',
+    } as const;
+    panel.trace = {
+      traceInfo: {
+        traceTitle: 'current.trace',
+        start: 0n,
+        end: 10n,
+        source,
+      },
+      selection: {selection: {kind: 'empty'}},
+    };
+    panel.engine = {mode: 'WASM'};
+    panel.state.analysisMode = 'full';
+    panel.serverStatus = {connected: true};
+    panel.analysisBackendConnection = {
+      getSnapshot: () => ({state: 'preparing'}),
+    };
+    const sourceKey = backendUploadSourceKey(source as any);
+    setBackendUploadState({
+      backendIdentityKey: getBackendUploadIdentityKey(
+        panel.state.settings.backendUrl,
+        sourceKey,
+      ),
+      uploadToken: 'upload-preparing',
+      sourceKey,
+      state: 'uploading',
+    });
+
+    const tree = panel.view({attrs: {}} as any);
+    const textarea = findVNodeById(tree, 'ai-input');
+
+    expect(panel.state.backendTraceId).toBeNull();
+    expect(textarea === undefined || textarea.attrs?.disabled === true).toBe(true);
+  });
+
+
 });
 
 describe('AIPanel header tool panels', () => {
@@ -1821,5 +1986,49 @@ describe('AIPanel trace-pair session restore', () => {
       referenceTrace: {id: 'history-a'},
     });
     expect(panel.saveCurrentSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('AIPanel authority-aware disposal', () => {
+  function installOidcSession(userId: string, workspaceId: string): void {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: userId, email: `${userId}@example.test`},
+      tenant: {id: 'tenant-a', name: 'Tenant A'},
+      workspace: {id: workspaceId, name: workspaceId, kind: 'personal'},
+    };
+  }
+
+  afterEach(() => {
+    window.__SMARTPERFETTO_CONFIG__ = undefined;
+    window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it('flushes the pending session when the mounted authority is unchanged', () => {
+    installOidcSession('user-a', 'workspace-a');
+    const panel = new AIPanel() as any;
+    panel.mountedOidcAuthorityKey = panel.currentOidcAuthorityKey();
+    const flush = vi.spyOn(panel, 'flushSessionSave').mockImplementation(() => {});
+
+    panel.onremove();
+
+    expect(flush).toHaveBeenCalledOnce();
+  });
+
+  it('does not flush old panel state after switching user and workspace', () => {
+    installOidcSession('user-a', 'workspace-a');
+    const panel = new AIPanel() as any;
+    panel.mountedOidcAuthorityKey = panel.currentOidcAuthorityKey();
+    const flush = vi.spyOn(panel, 'flushSessionSave').mockImplementation(() => {});
+
+    installOidcSession('user-b', 'workspace-b');
+    panel.onremove();
+
+    expect(flush).not.toHaveBeenCalled();
   });
 });

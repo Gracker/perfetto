@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {afterEach} from 'vitest';
+
 import {TraceSource} from './trace_source';
 import {
   backendUploadSourceKey,
@@ -44,6 +46,36 @@ const userDirectTarget: HttpRpcTarget = {
 };
 
 describe('shouldProbeHttpRpcForTraceSource', () => {
+  afterEach(() => {
+    window.__SMARTPERFETTO_CONFIG__ = undefined;
+  });
+
+  it('does not probe a user-owned direct port for normal OIDC trace loads', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    const traceSource = {type: 'FILE'} as TraceSource;
+
+    expect(
+      shouldProbeHttpRpcForTraceSource(
+        'USE_HTTP_RPC_IF_AVAILABLE',
+        traceSource,
+        userDirectTarget,
+      ),
+    ).toBe(false);
+  });
+
+  it('does not probe an explicit HTTP_RPC source in OIDC mode', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    const traceSource = {type: 'HTTP_RPC'} as TraceSource;
+
+    expect(
+      shouldProbeHttpRpcForTraceSource(
+        'USE_HTTP_RPC_IF_AVAILABLE',
+        traceSource,
+        userDirectTarget,
+      ),
+    ).toBe(false);
+  });
+
   it('does not use backend lease targets for normal file trace loads', () => {
     const traceSource = {type: 'FILE'} as TraceSource;
 

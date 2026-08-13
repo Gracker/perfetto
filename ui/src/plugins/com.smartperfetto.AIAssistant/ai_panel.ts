@@ -46,6 +46,7 @@ import {
   getDefaultSmartPerfettoBackendUrl,
   getSmartPerfettoExternalIssueUrl,
 } from '../../core/smartperfetto_backend_url';
+import {bindBackendUploadTargetToViewer} from '../../core/smartperfetto_viewer_transport';
 import {
   isSmartPerfettoOidcMode,
   smartPerfettoFetch,
@@ -126,12 +127,14 @@ import {
 } from './conversation_client';
 import {
   appendConversationMessage,
+  clearConversationRuntimeIdentities,
   clearConversationStore,
   loadConversationStore,
   saveConversationStore,
 } from './conversation_store';
 import {ConversationStartQueue} from './conversation_start_queue';
 import {conversationTraceContextResetNotice} from './conversation_context_notice';
+import {readPageAuthGateState} from './page_auth_lifecycle';
 import {
   createStreamingFlowState,
   createStreamingAnswerState,
@@ -181,7 +184,12 @@ import {clearComparisonState} from './comparison_state_manager';
 import {handleSSEEvent as handleSSEEventExternal} from './sse_event_handlers';
 import type {SSEHandlerContext} from './sse_event_handlers';
 import {orderMessagesForDisplay} from './message_order';
-import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
+import {
+  STEP_TO_OVERLAY,
+  cleanupOverlayTracks,
+  clearPersistedOverlays,
+  createOverlayTrack,
+} from './track_overlay';
 import {traceLocationLabel} from './trace_location_label';
 import {
   subscribeClearChat,
@@ -197,6 +205,11 @@ import {
 } from './ui_action_proposals';
 import {buildTracePairContext as buildTracePairContextPayload} from './trace_pair_context';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import type {
+  AnalysisBackendConnection,
+  AnalysisBackendConnectionSnapshot,
+} from './analysis_backend_connection';
+import {resolveAnalysisBackendPresentation} from './analysis_backend_presentation';
 import {
   parseWorkspaceTraceCatalogResponse,
   type WorkspaceTraceCatalogItem,
@@ -222,7 +235,10 @@ import {
 } from './application_update';
 // Scene reconstruction logic lives in story_controller.ts; shared constants in scene_constants.ts.
 import {getSceneDisplayName} from './scene_constants';
-import {StoryController} from './story_controller';
+import {
+  StoryController,
+  StoryControllerInvalidatedError,
+} from './story_controller';
 import type {StoryControllerContext} from './story_controller';
 // AI Everywhere: cross-component shared state + timeline notes
 import {
@@ -464,6 +480,7 @@ export interface AIPanelAttrs {
   engine: Engine;
   trace: Trace;
   tracePairWorkspaceController: TracePairWorkspaceController;
+  analysisBackendConnection?: AnalysisBackendConnection;
 }
 
 // Re-export types for backward compatibility with external consumers
@@ -647,6 +664,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private unsubscribeClearChat?: () => void;
   private unsubscribeOpenSettings?: () => void;
   private unsubscribeBackendUpload?: () => void;
+  private unsubscribeAnalysisBackendConnection?: () => void;
+  private analysisBackendConnection?: AnalysisBackendConnection;
+  private analysisBackendSnapshot?: AnalysisBackendConnectionSnapshot;
   private lastBackendUploadState: BackendUploadSnapshot =
     getBackendUploadState();
   private messagesContainer: HTMLElement | null = null;
@@ -681,9 +701,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private conversationHistoryHydrated = false;
   private conversationRequestOrdinal = 0;
   private activeConversationRun?: ConversationRunReceipt;
+  private conversationAbortController?: AbortController;
   private pendingFullAnalysisHandoff?: ConversationFullHandoff;
   private conversationStartQueue?: ConversationStartQueue;
   private conversationStartQueueBackendUrl = '';
+  private mountedOidcAuthorityKey = '';
   private analysisModeMenuKeydownHandler:
     | ((event: KeyboardEvent) => void)
     | null = null;
@@ -1497,8 +1519,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   // oninit is called before view(), so backend status is initialized before first render
   oninit(vnode: m.Vnode<AIPanelAttrs>) {
+    this.mountedOidcAuthorityKey = this.currentOidcAuthorityKey();
     this.engine = vnode.attrs.engine;
     this.trace = vnode.attrs.trace;
+    this.analysisBackendConnection = vnode.attrs.analysisBackendConnection;
+    this.analysisBackendSnapshot =
+      this.analysisBackendConnection?.getSnapshot();
     this.tracePairWorkspaceController =
       vnode.attrs.tracePairWorkspaceController ||
       this.tracePairWorkspaceController;
@@ -1531,6 +1557,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (
       this.trace &&
       this.engine?.mode !== 'HTTP_RPC' &&
+      !isSmartPerfettoOidcMode() &&
       uploadState.state === 'idle' &&
       backendUploadSnapshotMatchesIdentity(
         uploadState,
@@ -1561,6 +1588,28 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return traceSource
       ? backendUploadSourceKey(traceSource)
       : 'no-trace-source';
+  }
+
+  private getAnalysisBackendPresentation() {
+    const sourceKey = this.getBackendUploadSourceKey();
+    const backendIdentityKey = getBackendUploadIdentityKey(
+      this.state.settings.backendUrl,
+      sourceKey,
+    );
+    const shared = getBackendUploadState();
+    const upload = backendUploadSnapshotMatchesIdentity(
+      shared,
+      backendIdentityKey,
+      sourceKey,
+    )
+      ? shared
+      : {state: 'idle' as const};
+    return resolveAnalysisBackendPresentation(
+      isSmartPerfettoOidcMode(),
+      upload,
+      this.analysisBackendConnection?.getSnapshot() ??
+        this.analysisBackendSnapshot,
+    );
   }
 
   private getCurrentTraceName(): string {
@@ -1865,25 +1914,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    */
   private handleTraceChange(): void {
     const newFingerprint = this.getTraceFingerprint();
-    const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
-    const sourceKey = this.getBackendUploadSourceKey();
-    const expectedBackendIdentityKey = getBackendUploadIdentityKey(
-      this.state.settings.backendUrl,
-      sourceKey,
-    );
-    const sharedBackendUploadState = getBackendUploadState();
-    const backendUploadState = backendUploadSnapshotMatchesIdentity(
-      sharedBackendUploadState,
-      expectedBackendIdentityKey,
-      sourceKey,
-    )
-      ? sharedBackendUploadState
-      : {state: 'idle' as const};
+    const engineInRpcMode =
+      !isSmartPerfettoOidcMode() && this.engine?.mode === 'HTTP_RPC';
+    const backendPresentation = this.getAnalysisBackendPresentation();
 
-    // Auto-RPC: Try to get backendTraceId from shared backend upload state.
-    const appBackendTraceId = backendUploadState.traceId;
-    const appBackendUploadState = backendUploadState.state;
-    const appBackendUploadError = backendUploadState.error;
+    const appBackendTraceId = backendPresentation.traceId;
+    const appBackendUploadState = backendPresentation.state;
+    const appBackendUploadError = backendPresentation.error;
 
     if (DEBUG_AI_PANEL) {
       console.log('[AIPanel] Trace fingerprint check:', {
@@ -1898,8 +1935,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       });
     }
 
-    // If upload already completed, reuse the backend trace id.
-    if (appBackendTraceId && !this.state.backendTraceId) {
+    // A scoped OIDC connection is authoritative. A candidate from upload state
+    // must never remain attached after the lease stops being ready.
+    if (isSmartPerfettoOidcMode()) {
+      this.state.backendTraceId = appBackendTraceId ?? null;
+    } else if (appBackendTraceId && !this.state.backendTraceId) {
       if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Using backendTraceId from auto-upload:',
@@ -1907,7 +1947,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         );
       }
       this.state.backendTraceId = appBackendTraceId;
-      // Don't call detectScenesQuick() here — defer to after welcome message below
     }
 
     // 如果指纹没变且已经有 session，不需要重新加载
@@ -1980,10 +2019,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       if (this.state.backendTraceId) {
         // Scene navigation bar now populates only after explicit /scene command.
         // detectScenesQuick() quality is too low for navigation (0ms entries, inaccurate types).
-      } else if (appBackendUploadState === 'uploading') {
-        // Background upload still in progress — listen for completion
-        // Without this, restored sessions get stuck in disconnected state
-        this.listenForBackendUpload();
+      } else if (appBackendUploadState === 'preparing') {
+        // Background upload/lease connection is still in progress.
+        if (!isSmartPerfettoOidcMode()) this.listenForBackendUpload();
       } else if (engineInRpcMode) {
         // In RPC mode but no backendTraceId — try to register
         this.autoRegisterWithBackend();
@@ -2003,10 +2041,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.state.backendTraceId) {
       // Backend already available — show welcome (scene detection deferred to /scene command)
       this.addRpcModeWelcomeMessage();
-    } else if (appBackendUploadState === 'uploading') {
-      // Background upload in progress — show connecting state, listen for completion
+    } else if (appBackendUploadState === 'preparing') {
+      // Background upload/lease preparation is still in progress.
       this.addBackendConnectingMessage();
-      this.listenForBackendUpload();
+      if (!isSmartPerfettoOidcMode()) this.listenForBackendUpload();
     } else if (appBackendUploadState === 'failed') {
       // Background upload failed — show unavailable state immediately
       this.addBackendUnavailableMessage(appBackendUploadError);
@@ -2218,27 +2256,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         console.log('[AIPanel] Upload successful:', uploadResult);
       }
 
-      // The local UI engine remains on its original source. The backend RPC
-      // target is a separate AI-analysis asset and can be rebound safely.
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: uiText(
-          '✅ 后端 Trace 已就绪，可以开始 AI 分析。',
-          '✅ The backend trace is ready for AI analysis.',
-        ),
-        timestamp: Date.now(),
-      });
+      const oidcMode = isSmartPerfettoOidcMode();
+      bindBackendUploadTargetToViewer(uploadResult);
 
-      // 设置 RPC 端口并重新加载 Trace
-      if (uploadResult.rpcTarget) {
-        HttpRpcEngine.setRpcTarget(uploadResult.rpcTarget);
-      } else if (uploadResult.port) {
-        HttpRpcEngine.useDirectPort(String(uploadResult.port));
+      if (!oidcMode && uploadResult.traceId) {
+        this.addMessage({
+          id: this.generateId(),
+          role: 'system',
+          content: uiText(
+            '✅ 后端 Trace 已就绪，可以开始 AI 分析。',
+            '✅ The backend trace is ready for AI analysis.',
+          ),
+          timestamp: Date.now(),
+        });
       }
 
-      // 存储 traceId 用于后续注册
-      if (uploadResult.traceId) {
+      // OIDC keeps the upload as a candidate until its page-scoped lease
+      // connection reports ready. Legacy modes retain pending binding behavior.
+      if (!oidcMode && uploadResult.traceId) {
         this.state.backendTraceId = uploadResult.traceId;
         sessionManager.storePendingBackendTrace(
           uploadResult.traceId,
@@ -2306,20 +2341,35 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * RPC 模式欢迎消息（无需上传）
    */
   private addRpcModeWelcomeMessage(): void {
+    const content = isSmartPerfettoOidcMode()
+      ? uiText(
+          '✅ **AI 助手已就绪**\n\nViewer 仍使用 WASM；AI 分析使用当前页面独立的 AI 后端连接。\n\n可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？',
+          '✅ **AI Assistant is ready**\n\nThe Viewer remains on WASM while AI analysis uses this page’s independent backend connection.\n\nYou can start analyzing it now.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?',
+        )
+      : uiText(
+          `✅ **AI 助手已就绪**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载。\n前后端共享同一个 trace_processor。\n\n可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
+          `✅ **AI Assistant is ready**\n\nThe trace is loaded through ${this.rpcModeDescription()}.\nThe frontend and backend share the same trace_processor.\n\nYou can start analyzing it now.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
+        );
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
-      content: uiText(
-        `✅ **AI 助手已就绪**\n\nTrace 已通过 ${this.rpcModeDescription()} 加载。\n前后端共享同一个 trace_processor。\n\n可以开始分析。\n\n试试问我：\n- 这个 Trace 有什么性能问题？\n- 帮我分析启动耗时\n- 有没有卡顿？`,
-        `✅ **AI Assistant is ready**\n\nThe trace is loaded through ${this.rpcModeDescription()}.\nThe frontend and backend share the same trace_processor.\n\nYou can start analyzing it now.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
-      ),
+      content,
       timestamp: Date.now(),
+      transient: isSmartPerfettoOidcMode(),
     });
     m.redraw();
   }
 
   private rpcModeDescription(): string {
-    const target = HttpRpcEngine.getCurrentTarget();
+    const target = isSmartPerfettoOidcMode()
+      ? this.analysisBackendConnection?.getSnapshot().target
+      : HttpRpcEngine.getCurrentTarget();
+    if (!target) {
+      return uiText(
+        '当前页面的 AI 后端连接',
+        'the current page AI backend connection',
+      );
+    }
     if (target.mode === 'backend-lease-proxy') {
       const modeText =
         target.leaseMode === 'isolated'
@@ -2334,10 +2384,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               `, queue ${target.leaseQueueLength}`,
             )
           : '';
-      return uiText(
-        `后端 ${modeText} Lease 代理 (${target.leaseId ?? 'unknown'}${queueText})`,
-        `Backend ${modeText} lease proxy (${target.leaseId ?? 'unknown'}${queueText})`,
-      );
+      return isSmartPerfettoOidcMode()
+        ? uiText(
+            `当前页面的后端 ${modeText} Lease 代理${queueText}`,
+            `the current page backend ${modeText} lease proxy${queueText}`,
+          )
+        : uiText(
+            `后端 ${modeText} Lease 代理 (${target.leaseId ?? 'unknown'}${queueText})`,
+            `Backend ${modeText} lease proxy (${target.leaseId ?? 'unknown'}${queueText})`,
+          );
     }
     return uiText(
       `HTTP RPC（端口 ${target.port ?? HttpRpcEngine.rpcPort}）`,
@@ -2360,6 +2415,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         `⚠️ **AI backend unavailable**\n\nCould not connect to the AI analysis backend (${this.state.settings.backendUrl}).\n\n**Possible causes:**\n- The backend service is not running\n- A network connection failed${errorSection}\n\nConfirm that the backend is running, then use Retry connection. The trace remains available in the WASM engine, but AI analysis is temporarily unavailable.`,
       ),
       timestamp: Date.now(),
+      transient: isSmartPerfettoOidcMode(),
     });
     m.redraw();
   }
@@ -2404,6 +2460,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         '⏳ **Connecting to the AI backend…**\n\nThe trace is loaded in the WASM engine while the AI backend prepares in the background.\nAI analysis will be enabled automatically after it connects.',
       ),
       timestamp: Date.now(),
+      transient: isSmartPerfettoOidcMode(),
     });
     m.redraw();
   }
@@ -2456,6 +2513,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             `✅ **AI backend connected**\n\nThe trace is loaded through ${this.rpcModeDescription()} and the AI backend is ready.\n\nTry asking:\n- What performance issues are present in this trace?\n- Analyze startup latency\n- Are there any janky frames?`,
           ),
           timestamp: Date.now(),
+          transient: isSmartPerfettoOidcMode(),
         });
         this.saveCurrentSession();
         m.redraw();
@@ -2558,6 +2616,34 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   oncreate(_vnode: m.VnodeDOM<AIPanelAttrs>) {
+    if (this.analysisBackendConnection) {
+      this.unsubscribeAnalysisBackendConnection =
+        this.analysisBackendConnection.subscribe((snapshot) => {
+          const wasReady = this.analysisBackendSnapshot?.state === 'ready';
+          this.analysisBackendSnapshot = snapshot;
+          const presentation = this.getAnalysisBackendPresentation();
+          this.state.backendTraceId =
+            presentation.state === 'ready' ? presentation.traceId ?? null : null;
+          if (presentation.state !== 'ready') {
+            this.analysisRequestCoordinator.invalidate();
+            this.cancelSSEConnection();
+            this.state.retryError = presentation.error ?? null;
+          } else if (!wasReady && snapshot.traceId) {
+            this.addMessage({
+              id: this.generateId(),
+              role: 'assistant',
+              content: uiText(
+                '✅ **AI 后端已连接**\n\n当前页面的 AI 分析后端已就绪，可以开始分析。',
+                '✅ **AI backend connected**\n\nThe page-scoped AI analysis backend is ready.',
+              ),
+              timestamp: Date.now(),
+              transient: true,
+            });
+            this.saveCurrentSession();
+          }
+          m.redraw();
+        });
+    }
     this.unsubscribeTracePairWorkspace =
       this.tracePairWorkspaceController.subscribe(() => {
         this.syncTracePairStateFromController();
@@ -2631,6 +2717,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
+    const currentOidcAuthorityKey = this.currentOidcAuthorityKey();
+    const authorityInvalidated = isSmartPerfettoOidcMode() && (
+      !currentOidcAuthorityKey ||
+      currentOidcAuthorityKey !== this.mountedOidcAuthorityKey
+    );
+    this.analysisRequestCoordinator.invalidate();
+    ++this.conversationRequestOrdinal;
+    this.conversationStartQueue?.reset({persist: false});
+    this.conversationAbortController?.abort();
+    this.conversationAbortController = undefined;
+    this.activeConversationRun = undefined;
+    this.pendingFullAnalysisHandoff = undefined;
+    this.storyController?.dispose();
+    this.storyController = null;
+    if (authorityInvalidated) clearConversationRuntimeIdentities();
+    this.unsubscribeAnalysisBackendConnection?.();
+    this.unsubscribeAnalysisBackendConnection = undefined;
     this.unsubscribeTracePairWorkspace?.();
     this.unsubscribeTracePairWorkspace = undefined;
     // Unregister transient saver first so any in-flight switchFloatingMode()
@@ -2640,6 +2743,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.transientSaverRef = null;
     }
     this.cancelSSEConnection();
+    if (authorityInvalidated) {
+      resetAISharedState();
+      resetTransientState();
+      if (this.trace) {
+        clearAIFindingNotes(this.trace);
+        cleanupOverlayTracks(this.trace);
+      }
+      clearPersistedOverlays();
+    }
     // Clear any pending conversation flush timer — otherwise its delayed
     // callback fires on the torn-down instance (Codex MEDIUM 2).
     if (this.state.streamingFlow.conversationFlushTimer !== undefined) {
@@ -2682,8 +2794,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.unsubscribeBackendUpload();
       this.unsubscribeBackendUpload = undefined;
     }
-    // Flush pending session save and remove beforeunload listener
-    this.flushSessionSave();
+    // Never project old identity state into the newly active workspace.
+    if (!authorityInvalidated) this.flushSessionSave();
     if (this.beforeUnloadHandler) {
       window.removeEventListener('beforeunload', this.beforeUnloadHandler);
       this.beforeUnloadHandler = null;
@@ -2703,6 +2815,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       clearTimeout(this.applicationUpdatePollTimer);
       this.applicationUpdatePollTimer = null;
     }
+  }
+
+  private currentOidcAuthorityKey(): string {
+    if (!isSmartPerfettoOidcMode()) return '';
+    const state = readPageAuthGateState();
+    if (state.kind !== 'ready') return '';
+    return [
+      state.authority.authGeneration,
+      state.authority.identityKey,
+    ].join('\0');
   }
 
   private closeAnalysisModeMenu(): boolean {
@@ -3298,12 +3420,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const aiDisabled = this.isAiDisabled();
     // Check backend availability: engine in HTTP_RPC mode, OR backend upload completed/in-progress
     // With non-blocking upload, WASM engine is used for UI while backend runs separately
-    const engineInRpcMode = this.engine?.mode === 'HTTP_RPC';
+    const oidcMode = isSmartPerfettoOidcMode();
+    const engineInRpcMode = !oidcMode && this.engine?.mode === 'HTTP_RPC';
     const hasBackendTrace = !!this.state.backendTraceId;
     const backendUploadState = getBackendUploadState();
-    const hasUploadInProgress = backendUploadState.state === 'uploading';
-    const isInRpcMode =
-      engineInRpcMode || hasBackendTrace || hasUploadInProgress;
+    const hasUploadInProgress =
+      !oidcMode && backendUploadState.state === 'uploading';
+    const isInRpcMode = oidcMode
+      ? hasBackendTrace
+      : engineInRpcMode || hasBackendTrace || hasUploadInProgress;
     const canSendFromCurrentSurface =
       isInRpcMode || this.state.analysisMode === 'conversation';
 
@@ -10552,6 +10677,8 @@ Click ⚙️ to configure backend connection.`,
     clearLoading = this.state.analysisMode === 'conversation',
   ): void {
     ++this.conversationRequestOrdinal;
+    this.conversationAbortController?.abort();
+    this.conversationAbortController = undefined;
     this.getConversationStartQueue().reset();
     const store = loadConversationStore(this.state.settings.backendUrl);
     saveConversationStore({...store, sessionId: undefined, traceId: undefined});
@@ -10599,6 +10726,9 @@ Click ⚙️ to configure backend connection.`,
       store = loadConversationStore(config.backendUrl);
     }
     const ordinal = ++this.conversationRequestOrdinal;
+    const controller = new AbortController();
+    this.conversationAbortController?.abort();
+    this.conversationAbortController = controller;
     const userMessage = [...this.state.messages].reverse().find(
       (candidate) => candidate.role === 'user' && candidate.content === message,
     );
@@ -10620,6 +10750,7 @@ Click ⚙️ to configure backend connection.`,
         traceId: this.state.backendTraceId ?? undefined,
         analysisContext: this.state.analysisContext,
         ...(selectionContext ? {selectionContext} : {}),
+        signal: controller.signal,
       });
       if (ordinal !== this.conversationRequestOrdinal) {
         await cancelConversationRun(config, receipt.sessionId, receipt.runId)
@@ -10634,6 +10765,7 @@ Click ⚙️ to configure backend connection.`,
         traceId: this.state.backendTraceId ?? undefined,
       });
       const outcome = await streamConversationRun(config, receipt, {
+        signal: controller.signal,
         onEvent: (event) => {
           if (ordinal !== this.conversationRequestOrdinal) return;
           if (event.type !== 'runtime_update' || !event.data || typeof event.data !== 'object') return;
@@ -10674,6 +10806,7 @@ Click ⚙️ to configure backend connection.`,
         ? outcome.handoff
         : undefined;
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (ordinal !== this.conversationRequestOrdinal) return;
       this.addMessage({
         id: this.generateId(),
@@ -10687,6 +10820,9 @@ Click ⚙️ to configure backend connection.`,
     } finally {
       if (ordinal === this.conversationRequestOrdinal) {
         this.activeConversationRun = undefined;
+        if (this.conversationAbortController === controller) {
+          this.conversationAbortController = undefined;
+        }
         this.setLoadingState(false);
       }
       m.redraw();
@@ -12396,7 +12532,7 @@ Click ⚙️ to configure backend connection.`,
   private storyController: StoryController | null = null;
 
   private getOrCreateStoryController(): StoryController {
-    if (!this.storyController) {
+    if (!this.storyController || this.storyController.isDisposed()) {
       const ctx: StoryControllerContext = {
         getBackendTraceId: () => this.state.backendTraceId,
         getBackendUrl: () => this.state.settings.backendUrl,
@@ -12406,8 +12542,8 @@ Click ⚙️ to configure backend connection.`,
         generateId: () => this.generateId(),
         setLoadingState: (loading) => this.setLoadingState(loading),
         fetchBackend: (url, opts) => this.fetchBackend(url, opts),
-        pinTracksFromInstructions: async (insts, procs) => {
-          await this.pinTracksFromInstructions(insts, procs);
+        pinTracksFromInstructions: async (insts, procs, isCurrent) => {
+          await this.pinTracksFromInstructions(insts, procs, isCurrent);
         },
         setDetectedScenes: (scenes) => {
           this.state.detectedScenes = scenes;
@@ -12439,6 +12575,7 @@ Click ⚙️ to configure backend connection.`,
     try {
       const ctrl = this.getOrCreateStoryController();
       const preview = await ctrl.preview(traceId);
+      if (ctrl.isDisposed()) return;
       this.state.storyState.preview = preview;
 
       if (preview.cached) {
@@ -12447,12 +12584,16 @@ Click ⚙️ to configure backend connection.`,
         m.redraw();
         try {
           const report = await ctrl.loadReport(preview.cached.reportId);
+          if (ctrl.isDisposed()) return;
           this.state.storyState.cachedReport = report;
           this.state.storyState.status = 'completed';
 
           // Rebuild track overlays from the cached envelopes so the
           // timeline looks the same as a fresh run.
-          this.replayOverlaysFromReport(report);
+          this.replayOverlaysFromReport(
+            report,
+            () => !ctrl.isDisposed(),
+          );
 
           // Sync detected scenes for the navigation bar.
           if (Array.isArray(report.displayedScenes)) {
@@ -12468,6 +12609,7 @@ Click ⚙️ to configure backend connection.`,
             );
           }
         } catch (loadErr: any) {
+          if (loadErr instanceof StoryControllerInvalidatedError) throw loadErr;
           // Cached report failed to load (expired between preview and load?).
           // Degrade to cold path so the user can still run fresh.
           console.warn(
@@ -12480,6 +12622,7 @@ Click ⚙️ to configure backend connection.`,
         this.state.storyState.status = 'preview_cold';
       }
     } catch (err: any) {
+      if (err instanceof StoryControllerInvalidatedError) return;
       this.state.storyState.status = 'failed';
       this.state.storyState.lastError =
         err?.message ?? uiText('预览失败', 'Preview failed');
@@ -12507,8 +12650,10 @@ Click ⚙️ to configure backend connection.`,
     try {
       const ctrl = this.getOrCreateStoryController();
       await ctrl.start({forceRefresh: opts?.forceRefresh});
+      if (ctrl.isDisposed()) return;
       this.state.storyState.status = 'completed';
     } catch (err: any) {
+      if (err instanceof StoryControllerInvalidatedError) return;
       this.state.storyState.status = 'failed';
       this.state.storyState.lastError =
         err?.message ?? uiText('场景还原失败', 'Scene reconstruction failed');
@@ -12930,7 +13075,10 @@ Click ⚙️ to configure backend connection.`,
    * Replay track overlays from a cached SceneReport's envelopes.
    * Called on cache-hit so the timeline looks the same as a fresh run.
    */
-  private replayOverlaysFromReport(report: any): void {
+  private replayOverlaysFromReport(
+    report: any,
+    isCurrent: () => boolean = () => true,
+  ): void {
     if (!Array.isArray(report?.cachedDataEnvelopes)) return;
     const trace = this.trace;
     if (!trace) return;
@@ -12950,6 +13098,7 @@ Click ⚙️ to configure backend connection.`,
           overlayId,
           envelope.data.columns,
           envelope.data.rows,
+          isCurrent,
         ).catch((err: Error) =>
           console.warn('[AIPanel] Cached overlay creation failed:', err),
         );
@@ -13065,7 +13214,12 @@ Click ⚙️ to configure backend connection.`,
   private async pinTracksFromInstructions(
     instructions: TeachingPinInstruction[],
     activeRenderingProcesses: TeachingActiveRenderingProcess[] = [],
+    isCurrent: () => boolean = () => true,
   ): Promise<TeachingPinExecutionResult> {
+    const assertPinCurrent = (): void => {
+      if (!isCurrent()) throw new StoryControllerInvalidatedError();
+    };
+    assertPinCurrent();
     const pinnedCount: TeachingPinExecutionResult = {
       count: 0,
       skipped: 0,
@@ -13155,6 +13309,7 @@ Click ⚙️ to configure backend connection.`,
       const query = `select count(*) as cnt from ${table} where track_id in (${trackIds.join(',')})`;
       try {
         const result = await engine.query(query);
+        assertPinCurrent();
         const it = result.iter({});
         let count = 0;
         if (it.valid()) {
@@ -13203,6 +13358,7 @@ Click ⚙️ to configure backend connection.`,
     }
 
     for (const inst of sortedInstructions) {
+      assertPinCurrent();
       const pinnedBeforeInstruction = pinnedCount.count;
       const skippedBeforeInstruction = pinnedCount.skipped;
       try {
@@ -13329,6 +13485,7 @@ Click ⚙️ to configure backend connection.`,
                 pinnedCount.skipped++;
                 pinnedForInstruction++;
               } else {
+                assertPinCurrent();
                 trackNode.pin();
                 if (inst.expand) trackNode.expand();
                 pinnedCount.pinnedTrackNames.push(
@@ -13395,6 +13552,7 @@ Click ⚙️ to configure backend connection.`,
                   return {trackNode, score};
                 }),
               );
+              assertPinCurrent();
 
               scored.sort((a, b) => b.score - a.score);
               nodesToPin = scored
@@ -13408,6 +13566,7 @@ Click ⚙️ to configure backend connection.`,
                 pinnedForInstruction++;
                 continue;
               }
+              assertPinCurrent();
               trackNode.pin();
               if (inst.expand) trackNode.expand();
               pinnedCount.pinnedTrackNames.push(
@@ -13435,6 +13594,7 @@ Click ⚙️ to configure backend connection.`,
           pinnedCount.missingPatterns.push(inst.pattern);
         }
       } catch (e) {
+        if (e instanceof StoryControllerInvalidatedError) throw e;
         console.warn(
           `[AIPanel] Failed to pin tracks with pattern ${inst.pattern}:`,
           e,
