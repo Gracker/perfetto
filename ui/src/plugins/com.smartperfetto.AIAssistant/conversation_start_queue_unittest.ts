@@ -8,7 +8,10 @@ import {
   ConversationClientError,
   type ConversationRunReceipt,
 } from './conversation_client';
-import {ConversationStartQueue} from './conversation_start_queue';
+import {
+  ConversationStartInvalidatedError,
+  ConversationStartQueue,
+} from './conversation_start_queue';
 
 function deferredReceipt(): {
   promise: Promise<ConversationRunReceipt>;
@@ -66,15 +69,72 @@ describe('ConversationStartQueue', () => {
     );
 
     const staleStart = queue.enqueue({backendUrl: 'http://backend'}, {query: 'stale'});
+    await Promise.resolve();
+    expect(start).toHaveBeenCalledTimes(1);
     queue.reset();
     const newStart = queue.enqueue({backendUrl: 'http://backend'}, {query: 'new'});
     first.resolve(receipt('old-session', 'run-1'));
-    await staleStart;
+    await expect(staleStart).resolves.toEqual(receipt('old-session', 'run-1'));
     await newStart;
 
     expect(start).toHaveBeenNthCalledWith(2, {backendUrl: 'http://backend'}, {query: 'new'});
     expect(sessionId).toBe('new-session');
   });
+
+  it('returns a receipt that arrives after reset so the caller can cancel it', async () => {
+    let sessionId: string | undefined = 'old-session';
+    const started = deferredReceipt();
+    const queue = new ConversationStartQueue(
+      () => sessionId,
+      (value) => { sessionId = value; },
+      vi.fn().mockImplementationOnce(() => started.promise),
+    );
+
+    const inFlight = queue.enqueue(
+      {backendUrl: 'http://backend'},
+      {query: 'stale'},
+    );
+    await Promise.resolve();
+    queue.reset();
+    const lateReceipt = receipt('old-session', 'run-1');
+    started.resolve(lateReceipt);
+
+    await expect(inFlight).resolves.toEqual(lateReceipt);
+    expect(sessionId).toBeUndefined();
+  });
+
+  it('drops queued work deterministically after invalidation', async () => {
+    let sessionId: string | undefined = 'old-session';
+    const first = deferredReceipt();
+    const start = vi.fn().mockImplementationOnce(() => first.promise);
+    const queue = new ConversationStartQueue(
+      () => sessionId,
+      (value) => { sessionId = value; },
+      start,
+    );
+
+    const inFlight = queue.enqueue(
+      {backendUrl: 'http://backend'},
+      {query: 'first'},
+    );
+    const queued = queue.enqueue(
+      {backendUrl: 'http://backend'},
+      {query: 'second'},
+    );
+    await Promise.resolve();
+    expect(start).toHaveBeenCalledTimes(1);
+
+    queue.reset({persist: false});
+    first.resolve(receipt('old-session', 'run-1'));
+
+    await expect(inFlight).resolves.toEqual(receipt('old-session', 'run-1'));
+    await expect(queued).rejects.toBeInstanceOf(
+      ConversationStartInvalidatedError,
+    );
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(sessionId).toBe('old-session');
+  });
+
 
   it('starts a fresh backend session when the persisted session no longer exists', async () => {
     let sessionId: string | undefined = 'expired-session';

@@ -37,6 +37,15 @@ describe('AnalysisRequestCoordinator', () => {
     expect(coordinator.disposition(currentRequest)).toBe('active');
   });
 
+  it('invalidates the active request without allowing a late completion to win', () => {
+    const request = coordinator.begin();
+
+    coordinator.invalidate();
+
+    expect(coordinator.disposition(request)).toBe('stale');
+    expect(coordinator.requestCancel()).toBe(false);
+  });
+
   it('reports no active cancellation after the current request finishes', () => {
     const request = coordinator.begin();
     coordinator.finish(request);

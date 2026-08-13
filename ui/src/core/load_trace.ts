@@ -73,8 +73,10 @@ import {
 } from './backend_upload_state';
 import {GUTTER_FRACTION} from './timeline';
 import {sha1} from '../base/hash';
+import {bindBackendUploadTargetToViewer} from './smartperfetto_viewer_transport';
 import {showModal} from '../widgets/modal';
 import m from 'mithril';
+import {isSmartPerfettoOidcMode} from './smartperfetto_auth';
 
 const ENABLE_CHROME_RELIABLE_RANGE_ZOOM_FLAG = featureFlags.register({
   id: 'enableChromeReliableRangeZoom',
@@ -159,6 +161,7 @@ export function shouldProbeHttpRpcForTraceSource(
   traceSource: TraceSource,
   target: HttpRpcTarget,
 ): boolean {
+  if (isSmartPerfettoOidcMode()) return false;
   if (newEngineMode !== 'USE_HTTP_RPC_IF_AVAILABLE') return false;
   if (traceSource.type === 'HTTP_RPC') return true;
   return !HttpRpcEngine.isSmartPerfettoBackendTarget(target);
@@ -184,6 +187,14 @@ async function createEngine(
   engineId: string,
   traceSource: TraceSource,
 ): Promise<EngineBase> {
+  if (
+    isSmartPerfettoOidcMode() &&
+    (traceSource.type === 'HTTP_RPC' || isSmartPerfettoDualTracePane(app))
+  ) {
+    throw new Error(
+      'OIDC Viewer keeps trace data in the page-local WASM engine; backend HTTP RPC trace sources are not allowed.',
+    );
+  }
   // === Background upload to AI backend (non-blocking) ===
   // Upload runs in the background while WASM engine is created immediately.
   // Upload status is published through backend_upload_state.
@@ -254,11 +265,7 @@ async function createEngine(
           }
 
           if (result.success && (result.rpcTarget || result.port)) {
-            if (result.rpcTarget) {
-              HttpRpcEngine.setRpcTarget(result.rpcTarget);
-            } else if (result.port) {
-              HttpRpcEngine.useDirectPort(String(result.port));
-            }
+            bindBackendUploadTargetToViewer(result);
             console.log(
               `[AutoRPC] Background upload complete, traceId=${result.traceId}, `
                 + `port=${result.port ?? 'n/a'}, leaseId=${result.leaseId ?? 'n/a'}, `

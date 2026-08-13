@@ -11,6 +11,7 @@ import {
   getSmartPerfettoStorageNamespace,
   getSmartPerfettoWindowId,
   setSmartPerfettoWorkspaceId,
+  tryGetSmartPerfettoRequestContext,
 } from './smartperfetto_request_context';
 
 beforeEach(() => {
@@ -199,5 +200,30 @@ describe('SmartPerfetto frontend request context', () => {
       'X-Workspace-Id': 'workspace-oidc',
       'X-CSRF-Token': 'csrf-oidc',
     });
+  });
+
+  it('fails closed for optional context reads after OIDC authority expires', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+
+    expect(tryGetSmartPerfettoRequestContext()).toBeUndefined();
+  });
+
+  it('returns the complete context for an authenticated OIDC page', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: true};
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-optional', email: 'user@example.com'},
+      tenant: {id: 'tenant-optional', name: 'Tenant'},
+      workspace: {id: 'workspace-optional', name: 'Workspace', kind: 'personal'},
+    };
+
+    expect(tryGetSmartPerfettoRequestContext()).toEqual(expect.objectContaining({
+      tenantId: 'tenant-optional',
+      userId: 'user-optional',
+      workspaceId: 'workspace-optional',
+    }));
   });
 });

@@ -18,6 +18,7 @@ import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backen
 import {SETTINGS_KEY} from './types';
 import {getSettingsStorageKey} from './session_manager';
 import {uiOutputLanguage, uiText} from './ui_language';
+import type {AnalysisBackendConnection} from './analysis_backend_connection';
 
 interface CriticalPathSegment {
   startOffsetMs?: number;
@@ -127,7 +128,22 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return data;
 }
 
-async function resolveCurrentTraceId(sourceKey: string): Promise<string> {
+async function resolveCurrentTraceId(
+  sourceKey: string,
+  analysisBackendConnection?: AnalysisBackendConnection,
+): Promise<string> {
+  if (isSmartPerfettoOidcMode()) {
+    const snapshot = analysisBackendConnection?.getSnapshot();
+    if (snapshot?.state === 'ready' && snapshot.traceId) {
+      return snapshot.traceId;
+    }
+    throw new Error(
+      uiText(
+        '当前 Trace 尚未完成页面级 AI 后端绑定，请等待连接状态变为就绪。',
+        'The current trace is not ready on the page-scoped AI backend yet.',
+      ),
+    );
+  }
   const backendUploadState = getBackendUploadState();
   const backendUrl = getBackendUrl();
   if (
@@ -386,7 +402,10 @@ function renderAnalysis(
   `;
 }
 
-export function setupCriticalPathExtension(trace: Trace): {
+export function setupCriticalPathExtension(
+  trace: Trace,
+  analysisBackendConnection?: AnalysisBackendConnection,
+): {
   dispose: () => void;
 } {
   const state: CriticalPathState = {
@@ -399,6 +418,8 @@ export function setupCriticalPathExtension(trace: Trace): {
   };
 
   let disposed = false;
+  let lifecycleGeneration = 0;
+  let analysisAbortController: AbortController | undefined;
   let drawer: HTMLElement | null = null;
 
   const ensureDrawer = (): HTMLElement => {
@@ -411,6 +432,7 @@ export function setupCriticalPathExtension(trace: Trace): {
   };
 
   const renderDrawer = (): void => {
+    if (disposed) return;
     const target = ensureDrawer();
     target.classList.toggle('active', state.open);
     if (!state.open) return;
@@ -432,6 +454,9 @@ export function setupCriticalPathExtension(trace: Trace): {
   };
 
   const analyzeSelectedTask = async (): Promise<void> => {
+    const generation = ++lifecycleGeneration;
+    analysisAbortController?.abort();
+    analysisAbortController = new AbortController();
     state.open = true;
     state.loading = true;
     state.error = '';
@@ -454,6 +479,7 @@ export function setupCriticalPathExtension(trace: Trace): {
       }
       const traceId = await resolveCurrentTraceId(
         backendUploadSourceKey(traceSource),
+        analysisBackendConnection,
       );
       state.traceId = traceId;
       const selectedTask = getSelectedTask(trace);
@@ -469,6 +495,7 @@ export function setupCriticalPathExtension(trace: Trace): {
             'Content-Type': 'application/json',
             'Accept-Language': uiOutputLanguage(),
           },
+          signal: analysisAbortController.signal,
           body: JSON.stringify({
             threadStateId: selectedTask.threadStateId,
             utid: selectedTask.utid,
@@ -480,15 +507,18 @@ export function setupCriticalPathExtension(trace: Trace): {
           }),
         },
       );
+      if (disposed || generation !== lifecycleGeneration) return;
       state.analysis = result.presentationAnalysis ?? result.analysis;
       state.aiSummary = result.aiSummary ?? null;
     } catch (error: unknown) {
+      if (disposed || generation !== lifecycleGeneration) return;
       const detail = error instanceof Error ? error.message : String(error);
       state.error = uiText(
         `Critical path 分析失败：${detail}`,
         `Critical-path analysis failed: ${detail}`,
       );
     } finally {
+      if (disposed || generation !== lifecycleGeneration) return;
       state.loading = false;
       renderDrawer();
     }
@@ -537,6 +567,9 @@ export function setupCriticalPathExtension(trace: Trace): {
   return {
     dispose: () => {
       disposed = true;
+      lifecycleGeneration++;
+      analysisAbortController?.abort();
+      analysisAbortController = undefined;
       observer.disconnect();
       removeInlineButtons();
       drawer?.remove();

@@ -7,6 +7,7 @@ import {beforeEach, describe, expect, it} from 'vitest';
 import {
   type AISession,
   type AISettings,
+  type Message,
   DEFAULT_SETTINGS,
   HISTORY_KEY,
   PENDING_BACKEND_TRACE_KEY,
@@ -224,6 +225,201 @@ describe('SessionManager OIDC storage isolation', () => {
     );
     expect(persisted.backendUrl).toBe(getDefaultSmartPerfettoBackendUrl());
     expect(persisted.backendApiKey).toBe('');
+  });
+
+  it('does not persist page-scoped messages or connection identity', () => {
+    enableOidcSession();
+    const manager = new SessionManager();
+    const transientCanary = 'oidc-transient-connection-canary';
+    const durableMessage: Message = {
+      id: 'durable-message',
+      role: 'assistant',
+      content: 'Ordinary analysis explanation',
+      timestamp: 1,
+    };
+    const transientMessage: Message = {
+      id: 'transient-message',
+      role: 'assistant',
+      content: transientCanary,
+      timestamp: 2,
+      transient: true,
+    };
+    const session = makeSession('oidc-session', 'trace-oidc');
+    Object.assign(session, {
+      backendTraceId: 'backend-trace-canary',
+      referenceBackendTraceId: 'reference-trace-canary',
+      agentSessionId: 'agent-session-canary',
+      agentRunId: 'agent-run-canary',
+      agentRequestId: 'agent-request-canary',
+      agentRunSequence: 7,
+      latestAnalysisSnapshot: {snapshotId: 'snapshot-canary'},
+      pinnedResults: [{
+        id: 'pinned-result',
+        query: 'saved evidence',
+        columns: [],
+        rows: [],
+        timestamp: 3,
+        evidence: {
+          content: 'Pinned evidence narrative must remain visible',
+          source: 'data_envelope',
+          evidenceRefId: 'pinned-evidence-ref-canary',
+        },
+      }],
+      messages: [transientMessage, durableMessage],
+    });
+
+    manager.saveHistory(
+      [transientMessage, durableMessage],
+      'legacy-backend-canary',
+      'trace-oidc',
+    );
+    manager.saveSessionsStorage({byTrace: {'trace-oidc': [session]}});
+
+    const rawHistory = localStorage.getItem(getHistoryStorageKey()) || '';
+    const rawSessions = localStorage.getItem(getSessionsStorageKey()) || '';
+    for (const canary of [
+      transientCanary,
+      'legacy-backend-canary',
+      'backend-trace-canary',
+      'reference-trace-canary',
+      'agent-session-canary',
+      'agent-run-canary',
+      'agent-request-canary',
+      'snapshot-canary',
+      'pinned-evidence-ref-canary',
+    ]) {
+      expect(rawHistory).not.toContain(canary);
+      expect(rawSessions).not.toContain(canary);
+    }
+    expect(rawSessions).toContain('Ordinary analysis explanation');
+    expect(rawSessions).toContain('Pinned evidence narrative must remain visible');
+  });
+
+  it('removes nested page identities from OIDC history and session projections', () => {
+    enableOidcSession();
+    const manager = new SessionManager();
+    const nestedMessage = {
+      id: 'nested-identity-message',
+      role: 'assistant' as const,
+      content: 'Nested identity narrative must remain visible',
+      timestamp: 3,
+      smartScenePreview: {
+        reportId: 'nested-report-canary',
+        scenes: [],
+      },
+      teachingPipeline: {
+        observedFlow: {context: {traceId: 'nested-teaching-trace-canary'}},
+      },
+      sqlResult: {
+        rows: [],
+        sourceContext: {traceId: 'nested-sql-trace-canary'},
+      },
+    } as unknown as Message;
+
+    manager.saveHistory([nestedMessage], null, 'trace-oidc');
+    manager.saveSessionsStorage({
+      byTrace: {
+        'trace-oidc': [
+          {...makeSession('nested-session', 'trace-oidc'), messages: [nestedMessage]},
+        ],
+      },
+    });
+
+    const rawHistory = localStorage.getItem(getHistoryStorageKey()) || '';
+    const rawSessions = localStorage.getItem(getSessionsStorageKey()) || '';
+    for (const canary of [
+      'nested-report-canary',
+      'nested-teaching-trace-canary',
+      'nested-sql-trace-canary',
+    ]) {
+      expect(rawHistory).not.toContain(canary);
+      expect(rawSessions).not.toContain(canary);
+    }
+    expect(rawSessions).toContain('Nested identity narrative must remain visible');
+
+    localStorage.setItem(
+      getSessionsStorageKey(),
+      JSON.stringify({
+        byTrace: {
+          'trace-oidc': [
+            {...makeSession('legacy-nested-session', 'trace-oidc'), messages: [nestedMessage]},
+          ],
+        },
+      }),
+    );
+    const restored = new SessionManager().loadSessionsStorage();
+    const restoredMessage = restored.byTrace['trace-oidc'][0].messages[0] as unknown as Record<string, unknown>;
+    expect(restoredMessage).not.toHaveProperty('smartScenePreview.reportId');
+    expect(restoredMessage).not.toHaveProperty('teachingPipeline.observedFlow.context.traceId');
+    expect(restoredMessage).not.toHaveProperty('sqlResult.sourceContext');
+  });
+
+  it('removes legacy OIDC connection messages on load and writes the migration back', () => {
+    enableOidcSession();
+    const legacyStatus = {
+      id: 'legacy-status',
+      role: 'assistant' as const,
+      content:
+        '✅ **AI Assistant is ready**\n\nThe trace is loaded through the current page backend shared lease proxy, queue 0.\nThe frontend and backend share the same trace_processor.',
+      timestamp: 1,
+    };
+    const legacySystemStatus = {
+      id: 'legacy-system-status',
+      role: 'system' as const,
+      content:
+        '✅ **AI backend connected**\n\nThe page-scoped AI analysis backend is ready.',
+      timestamp: 2,
+    };
+    const ordinaryMessage = {
+      id: 'ordinary-message',
+      role: 'assistant' as const,
+      content:
+        '✅ **AI Assistant is ready**\n\nThis is an ordinary explanation of readiness semantics, not a connection status.',
+      timestamp: 3,
+    };
+    const session = makeSession('legacy-oidc-session', 'trace-legacy');
+    session.messages = [legacyStatus, legacySystemStatus, ordinaryMessage];
+    localStorage.setItem(
+      getSessionsStorageKey(),
+      JSON.stringify({
+        byTrace: {'trace-legacy': [session]},
+        _meta: {mtimeMs: 10, revision: 4},
+      }),
+    );
+
+    const loaded = new SessionManager().loadSessionsStorage();
+
+    expect(loaded.byTrace['trace-legacy'][0].messages).toEqual([
+      ordinaryMessage,
+    ]);
+    const persisted = JSON.parse(
+      localStorage.getItem(getSessionsStorageKey()) || '{}',
+    );
+    expect(persisted.byTrace['trace-legacy'][0].messages).toEqual([
+      ordinaryMessage,
+    ]);
+    expect(persisted._meta.revision).toBeGreaterThan(4);
+  });
+
+  it('physically removes every pending backend binding in OIDC mode', () => {
+    sessionStorage.setItem('smartperfetto-window-id', 'window-oidc');
+    enableOidcSession();
+    const scopedKey = getPendingBackendTraceStorageKey('window-oidc');
+    const legacyWindowKey = `${PENDING_BACKEND_TRACE_KEY}:window-oidc`;
+    sessionStorage.setItem(scopedKey, JSON.stringify({traceId: 'scoped'}));
+    sessionStorage.setItem(
+      legacyWindowKey,
+      JSON.stringify({traceId: 'legacy-window'}),
+    );
+    localStorage.setItem(
+      PENDING_BACKEND_TRACE_KEY,
+      JSON.stringify({traceId: 'legacy-global'}),
+    );
+
+    expect(new SessionManager().recoverPendingBackendTrace()).toBeNull();
+    expect(sessionStorage.getItem(scopedKey)).toBeNull();
+    expect(sessionStorage.getItem(legacyWindowKey)).toBeNull();
+    expect(localStorage.getItem(PENDING_BACKEND_TRACE_KEY)).toBeNull();
   });
 });
 

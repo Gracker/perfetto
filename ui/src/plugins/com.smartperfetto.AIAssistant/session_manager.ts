@@ -58,6 +58,100 @@ export {getSmartPerfettoWindowId};
 const ANALYSIS_MODE_KEY = 'ai-analysis-mode';
 export type AnalysisMode = 'conversation' | 'fast' | 'full' | 'auto';
 
+function isLegacyOidcConnectionStatusMessage(message: Message): boolean {
+  if (message.role !== 'assistant' && message.role !== 'system') return false;
+  const content = message.content;
+  const knownHeading =
+    content.includes('**AI Assistant is ready**') ||
+    content.includes('**AI 助手已就绪**') ||
+    content.includes('**AI backend connected**') ||
+    content.includes('**AI 后端已连接**') ||
+    content.includes('**Connecting to the AI backend') ||
+    content.includes('**正在连接 AI 后端');
+  if (!knownHeading) return false;
+  return (
+    content.includes('share the same trace_processor') ||
+    content.includes('共享同一个 trace_processor') ||
+    content.includes('page-scoped AI analysis backend') ||
+    content.includes('当前页面的 AI 分析后端') ||
+    content.includes('current page backend') ||
+    content.includes('当前页面的后端') ||
+    content.includes('loaded in the WASM engine while the AI backend prepares') ||
+    content.includes('Trace 已加载到 WASM 引擎，AI 分析后端正在后台准备')
+  );
+}
+
+function scrubOidcIdentityFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(scrubOidcIdentityFields);
+  if (!value || typeof value !== 'object') return value;
+
+  const projected: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (
+      key === 'reportId' ||
+      key === 'traceId' ||
+      key === 'backendTraceId' ||
+      key === 'leaseId' ||
+      key === 'agentSessionId' ||
+      key === 'agentRunId' ||
+      key === 'agentRequestId' ||
+      key === 'runId' ||
+      key === 'sessionId' ||
+      key === 'requestId' ||
+      key === 'snapshotId' ||
+      key === 'evidenceRefId' ||
+      key === 'sourceContext' ||
+      key === 'cursor' ||
+      key === 'rpcTarget' ||
+      key === 'pendingBackendTrace'
+    ) {
+      continue;
+    }
+    projected[key] = scrubOidcIdentityFields(child);
+  }
+  return projected;
+}
+
+function projectOidcMessageForStorage(message: Message): Message | undefined {
+  if (message.transient || isLegacyOidcConnectionStatusMessage(message)) {
+    return undefined;
+  }
+  const projected = projectMessageForStorage(message);
+  return {
+    ...projected,
+    transient: undefined,
+    reportUrl: undefined,
+    sourceContext: undefined,
+    analysisReceipt: undefined,
+    quickRun: undefined,
+    uiActionProposals: undefined,
+    conversationEvidence: undefined,
+    teachingPipeline: scrubOidcIdentityFields(projected.teachingPipeline) as Message['teachingPipeline'],
+    teachingPinExecution: scrubOidcIdentityFields(projected.teachingPinExecution) as Message['teachingPinExecution'],
+    smartScenePreview: scrubOidcIdentityFields(projected.smartScenePreview) as Message['smartScenePreview'],
+    sqlResult: scrubOidcIdentityFields(projected.sqlResult) as Message['sqlResult'],
+  };
+}
+
+function projectOidcSessionForStorage(session: AISession): AISession {
+  return {
+    ...session,
+    backendTraceId: undefined,
+    referenceBackendTraceId: undefined,
+    agentSessionId: undefined,
+    agentRunId: undefined,
+    agentRequestId: undefined,
+    agentRunSequence: undefined,
+    latestAnalysisSnapshot: undefined,
+    pinnedResults: scrubOidcIdentityFields(
+      session.pinnedResults,
+    ) as AISession['pinnedResults'],
+    messages: session.messages
+      .map(projectOidcMessageForStorage)
+      .filter((message): message is Message => message !== undefined),
+  };
+}
+
 /**
  * Generates a unique ID for messages and sessions.
  */
@@ -213,10 +307,26 @@ export class SessionManager {
       if (!stored) return null;
 
       const parsed = JSON.parse(stored);
-      const messages = Array.isArray(parsed) ? parsed : parsed.messages || [];
+      const rawMessages = Array.isArray(parsed) ? parsed : parsed.messages || [];
+      const messages = isSmartPerfettoOidcMode()
+        ? rawMessages
+            .map(projectOidcMessageForStorage)
+            .filter((message: Message | undefined): message is Message => message !== undefined)
+        : rawMessages;
+      if (isSmartPerfettoOidcMode()) {
+        localStorage.setItem(
+          getHistoryStorageKey(),
+          JSON.stringify({
+            messages,
+            traceFingerprint: parsed.traceFingerprint,
+          }),
+        );
+      }
       return {
         messages,
-        backendTraceId: parsed.backendTraceId,
+        backendTraceId: isSmartPerfettoOidcMode()
+          ? undefined
+          : parsed.backendTraceId,
         traceFingerprint: parsed.traceFingerprint,
       };
     } catch {
@@ -233,9 +343,14 @@ export class SessionManager {
     traceFingerprint: string | null,
   ): void {
     try {
+      const projectedMessages = isSmartPerfettoOidcMode()
+        ? messages
+            .map(projectOidcMessageForStorage)
+            .filter((message): message is Message => message !== undefined)
+        : this.trimStorageMessages(messages);
       const data = {
-        messages: this.trimStorageMessages(messages),
-        backendTraceId,
+        messages: projectedMessages,
+        backendTraceId: isSmartPerfettoOidcMode() ? undefined : backendTraceId,
         traceFingerprint,
       };
       localStorage.setItem(getHistoryStorageKey(), JSON.stringify(data));
@@ -276,7 +391,8 @@ export class SessionManager {
    * Load all Sessions storage from localStorage.
    */
   loadSessionsStorage(): SessionsStorage {
-    const scoped = localStorage.getItem(getSessionsStorageKey());
+    const storageKey = getSessionsStorageKey();
+    const scoped = localStorage.getItem(storageKey);
     const parsed = this.parseSessionsStorage(
       scoped || (isSmartPerfettoOidcMode()
         ? null
@@ -284,7 +400,23 @@ export class SessionManager {
     );
     this.sessionsStorageMtimeMs = parsed.mtimeMs;
     this.sessionsStorageRevision = parsed.revision;
-    return parsed.storage;
+    if (!isSmartPerfettoOidcMode()) return parsed.storage;
+
+    const sanitized: SessionsStorage = {byTrace: {}};
+    let changed = false;
+    for (const fingerprint in parsed.storage.byTrace) {
+      sanitized.byTrace[fingerprint] = parsed.storage.byTrace[fingerprint].map(
+        (session) => {
+          const projected = projectOidcSessionForStorage(session);
+          if (JSON.stringify(projected) !== JSON.stringify(session)) changed = true;
+          return projected;
+        },
+      );
+    }
+    if (changed) {
+      this.saveSessionsStorage(sanitized);
+    }
+    return sanitized;
   }
 
   private parseSessionsStorage(raw: string | null): {
@@ -319,7 +451,7 @@ export class SessionManager {
    */
   private trimStorageMessages(messages: Message[]): Message[] {
     const MAX_ROWS_PERSISTED = 50;
-    return messages.map((msg) => {
+    return messages.filter((msg) => !msg.transient).map((msg) => {
       // P2-9: Strip large data fields that are not essential for session restore
       const trimmed: Message = {
         ...projectMessageForStorage(msg),
@@ -416,10 +548,15 @@ export class SessionManager {
       for (const fingerprint in storageToSave.byTrace) {
         trimmedStorage.byTrace[fingerprint] = storageToSave.byTrace[
           fingerprint
-        ].map((session) => ({
-          ...session,
-          messages: this.trimStorageMessages(session.messages),
-        }));
+        ].map((session) => {
+          const projected = isSmartPerfettoOidcMode()
+            ? projectOidcSessionForStorage(session)
+            : session;
+          return {
+            ...projected,
+            messages: this.trimStorageMessages(projected.messages),
+          };
+        });
       }
       let envelope = this.buildSessionsEnvelope(trimmedStorage, revisionBase);
       const serialize = (): string => JSON.stringify(envelope);
@@ -709,6 +846,15 @@ export class SessionManager {
     try {
       const scopedKey = getPendingBackendTraceStorageKey();
       const legacyWindowKey = `${PENDING_BACKEND_TRACE_KEY}:${getSmartPerfettoWindowId()}`;
+      const clearPending = () => {
+        sessionStorage.removeItem(scopedKey);
+        sessionStorage.removeItem(legacyWindowKey);
+        localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
+      };
+      if (isSmartPerfettoOidcMode()) {
+        clearPending();
+        return null;
+      }
       let stored = sessionStorage.getItem(scopedKey);
       let legacyStorage = false;
       if (!stored && !isSmartPerfettoOidcMode()) {
@@ -722,11 +868,6 @@ export class SessionManager {
       if (!stored) return null;
 
       const data = JSON.parse(stored);
-      const clearPending = () => {
-        sessionStorage.removeItem(scopedKey);
-        sessionStorage.removeItem(legacyWindowKey);
-        localStorage.removeItem(PENDING_BACKEND_TRACE_KEY);
-      };
 
       const isRecent = Date.now() - data.timestamp < 60000;
       const portMatches =

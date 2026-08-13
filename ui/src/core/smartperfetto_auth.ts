@@ -39,6 +39,52 @@ declare global {
 }
 
 let authReloadScheduled = false;
+let authSessionGeneration = 0;
+
+const AUTH_INVALIDATION_CHANNEL = 'smartperfetto-auth-invalidation';
+let authInvalidationChannel: BroadcastChannel | undefined;
+
+function dispatchSmartPerfettoAuthSessionChanged(): void {
+  window.dispatchEvent(new Event('smartperfetto-auth-session-changed'));
+}
+
+export function getSmartPerfettoAuthSessionGeneration(): number {
+  return authSessionGeneration;
+}
+
+/**
+ * Invalidate the page's OIDC runtime without restoring identity from browser
+ * storage. Logout and authentication failures use this same path.
+ */
+export function invalidateSmartPerfettoAuthSession(
+  broadcast = true,
+): void {
+  authSessionGeneration++;
+  window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+  dispatchSmartPerfettoAuthSessionChanged();
+  if (broadcast) {
+    try {
+      authInvalidationChannel?.postMessage({type: 'invalidated'});
+    } catch {
+      // BroadcastChannel is only a best-effort cross-tab hint. The backend
+      // remains authoritative for every subsequent scoped request.
+    }
+  }
+}
+
+if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
+  try {
+    authInvalidationChannel = new BroadcastChannel(AUTH_INVALIDATION_CHANNEL);
+    authInvalidationChannel.addEventListener('message', (event: MessageEvent) => {
+      if (event.data?.type === 'invalidated') {
+        invalidateSmartPerfettoAuthSession(false);
+      }
+    });
+  } catch {
+    // Private-mode or embedded browsers can deny BroadcastChannel. Same-tab
+    // teardown still runs through the DOM event above.
+  }
+}
 
 export function isSmartPerfettoOidcMode(): boolean {
   try {
@@ -61,6 +107,40 @@ export function getSmartPerfettoAuthSession():
     }
     return session;
   } catch {
+    return undefined;
+  }
+}
+
+export async function refreshSmartPerfettoAuthSession(
+  backendUrl: string,
+): Promise<SmartPerfettoAuthSession | undefined> {
+  if (!isSmartPerfettoOidcMode()) return undefined;
+  const refreshGeneration = authSessionGeneration;
+  const endpoint = `${backendUrl.replace(/\/+$/, '')}/api/auth/session`;
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      cache: 'no-cache',
+      credentials: 'include',
+    });
+    if (refreshGeneration !== authSessionGeneration) return undefined;
+    if (!response.ok) {
+      throw new Error(`OIDC session request failed (${response.status})`);
+    }
+    const session = await response.json() as SmartPerfettoAuthSession;
+    if (refreshGeneration !== authSessionGeneration) return undefined;
+    window.__SMARTPERFETTO_AUTH_SESSION__ = session;
+    const hydrated = getSmartPerfettoAuthSession();
+    if (!hydrated) {
+      invalidateSmartPerfettoAuthSession();
+      return undefined;
+    }
+    dispatchSmartPerfettoAuthSessionChanged();
+    return hydrated;
+  } catch {
+    if (refreshGeneration === authSessionGeneration) {
+      invalidateSmartPerfettoAuthSession();
+    }
     return undefined;
   }
 }
@@ -99,7 +179,10 @@ export async function smartPerfettoFetch(
 }
 
 export function handleSmartPerfettoAuthResponse(response: Response): Response {
-  if (response.status === 401) scheduleAuthReload();
+  if (isSmartPerfettoOidcMode() && response.status === 401) {
+    invalidateSmartPerfettoAuthSession();
+    scheduleAuthReload();
+  }
   return response;
 }
 

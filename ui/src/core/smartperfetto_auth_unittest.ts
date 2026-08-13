@@ -4,9 +4,26 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {
   getSmartPerfettoAuthSession,
+  getSmartPerfettoAuthSessionGeneration,
+  handleSmartPerfettoAuthResponse,
+  invalidateSmartPerfettoAuthSession,
+  refreshSmartPerfettoAuthSession,
   smartPerfettoFetch,
   withSmartPerfettoAuth,
 } from './smartperfetto_auth';
+
+function deferredResponse(): {
+  promise: Promise<Response>;
+  resolve: (response: Response) => void;
+} {
+  let resolve!: (response: Response) => void;
+  return {
+    promise: new Promise<Response>((complete) => {
+      resolve = complete;
+    }),
+    resolve,
+  };
+}
 
 beforeEach(() => {
   vi.unstubAllGlobals();
@@ -83,5 +100,48 @@ describe('SmartPerfetto browser authentication', () => {
       credentials: 'same-origin',
     });
     expect(explicit.credentials).toBe('same-origin');
+  });
+
+  it('invalidates OIDC authority before scheduling a reload on 401', () => {
+    vi.useFakeTimers();
+    const listener = vi.fn();
+    window.addEventListener('smartperfetto-auth-session-changed', listener);
+    const before = getSmartPerfettoAuthSessionGeneration();
+
+    handleSmartPerfettoAuthResponse(new Response('', {status: 401}));
+
+    expect(getSmartPerfettoAuthSession()).toBeUndefined();
+    expect(getSmartPerfettoAuthSessionGeneration()).toBeGreaterThan(before);
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener('smartperfetto-auth-session-changed', listener);
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it('does not invalidate a non-OIDC session on 401', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: false};
+    const before = getSmartPerfettoAuthSessionGeneration();
+
+    handleSmartPerfettoAuthResponse(new Response('', {status: 401}));
+
+    expect(getSmartPerfettoAuthSessionGeneration()).toBe(before);
+  });
+
+  it('rejects a stale session refresh after authority invalidation', async () => {
+    const sessionResponse = deferredResponse();
+    const fetchMock = vi.fn().mockReturnValue(sessionResponse.promise);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const refresh = refreshSmartPerfettoAuthSession('http://backend');
+    invalidateSmartPerfettoAuthSession(false);
+    sessionResponse.resolve(
+      new Response(JSON.stringify(window.__SMARTPERFETTO_AUTH_SESSION__), {
+        status: 200,
+        headers: {'content-type': 'application/json'},
+      }),
+    );
+
+    await expect(refresh).resolves.toBeUndefined();
+    expect(getSmartPerfettoAuthSession()).toBeUndefined();
   });
 });

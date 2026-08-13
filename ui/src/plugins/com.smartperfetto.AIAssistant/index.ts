@@ -51,7 +51,10 @@ import {getAIAssistantSurfacePolicy} from './ai_surface_policy';
 import {sessionManager} from './session_manager';
 import {setUiLanguagePreference} from './ui_language';
 import {ConversationPage} from './conversation_page';
+import {PageAuthGate} from './page_auth_lifecycle';
 import {resolveAssistantOpenTarget} from './assistant_navigation';
+import {AnalysisBackendConnectionOwner} from './analysis_backend_connection_owner';
+import {backendUploadSourceKey} from '../../core/backend_uploader';
 
 // Inject smart-detected backend URL at module load time, BEFORE any trace
 // auto-upload kicks in.
@@ -93,7 +96,9 @@ export default class implements PerfettoPlugin {
     if (!getAIAssistantSurfacePolicy().registerCommands) return;
     app.pages.registerPage({
       route: '/assistant',
-      render: () => m(ConversationPage, {app}),
+      render: () => m(PageAuthGate, {
+        content: m(ConversationPage, {app}),
+      }),
     });
     app.commands.registerCommand({
       id: 'com.smartperfetto.AIAssistant.OpenPanel',
@@ -173,6 +178,17 @@ export default class implements PerfettoPlugin {
     updateFloatingState({mode: 'tab'});
 
     const tracePairWorkspaceController = new TracePairWorkspaceController();
+    const traceSource = (
+      ctx.traceInfo as unknown as {source?: Parameters<typeof backendUploadSourceKey>[0]}
+    ).source;
+    const analysisBackendConnectionOwner =
+      isSmartPerfettoOidcMode() && traceSource
+        ? new AnalysisBackendConnectionOwner(
+            getDefaultSmartPerfettoBackendUrl(),
+            traceSource,
+          )
+        : undefined;
+    analysisBackendConnectionOwner?.start();
     const tracePairIdentity = (): string => {
       const state = tracePairWorkspaceController.getState();
       return [
@@ -191,13 +207,18 @@ export default class implements PerfettoPlugin {
     const surfaceHandle = setupFloatingWindow(
       ctx,
       tracePairWorkspaceController,
+      analysisBackendConnectionOwner?.connection,
     );
     ctx.trash.defer(() => {
       unsubscribeTracePair();
       surfaceHandle.dispose();
+      analysisBackendConnectionOwner?.dispose();
       tracePairWorkspaceController.resetScope();
     });
-    const criticalPathHandle = setupCriticalPathExtension(ctx);
+    const criticalPathHandle = setupCriticalPathExtension(
+      ctx,
+      analysisBackendConnectionOwner?.connection,
+    );
     ctx.trash.defer(() => criticalPathHandle.dispose());
 
     // ── F1: Area Selection Analysis Tab ──

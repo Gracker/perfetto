@@ -36,6 +36,11 @@ export class AnalysisRequestCoordinator {
     return this.activeRequest.cancelRequested ? 'cancelled' : 'active';
   }
 
+  invalidate(): void {
+    this.activeRequest = null;
+    this.nextGeneration++;
+  }
+
   finish(token: AnalysisRequestToken): void {
     if (this.activeRequest?.token.generation === token.generation) {
       this.activeRequest = null;
