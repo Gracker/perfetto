@@ -142,9 +142,23 @@ describe('ConversationPage OIDC lifecycle', () => {
     page.onremove();
   });
 
-  it('aborts an in-flight start when the page is removed', async () => {
+  it('cancels a run whose receipt arrives after page removal', async () => {
     const pendingStart = deferredResponse();
-    const fetchMock = vi.fn().mockReturnValue(pendingStart.promise);
+    const fetchMock = vi.fn()
+      .mockImplementationOnce((_input: unknown, init?: RequestInit) => {
+        const signal = init?.signal;
+        return signal
+          ? Promise.race([
+              pendingStart.promise,
+              new Promise<Response>((_resolve, reject) => {
+                signal.addEventListener('abort', () => {
+                  reject(new DOMException('The operation was aborted', 'AbortError'));
+                }, {once: true});
+              }),
+            ])
+          : pendingStart.promise;
+      })
+      .mockResolvedValueOnce(new Response('', {status: 200}));
     vi.stubGlobal('fetch', fetchMock);
     const page = createPage();
     page.input = 'page removal question';
@@ -156,7 +170,15 @@ describe('ConversationPage OIDC lifecycle', () => {
     await send;
 
     expect(page.activeReceipt).toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://backend/api/workspaces/workspace-a/agent/conversation/' +
+        'removed-session/cancel',
+    );
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({runId: 'removed-run'}),
+    });
   });
 
   it('does not append an old stream result after switching user/workspace', async () => {

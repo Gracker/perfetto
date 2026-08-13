@@ -250,6 +250,7 @@ export const STEP_TO_OVERLAY = new Map<string, OverlayId>([
 // ---------------------------------------------------------------------------
 
 const activeTrackNodes = new Map<OverlayId, string[]>();
+let overlayTrackCreationCounter = 0;
 
 // ---------------------------------------------------------------------------
 // sessionStorage persistence — survives build.mjs --watch hot-reload
@@ -518,31 +519,39 @@ export async function createOverlayTrack(
     SELECT * FROM source WHERE ${durCol} >= 0
   `;
 
-  // Snapshot pinned track node IDs before creation
+  // addDebugSliceTrack does not return the nodes it creates. Mark this
+  // invocation's title so concurrent workspace additions cannot be mistaken
+  // for overlay-owned tracks, then remove the marker before yielding.
   const pinnedNode = trace.currentWorkspace.pinnedTracksNode;
-  const beforeIds = new Set(pinnedNode.children.map((n) => n.id));
+  const ownershipMarker =
+    ` [SmartPerfetto overlay ${overlayTrackCreationCounter++}]`;
 
   await addDebugSliceTrack({
     trace,
     data: {sqlSource},
-    title: config.trackTitle(),
+    title: `${config.trackTitle()}${ownershipMarker}`,
     columns: {ts: config.columns.ts, dur: config.columns.dur, name: 'name'},
     ...(pivotIdx >= 0 ? {pivotOn: config.pivotOn} : {}),
     ...(colorIdx >= 0 ? {colorColumn: config.colorColumn} : {}),
     rawColumns: rawCols,
   });
 
+  const createdNodes = pinnedNode.children.filter((node) =>
+    node.name.includes(ownershipMarker),
+  );
+  for (const node of createdNodes) {
+    node.name = node.name.replace(ownershipMarker, '');
+  }
+
   if (!isCurrent()) {
-    for (const node of pinnedNode.children.filter((item) => !beforeIds.has(item.id))) {
+    for (const node of createdNodes) {
       node.remove();
     }
     return;
   }
 
   // Record newly created node IDs for future cleanup
-  const newNodeIds = pinnedNode.children
-    .filter((n) => !beforeIds.has(n.id))
-    .map((n) => n.id);
+  const newNodeIds = createdNodes.map((node) => node.id);
   activeTrackNodes.set(config.id, newNodeIds);
 
   // Persist to sessionStorage for hot-reload survival (use capped rows, not raw input)

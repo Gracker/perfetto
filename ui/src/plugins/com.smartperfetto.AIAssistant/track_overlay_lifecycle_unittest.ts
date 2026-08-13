@@ -24,7 +24,11 @@ describe('track overlay lifecycle', () => {
     const creationGate = new Promise<void>((resolve) => {
       finishCreation = resolve;
     });
-    const children: Array<{id: string; remove: ReturnType<typeof vi.fn>}> = [];
+    const children: Array<{
+      id: string;
+      name: string;
+      remove: ReturnType<typeof vi.fn>;
+    }> = [];
     const trace = {
       traceInfo: {uuid: 'trace-a'},
       currentWorkspace: {
@@ -35,9 +39,9 @@ describe('track overlay lifecycle', () => {
       const index = children.findIndex((node) => node.id === 'story-overlay');
       if (index >= 0) children.splice(index, 1);
     });
-    addDebugSliceTrackMock.mockImplementation(async () => {
+    addDebugSliceTrackMock.mockImplementation(async ({title}) => {
       await creationGate;
-      children.push({id: 'story-overlay', remove});
+      children.push({id: 'story-overlay', name: title, remove});
     });
     let current = true;
 
@@ -54,6 +58,58 @@ describe('track overlay lifecycle', () => {
 
     expect(remove).toHaveBeenCalledOnce();
     expect(children).toEqual([]);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it('preserves unrelated tracks pinned while stale overlay creation is pending', async () => {
+    let finishCreation: (() => void) | undefined;
+    const creationGate = new Promise<void>((resolve) => {
+      finishCreation = resolve;
+    });
+    const children: Array<{
+      id: string;
+      name: string;
+      remove: ReturnType<typeof vi.fn>;
+    }> = [];
+    const trace = {
+      traceInfo: {uuid: 'trace-a'},
+      currentWorkspace: {
+        pinnedTracksNode: {children},
+      },
+    } as any;
+    const overlayRemove = vi.fn(() => {
+      const index = children.findIndex((node) => node.id === 'story-overlay');
+      if (index >= 0) children.splice(index, 1);
+    });
+    const unrelatedRemove = vi.fn(() => {
+      const index = children.findIndex((node) => node.id === 'user-track');
+      if (index >= 0) children.splice(index, 1);
+    });
+    addDebugSliceTrackMock.mockImplementation(async ({title}) => {
+      await creationGate;
+      children.push({id: 'story-overlay', name: title, remove: overlayRemove});
+    });
+    let current = true;
+
+    const creation = createOverlayTrack(
+      trace,
+      'scene_timeline',
+      ['ts', 'dur', 'event'],
+      [[1, 2, 'Launch']],
+      () => current,
+    );
+    children.push({
+      id: 'user-track',
+      name: 'User SQL Track',
+      remove: unrelatedRemove,
+    });
+    current = false;
+    finishCreation?.();
+    await creation;
+
+    expect(overlayRemove).toHaveBeenCalledOnce();
+    expect(unrelatedRemove).not.toHaveBeenCalled();
+    expect(children.map(({id}) => id)).toEqual(['user-track']);
     expect(sessionStorage.length).toBe(0);
   });
 });

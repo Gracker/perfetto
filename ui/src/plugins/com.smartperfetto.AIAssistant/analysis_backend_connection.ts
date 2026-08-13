@@ -165,7 +165,10 @@ export class AnalysisBackendConnection {
 
     let preparingAttempt = 0;
     while (generation === this.generation) {
-      const response = await this.readLeaseConnection(upload.leaseId);
+      const response = await this.readLeaseConnection(
+        upload.leaseId,
+        generation,
+      );
       if (generation !== this.generation) return;
       const state = response.status ?? 'backend_unavailable';
       if (state === 'preparing') {
@@ -200,6 +203,7 @@ export class AnalysisBackendConnection {
 
   private async readLeaseConnection(
     leaseId: string,
+    generation: number,
   ): Promise<LeaseConnectionResponse> {
     const url = buildSmartPerfettoWorkspaceApiUrl(
       this.backendUrl,
@@ -216,7 +220,9 @@ export class AnalysisBackendConnection {
         }),
       );
       if (response.status === 401) {
-        invalidateSmartPerfettoAuthSession();
+        if (generation === this.generation) {
+          invalidateSmartPerfettoAuthSession();
+        }
         return {status: 'auth_expired', leaseId};
       }
       handleSmartPerfettoAuthResponse(response);
@@ -316,7 +322,10 @@ export class AnalysisBackendConnection {
       }
       if (response.ok) return;
 
-      const refreshed = await this.readLeaseConnection(target.leaseId!);
+      const refreshed = await this.readLeaseConnection(
+        target.leaseId!,
+        generation,
+      );
       if (generation !== this.generation) return;
       if (refreshed.status === 'ready') {
         this.publish({...this.snapshot, state: 'ready'});

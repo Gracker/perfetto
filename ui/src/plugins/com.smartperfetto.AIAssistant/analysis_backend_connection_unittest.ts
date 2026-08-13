@@ -141,6 +141,42 @@ describe('AnalysisBackendConnection', () => {
     connection.dispose();
   });
 
+  it('does not invalidate a newer auth session when an old status 401 arrives', async () => {
+    let resolveOldStatus!: (response: Response) => void;
+    const oldStatus = new Promise<Response>((resolve) => {
+      resolveOldStatus = resolve;
+    });
+    fetchMock.mockReturnValueOnce(oldStatus).mockResolvedValue(
+      jsonResponse({status: 'ready', traceId: 'trace-new', leaseId: 'lease-new'}),
+    );
+    const connection = new AnalysisBackendConnection('http://backend');
+
+    const oldConnection = connection.connectOidc(oidcUpload());
+    await flushAsyncWork();
+    window.__SMARTPERFETTO_AUTH_SESSION__ = {
+      success: true,
+      authenticated: true,
+      authMode: 'oidc',
+      status: 'ready',
+      user: {id: 'user-b', email: 'user-b@example.test'},
+      tenant: {id: 'tenant-b', name: 'Tenant B'},
+      workspace: {id: 'workspace-b', name: 'Workspace B', kind: 'personal'},
+      csrfToken: 'csrf-b',
+    };
+    await connection.connectOidc(oidcUpload('trace-new', 'lease-new'));
+
+    resolveOldStatus(jsonResponse({error: 'unauthorized'}, 401));
+    await oldConnection;
+
+    expect(window.__SMARTPERFETTO_AUTH_SESSION__?.user?.id).toBe('user-b');
+    expect(connection.getSnapshot()).toMatchObject({
+      state: 'ready',
+      traceId: 'trace-new',
+      leaseId: 'lease-new',
+    });
+    connection.dispose();
+  });
+
   it('keeps polling a preparing lease until it becomes ready', async () => {
     const upload = oidcUpload();
     fetchMock

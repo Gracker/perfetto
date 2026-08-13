@@ -258,7 +258,6 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       }, {
         query,
         analysisContext,
-        signal: controller.signal,
       });
       if (
         ordinal !== this.requestOrdinal ||

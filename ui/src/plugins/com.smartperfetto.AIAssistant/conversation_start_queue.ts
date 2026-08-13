@@ -10,7 +10,10 @@ import {
   type StartConversationInput,
 } from './conversation_client';
 
-type ConversationStartInput = Omit<StartConversationInput, 'sessionId'>;
+type ConversationStartInput = Omit<
+  StartConversationInput,
+  'sessionId' | 'signal'
+>;
 
 export class ConversationStartInvalidatedError extends Error {
   constructor() {
@@ -22,7 +25,9 @@ export class ConversationStartInvalidatedError extends Error {
 /**
  * Serializes only the short HTTP start handshake. Model runs remain concurrent
  * with the UI, so a later turn can steer/cancel the active run after it has a
- * stable backend session identity.
+ * stable backend session identity. The handshake deliberately cannot share
+ * the streaming lifecycle's AbortSignal: once the backend starts a run, the
+ * receipt must reach the caller so an invalidated request can cancel it.
  */
 export class ConversationStartQueue {
   private tail: Promise<void> = Promise.resolve();
@@ -58,13 +63,7 @@ export class ConversationStartQueue {
         this.writeSessionId(receipt.sessionId);
       }
       return receipt;
-    })
-      .then((response) => {
-        if (generation !== this.generation) {
-          throw new ConversationStartInvalidatedError();
-        }
-        return response;
-      });
+    });
     this.tail = operation.then(() => undefined, () => undefined);
     return operation;
   }

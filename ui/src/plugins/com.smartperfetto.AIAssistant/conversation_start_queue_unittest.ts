@@ -74,13 +74,33 @@ describe('ConversationStartQueue', () => {
     queue.reset();
     const newStart = queue.enqueue({backendUrl: 'http://backend'}, {query: 'new'});
     first.resolve(receipt('old-session', 'run-1'));
-    await expect(staleStart).rejects.toBeInstanceOf(
-      ConversationStartInvalidatedError,
-    );
+    await expect(staleStart).resolves.toEqual(receipt('old-session', 'run-1'));
     await newStart;
 
     expect(start).toHaveBeenNthCalledWith(2, {backendUrl: 'http://backend'}, {query: 'new'});
     expect(sessionId).toBe('new-session');
+  });
+
+  it('returns a receipt that arrives after reset so the caller can cancel it', async () => {
+    let sessionId: string | undefined = 'old-session';
+    const started = deferredReceipt();
+    const queue = new ConversationStartQueue(
+      () => sessionId,
+      (value) => { sessionId = value; },
+      vi.fn().mockImplementationOnce(() => started.promise),
+    );
+
+    const inFlight = queue.enqueue(
+      {backendUrl: 'http://backend'},
+      {query: 'stale'},
+    );
+    await Promise.resolve();
+    queue.reset();
+    const lateReceipt = receipt('old-session', 'run-1');
+    started.resolve(lateReceipt);
+
+    await expect(inFlight).resolves.toEqual(lateReceipt);
+    expect(sessionId).toBeUndefined();
   });
 
   it('drops queued work deterministically after invalidation', async () => {
@@ -107,9 +127,7 @@ describe('ConversationStartQueue', () => {
     queue.reset({persist: false});
     first.resolve(receipt('old-session', 'run-1'));
 
-    await expect(inFlight).rejects.toBeInstanceOf(
-      ConversationStartInvalidatedError,
-    );
+    await expect(inFlight).resolves.toEqual(receipt('old-session', 'run-1'));
     await expect(queued).rejects.toBeInstanceOf(
       ConversationStartInvalidatedError,
     );

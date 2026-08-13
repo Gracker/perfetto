@@ -10750,7 +10750,6 @@ Click ⚙️ to configure backend connection.`,
         traceId: this.state.backendTraceId ?? undefined,
         analysisContext: this.state.analysisContext,
         ...(selectionContext ? {selectionContext} : {}),
-        signal: controller.signal,
       });
       if (ordinal !== this.conversationRequestOrdinal) {
         await cancelConversationRun(config, receipt.sessionId, receipt.runId)
