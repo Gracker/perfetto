@@ -45,6 +45,7 @@ export default defineConfig({
     include: [
       'src/**/*_unittest.ts',
       'src/**/*_jsdomtest.ts',
+      'syntaqlite_build_unittest.ts',
       'vite_config_unittest.ts',
     ],
     // Registers @testing-library/jest-dom matchers (toBeInTheDocument, etc.).
