@@ -654,6 +654,11 @@
 // Base Panel Layout
 // ----------------------------------------------------------------------------
 
+.ai-page-auth-ready {
+  // PageAuthGate owns identity/remount lifecycle, not layout.
+  display: contents;
+}
+
 .ai-panel {
   display: flex;
   flex-direction: column;
@@ -1757,6 +1762,7 @@
 
 .ai-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 12px 8px;
