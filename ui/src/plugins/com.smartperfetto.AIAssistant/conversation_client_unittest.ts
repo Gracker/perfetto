@@ -49,9 +49,6 @@ describe('startConversationTurn', () => {
       eventId: 42,
       ts: 1000,
       dur: 250,
-      name: 'monitor contention',
-      threadName: 'main',
-      processName: 'com.example.app',
     };
 
     await startConversationTurn({backendUrl: 'http://backend'}, {
@@ -73,9 +70,6 @@ describe('startConversationTurn', () => {
       eventId: 42,
       ts: 1000,
       dur: 250,
-      name: 'monitor contention',
-      threadName: 'main',
-      processName: 'com.example.app',
     });
   });
 });

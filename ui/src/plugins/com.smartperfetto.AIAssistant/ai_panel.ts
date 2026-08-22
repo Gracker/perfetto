@@ -33,7 +33,6 @@ import {
 import type {Engine} from '../../trace_processor/engine';
 import {LONG, NUM_NULL, STR_NULL} from '../../trace_processor/query_result';
 import type {Trace} from '../../public/trace';
-import type {Track} from '../../public/track';
 import {HttpRpcEngine} from '../../trace_processor/http_rpc_engine';
 import {
   backendUploadSourceKey,
@@ -89,7 +88,6 @@ import type {
   SelectionTrackInfo,
   SliceCardInfo,
   AreaCardInfo,
-  TraceDataset,
   DataSourceContext,
   LatestAnalysisSnapshot,
   AnalysisResultPickerItem,
@@ -287,6 +285,8 @@ const MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS = 32;
 const ANALYSIS_CONTEXT_CODEBASE_RETRY_DELAY_MS = 15_000;
 const MODEL_BACKED_COMMANDS = new Set([
   '/analyze',
+  '/anr',
+  '/jank',
   '/slow',
   '/memory',
   '/smart',
@@ -305,16 +305,6 @@ function parseAiCapabilityPolicy(
   if (!Array.isArray(policy.allowedDeterministicFeatures)) return undefined;
   if (!Array.isArray(policy.blockedFeatures)) return undefined;
   return policy as AiCapabilityPolicy;
-}
-
-interface AreaQueryScope {
-  startNs: number;
-  endNs: number;
-  durationNs: number;
-  source: SelectionContext['source'];
-  utids: number[];
-  upids: number[];
-  cpus: number[];
 }
 
 const RANGE_REFERENCE_PATTERNS = [
@@ -657,7 +647,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     areaCardInfo: null,
     sliceCardPrevSelId: '',
     sliceCardDismissed: false,
-    pendingTraceContext: null,
     captureConfigSuggestion: createCaptureConfigSuggestionState(),
   };
 
@@ -1663,7 +1652,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
     this.retireBackendAgentSession();
-    this.state.pendingTraceContext = null;
     this.state.sseLastEventId = null;
     this.saveCurrentSession();
   }
@@ -4727,8 +4715,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                             )
                           : aiDisabled
                             ? uiText(
-                                'AI 已禁用；可继续输入 /sql、/goto、/anr、/jank 等确定性命令',
-                                'AI is disabled; deterministic commands such as /sql, /goto, /anr, and /jank remain available.',
+                                'AI 已禁用；仍可使用 /sql、/goto 等本地确定性命令',
+                                'AI is disabled; local deterministic commands such as /sql and /goto remain available.',
                               )
                             : uiText(
                                 '询问任何关于当前 Trace 的问题...',
@@ -6525,7 +6513,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     this.tracePairWorkspaceController.resetScope();
     resetTransientState();
-    this.state.pendingTraceContext = null;
     this.availableTraces = [];
     this.state.showTracePicker = false;
     this.clearTracePairSessionState();
@@ -6677,7 +6664,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.retireBackendAgentSession(this.state.settings.backendUrl);
       this.tracePairWorkspaceController.resetScope();
       this.state.backendTraceId = null;
-      this.state.pendingTraceContext = null;
       this.clearTracePairSessionState();
       if (backendUrlChanged) setDefaultBackendUrl(newSettings.backendUrl);
       setDefaultBackendCredential(newSettings.backendApiKey);
@@ -7555,8 +7541,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ),
         '',
         uiText(
-          '仍可继续使用 SQL 查询、时间跳转、ANR/Jank 检测、结果收藏、Provider 配置/切换，以及已有报告读取。',
-          'SQL queries, timeline navigation, ANR/Jank detection, saved results, provider configuration/switching, and existing reports remain available.',
+          '仍可继续使用 SQL 查询、时间跳转、结果收藏、Provider 配置/切换，以及已有报告读取。ANR/Jank 分析需要启用 AI 后端。',
+          'SQL queries, timeline navigation, saved results, provider configuration/switching, and existing reports remain available. ANR/Jank analysis requires the AI backend.',
         ),
       ].join('\n'),
       timestamp: Date.now(),
@@ -7771,8 +7757,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 * \`/sql <查询>\` - 执行 SQL
 * \`/goto <时间戳>\` - 跳转到时间点
 * \`/analyze\` - 分析当前选区
-* \`/anr\` - 查找 ANR
-* \`/jank\` - 查找卡顿帧
+* \`/anr\` - 分析 ANR（后端证据管线）
+* \`/jank\` - 分析卡顿帧（后端证据管线）
 * \`/slow\` - 分析慢操作（后端）
 * \`/memory\` - 分析内存（后端）
 * \`/pins\` - 查看当前会话收藏的结果
@@ -7795,8 +7781,8 @@ I can help you analyze Perfetto traces. Here are some things you can ask:
 * \`/sql <query>\` - Execute a SQL query
 * \`/goto <timestamp>\` - Jump to a timestamp
 * \`/analyze\` - Analyze current selection
-* \`/anr\` - Find ANRs
-* \`/jank\` - Find janky frames
+* \`/anr\` - Analyze ANRs (backend evidence pipeline)
+* \`/jank\` - Analyze janky frames (backend evidence pipeline)
 * \`/slow\` - Analyze slow operations (backend)
 * \`/memory\` - Analyze memory usage (backend)
 * \`/pins\` - View results saved in this conversation
@@ -8149,8 +8135,6 @@ Click ⚙️ to configure backend connection.`,
     if (!query) return;
 
     this.state.input = query;
-    const datasets = await this.querySelectionData();
-    this.state.pendingTraceContext = datasets.length > 0 ? datasets : null;
     this.sendMessage();
   }
 
@@ -8800,8 +8784,6 @@ Click ⚙️ to configure backend connection.`,
       if (last?.role === 'user' && last.content.trim() === '/analyze') {
         last.content = query;
       }
-      const datasets = await this.querySelectionData();
-      this.state.pendingTraceContext = datasets.length > 0 ? datasets : null;
       await this.handleChatMessage(query);
       return;
     }
@@ -8878,6 +8860,9 @@ Click ⚙️ to configure backend connection.`,
     let sliceCount = 0;
     let trackCount = 0;
     let jankCount = 0;
+    let sliceStatsStatus: AreaCardInfo['sliceStatsStatus'] = 'unavailable';
+    let topSlicesStatus: AreaCardInfo['topSlicesStatus'] = 'unavailable';
+    let jankStatus: AreaCardInfo['jankStatus'] = 'unavailable';
     const topSlices: Array<{name: string; durMs: number; count: number}> = [];
 
     if (!this.engine) {
@@ -8888,6 +8873,9 @@ Click ⚙️ to configure backend connection.`,
         sliceCount,
         trackCount,
         topSlices,
+        sliceStatsStatus,
+        topSlicesStatus,
+        jankStatus,
         hasJank: false,
         jankCount,
       };
@@ -8903,9 +8891,10 @@ Click ⚙️ to configure backend connection.`,
       if (it.valid()) {
         sliceCount = Number(it.cnt ?? 0);
         trackCount = Number(it.tracks ?? 0);
+        sliceStatsStatus = 'observed';
       }
     } catch {
-      /* ignore */
+      /* unavailable */
     }
 
     try {
@@ -8926,8 +8915,9 @@ Click ⚙️ to configure backend connection.`,
           count: Number(it.cnt ?? 0),
         });
       }
+      topSlicesStatus = 'observed';
     } catch {
-      /* ignore */
+      topSlices.length = 0;
     }
 
     try {
@@ -8937,7 +8927,10 @@ Click ⚙️ to configure backend connection.`,
           AND jank_type IS NOT NULL AND jank_type != 'None'
       `);
       const it = r.iter({cnt: NUM_NULL});
-      if (it.valid()) jankCount = Number(it.cnt ?? 0);
+      if (it.valid()) {
+        jankCount = Number(it.cnt ?? 0);
+        jankStatus = 'observed';
+      }
     } catch {
       /* ignore */
     }
@@ -8949,6 +8942,9 @@ Click ⚙️ to configure backend connection.`,
       sliceCount,
       trackCount,
       topSlices,
+      sliceStatsStatus,
+      topSlicesStatus,
+      jankStatus,
       hasJank: jankCount > 0,
       jankCount,
     };
@@ -8957,739 +8953,6 @@ Click ⚙️ to configure backend connection.`,
   /**
    * Detect selection changes (called from view()) and trigger async slice/area info query.
    */
-  private uniqueFiniteNumbers(values: Array<number | undefined>): number[] {
-    return Array.from(
-      new Set(
-        values.filter(
-          (value): value is number =>
-            typeof value === 'number' && Number.isFinite(value),
-        ),
-      ),
-    ).sort((a, b) => a - b);
-  }
-
-  private sqlNumberList(values: number[]): string {
-    return values.join(',');
-  }
-
-  private buildTrackScopeFromPerfettoTracks(
-    tracks: ReadonlyArray<Track>,
-  ): Pick<AreaQueryScope, 'utids' | 'upids' | 'cpus'> {
-    return {
-      utids: this.uniqueFiniteNumbers(
-        tracks.map((track) => track.tags?.utid as number | undefined),
-      ),
-      upids: this.uniqueFiniteNumbers(
-        tracks.map((track) => track.tags?.upid as number | undefined),
-      ),
-      cpus: this.uniqueFiniteNumbers(
-        tracks.map((track) => track.tags?.cpu as number | undefined),
-      ),
-    };
-  }
-
-  private buildTrackScopeFromSelectionContext(
-    context: SelectionContext,
-  ): Pick<AreaQueryScope, 'utids' | 'upids' | 'cpus'> {
-    return {
-      utids: this.uniqueFiniteNumbers(
-        context.tracks?.map((track) => track.utid) ?? [],
-      ),
-      upids: this.uniqueFiniteNumbers(
-        context.tracks?.map((track) => track.upid) ?? [],
-      ),
-      cpus: this.uniqueFiniteNumbers(
-        context.tracks?.map((track) => track.cpu) ?? [],
-      ),
-    };
-  }
-
-  private getAreaQueryScope(
-    selectionContext?: SelectionContext,
-  ): AreaQueryScope | null {
-    if (!this.trace) return null;
-    const sel = this.trace.selection.selection;
-
-    if (sel.kind === 'area') {
-      const startNs = Number(sel.start);
-      const endNs = Number(sel.end);
-      const trackScope = this.buildTrackScopeFromPerfettoTracks(sel.tracks);
-      return {
-        startNs,
-        endNs,
-        durationNs: endNs - startNs,
-        source: 'area_selection',
-        ...trackScope,
-      };
-    }
-
-    if (
-      selectionContext?.kind === 'area' &&
-      selectionContext.startNs !== undefined &&
-      selectionContext.endNs !== undefined
-    ) {
-      const trackScope =
-        this.buildTrackScopeFromSelectionContext(selectionContext);
-      return {
-        startNs: selectionContext.startNs,
-        endNs: selectionContext.endNs,
-        durationNs:
-          selectionContext.durationNs ??
-          selectionContext.endNs - selectionContext.startNs,
-        source: selectionContext.source ?? 'area_selection',
-        ...trackScope,
-      };
-    }
-
-    return null;
-  }
-
-  private areaThreadPredicate(
-    scope: AreaQueryScope,
-    threadStateAlias = 'ts',
-    threadAlias = 't',
-  ): string {
-    const clauses: string[] = [];
-    if (scope.utids.length > 0) {
-      clauses.push(
-        `${threadStateAlias}.utid IN (${this.sqlNumberList(scope.utids)})`,
-      );
-    }
-    if (scope.upids.length > 0) {
-      clauses.push(
-        `${threadAlias}.upid IN (${this.sqlNumberList(scope.upids)})`,
-      );
-    }
-    if (scope.cpus.length > 0) {
-      clauses.push(
-        `${threadStateAlias}.cpu IN (${this.sqlNumberList(scope.cpus)})`,
-      );
-    }
-    return clauses.length > 0 ? `AND (${clauses.join(' OR ')})` : '';
-  }
-
-  private areaSlicePredicate(scope: AreaQueryScope): string {
-    const clauses: string[] = [];
-    if (scope.utids.length > 0) {
-      clauses.push(`tt.utid IN (${this.sqlNumberList(scope.utids)})`);
-    }
-    if (scope.upids.length > 0) {
-      clauses.push(`t.upid IN (${this.sqlNumberList(scope.upids)})`);
-    }
-    return clauses.length > 0 ? `AND (${clauses.join(' OR ')})` : '';
-  }
-
-  private areaCpuPredicate(scope: AreaQueryScope, cpuAlias: string): string {
-    return scope.cpus.length > 0
-      ? `AND ${cpuAlias} IN (${this.sqlNumberList(scope.cpus)})`
-      : '';
-  }
-
-  private cpuTopologyCte(): string {
-    return `
-      cpu_universe AS (
-        SELECT cpu AS cpu_id FROM sched_slice WHERE cpu IS NOT NULL
-        UNION
-        SELECT cpu AS cpu_id FROM thread_state WHERE cpu IS NOT NULL
-        UNION
-        SELECT id AS cpu_id FROM cpu
-      ),
-      cpu_scale AS (
-        SELECT
-          u.cpu_id,
-          COALESCE(NULLIF(cpu.capacity, 0), 0) AS scale_value
-        FROM cpu_universe u
-        LEFT JOIN cpu ON cpu.id = u.cpu_id
-      ),
-      scale_values AS (
-        SELECT
-          scale_value,
-          ROW_NUMBER() OVER (ORDER BY scale_value ASC) AS cluster_rank,
-          COUNT(*) OVER () AS cluster_count
-        FROM (
-          SELECT DISTINCT scale_value
-          FROM cpu_scale
-          WHERE scale_value > 0
-        )
-      ),
-      cpu_topology AS (
-        SELECT
-          cs.cpu_id,
-          CASE
-            WHEN cs.scale_value <= 0 OR sv.scale_value IS NULL THEN 'unknown'
-            WHEN sv.cluster_count = 1 AND (SELECT COUNT(*) FROM cpu_scale) <= 4 THEN 'little'
-            WHEN sv.cluster_count = 1 THEN 'unknown'
-            WHEN sv.cluster_rank = 1 THEN 'little'
-            WHEN sv.cluster_rank = sv.cluster_count THEN 'big'
-            ELSE 'medium'
-          END AS core_type
-        FROM cpu_scale cs
-        LEFT JOIN scale_values sv ON sv.scale_value = cs.scale_value
-      )
-    `;
-  }
-
-  private cpuFrequencySpansCte(
-    scope: AreaQueryScope,
-    startNs: number,
-    endNs: number,
-  ): string {
-    const freqCpuScope = this.areaCpuPredicate(scope, 't.cpu');
-    return `
-      ${this.cpuTopologyCte()},
-      cpu_tracks AS (
-        SELECT id, cpu
-        FROM cpu_counter_track t
-        WHERE t.name = 'cpufreq'
-          AND t.cpu IS NOT NULL
-          ${freqCpuScope}
-      ),
-      freq_points AS (
-        SELECT
-          t.cpu,
-          ${startNs} AS ts,
-          (
-            SELECT c2.value
-            FROM counter c2
-            WHERE c2.track_id = t.id AND c2.ts <= ${startNs}
-            ORDER BY c2.ts DESC
-            LIMIT 1
-          ) AS freq_khz,
-          0 AS source_order
-        FROM cpu_tracks t
-        UNION ALL
-        SELECT t.cpu, c.ts, c.value AS freq_khz, 1 AS source_order
-        FROM counter c
-        JOIN cpu_tracks t ON c.track_id = t.id
-        WHERE c.ts >= ${startNs} AND c.ts < ${endNs}
-      ),
-      freq_spans AS (
-        SELECT
-          cpu,
-          freq_khz,
-          ts,
-          LEAD(ts, 1, ${endNs}) OVER (PARTITION BY cpu ORDER BY ts, source_order) AS next_ts
-        FROM freq_points
-        WHERE freq_khz IS NOT NULL AND freq_khz > 0
-      ),
-      freq_clipped AS (
-        SELECT
-          cpu,
-          freq_khz,
-          MIN(next_ts, ${endNs}) - MAX(ts, ${startNs}) AS dur_ns
-        FROM freq_spans
-        WHERE ts < ${endNs} AND next_ts > ${startNs}
-      )
-    `;
-  }
-
-  /**
-   * Pre-query trace data for the current selection, mirroring smartperfetto's querySelectionData.
-   * Results are sent with the request so the AI doesn't need to spend turns fetching basics.
-   */
-  private async querySelectionData(
-    selectionContext?: SelectionContext,
-  ): Promise<TraceDataset[]> {
-    if (!this.engine || !this.trace) return [];
-    const sel = this.trace.selection.selection;
-    const datasets: TraceDataset[] = [];
-
-    const runQuery = async (
-      label: string,
-      sql: string,
-      schema: Record<string, any>,
-    ): Promise<void> => {
-      try {
-        const result = await this.engine!.query(sql);
-        const columns = Object.keys(schema);
-        const rows: unknown[][] = [];
-        for (const it = result.iter(schema); it.valid(); it.next()) {
-          rows.push(
-            columns.map((c) => {
-              const v = (it as any)[c];
-              return typeof v === 'bigint' ? Number(v) : v ?? null;
-            }),
-          );
-        }
-        if (rows.length > 0) datasets.push({label, columns, rows});
-      } catch {
-        /* ignore — table may not exist */
-      }
-    };
-
-    if (sel.kind === 'track_event') {
-      const id = sel.eventId;
-      const tsNs = Number(sel.ts);
-      const durNs = sel.dur !== undefined ? Number(sel.dur) : 0;
-      const endNs = tsNs + durNs;
-
-      // 1) Slice details + thread/process
-      await runQuery(
-        `slice id=${id}`,
-        `
-        SELECT s.id, s.name, s.ts, s.dur, CAST(s.dur/1e6 AS REAL) as dur_ms,
-          t.name as thread_name, p.name as process_name, s.depth, t.utid, t.tid
-        FROM slice s
-        LEFT JOIN thread_track tt ON s.track_id = tt.id
-        LEFT JOIN thread t ON tt.utid = t.utid
-        LEFT JOIN process p ON t.upid = p.upid
-        WHERE s.id = ${id}
-      `,
-        {
-          id: NUM_NULL,
-          name: STR_NULL,
-          ts: LONG,
-          dur: LONG,
-          dur_ms: NUM_NULL,
-          thread_name: STR_NULL,
-          process_name: STR_NULL,
-          depth: NUM_NULL,
-          utid: NUM_NULL,
-          tid: NUM_NULL,
-        },
-      );
-
-      // 2) If the selected slice is an Android FrameTimeline row, resolve the
-      // paired expected/actual/SF-present timing up front. This keeps the
-      // default selected-frame analysis on the quick path.
-      await runQuery(
-        `selected FrameTimeline frame for slice ${id}`,
-        `
-        WITH selected AS (
-          SELECT 'actual' AS selected_kind, id, name, upid, display_frame_token,
-                 surface_frame_token, layer_name
-          FROM actual_frame_timeline_slice
-          WHERE id = ${id}
-          UNION ALL
-          SELECT 'expected' AS selected_kind, id, name, upid, display_frame_token,
-                 surface_frame_token, layer_name
-          FROM expected_frame_timeline_slice
-          WHERE id = ${id}
-        ),
-        frame_key AS (
-          SELECT * FROM selected LIMIT 1
-        ),
-        expected_match AS (
-          SELECT e.*
-          FROM expected_frame_timeline_slice e
-          JOIN frame_key k ON e.upid = k.upid AND e.name = k.name
-          ORDER BY e.id
-          LIMIT 1
-        ),
-        actual_match AS (
-          SELECT a.*
-          FROM actual_frame_timeline_slice a
-          JOIN frame_key k ON
-            (a.id = k.id AND k.selected_kind = 'actual')
-            OR (a.upid = k.upid AND a.name = k.name)
-            OR (
-              k.display_frame_token IS NOT NULL
-              AND a.display_frame_token = k.display_frame_token
-              AND a.upid = k.upid
-            )
-          ORDER BY CASE WHEN a.id = k.id THEN 0 ELSE 1 END, a.dur DESC
-          LIMIT 1
-        ),
-        sf_match AS (
-          SELECT sf.*
-          FROM actual_frame_timeline_slice sf
-          JOIN actual_match a ON
-            a.display_frame_token IS NOT NULL
-            AND sf.display_frame_token = a.display_frame_token
-          WHERE sf.surface_frame_token IS NULL
-          ORDER BY sf.ts + sf.dur DESC
-          LIMIT 1
-        )
-        SELECT
-          k.selected_kind,
-          k.id AS selected_id,
-          COALESCE(a.name, e.name, k.name) AS frame_id,
-          COALESCE(a.layer_name, e.layer_name, k.layer_name) AS layer_name,
-          p.name AS process_name,
-          e.ts AS expected_start_ns,
-          e.ts + e.dur AS expected_end_ns,
-          CAST(e.dur / 1e6 AS REAL) AS expected_ms,
-          a.ts AS actual_start_ns,
-          a.ts + a.dur AS actual_end_ns,
-          CAST(a.dur / 1e6 AS REAL) AS actual_ms,
-          sf.ts AS sf_start_ns,
-          sf.ts + sf.dur AS sf_present_ns,
-          CAST(sf.dur / 1e6 AS REAL) AS sf_ms,
-          a.present_type,
-          a.on_time_finish,
-          a.jank_type,
-          a.jank_severity_type,
-          a.prediction_type,
-          a.gpu_composition
-        FROM frame_key k
-        LEFT JOIN expected_match e ON 1 = 1
-        LEFT JOIN actual_match a ON 1 = 1
-        LEFT JOIN sf_match sf ON 1 = 1
-        LEFT JOIN process p ON p.upid = COALESCE(a.upid, e.upid, k.upid)
-      `,
-        {
-          selected_kind: STR_NULL,
-          selected_id: NUM_NULL,
-          frame_id: STR_NULL,
-          layer_name: STR_NULL,
-          process_name: STR_NULL,
-          expected_start_ns: NUM_NULL,
-          expected_end_ns: NUM_NULL,
-          expected_ms: NUM_NULL,
-          actual_start_ns: NUM_NULL,
-          actual_end_ns: NUM_NULL,
-          actual_ms: NUM_NULL,
-          sf_start_ns: NUM_NULL,
-          sf_present_ns: NUM_NULL,
-          sf_ms: NUM_NULL,
-          present_type: STR_NULL,
-          on_time_finish: NUM_NULL,
-          jank_type: STR_NULL,
-          jank_severity_type: STR_NULL,
-          prediction_type: STR_NULL,
-          gpu_composition: NUM_NULL,
-        },
-      );
-
-      // 3) Ancestor chain (up to 10 levels)
-      await runQuery(
-        `caller chain of slice ${id}`,
-        `
-        WITH RECURSIVE ancestors(id, parent_id, name, dur, depth) AS (
-          SELECT id, parent_id, name, dur, depth FROM slice WHERE id = ${id}
-          UNION ALL
-          SELECT s.id, s.parent_id, s.name, s.dur, s.depth
-          FROM slice s JOIN ancestors a ON s.id = a.parent_id LIMIT 10
-        )
-        SELECT id, name, CAST(dur/1e6 AS REAL) as dur_ms, depth
-        FROM ancestors WHERE id != ${id} ORDER BY depth ASC
-      `,
-        {id: NUM_NULL, name: STR_NULL, dur_ms: NUM_NULL, depth: NUM_NULL},
-      );
-
-      // 4) Direct children (call tree)
-      await runQuery(
-        `children of slice ${id}`,
-        `
-        SELECT id, name, CAST(dur/1e6 AS REAL) as dur_ms, depth,
-          ROUND(dur * 100.0 / NULLIF((SELECT dur FROM slice WHERE id = ${id}), 0), 1) as pct
-        FROM slice WHERE parent_id = ${id} ORDER BY dur DESC LIMIT 50
-      `,
-        {
-          id: NUM_NULL,
-          name: STR_NULL,
-          dur_ms: NUM_NULL,
-          depth: NUM_NULL,
-          pct: NUM_NULL,
-        },
-      );
-
-      // 5) Thread state distribution
-      if (durNs > 0) {
-        await runQuery(
-          `thread state during slice ${id}`,
-          `
-          SELECT cpu, state, COUNT(*) AS cnt,
-            CAST(SUM(MIN(ts + dur, ${endNs}) - MAX(ts, ${tsNs}))/1e6 AS REAL) as total_ms,
-            CAST(SUM(MIN(ts + dur, ${endNs}) - MAX(ts, ${tsNs}))*100.0/${durNs} AS REAL) as pct
-          FROM thread_state
-          WHERE utid = (SELECT tt.utid FROM slice s JOIN thread_track tt ON s.track_id=tt.id WHERE s.id=${id})
-            AND ts < ${endNs} AND ts + dur > ${tsNs} AND dur > 0
-          GROUP BY cpu, state ORDER BY total_ms DESC
-        `,
-          {
-            cpu: NUM_NULL,
-            state: STR_NULL,
-            cnt: NUM_NULL,
-            total_ms: NUM_NULL,
-            pct: NUM_NULL,
-          },
-        );
-      }
-    } else {
-      const scope = this.getAreaQueryScope(selectionContext);
-      if (!scope) return datasets;
-      const {startNs, endNs} = scope;
-      const threadScope = this.areaThreadPredicate(scope);
-      const sliceScope = this.areaSlicePredicate(scope);
-      const freqBucketMhz = 100;
-
-      // Top slices by total duration
-      await runQuery(
-        `top slices in range`,
-        `
-        WITH clipped AS (
-          SELECT
-            s.name,
-            MIN(s.ts + s.dur, ${endNs}) - MAX(s.ts, ${startNs}) AS clipped_dur
-          FROM slice s
-          LEFT JOIN thread_track tt ON s.track_id = tt.id
-          LEFT JOIN thread t ON tt.utid = t.utid
-          WHERE s.ts < ${endNs}
-            AND s.ts + s.dur > ${startNs}
-            AND s.dur > 0
-            ${sliceScope}
-        )
-        SELECT name, COUNT(*) as cnt,
-          CAST(SUM(clipped_dur)/1e6 AS REAL) as total_ms,
-          CAST(AVG(clipped_dur)/1e6 AS REAL) as avg_ms
-        FROM clipped
-        WHERE clipped_dur > 0
-        GROUP BY name ORDER BY total_ms DESC LIMIT 20
-      `,
-        {name: STR_NULL, cnt: NUM_NULL, total_ms: NUM_NULL, avg_ms: NUM_NULL},
-      );
-
-      // Thread state summary
-      await runQuery(
-        `thread states in range`,
-        `
-        SELECT
-          COALESCE(t.name, '<unknown>') as thread_name,
-          COALESCE(p.name, '<unknown>') as process_name,
-          ts.state,
-          CAST(SUM(MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}))/1e6 AS REAL) as total_ms
-        FROM thread_state ts
-        JOIN thread t ON ts.utid = t.utid
-        LEFT JOIN process p ON t.upid = p.upid
-        WHERE ts.ts < ${endNs}
-          AND ts.ts + ts.dur > ${startNs}
-          AND ts.dur > 0
-          ${threadScope}
-        GROUP BY t.utid, ts.state ORDER BY total_ms DESC LIMIT 30
-      `,
-        {
-          thread_name: STR_NULL,
-          process_name: STR_NULL,
-          state: STR_NULL,
-          total_ms: NUM_NULL,
-        },
-      );
-
-      await runQuery(
-        `running threads in range`,
-        `
-        WITH ${this.cpuTopologyCte()},
-        running AS (
-          SELECT
-            ts.utid,
-            COALESCE(t.name, '<unknown>') AS thread_name,
-            COALESCE(p.name, '<unknown>') AS process_name,
-            t.tid,
-            ts.cpu,
-            COALESCE(ct.core_type, 'unknown') AS core_type,
-            MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}) AS clipped_dur
-          FROM thread_state ts
-          JOIN thread t ON ts.utid = t.utid
-          LEFT JOIN process p ON t.upid = p.upid
-          LEFT JOIN cpu_topology ct ON ts.cpu = ct.cpu_id
-          WHERE ts.ts < ${endNs}
-            AND ts.ts + ts.dur > ${startNs}
-            AND ts.dur > 0
-            AND ts.state = 'Running'
-            ${threadScope}
-        )
-        SELECT
-          thread_name,
-          process_name,
-          tid,
-          CAST(SUM(clipped_dur)/1e6 AS REAL) as running_ms,
-          GROUP_CONCAT(DISTINCT cpu) as cpus,
-          GROUP_CONCAT(DISTINCT core_type) as core_types,
-          CAST(SUM(CASE WHEN core_type IN ('big', 'medium', 'prime') THEN clipped_dur ELSE 0 END) * 100.0 / NULLIF(SUM(clipped_dur), 0) AS REAL) as perf_core_pct
-        FROM running
-        WHERE clipped_dur > 0
-        GROUP BY utid
-        ORDER BY running_ms DESC
-        LIMIT 30
-      `,
-        {
-          thread_name: STR_NULL,
-          process_name: STR_NULL,
-          tid: NUM_NULL,
-          running_ms: NUM_NULL,
-          cpus: STR_NULL,
-          core_types: STR_NULL,
-          perf_core_pct: NUM_NULL,
-        },
-      );
-
-      await runQuery(
-        `running processes in range`,
-        `
-        SELECT
-          COALESCE(p.name, '<unknown>') AS process_name,
-          p.pid,
-          CAST(SUM(MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}))/1e6 AS REAL) as running_ms,
-          COUNT(DISTINCT ts.utid) as thread_count
-        FROM thread_state ts
-        JOIN thread t ON ts.utid = t.utid
-        LEFT JOIN process p ON t.upid = p.upid
-        WHERE ts.ts < ${endNs}
-          AND ts.ts + ts.dur > ${startNs}
-          AND ts.dur > 0
-          AND ts.state = 'Running'
-          ${threadScope}
-        GROUP BY p.upid
-        ORDER BY running_ms DESC
-        LIMIT 20
-      `,
-        {
-          process_name: STR_NULL,
-          pid: NUM_NULL,
-          running_ms: NUM_NULL,
-          thread_count: NUM_NULL,
-        },
-      );
-
-      await runQuery(
-        `thread quadrants and CPU placement in range`,
-        `
-        WITH ${this.cpuTopologyCte()},
-        states AS (
-          SELECT
-            ts.utid,
-            COALESCE(t.name, '<unknown>') AS thread_name,
-            COALESCE(p.name, '<unknown>') AS process_name,
-            t.tid,
-            ts.ts,
-            ts.state,
-            ts.cpu,
-            COALESCE(ct.core_type, 'unknown') AS core_type,
-            MIN(ts.ts + ts.dur, ${endNs}) - MAX(ts.ts, ${startNs}) AS clipped_dur
-          FROM thread_state ts
-          JOIN thread t ON ts.utid = t.utid
-          LEFT JOIN process p ON t.upid = p.upid
-          LEFT JOIN cpu_topology ct ON ts.cpu = ct.cpu_id
-          WHERE ts.ts < ${endNs}
-            AND ts.ts + ts.dur > ${startNs}
-            AND ts.dur > 0
-            ${threadScope}
-        ),
-        running_events AS (
-          SELECT
-            utid,
-            ts,
-            cpu,
-            core_type,
-            LAG(cpu) OVER (PARTITION BY utid ORDER BY ts) AS prev_cpu,
-            LAG(core_type) OVER (PARTITION BY utid ORDER BY ts) AS prev_core_type
-          FROM states
-          WHERE state = 'Running' AND clipped_dur > 0
-        ),
-        migrations AS (
-          SELECT
-            utid,
-            SUM(CASE WHEN prev_cpu IS NOT NULL AND cpu != prev_cpu THEN 1 ELSE 0 END) AS migrations,
-            SUM(CASE WHEN prev_cpu IS NOT NULL AND cpu != prev_cpu AND core_type != prev_core_type THEN 1 ELSE 0 END) AS cross_cluster_migrations
-          FROM running_events
-          GROUP BY utid
-        )
-        SELECT
-          s.thread_name,
-          s.process_name,
-          s.tid,
-          CAST(SUM(CASE WHEN s.state = 'Running' THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS total_cpu_ms,
-          CAST(SUM(CASE WHEN s.state = 'Running' AND s.core_type IN ('big', 'medium', 'prime') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q1_big_running_ms,
-          CAST(SUM(CASE WHEN s.state = 'Running' AND s.core_type = 'little' THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q2_little_running_ms,
-          CAST(SUM(CASE WHEN s.state IN ('R', 'R+') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q3_runnable_ms,
-          CAST(SUM(CASE WHEN s.state IN ('D', 'DK') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q4a_io_blocked_ms,
-          CAST(SUM(CASE WHEN s.state IN ('S', 'I') THEN s.clipped_dur ELSE 0 END)/1e6 AS REAL) AS q4b_sleeping_ms,
-          CAST(SUM(s.clipped_dur)/1e6 AS REAL) AS total_state_ms,
-          GROUP_CONCAT(DISTINCT CASE WHEN s.state = 'Running' THEN s.cpu END) AS running_cpus,
-          GROUP_CONCAT(DISTINCT CASE WHEN s.state = 'Running' THEN s.core_type END) AS running_core_types,
-          COALESCE(m.migrations, 0) AS migrations,
-          COALESCE(m.cross_cluster_migrations, 0) AS cross_cluster_migrations
-        FROM states s
-        LEFT JOIN migrations m ON s.utid = m.utid
-        WHERE s.clipped_dur > 0
-        GROUP BY s.utid
-        HAVING total_cpu_ms > 0
-        ORDER BY total_cpu_ms DESC
-        LIMIT 20
-      `,
-        {
-          thread_name: STR_NULL,
-          process_name: STR_NULL,
-          tid: NUM_NULL,
-          total_cpu_ms: NUM_NULL,
-          q1_big_running_ms: NUM_NULL,
-          q2_little_running_ms: NUM_NULL,
-          q3_runnable_ms: NUM_NULL,
-          q4a_io_blocked_ms: NUM_NULL,
-          q4b_sleeping_ms: NUM_NULL,
-          total_state_ms: NUM_NULL,
-          running_cpus: STR_NULL,
-          running_core_types: STR_NULL,
-          migrations: NUM_NULL,
-          cross_cluster_migrations: NUM_NULL,
-        },
-      );
-
-      await runQuery(
-        `CPU frequency summary in range`,
-        `
-        WITH ${this.cpuFrequencySpansCte(scope, startNs, endNs)}
-        SELECT
-          c.cpu,
-          COALESCE(ct.core_type, 'unknown') AS core_type,
-          CAST(SUM(freq_khz * dur_ns) / NULLIF(SUM(dur_ns), 0) / 1000 AS REAL) AS avg_freq_mhz,
-          CAST(MIN(freq_khz) / 1000 AS REAL) AS min_freq_mhz,
-          CAST(MAX(freq_khz) / 1000 AS REAL) AS max_freq_mhz,
-          CAST(SUM(dur_ns)/1e6 AS REAL) AS covered_ms
-        FROM freq_clipped c
-        LEFT JOIN cpu_topology ct ON c.cpu = ct.cpu_id
-        WHERE dur_ns > 0
-        GROUP BY c.cpu
-        ORDER BY c.cpu
-      `,
-        {
-          cpu: NUM_NULL,
-          core_type: STR_NULL,
-          avg_freq_mhz: NUM_NULL,
-          min_freq_mhz: NUM_NULL,
-          max_freq_mhz: NUM_NULL,
-          covered_ms: NUM_NULL,
-        },
-      );
-
-      await runQuery(
-        `CPU frequency distribution in range`,
-        `
-        WITH ${this.cpuFrequencySpansCte(scope, startNs, endNs)},
-        buckets AS (
-          SELECT
-            cpu,
-            CAST(ROUND(freq_khz / (${freqBucketMhz} * 1000.0)) * ${freqBucketMhz} AS INTEGER) AS freq_mhz_bucket,
-            dur_ns
-          FROM freq_clipped
-        )
-        SELECT
-          c.cpu,
-          COALESCE(ct.core_type, 'unknown') AS core_type,
-          c.freq_mhz_bucket,
-          CAST(SUM(c.dur_ns)/1e6 AS REAL) AS duration_ms,
-          CAST(SUM(c.dur_ns) * 100.0 / NULLIF(${endNs} - ${startNs}, 0) AS REAL) AS pct_of_range
-        FROM buckets c
-        LEFT JOIN cpu_topology ct ON c.cpu = ct.cpu_id
-        WHERE c.dur_ns > 0
-        GROUP BY c.cpu, c.freq_mhz_bucket
-        ORDER BY c.cpu, duration_ms DESC
-        LIMIT 80
-      `,
-        {
-          cpu: NUM_NULL,
-          core_type: STR_NULL,
-          freq_mhz_bucket: NUM_NULL,
-          duration_ms: NUM_NULL,
-          pct_of_range: NUM_NULL,
-        },
-      );
-    }
-
-    return datasets;
-  }
-
   private updateSliceCard(): void {
     if (!this.trace) return;
     const sel = this.trace.selection.selection;
@@ -9737,26 +9000,18 @@ Click ⚙️ to configure backend connection.`,
     if (!info) return null;
 
     const dur = this.fmtDurMs(info.durMs);
-    const isSlow = info.durMs >= 16;
 
     const onAction = (query: string) => {
       this.state.sliceCardDismissed = true;
       this.state.input = query;
-      // Pre-query trace data before sending — result stored in pendingTraceContext
-      this.querySelectionData().then((datasets) => {
-        this.state.pendingTraceContext = datasets.length > 0 ? datasets : null;
-        this.sendMessage();
-      });
+      this.sendMessage();
     };
 
     return m('div.sp-sel-card', [
       m('div.sp-sel-card-header', [
         m(
           'span.sp-sel-card-title',
-          uiText(
-            `⬛ 已选 Slice${isSlow ? ' ⚠️' : ''}`,
-            `⬛ Slice selected${isSlow ? ' ⚠️' : ''}`,
-          ),
+          uiText('⬛ 已选 Slice', '⬛ Slice selected'),
         ),
         m(
           'button.sp-sel-card-dismiss',
@@ -9842,22 +9097,6 @@ Click ⚙️ to configure backend connection.`,
           },
           uiText('📊 调用链', '📊 Call chain'),
         ),
-        isSlow
-          ? m(
-              'button.sp-action-btn.sp-action-btn--secondary',
-              {
-                onclick: () =>
-                  onAction(
-                    uiText(
-                      `“${info.name}”耗时 ${dur}，超过帧预算（16ms）；分析为什么会卡顿`,
-                      `${info.name} took ${dur}, exceeding the 16ms frame budget; analyze why it janks`,
-                    ),
-                  ),
-                disabled: this.state.isLoading,
-              },
-              uiText('🚨 卡顿分析', '🚨 Jank analysis'),
-            )
-          : null,
       ]),
     ]);
   }
@@ -9880,10 +9119,7 @@ Click ⚙️ to configure backend connection.`,
     const onAction = (query: string) => {
       this.state.sliceCardDismissed = true;
       this.state.input = query;
-      this.querySelectionData().then((datasets) => {
-        this.state.pendingTraceContext = datasets.length > 0 ? datasets : null;
-        this.sendMessage();
-      });
+      this.sendMessage();
     };
 
     return m('div.sp-sel-card', [
@@ -9910,22 +9146,30 @@ Click ⚙️ to configure backend connection.`,
       m('div.sp-sel-card-meta', [
         m('span.sp-meta-pill', ['⏱ ', m('strong', dur)]),
         m('span.sp-meta-pill', ['📍 ', `${startMs}ms – ${endMs}ms`]),
-        info.sliceCount > 0
+        info.sliceStatsStatus === 'observed'
           ? m('span.sp-meta-pill', [
               '📋 ',
-              uiText(`${info.sliceCount} 个 Slice`, `${info.sliceCount} slices`),
-            ])
-          : null,
-        info.trackCount > 0
-          ? m('span.sp-meta-pill', [
-              '🎛 ',
               uiText(
-                `${info.trackCount} 个轨道`,
-                `${info.trackCount} tracks`,
+                `${info.sliceCount} 个 Slice · ${info.trackCount} 个轨道`,
+                `${info.sliceCount} slices · ${info.trackCount} tracks`,
               ),
             ])
+          : m('span.sp-meta-pill', [
+              '📋 ',
+              uiText('Slice 统计不可用', 'Slice statistics unavailable'),
+            ]),
+        info.topSlicesStatus === 'unavailable'
+          ? m('span.sp-meta-pill', [
+              '⏳ ',
+              uiText('耗时 Slice 数据不可用', 'Top-slice data unavailable'),
+            ])
           : null,
-        info.hasJank
+        info.jankStatus === 'unavailable'
+          ? m('span.sp-meta-pill', [
+              '◌ ',
+              uiText('卡顿数据不可用', 'Jank data unavailable'),
+            ])
+          : info.hasJank
           ? m(
               'span.sp-meta-pill',
               {
@@ -9939,7 +9183,10 @@ Click ⚙️ to configure backend connection.`,
                 ),
               ],
             )
-          : null,
+          : m('span.sp-meta-pill', [
+              '✓ ',
+              uiText('未发现卡顿帧', 'No janky frames observed'),
+            ]),
       ]),
       info.topSlices.length > 0
         ? m(
@@ -10072,8 +9319,19 @@ Click ⚙️ to configure backend connection.`,
       const endNs = Number(sel.end);
       const durationNs = timeSpan ? Number(timeSpan.duration) : endNs - startNs;
 
-      // Resolve track metadata (thread/process names) from track tags
-      const tracks = await this.resolveTrackInfos(sel.tracks);
+      const tracks: SelectionTrackInfo[] = sel.tracks.map((track) => ({
+        uri: track.uri,
+        ...(track.tags?.utid !== undefined
+          ? {utid: track.tags.utid as number}
+          : {}),
+        ...(track.tags?.upid !== undefined
+          ? {upid: track.tags.upid as number}
+          : {}),
+        ...(track.tags?.cpu !== undefined
+          ? {cpu: track.tags.cpu as number}
+          : {}),
+        ...(track.tags?.type ? {kind: track.tags.type as string} : {}),
+      }));
 
       return {
         kind: 'area',
@@ -10087,11 +9345,6 @@ Click ⚙️ to configure backend connection.`,
     }
 
     if (sel.kind === 'track_event') {
-      // Reuse pre-queried sliceCardInfo if it matches current selection (avoids redundant SQL)
-      const cardInfo =
-        this.state.sliceCardInfo?.id === sel.eventId
-          ? this.state.sliceCardInfo
-          : null;
       const duration = sel.dur === undefined ? undefined : Number(sel.dur);
       const ctx: SelectionContext = {
         kind: 'track_event',
@@ -10101,13 +9354,6 @@ Click ⚙️ to configure backend connection.`,
         ts: Number(sel.ts),
         ...(duration !== undefined && duration >= 0 ? {dur: duration} : {}),
       };
-      if (cardInfo) {
-        ctx.name = cardInfo.name;
-        ctx.threadName = cardInfo.threadName;
-        ctx.processName = cardInfo.processName;
-        ctx.depth = cardInfo.depth;
-        ctx.childCount = cardInfo.childCount;
-      }
       console.log(
         '[AIPanel] captureSelectionContext: track_event captured',
         ctx,
@@ -10132,266 +9378,46 @@ Click ⚙️ to configure backend connection.`,
     return null;
   }
 
-  /**
-   * Batch-resolve track tags (utid/upid/cpu) into human-readable names via SQL.
-   */
-  private async resolveTrackInfos(
-    tracks: ReadonlyArray<import('../../public/track').Track>,
-  ): Promise<SelectionTrackInfo[]> {
-    const result: SelectionTrackInfo[] = [];
-    const utids = new Set<number>();
-    const upids = new Set<number>();
-
-    // Collect utid/upid/cpu from track tags
-    for (const t of tracks) {
-      const info: SelectionTrackInfo = {uri: t.uri};
-      if (t.tags?.cpu !== undefined) info.cpu = t.tags.cpu as number;
-      if (t.tags?.type) info.kind = t.tags.type as string;
-      if (t.tags?.utid !== undefined) {
-        info.utid = t.tags.utid as number;
-        utids.add(info.utid);
-      }
-      if (t.tags?.upid !== undefined) {
-        info.upid = t.tags.upid as number;
-        upids.add(info.upid);
-      }
-      result.push(info);
-    }
-
-    if (!this.engine || (utids.size === 0 && upids.size === 0)) return result;
-
-    // Batch query thread names
-    const threadMap = new Map<
-      number,
-      {name: string; tid: number; upid?: number}
-    >();
-    if (utids.size > 0) {
-      try {
-        const q = `SELECT utid, name, tid, upid FROM thread WHERE utid IN (${[...utids].join(',')})`;
-        const res = await this.engine.query(q);
-        const it = res.iter({});
-        while (it.valid()) {
-          threadMap.set(Number(it.get('utid')), {
-            name: String(it.get('name') ?? ''),
-            tid: Number(it.get('tid')),
-            upid: it.get('upid') != null ? Number(it.get('upid')) : undefined,
-          });
-          // Also collect upids from thread rows for process name resolution
-          if (it.get('upid') != null) upids.add(Number(it.get('upid')));
-          it.next();
-        }
-      } catch {
-        /* non-fatal */
-      }
-    }
-
-    // Batch query process names
-    const processMap = new Map<number, {name: string; pid: number}>();
-    if (upids.size > 0) {
-      try {
-        const q = `SELECT upid, name, pid FROM process WHERE upid IN (${[...upids].join(',')})`;
-        const res = await this.engine.query(q);
-        const it = res.iter({});
-        while (it.valid()) {
-          processMap.set(Number(it.get('upid')), {
-            name: String(it.get('name') ?? ''),
-            pid: Number(it.get('pid')),
-          });
-          it.next();
-        }
-      } catch {
-        /* non-fatal */
-      }
-    }
-
-    // Merge resolved names back into result
-    for (let i = 0; i < tracks.length; i++) {
-      const t = tracks[i];
-      const info = result[i];
-      const utid = t.tags?.utid as number | undefined;
-      const upid = t.tags?.upid as number | undefined;
-
-      if (utid !== undefined) {
-        const th = threadMap.get(utid);
-        if (th) {
-          info.threadName = th.name;
-          info.tid = th.tid;
-          // Resolve process via thread's upid
-          if (th.upid !== undefined) {
-            info.upid = th.upid;
-            const proc = processMap.get(th.upid);
-            if (proc) {
-              info.processName = proc.name;
-              info.pid = proc.pid;
-            }
-          }
-        }
-      }
-      if (upid !== undefined && !info.processName) {
-        const proc = processMap.get(upid);
-        if (proc) {
-          info.processName = proc.name;
-          info.pid = proc.pid;
-        }
-      }
-    }
-
-    return result;
-  }
-
   private async handleAnrCommand() {
-    this.setLoadingState(true);
-    m.redraw();
-
-    try {
-      const query = `
-        SELECT
-          id,
-          name,
-          ts,
-          dur / 1e6 as duration_ms,
-          EXTRACT_ARG(arg_set_id, 'anr.error_type') as error_type
-        FROM slice
-        WHERE dur > 5000000000
-          AND (category = 'Java' OR name LIKE '%ANR%')
-        ORDER BY dur DESC
-        LIMIT 20
-      `;
-
-      // Store query for pinning
-      this.state.lastQuery = query;
-
-      const result = await this.engine?.query(query);
-      if (result) {
-        const columns = result.columns();
-        const rows: any[][] = [];
-
-        const it = result.iter({});
-        while (it.valid()) {
-          const row: any[] = [];
-          for (const col of columns) {
-            row.push(it.get(col));
-          }
-          rows.push(row);
-          it.next();
-        }
-
-        if (rows.length > 0) {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: uiText(
-              `在此 Trace 中发现 **${rows.length}** 个潜在 ANR。`,
-              `Found **${rows.length}** potential ANRs in this trace.`,
-            ),
-            timestamp: Date.now(),
-            query: query,
-            sqlResult: {columns, rows, rowCount: rows.length, query},
-          });
-        } else {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: uiText(
-              '此 Trace 中**未检测到 ANR**。',
-              '**No ANRs detected** in this trace. Good job!',
-            ),
-            timestamp: Date.now(),
-          });
-        }
-      }
-    } catch (e: any) {
+    if (!this.state.backendTraceId) {
       this.addMessage({
         id: this.generateId(),
-        role: 'assistant',
+        role: 'system',
         content: uiText(
-          `**检测 ANR 出错：** ${e.message || e}`,
-          `**Error detecting ANRs:** ${e.message || e}`,
+          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角“重试连接”按钮。`/anr` 命令需要后端证据管线。',
+          '⚠️ **The trace is not connected to the AI backend**\n\nConfirm that the backend is running, then use Retry connection in the upper-right corner. The `/anr` command requires the backend evidence pipeline.',
         ),
         timestamp: Date.now(),
       });
+      return;
     }
-
-    this.setLoadingState(false);
-    m.redraw();
+    await this.handleChatMessage(
+      uiText(
+        '分析当前 Trace 中的 ANR：先用确定性证据确认 ANR 事件和触发链，再定位主线程阻塞、Binder、锁或调度根因',
+        'Analyze ANRs in the current trace: first verify the ANR events and trigger chain with deterministic evidence, then identify main-thread, Binder, lock, or scheduling root causes',
+      ),
+    );
   }
 
   private async handleJankCommand() {
-    this.setLoadingState(true);
-    m.redraw();
-
-    try {
-      const query = `
-        SELECT
-          id,
-          name,
-          ts,
-          dur / 1e6 as duration_ms,
-          track_id
-        FROM slice
-        WHERE category = 'gfx'
-          AND dur > 16670000
-          AND name LIKE 'Jank%'
-        ORDER BY dur DESC
-        LIMIT 50
-      `;
-
-      // Store query for pinning
-      this.state.lastQuery = query;
-
-      const result = await this.engine?.query(query);
-      if (result) {
-        const columns = result.columns();
-        const rows: any[][] = [];
-
-        const it = result.iter({});
-        while (it.valid()) {
-          const row: any[] = [];
-          for (const col of columns) {
-            row.push(it.get(col));
-          }
-          rows.push(row);
-          it.next();
-        }
-
-        if (rows.length > 0) {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: uiText(
-              `在此 Trace 中发现 **${rows.length}** 个卡顿帧。`,
-              `Found **${rows.length}** janky frames in this trace.`,
-            ),
-            timestamp: Date.now(),
-            query: query,
-            sqlResult: {columns, rows, rowCount: rows.length, query},
-          });
-        } else {
-          this.addMessage({
-            id: this.generateId(),
-            role: 'assistant',
-            content: uiText(
-              '此 Trace 中**未检测到卡顿**。',
-              '**No jank detected** in this trace. Smooth rendering!',
-            ),
-            timestamp: Date.now(),
-          });
-        }
-      }
-    } catch (e: any) {
+    if (!this.state.backendTraceId) {
       this.addMessage({
         id: this.generateId(),
-        role: 'assistant',
+        role: 'system',
         content: uiText(
-          `**检测卡顿出错：** ${e.message || e}`,
-          `**Error detecting jank:** ${e.message || e}`,
+          '⚠️ **Trace 未连接到 AI 后端**\n\n请确认后端服务已启动，然后点击右上角“重试连接”按钮。`/jank` 命令需要后端证据管线。',
+          '⚠️ **The trace is not connected to the AI backend**\n\nConfirm that the backend is running, then use Retry connection in the upper-right corner. The `/jank` command requires the backend evidence pipeline.',
         ),
         timestamp: Date.now(),
       });
+      return;
     }
-
-    this.setLoadingState(false);
-    m.redraw();
+    await this.handleChatMessage(
+      uiText(
+        '分析当前 Trace 的卡顿：用 FrameTimeline 和调度证据确认异常帧、责任归属与根因，不使用固定 16ms 阈值猜测',
+        'Analyze jank in the current trace: use FrameTimeline and scheduling evidence to verify abnormal frames, ownership, and root cause without guessing from a fixed 16 ms threshold',
+      ),
+    );
   }
 
   private async handleSlowCommand() {
@@ -10959,25 +9985,6 @@ Click ⚙️ to configure backend connection.`,
             selectionContext,
           );
         }
-        if (!tracePairContext && !this.state.pendingTraceContext) {
-          const datasets = await this.querySelectionData(selectionContext);
-          this.state.pendingTraceContext =
-            datasets.length > 0 ? datasets : null;
-        }
-      }
-
-      // Attach pre-queried trace data (set by quick-action buttons) and consume it
-      if (this.state.pendingTraceContext) {
-        requestBody.traceContext = this.state.pendingTraceContext.map(
-          (dataset) => ({
-            ...dataset,
-            traceSide: dataset.traceSide || 'current',
-            paneSide:
-              dataset.paneSide || tracePairContext?.primarySide || 'left',
-            traceId: dataset.traceId || this.state.backendTraceId || undefined,
-          }),
-        );
-        this.state.pendingTraceContext = null;
       }
 
       // Include agentSessionId if available for multi-turn dialogue
@@ -13629,8 +12636,8 @@ Click ⚙️ to configure backend connection.`,
 | \`/sql <查询>\` | 执行 SQL 查询 |
 | \`/goto <时间戳>\` | 跳转到时间戳 |
 | \`/analyze\` | 分析当前选区 |
-| \`/anr\` | 查找 ANR |
-| \`/jank\` | 查找卡顿帧 |
+| \`/anr\` | 分析 ANR（后端证据管线） |
+| \`/jank\` | 分析卡顿帧（后端证据管线） |
 | \`/slow\` | 分析慢操作（后端） |
 | \`/memory\` | 分析内存使用（后端） |
 | \`/teaching-pipeline\` | 检测渲染管线并展示教学信息 |
@@ -13653,8 +12660,8 @@ Click ⚙️ to configure backend connection.`,
 | \`/sql <query>\` | Execute SQL query |
 | \`/goto <ts>\` | Jump to timestamp |
 | \`/analyze\` | Analyze current selection |
-| \`/anr\` | Find ANRs |
-| \`/jank\` | Find janky frames |
+| \`/anr\` | Analyze ANRs (backend evidence pipeline) |
+| \`/jank\` | Analyze janky frames (backend evidence pipeline) |
 | \`/slow\` | Analyze slow operations (backend) |
 | \`/memory\` | Analyze memory usage (backend) |
 | \`/teaching-pipeline\` | Detect the rendering pipeline and show tutorial details |

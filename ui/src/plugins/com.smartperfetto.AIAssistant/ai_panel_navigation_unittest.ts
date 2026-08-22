@@ -164,9 +164,6 @@ describe('AIPanel conversation selection context', () => {
       eventId: 42,
       ts: 1000,
       dur: 250,
-      name: 'monitor contention',
-      threadName: 'main',
-      processName: 'com.example.app',
     };
     panel.state.analysisMode = 'conversation';
     panel.captureSelectionContext = vi.fn(async () => selectionContext);
@@ -181,6 +178,275 @@ describe('AIPanel conversation selection context', () => {
       '分析当前选择的这一段',
       selectionContext,
     );
+  });
+
+  it('captures only stable area and track-tag identities without querying the trace', async () => {
+    const panel = new AIPanel() as any;
+    const query = vi.fn(() => {
+      throw new Error('selection capture must not query');
+    });
+    panel.engine = {query};
+    panel.trace = {
+      selection: {
+        selection: {
+          kind: 'area',
+          start: 100n,
+          end: 200n,
+          trackUris: ['/process_1/thread_2', '/cpu_6'],
+          tracks: [
+            {
+              uri: '/process_1/thread_2',
+              tags: {utid: 2, upid: 1, type: 'thread_slice'},
+            },
+            {uri: '/cpu_6', tags: {cpu: 6, type: 'cpu_slice'}},
+          ],
+        },
+        getTimeSpanOfSelection: () => ({duration: 100n}),
+      },
+    };
+
+    await expect(panel.captureSelectionContext()).resolves.toEqual({
+      kind: 'area',
+      source: 'area_selection',
+      startNs: 100,
+      endNs: 200,
+      durationNs: 100,
+      trackCount: 2,
+      tracks: [
+        {
+          uri: '/process_1/thread_2',
+          utid: 2,
+          upid: 1,
+          kind: 'thread_slice',
+        },
+        {uri: '/cpu_6', cpu: 6, kind: 'cpu_slice'},
+      ],
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('does not promote slice-card display metadata into selection context', async () => {
+    const panel = new AIPanel() as any;
+    panel.state.sliceCardInfo = {
+      id: 42,
+      name: 'display-only-name',
+      ts: 1000,
+      dur: 250,
+      durMs: 0.00025,
+      threadName: 'display-only-thread',
+      processName: 'display-only-process',
+      depth: 3,
+      childCount: 4,
+    };
+    panel.trace = {
+      selection: {
+        selection: {
+          kind: 'track_event',
+          trackUri: '/process_1/thread_2',
+          eventId: 42,
+          ts: 1000n,
+          dur: 250n,
+        },
+      },
+    };
+
+    await expect(panel.captureSelectionContext()).resolves.toEqual({
+      kind: 'track_event',
+      source: 'track_event_selection',
+      trackUri: '/process_1/thread_2',
+      eventId: 42,
+      ts: 1000,
+      dur: 250,
+    });
+  });
+
+  it('sends selection identity without automatic traceContext datasets', async () => {
+    const panel = new AIPanel() as any;
+    const selectionContext = {
+      kind: 'track_event',
+      source: 'track_event_selection',
+      trackUri: '/process_1/thread_2',
+      eventId: 42,
+      ts: 1000,
+      dur: 250,
+    };
+    panel.state.analysisMode = 'full';
+    panel.state.backendTraceId = 'trace-1';
+    panel.trace = {
+      traceInfo: {traceTitle: 'current.trace', start: 0n, end: 10n},
+      notes: {removeNote: vi.fn()},
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => undefined);
+    panel.captureSelectionContext = vi.fn(async () => selectionContext);
+    panel.querySelectionData = vi.fn(async () => [
+      {label: 'hidden', columns: ['value'], rows: [[1]]},
+    ]);
+    panel.listenToAgentSSE = vi.fn(async () => undefined);
+    panel.saveCurrentSession = vi.fn();
+    panel.fetchBackend = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      sessionId: 'session-1',
+      isNewSession: true,
+    }), {status: 200}));
+
+    await panel.handleChatMessage('分析当前选择');
+
+    expect(panel.querySelectionData).not.toHaveBeenCalled();
+    const requestBody = JSON.parse(String(
+      panel.fetchBackend.mock.calls[0]?.[1]?.body,
+    ));
+    expect(requestBody.selectionContext).toEqual(selectionContext);
+    expect(requestBody).not.toHaveProperty('traceContext');
+  });
+});
+
+describe('AIPanel evidence-backed commands', () => {
+  it.each([
+    ['/anr', 'ANR'],
+    ['/jank', 'FrameTimeline'],
+  ])('routes %s through the backend analysis path', async (command, marker) => {
+    const panel = new AIPanel() as any;
+    panel.state.backendTraceId = 'trace-1';
+    panel.handleChatMessage = vi.fn(async () => undefined);
+    panel.engine = {query: vi.fn()};
+
+    await panel.handleCommand(command);
+
+    expect(panel.isModelBackedCommand(command)).toBe(true);
+    expect(panel.handleChatMessage).toHaveBeenCalledTimes(1);
+    expect(panel.handleChatMessage.mock.calls[0]?.[0]).toContain(marker);
+    expect(panel.engine.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('AIPanel selection display cards', () => {
+  const singleRow = (row: Record<string, unknown>) => ({
+    iter: () => {
+      let valid = true;
+      return {
+        ...row,
+        valid: () => valid,
+        next: () => {
+          valid = false;
+        },
+      };
+    },
+  });
+  const noRows = () => ({
+    iter: () => ({valid: () => false, next: () => undefined}),
+  });
+
+  it('distinguishes an unavailable jank query from an observed zero', async () => {
+    const unavailablePanel = new AIPanel() as any;
+    unavailablePanel.engine = {
+      query: vi.fn()
+        .mockResolvedValueOnce(singleRow({cnt: 0, tracks: 0}))
+        .mockResolvedValueOnce(noRows())
+        .mockRejectedValueOnce(new Error('FrameTimeline unavailable')),
+    };
+
+    await expect(unavailablePanel.queryAreaCardInfo(100, 200)).resolves.toMatchObject({
+      sliceStatsStatus: 'observed',
+      topSlicesStatus: 'observed',
+      jankStatus: 'unavailable',
+      jankCount: 0,
+    });
+
+    const zeroPanel = new AIPanel() as any;
+    zeroPanel.engine = {
+      query: vi.fn()
+        .mockResolvedValueOnce(singleRow({cnt: 0, tracks: 0}))
+        .mockResolvedValueOnce(noRows())
+        .mockResolvedValueOnce(singleRow({cnt: 0})),
+    };
+
+    await expect(zeroPanel.queryAreaCardInfo(100, 200)).resolves.toMatchObject({
+      sliceStatsStatus: 'observed',
+      topSlicesStatus: 'observed',
+      jankStatus: 'observed',
+      jankCount: 0,
+    });
+  });
+
+  it('does not render a partial top-slice result as observed data', async () => {
+    const panel = new AIPanel() as any;
+    panel.engine = {
+      query: vi.fn()
+        .mockResolvedValueOnce(singleRow({cnt: 1, tracks: 1}))
+        .mockResolvedValueOnce({
+          iter: () => {
+            let valid = true;
+            return {
+              name: 'partial',
+              cnt: 1,
+              total_ms: 1,
+              valid: () => valid,
+              next: () => {
+                valid = false;
+                throw new Error('iterator failed');
+              },
+            };
+          },
+        })
+        .mockResolvedValueOnce(singleRow({cnt: 0})),
+    };
+
+    await expect(panel.queryAreaCardInfo(100, 200)).resolves.toMatchObject({
+      topSlicesStatus: 'unavailable',
+      topSlices: [],
+    });
+  });
+
+  it('renders observed-zero and unavailable jank states distinctly', () => {
+    const panel = new AIPanel() as any;
+    panel.trace = {selection: {selection: {kind: 'area'}}};
+    const base = {
+      startNs: 100,
+      endNs: 200,
+      durationMs: 0.0001,
+      sliceCount: 0,
+      trackCount: 0,
+      topSlices: [],
+      sliceStatsStatus: 'observed',
+      topSlicesStatus: 'observed',
+      hasJank: false,
+      jankCount: 0,
+    };
+
+    panel.state.areaCardInfo = {...base, jankStatus: 'observed'};
+    expect(collectVNodeText(panel.renderAreaCard())).toContain('未发现卡顿帧');
+
+    panel.state.areaCardInfo = {...base, jankStatus: 'unavailable'};
+    expect(collectVNodeText(panel.renderAreaCard())).toContain('卡顿数据不可用');
+  });
+
+  it('does not classify an arbitrary selected slice using a fixed 16 ms budget', () => {
+    const panel = new AIPanel() as any;
+    panel.trace = {
+      selection: {
+        selection: {
+          kind: 'track_event',
+          eventId: 42,
+        },
+      },
+      timeline: {panIntoView: vi.fn()},
+    };
+    panel.state.sliceCardInfo = {
+      id: 42,
+      name: 'work',
+      ts: 1000,
+      dur: 20_000_000,
+      durMs: 20,
+      threadName: 'main',
+      processName: 'app',
+      depth: 0,
+      childCount: 0,
+    };
+
+    const text = collectVNodeText(panel.renderSliceCard());
+    expect(text).not.toContain('超过帧预算');
+    expect(text).not.toContain('卡顿分析');
+    expect(text).not.toContain('⚠️');
   });
 });
 
@@ -1471,7 +1737,6 @@ describe('AIPanel trace-pair session restore', () => {
 
   it('invalidates continuation only when the semantic pair changes', () => {
     const panel = createMutableTestPanel();
-    const pendingDataset = {label: 'pending', columns: [], rows: []};
     panel.state.backendTraceId = 'backend-current';
     panel.state.referenceTraceId = 'history-a';
     panel.state.referenceTraceName = 'history-a.trace';
@@ -1479,7 +1744,6 @@ describe('AIPanel trace-pair session restore', () => {
     panel.state.agentRunId = 'run-a';
     panel.state.agentRequestId = 'request-a';
     panel.state.agentRunSequence = 4;
-    panel.state.pendingTraceContext = [pendingDataset];
     panel.state.sseLastEventId = 27;
     panel.saveCurrentSession = vi.fn();
     panel.tracePairWorkspaceController.open({
@@ -1499,7 +1763,6 @@ describe('AIPanel trace-pair session restore', () => {
     panel.state.agentRunId = 'run-a';
     panel.state.agentRequestId = 'request-a';
     panel.state.agentRunSequence = 4;
-    panel.state.pendingTraceContext = [pendingDataset];
     panel.state.sseLastEventId = 27;
 
     panel.tracePairWorkspaceController.selectTrace({
@@ -1508,7 +1771,6 @@ describe('AIPanel trace-pair session restore', () => {
     });
     panel.syncTracePairStateFromController();
     expect(panel.state.agentSessionId).toBe('agent-a');
-    expect(panel.state.pendingTraceContext).toEqual([pendingDataset]);
 
     panel.tracePairWorkspaceController.selectTrace({
       pane: 'first',
@@ -1519,7 +1781,6 @@ describe('AIPanel trace-pair session restore', () => {
     expect(panel.state.agentRunId).toBeNull();
     expect(panel.state.agentRequestId).toBeNull();
     expect(panel.state.agentRunSequence).toBe(0);
-    expect(panel.state.pendingTraceContext).toBeNull();
     expect(panel.state.sseLastEventId).toBeNull();
   });
 

@@ -1019,22 +1019,7 @@ export interface AIPanelState {
   areaCardInfo: AreaCardInfo | null; // Queried area metadata for the card
   sliceCardPrevSelId: string; // Last seen selection key for diff detection
   sliceCardDismissed: boolean; // Whether user dismissed the card
-  // Pre-queried trace context to attach to next request (set by quick-action buttons)
-  pendingTraceContext: TraceDataset[] | null;
   captureConfigSuggestion: CaptureConfigSuggestionState;
-}
-
-/** A pre-queried trace dataset sent to the backend alongside the query. */
-export interface TraceDataset {
-  label: string; // Human-readable description of the SQL
-  columns: string[];
-  rows: unknown[][];
-  evidenceRefId?: string;
-  sourceToolCallId?: string;
-  queryHash?: string;
-  traceSide?: 'current' | 'reference';
-  paneSide?: TracePaneSide;
-  traceId?: string;
 }
 
 export type TracePairLayout = 'horizontal' | 'vertical';
@@ -1086,6 +1071,9 @@ export interface AreaCardInfo {
   sliceCount: number;
   trackCount: number;
   topSlices: Array<{name: string; durMs: number; count: number}>;
+  sliceStatsStatus: 'observed' | 'unavailable';
+  topSlicesStatus: 'observed' | 'unavailable';
+  jankStatus: 'observed' | 'unavailable';
   hasJank: boolean;
   jankCount: number;
 }
@@ -1397,8 +1385,8 @@ export const COMPARISON_PRESET_QUESTIONS: PresetQuestion[] = [
 
 /**
  * Describes the user's current Perfetto UI selection (area or single slice).
- * Serialized and sent to the backend so that Claude can scope its analysis
- * to the user-selected time range or slice.
+ * Serialized and sent to the backend as identity and time bounds only. The
+ * backend resolves descriptive trace facts before using them as evidence.
  */
 export interface SelectionContext {
   kind: 'area' | 'track_event';
@@ -1408,7 +1396,7 @@ export interface SelectionContext {
   startNs?: number;
   endNs?: number;
   durationNs?: number;
-  /** Resolved track metadata for the selected area */
+  /** Stable Perfetto track identities for the selected area. */
   tracks?: SelectionTrackInfo[];
   trackCount?: number;
   // ── Single slice selection ──
@@ -1416,23 +1404,13 @@ export interface SelectionContext {
   eventId?: number;
   ts?: number;
   dur?: number;
-  // Pre-queried metadata from frontend (avoids first SQL turn in AI)
-  name?: string;
-  threadName?: string;
-  processName?: string;
-  depth?: number;
-  childCount?: number;
 }
 
-/** Human-readable metadata for a track in an area selection. */
+/** Stable Perfetto track identity supplied by the UI. */
 export interface SelectionTrackInfo {
   uri: string;
   utid?: number;
   upid?: number;
-  threadName?: string;
-  processName?: string;
-  tid?: number;
-  pid?: number;
   cpu?: number;
   kind?: string;
 }
