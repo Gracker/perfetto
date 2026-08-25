@@ -979,6 +979,8 @@ export interface AIPanelState {
   streamingFlow: StreamingFlowState;
   streamingAnswer: StreamingAnswerState;
   // Comparison mode state
+  tracePairBaselineTraceId: string | null;
+  tracePairBaselineTraceName: string | null;
   referenceTraceId: string | null; // Backend trace ID of the reference trace
   referenceTraceName: string | null; // Display name of the reference trace
   isReferenceActive: boolean;
@@ -1240,6 +1242,10 @@ export interface AISession {
   type?: 'single' | 'comparison';
   /** Reference trace fingerprint (comparison mode only) */
   referenceTraceFingerprint?: string;
+  /** Baseline trace backend ID for an arbitrary raw-trace pair. */
+  tracePairBaselineBackendTraceId?: string;
+  /** Baseline trace display name for an arbitrary raw-trace pair. */
+  tracePairBaselineTraceName?: string;
   /** Reference trace backend ID (comparison mode only) */
   referenceBackendTraceId?: string;
   /** Reference trace display name (comparison mode only) */

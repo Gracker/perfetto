@@ -14,12 +14,9 @@ import {formatWorkspaceTraceCatalogMeta} from './workspace_trace_catalog';
 import {uiText} from './ui_language';
 
 function getPaneSlot(
-  controller: TracePairWorkspaceController,
   traceSide: TracePairTraceSide,
 ): TracePairPaneSlot {
-  const currentPane = controller.getState().currentPane;
-  if (traceSide === 'current') return currentPane;
-  return currentPane === 'first' ? 'second' : 'first';
+  return traceSide === 'current' ? 'first' : 'second';
 }
 
 function getPaneTitle(
@@ -35,7 +32,7 @@ function getPaneTitle(
       : pane === 'first'
         ? uiText('左', 'Left')
         : uiText('右', 'Right');
-  return `${location}/${traceSide === 'current' ? uiText('当前', 'Current') : uiText('参考', 'Reference')}`;
+  return `${location}/${traceSide === 'current' ? uiText('基线', 'Baseline') : uiText('对比', 'Comparison')}`;
 }
 
 function buildFrameUrl(
@@ -51,7 +48,7 @@ function buildFrameUrl(
     smartperfettoDualTrace: 'true',
     smartperfettoPane: traceSide,
   });
-  return `${window.location.origin}${window.location.pathname}#!/?${params.toString()}`;
+  return `${window.location.origin}${window.location.pathname}#!/viewer?${params.toString()}`;
 }
 
 function renderTraceSelector(
@@ -60,9 +57,13 @@ function renderTraceSelector(
   selectedTraceId: string,
 ): m.Children {
   const state = controller.getState();
-  const history = state.catalog.filter(
-    (trace) => trace.id !== state.currentTrace?.id,
-  );
+  const candidates = [
+    state.pageTrace,
+    ...state.catalog,
+    state.currentTrace,
+    state.referenceTrace,
+  ].filter((trace): trace is NonNullable<typeof trace> => trace !== null);
+  const history = [...new Map(candidates.map((trace) => [trace.id, trace])).values()];
   const filenameCounts = new Map<string, number>();
   for (const trace of history) {
     filenameCounts.set(
@@ -92,13 +93,6 @@ function renderTraceSelector(
       selectedTraceId
         ? null
         : m('option', {value: '', disabled: true}, uiText('选择 Trace', 'Select a trace')),
-      state.currentTrace
-        ? m(
-            'option',
-            {value: state.currentTrace.id},
-            `${state.currentTrace.filename} · ${uiText('当前', 'Current')}`,
-          )
-        : null,
       ...history.map((trace) => {
         const meta =
           filenameCounts.get(trace.filename) === 1
@@ -107,8 +101,55 @@ function renderTraceSelector(
         return m(
           'option',
           {value: trace.id},
-          meta ? `${trace.filename} · ${meta}` : trace.filename,
+          trace.id === state.pageTrace?.id
+            ? `${trace.filename} · ${uiText('当前页面', 'Current page')}`
+            : meta
+              ? `${trace.filename} · ${meta}`
+              : trace.filename,
         );
+      }),
+    ],
+  );
+}
+
+function renderTraceUploadControl(
+  controller: TracePairWorkspaceController,
+  pane: TracePairPaneSlot,
+  replacing: boolean,
+): m.Children {
+  const state = controller.getState();
+  const upload = state.paneUploads[pane];
+  const disabled =
+    state.selectionLocked ||
+    upload.status === 'uploading' ||
+    !controller.hasUploadHandler();
+  const label = upload.status === 'uploading'
+    ? uiText('上传中…', 'Uploading…')
+    : replacing
+      ? uiText('替换文件', 'Replace file')
+      : uiText('上传 Trace', 'Upload trace');
+  return m(
+    `label.ai-trace-pair-upload${replacing ? '.is-compact' : ''}${disabled ? '.is-disabled' : ''}`,
+    {
+      title: state.selectionLocked
+        ? uiText('分析运行中，上传已锁定', 'Uploads are locked while analysis is running')
+        : label,
+    },
+    [
+      m('i.pf-icon', upload.status === 'uploading' ? 'hourglass_top' : 'upload_file'),
+      m('span', label),
+      m('input', {
+        type: 'file',
+        accept: '.pftrace,.perfetto-trace,.trace,application/octet-stream',
+        disabled,
+        'data-trace-pair-upload': pane,
+        onchange: (event: Event) => {
+          const input = event.currentTarget;
+          if (!(input instanceof HTMLInputElement)) return;
+          const file = input.files?.[0];
+          input.value = '';
+          if (file) void controller.uploadTrace(pane, file);
+        },
       }),
     ],
   );
@@ -119,7 +160,7 @@ export function renderTracePairPane(
   traceSide: TracePairTraceSide,
 ): m.Children {
   const state = controller.getState();
-  const pane = getPaneSlot(controller, traceSide);
+  const pane = getPaneSlot(traceSide);
   const trace =
     traceSide === 'current' ? state.currentTrace : state.referenceTrace;
   const minimized = state.minimizedTraceSides.has(traceSide);
@@ -152,6 +193,7 @@ export function renderTracePairPane(
         m('span.ai-trace-pair-pane-side', title),
         renderTraceSelector(controller, pane, trace?.id || ''),
         m('div.ai-trace-pair-pane-actions', [
+          trace ? renderTraceUploadControl(controller, pane, true) : null,
           m(
             'button.ai-trace-pair-icon-btn',
             {
@@ -189,6 +231,9 @@ export function renderTracePairPane(
           ),
         ]),
       ]),
+      state.paneUploads[pane].error
+        ? m('span.ai-trace-pair-upload-error', state.paneUploads[pane].error)
+        : null,
       frameUrl
         ? m('iframe.ai-trace-pair-frame', {
             'src': frameUrl,
@@ -200,8 +245,11 @@ export function renderTracePairPane(
             m('i.pf-icon', 'add_chart'),
             m(
               'span',
-              uiText('在上方选择一个历史 Trace', 'Select a historical trace above'),
+              traceSide === 'current'
+                ? uiText('在上方选择一份基线 Trace', 'Select a baseline trace above')
+                : uiText('在上方选择一份对比 Trace', 'Select a comparison trace above'),
             ),
+            renderTraceUploadControl(controller, pane, false),
           ]),
       frameUrl
         ? m(

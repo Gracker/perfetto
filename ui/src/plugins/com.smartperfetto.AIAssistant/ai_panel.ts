@@ -41,6 +41,7 @@ import {
   setDefaultBackendCredential,
   setDefaultBackendUrl,
 } from '../../core/backend_uploader';
+import {parseWorkspaceTraceLaunch} from '../../core/workspace_trace_launch';
 import {
   getDefaultSmartPerfettoBackendUrl,
   getSmartPerfettoExternalIssueUrl,
@@ -203,6 +204,10 @@ import {
 } from './ui_action_proposals';
 import {buildTracePairContext as buildTracePairContextPayload} from './trace_pair_context';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import {
+  loadPersistedTracePairWorkspace,
+  persistTracePairWorkspace,
+} from './trace_pair_workspace_persistence';
 import type {
   AnalysisBackendConnection,
   AnalysisBackendConnectionSnapshot,
@@ -610,6 +615,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     // Incremental final answer stream state
     streamingAnswer: createStreamingAnswerState(),
     // Comparison mode state
+    tracePairBaselineTraceId: null,
+    tracePairBaselineTraceName: null,
     referenceTraceId: null,
     referenceTraceName: null,
     isReferenceActive: false,
@@ -1535,13 +1542,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       invalidateBackendUploadState(backendIdentityKey, sourceKey);
     }
     this.loadAnalysisContextSelection();
-
     // Initialize backend status - must happen before first render
     this.initBackendStatus();
     this.refreshApplicationUpdateStatus();
 
     // 检测 Trace 变化并加载对应的历史
     this.handleTraceChange();
+    this.restorePersistedTracePairWorkspace();
     const uploadState = getBackendUploadState();
     if (
       this.trace &&
@@ -1622,18 +1629,62 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     };
   }
 
-  private syncTracePairStateFromController(): void {
-    const workspace = this.tracePairWorkspaceController.getState();
+  private restorePersistedTracePairWorkspace(): void {
+    if (!this.state.backendTraceId || isSmartPerfettoOidcMode()) return;
+    const saved = loadPersistedTracePairWorkspace(
+      this.state.settings.backendUrl,
+    );
     if (
-      !workspace.currentTrace ||
-      workspace.currentTrace.id !== this.state.backendTraceId
+      !saved?.open ||
+      saved.baseline?.id !== this.state.backendTraceId ||
+      !saved.comparison
     ) {
       return;
     }
+    this.tracePairWorkspaceController.open({
+      scope: this.getTracePairWorkspaceScope(),
+      currentTrace: {
+        id: this.state.backendTraceId,
+        filename: saved.baseline.filename,
+        fingerprint:
+          this.state.currentTraceFingerprint ||
+          this.getTraceFingerprint() ||
+          undefined,
+      },
+    });
+    this.tracePairWorkspaceController.setCatalog([
+      saved.baseline,
+      saved.comparison,
+    ]);
+    this.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: saved.comparison.id,
+    });
+    this.tracePairWorkspaceController.setLayout(saved.layout);
+    this.tracePairWorkspaceController.setSplitPercent(saved.splitPercent);
+    this.syncTracePairStateFromController();
+    void this.fetchAvailableTraces();
+  }
 
+  private syncTracePairStateFromController(): void {
+    const workspace = this.tracePairWorkspaceController.getState();
+    if (
+      !workspace.pageTrace ||
+      workspace.pageTrace.id !== this.state.backendTraceId
+    ) {
+      return;
+    }
+    persistTracePairWorkspace(workspace, this.state.settings.backendUrl);
+
+    const previousBaselineTraceId = this.state.tracePairBaselineTraceId;
+    const previousBaselineTraceName = this.state.tracePairBaselineTraceName;
     const previousReferenceTraceId = this.state.referenceTraceId;
     const previousReferenceTraceName = this.state.referenceTraceName;
+    const nextBaselineTraceId = workspace.currentTrace?.id || null;
     const nextReferenceTraceId = workspace.referenceTrace?.id || null;
+    this.state.tracePairBaselineTraceId = nextBaselineTraceId;
+    this.state.tracePairBaselineTraceName =
+      workspace.currentTrace?.filename || null;
     this.state.referenceTraceId = nextReferenceTraceId;
     this.state.referenceTraceName = workspace.referenceTrace?.filename || null;
     this.state.isReferenceActive = workspace.activeTraceSide === 'reference';
@@ -1645,8 +1696,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       workspace.minimizedTraceSides,
     );
 
-    if (previousReferenceTraceId === nextReferenceTraceId) {
-      if (previousReferenceTraceName !== this.state.referenceTraceName) {
+    const previousIdentity = previousReferenceTraceId
+      ? `${previousBaselineTraceId || this.state.backendTraceId}\0${previousReferenceTraceId}`
+      : null;
+    const nextIdentity = nextReferenceTraceId
+      ? `${nextBaselineTraceId}\0${nextReferenceTraceId}`
+      : null;
+    if (previousIdentity === nextIdentity) {
+      if (
+        previousBaselineTraceName !== this.state.tracePairBaselineTraceName ||
+        previousReferenceTraceName !== this.state.referenceTraceName
+      ) {
         this.saveCurrentSession();
       }
       return;
@@ -1690,20 +1750,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private getTracePairPaneTitle(traceSide: TracePairTraceSide): string {
     const workspace = this.tracePairWorkspaceController.getState();
-    const layout =
-      workspace.currentTrace?.id === this.state.backendTraceId
-        ? workspace.layout
-        : this.state.tracePairLayout;
-    const currentPane =
-      workspace.currentTrace?.id === this.state.backendTraceId
-        ? workspace.currentPane
-        : 'first';
-    const pane =
-      traceSide === 'current'
-        ? currentPane
-        : currentPane === 'first'
-          ? 'second'
-          : 'first';
+    const useWorkspace = workspace.pageTrace?.id === this.state.backendTraceId;
+    const layout = useWorkspace ? workspace.layout : this.state.tracePairLayout;
+    const pane = traceSide === 'current' ? 'first' : 'second';
     const location =
       layout === 'vertical'
         ? pane === 'first'
@@ -1714,33 +1763,43 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           : uiText('右', 'Right');
     const role =
       traceSide === 'current'
-        ? uiText('主', 'Primary')
-        : uiText('参考', 'Reference');
+        ? uiText('基线', 'Baseline')
+        : uiText('对比', 'Comparison');
     return `${location}/${role}`;
   }
 
   private buildTracePairContext(): TracePairContext | undefined {
     const workspace = this.tracePairWorkspaceController.getState();
     const useWorkspace =
-      workspace.currentTrace?.id === this.state.backendTraceId;
+      workspace.pageTrace?.id === this.state.backendTraceId;
+    const baselineTraceId = useWorkspace
+      ? workspace.currentTrace?.id || null
+      : this.state.tracePairBaselineTraceId || this.state.backendTraceId;
+    const baselineTraceName = useWorkspace
+      ? workspace.currentTrace?.filename || this.getCurrentTraceName()
+      : this.state.tracePairBaselineTraceName || this.getCurrentTraceName();
     return buildTracePairContextPayload({
-      currentTraceId: this.state.backendTraceId,
-      currentTraceName: this.getCurrentTraceName(),
+      currentTraceId: baselineTraceId,
+      currentTraceName: baselineTraceName,
       currentTraceFingerprint:
-        this.state.currentTraceFingerprint || this.getTraceFingerprint(),
+        baselineTraceId === this.state.backendTraceId
+          ? this.state.currentTraceFingerprint || this.getTraceFingerprint()
+          : useWorkspace
+            ? workspace.currentTrace?.fingerprint
+            : undefined,
       referenceTraceId: useWorkspace
         ? workspace.referenceTrace?.id || null
         : this.state.referenceTraceId,
       referenceTraceName: useWorkspace
         ? workspace.referenceTrace?.filename || null
         : this.state.referenceTraceName,
-      referenceTraceFallbackName: uiText('参考 Trace', 'Reference Trace'),
+      referenceTraceFallbackName: uiText('对比 Trace', 'Comparison Trace'),
       activeTraceSide: useWorkspace
         ? workspace.activeTraceSide
         : this.state.isReferenceActive
           ? 'reference'
           : 'current',
-      currentPane: useWorkspace ? workspace.currentPane : 'first',
+      currentPane: 'first',
       layout: useWorkspace ? workspace.layout : this.state.tracePairLayout,
       workspaceOpen: useWorkspace
         ? workspace.open
@@ -1760,7 +1819,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private buildTracePairSessionFields(): Partial<AISession> {
     const workspace = this.tracePairWorkspaceController.getState();
     const useWorkspace =
-      workspace.currentTrace?.id === this.state.backendTraceId;
+      workspace.pageTrace?.id === this.state.backendTraceId;
+    const baselineTraceId = (
+      useWorkspace
+        ? workspace.currentTrace?.id
+        : this.state.tracePairBaselineTraceId || this.state.backendTraceId
+    )?.trim();
     const referenceTraceId = (
       useWorkspace ? workspace.referenceTrace?.id : this.state.referenceTraceId
     )?.trim();
@@ -1768,6 +1832,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return {
         type: 'single',
         referenceTraceFingerprint: undefined,
+        tracePairBaselineBackendTraceId: undefined,
+        tracePairBaselineTraceName: undefined,
         referenceBackendTraceId: undefined,
         referenceTraceName: undefined,
         tracePairLayout: undefined,
@@ -1779,6 +1845,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     return {
       type: 'comparison',
+      tracePairBaselineBackendTraceId: baselineTraceId,
+      tracePairBaselineTraceName: useWorkspace
+        ? workspace.currentTrace?.filename
+        : this.state.tracePairBaselineTraceName || this.getCurrentTraceName(),
       referenceBackendTraceId: referenceTraceId,
       referenceTraceName: useWorkspace
         ? workspace.referenceTrace?.filename
@@ -1796,11 +1866,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         : this.state.isReferenceActive
           ? 'reference'
           : 'current',
-      tracePairCurrentPane: useWorkspace ? workspace.currentPane : 'first',
+      tracePairCurrentPane: 'first',
     };
   }
 
   private clearTracePairSessionState(): void {
+    this.state.tracePairBaselineTraceId = null;
+    this.state.tracePairBaselineTraceName = null;
     this.state.referenceTraceId = null;
     this.state.referenceTraceName = null;
     this.state.isReferenceActive = false;
@@ -1822,8 +1894,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       typeof session.referenceBackendTraceId === 'string'
         ? session.referenceBackendTraceId.trim()
         : '';
+    const baselineTraceId =
+      typeof session.tracePairBaselineBackendTraceId === 'string'
+        ? session.tracePairBaselineBackendTraceId.trim()
+        : this.state.backendTraceId || '';
     if (
       session.type !== 'comparison' ||
+      !baselineTraceId ||
       !referenceTraceId ||
       !this.state.backendTraceId
     ) {
@@ -1848,6 +1925,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return this.state.referenceTraceId !== null;
     }
 
+    this.state.tracePairBaselineTraceId = baselineTraceId;
+    this.state.tracePairBaselineTraceName =
+      session.tracePairBaselineTraceName ||
+      (baselineTraceId === this.state.backendTraceId
+        ? this.getCurrentTraceName()
+        : uiText('基线 Trace', 'Baseline Trace'));
     this.state.referenceTraceId = referenceTraceId;
     this.state.referenceTraceName = session.referenceTraceName || null;
     this.state.isReferenceActive =
@@ -1872,14 +1955,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             this.getTraceFingerprint() ||
             undefined,
         },
+        baselineTrace: {
+          id: baselineTraceId,
+          filename: this.state.tracePairBaselineTraceName,
+          ...(baselineTraceId === this.state.backendTraceId &&
+          this.state.currentTraceFingerprint
+            ? {fingerprint: this.state.currentTraceFingerprint}
+            : {}),
+        },
         referenceTrace: {
           id: referenceTraceId,
           filename:
             session.referenceTraceName ||
-            uiText('参考 Trace', 'Reference Trace'),
+            uiText('对比 Trace', 'Comparison Trace'),
         },
-        currentPane:
-          session.tracePairCurrentPane === 'second' ? 'second' : 'first',
+        currentPane: 'first',
         layout: this.state.tracePairLayout,
         splitPercent: this.state.tracePairSplitPercent,
         activeTraceSide: this.state.isReferenceActive ? 'reference' : 'current',
@@ -1906,7 +1996,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       !isSmartPerfettoOidcMode() && this.engine?.mode === 'HTTP_RPC';
     const backendPresentation = this.getAnalysisBackendPresentation();
 
-    const appBackendTraceId = backendPresentation.traceId;
+    const workspaceTraceLaunch = parseWorkspaceTraceLaunch(
+      window.location.href,
+    );
+    const appBackendTraceId =
+      backendPresentation.traceId ?? workspaceTraceLaunch?.traceId;
     const appBackendUploadState = backendPresentation.state;
     const appBackendUploadError = backendPresentation.error;
 
@@ -3594,7 +3688,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     ),
                     m(
                       'span.ai-comparison-pane-name',
-                      this.getCurrentTraceName(),
+                      this.state.tracePairBaselineTraceName ||
+                        this.getCurrentTraceName(),
                     ),
                   ]),
                   m('span.ai-comparison-divider', 'vs'),
@@ -3606,7 +3701,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m(
                       'span.ai-comparison-pane-name',
                       this.state.referenceTraceName ||
-                        uiText('参考 Trace', 'Reference Trace'),
+                        uiText('对比 Trace', 'Comparison Trace'),
                     ),
                   ]),
                 ]),
@@ -6390,8 +6485,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           'Source code or external knowledge requires full analysis for evidence and authorization checks.',
                         )
                       : uiText(
-                          '对比模式下需完整分析才能利用参考 Trace 上下文',
-                          'Comparison mode requires full analysis to use the reference trace context.',
+                          '对比模式下需完整分析才能利用两侧 Trace 上下文',
+                          'Comparison mode requires full analysis to use both trace contexts.',
                         )
                     : mode.title,
                   disabled,
@@ -9966,10 +10061,14 @@ Click ⚙️ to configure backend connection.`,
 
       const tracePairContext = this.buildTracePairContext();
       if (tracePairContext) {
+        const baselinePane = tracePairContext.panes.find(
+          (pane) => pane.traceSide === 'current',
+        );
         const referencePane = tracePairContext.panes.find(
           (pane) => pane.traceSide === 'reference',
         );
-        if (referencePane) {
+        if (baselinePane && referencePane) {
+          requestBody.traceId = baselinePane.traceId;
           requestBody.referenceTraceId = referencePane.traceId;
           requestBody.options.tracePairContext = tracePairContext;
         }
@@ -14749,7 +14848,7 @@ Click ⚙️ to configure backend connection.`,
     );
   }
 
-  /** Render trace picker drawer for selecting a reference trace. */
+  /** Render the legacy shortcut for pairing the page trace with one comparison trace. */
   private renderTracePicker(): m.Vnode {
     return m('aside.ai-trace-picker-sidebar', [
       m('div.ai-trace-picker-sidebar-header', [
@@ -14778,7 +14877,7 @@ Click ⚙️ to configure backend connection.`,
                 // Show available traces from backend
                 this.availableTraces.length > 0
                   ? this.availableTraces
-                      .filter((t) => t.id !== this.state.backendTraceId) // Exclude current trace
+                      .filter((t) => t.id !== this.state.backendTraceId)
                       .map((t) =>
                         m(
                           'div.ai-trace-picker-item',
@@ -14818,8 +14917,8 @@ Click ⚙️ to configure backend connection.`,
                   : m(
                       'div.ai-trace-picker-empty',
                       uiText(
-                        '没有可用的参考 Trace。请先上传另一个 Trace 文件到后端。',
-                        'No reference trace is available. Upload another trace to the backend first.',
+                        '没有可用的对比 Trace。请先上传另一个 Trace 文件到后端。',
+                        'No comparison trace is available. Upload another trace to the backend first.',
                       ),
                     ),
               ]),
@@ -14840,7 +14939,7 @@ Click ⚙️ to configure backend connection.`,
     ]);
   }
 
-  /** Enter comparison mode with a reference trace. */
+  /** Enter comparison mode with the page trace as the initial baseline. */
   private async enterComparisonMode(
     refTraceId: string,
     refTraceName: string,

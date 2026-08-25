@@ -56,7 +56,7 @@ test('keeps heavy/light analysis stable through window operations and confirms s
 
   try {
     await scenario.open();
-    if (!scenario.lightTrace || !scenario.heavyTraceId) {
+    if (!scenario.lightTrace || !scenario.heavyHistoryTrace) {
       throw new Error('Dual Trace scenario did not initialize both traces');
     }
     await capture('00-dual-trace-ready.png');
@@ -151,7 +151,7 @@ test('keeps heavy/light analysis stable through window operations and confirms s
     activeRunId = analysis.runId;
 
     expect(analyzeRequest).toMatchObject({
-      traceId: scenario.heavyTraceId,
+      traceId: scenario.heavyHistoryTrace.id,
       referenceTraceId: scenario.lightTrace.id,
       options: {
         analysisMode: 'full',
@@ -169,7 +169,7 @@ test('keeps heavy/light analysis stable through window operations and confirms s
       expect.arrayContaining([
         expect.objectContaining({
           traceSide: 'current',
-          traceId: scenario.heavyTraceId,
+          traceId: scenario.heavyHistoryTrace.id,
           traceName: 'lacunh_heavy.pftrace',
         }),
         expect.objectContaining({

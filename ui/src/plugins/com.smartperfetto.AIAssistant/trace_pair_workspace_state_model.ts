@@ -16,10 +16,21 @@ export interface TracePairWorkspaceScope {
   readonly backendUrl: string;
 }
 
+export type TracePairPaneUploadStatus = 'idle' | 'uploading' | 'failed';
+
+export interface TracePairPaneUploadState {
+  readonly status: TracePairPaneUploadStatus;
+  readonly error: string | null;
+}
+
 export interface TracePairWorkspaceState {
   readonly open: boolean;
   readonly scope: TracePairWorkspaceScope | null;
+  /** Trace loaded by the parent Perfetto page. It seeds the initial baseline. */
+  readonly pageTrace: TracePairWorkspaceTrace | null;
+  /** Backend-compatible `current` role; presented to users as the baseline. */
   readonly currentTrace: TracePairWorkspaceTrace | null;
+  /** Backend-compatible `reference` role; presented to users as the comparison. */
   readonly referenceTrace: WorkspaceTraceCatalogItem | null;
   readonly currentPane: TracePairPaneSlot;
   readonly catalog: ReadonlyArray<WorkspaceTraceCatalogItem>;
@@ -31,11 +42,12 @@ export interface TracePairWorkspaceState {
   readonly maximizedTraceSide: TracePairTraceSide | null;
   readonly minimizedTraceSides: ReadonlySet<TracePairTraceSide>;
   readonly activeTraceSide: TracePairTraceSide;
+  readonly paneUploads: Readonly<Record<TracePairPaneSlot, TracePairPaneUploadState>>;
 }
 
 export interface OpenTracePairWorkspaceInput {
   readonly scope: TracePairWorkspaceScope;
-  readonly currentTrace: TracePairWorkspaceTrace;
+  readonly currentTrace?: TracePairWorkspaceTrace;
 }
 
 export interface SelectTraceForPaneInput {
@@ -45,6 +57,7 @@ export interface SelectTraceForPaneInput {
 
 export interface HydrateTracePairWorkspaceInput
   extends OpenTracePairWorkspaceInput {
+  readonly baselineTrace?: TracePairWorkspaceTrace;
   readonly referenceTrace: WorkspaceTraceCatalogItem;
   readonly currentPane?: TracePairPaneSlot;
   readonly layout?: TracePairLayout;
@@ -60,6 +73,7 @@ export function createInitialTracePairWorkspaceState(): TracePairWorkspaceState 
   return {
     open: false,
     scope: null,
+    pageTrace: null,
     currentTrace: null,
     referenceTrace: null,
     currentPane: 'first',
@@ -72,5 +86,9 @@ export function createInitialTracePairWorkspaceState(): TracePairWorkspaceState 
     maximizedTraceSide: null,
     minimizedTraceSides: new Set(),
     activeTraceSide: 'current',
+    paneUploads: {
+      first: {status: 'idle', error: null},
+      second: {status: 'idle', error: null},
+    },
   };
 }

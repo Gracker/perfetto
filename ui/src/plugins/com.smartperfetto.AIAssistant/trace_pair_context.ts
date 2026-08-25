@@ -41,11 +41,16 @@ const TRACE_PAIR_SEMANTIC_ALIASES: Record<string, TracePairTraceSide> = {
   primary: 'current',
   main: 'current',
   current: 'current',
+  baseline: 'current',
   '主': 'current',
   '当前': 'current',
+  '基线': 'current',
   reference: 'reference',
-  baseline: 'reference',
+  comparison: 'reference',
+  candidate: 'reference',
   '参考': 'reference',
+  '对比': 'reference',
+  '候选': 'reference',
 };
 
 const FIRST_PANE_ALIASES = [
@@ -109,7 +114,7 @@ export function buildTracePairContext(
     traceName:
       input.referenceTraceName ||
       input.referenceTraceFallbackName ||
-      'Reference Trace',
+      'Comparison Trace',
     active: input.activeTraceSide === 'reference',
     visualState: isTracePaneLive(input, 'reference') ? 'live' : 'context_only',
   };

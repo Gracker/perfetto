@@ -47,7 +47,7 @@ test('keeps a real DeepSeek comparison alive through window operations', async (
     const analyzeRequest = parseAnalyzeRequest(analyzeResponse.request());
     sessionId = analysis.sessionId;
     runId = analysis.runId;
-    expect(analyzeRequest.traceId).toBe(scenario.heavyTraceId);
+    expect(analyzeRequest.traceId).toBe(scenario.heavyHistoryTrace?.id);
     expect(analyzeRequest.referenceTraceId).toBe(scenario.lightTrace?.id);
 
     await expect(page.locator('button.ai-stop-btn')).toBeVisible();

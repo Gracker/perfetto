@@ -137,6 +137,7 @@ function projectOidcSessionForStorage(session: AISession): AISession {
   return {
     ...session,
     backendTraceId: undefined,
+    tracePairBaselineBackendTraceId: undefined,
     referenceBackendTraceId: undefined,
     agentSessionId: undefined,
     agentRunId: undefined,
@@ -682,6 +683,8 @@ export class SessionManager {
       summary?: string;
       type?: AISession['type'];
       referenceTraceFingerprint?: string;
+      tracePairBaselineBackendTraceId?: string;
+      tracePairBaselineTraceName?: string;
       referenceBackendTraceId?: string;
       referenceTraceName?: string;
       tracePairLayout?: AISession['tracePairLayout'];

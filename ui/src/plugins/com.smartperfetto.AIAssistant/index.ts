@@ -54,7 +54,16 @@ import {ConversationPage} from './conversation_page';
 import {PageAuthGate} from './page_auth_lifecycle';
 import {resolveAssistantOpenTarget} from './assistant_navigation';
 import {AnalysisBackendConnectionOwner} from './analysis_backend_connection_owner';
-import {backendUploadSourceKey} from '../../core/backend_uploader';
+import {
+  BackendUploader,
+  backendUploadSourceKey,
+} from '../../core/backend_uploader';
+import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+import {parseWorkspaceTraceLaunch} from '../../core/workspace_trace_launch';
+import {
+  loadPersistedTracePairWorkspace,
+  persistTracePairWorkspace,
+} from './trace_pair_workspace_persistence';
 
 // Inject smart-detected backend URL at module load time, BEFORE any trace
 // auto-upload kicks in.
@@ -178,6 +187,58 @@ export default class implements PerfettoPlugin {
     updateFloatingState({mode: 'tab'});
 
     const tracePairWorkspaceController = new TracePairWorkspaceController();
+    const settings = sessionManager.loadSettings();
+    if (!isSmartPerfettoOidcMode()) {
+      const uploader = new BackendUploader(
+        settings.backendUrl,
+        settings.backendApiKey,
+      );
+      tracePairWorkspaceController.setUploadHandler(async (_pane, file) => {
+        const result = await uploader.upload({type: 'FILE', file});
+        if (!result.success || !result.traceId) {
+          throw new Error(result.error || 'Trace upload failed');
+        }
+        return {
+          id: result.traceId,
+          filename: file.name,
+          size: file.size,
+          uploadedAt: new Date().toISOString(),
+        };
+      });
+      const launch = parseWorkspaceTraceLaunch(window.location.href);
+      const saved = loadPersistedTracePairWorkspace(settings.backendUrl);
+      if (
+        launch &&
+        saved?.open &&
+        saved.baseline?.id === launch.traceId &&
+        saved.comparison
+      ) {
+        const context = getSmartPerfettoRequestContext();
+        tracePairWorkspaceController.open({
+          scope: {
+            key: [
+              context.tenantId,
+              context.userId,
+              context.workspaceId,
+              settings.backendUrl,
+              launch.traceId,
+            ].join(':'),
+            backendUrl: settings.backendUrl,
+          },
+          currentTrace: saved.baseline,
+        });
+        tracePairWorkspaceController.setCatalog([
+          saved.baseline,
+          saved.comparison,
+        ]);
+        tracePairWorkspaceController.selectTrace({
+          pane: 'second',
+          traceId: saved.comparison.id,
+        });
+        tracePairWorkspaceController.setLayout(saved.layout);
+        tracePairWorkspaceController.setSplitPercent(saved.splitPercent);
+      }
+    }
     const traceSource = (
       ctx.traceInfo as unknown as {source?: Parameters<typeof backendUploadSourceKey>[0]}
     ).source;
@@ -199,6 +260,10 @@ export default class implements PerfettoPlugin {
     };
     let previousTracePairIdentity = tracePairIdentity();
     const unsubscribeTracePair = tracePairWorkspaceController.subscribe(() => {
+      persistTracePairWorkspace(
+        tracePairWorkspaceController.getState(),
+        settings.backendUrl,
+      );
       const nextTracePairIdentity = tracePairIdentity();
       if (nextTracePairIdentity === previousTracePairIdentity) return;
       previousTracePairIdentity = nextTracePairIdentity;
@@ -213,6 +278,7 @@ export default class implements PerfettoPlugin {
       unsubscribeTracePair();
       surfaceHandle.dispose();
       analysisBackendConnectionOwner?.dispose();
+      tracePairWorkspaceController.setUploadHandler(undefined);
       tracePairWorkspaceController.resetScope();
     });
     const criticalPathHandle = setupCriticalPathExtension(

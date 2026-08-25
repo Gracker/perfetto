@@ -36,6 +36,10 @@ describe('TracePairWorkspaceController', () => {
   it('opens a draft workspace before a reference trace is selected', () => {
     expect(controller.getState()).toMatchObject({
       open: true,
+      pageTrace: {
+        id: 'backend-current',
+        filename: 'current.pftrace',
+      },
       currentPane: 'first',
       currentTrace: {
         id: 'backend-current',
@@ -45,6 +49,175 @@ describe('TracePairWorkspaceController', () => {
     });
     expect(controller.getTraceForPane('first')?.id).toBe('backend-current');
     expect(controller.getTraceForPane('second')).toBeNull();
+  });
+
+  it('opens a zero-start workspace without a page trace', () => {
+    const empty = new TracePairWorkspaceController();
+    empty.open({
+      scope: {
+        key: 'tenant-a/workspace-a/zero-start',
+        backendUrl: 'http://127.0.0.1:3000',
+      },
+    });
+
+    expect(empty.getState()).toMatchObject({
+      open: true,
+      pageTrace: null,
+      currentTrace: null,
+      referenceTrace: null,
+    });
+  });
+
+  it('uploads both empty panes independently and selects each result', async () => {
+    const empty = new TracePairWorkspaceController();
+    empty.open({
+      scope: {
+        key: 'tenant-a/workspace-a/zero-start',
+        backendUrl: 'http://127.0.0.1:3000',
+      },
+    });
+    const completions = new Map<
+      'first' | 'second',
+      (trace: {id: string; filename: string; size: number}) => void
+    >();
+    empty.setUploadHandler(
+      (pane) =>
+        new Promise((resolve) => {
+          completions.set(pane, resolve);
+        }),
+    );
+
+    const baselineUpload = empty.uploadTrace(
+      'first',
+      new File(['baseline'], 'baseline.pftrace'),
+    );
+    const comparisonUpload = empty.uploadTrace(
+      'second',
+      new File(['comparison'], 'comparison.pftrace'),
+    );
+
+    expect(empty.getState().paneUploads).toMatchObject({
+      first: {status: 'uploading'},
+      second: {status: 'uploading'},
+    });
+
+    completions.get('second')?.({
+      id: 'comparison-id',
+      filename: 'comparison.pftrace',
+      size: 10,
+    });
+    await comparisonUpload;
+    expect(empty.getState()).toMatchObject({
+      currentTrace: null,
+      referenceTrace: {id: 'comparison-id'},
+      paneUploads: {second: {status: 'idle'}},
+    });
+
+    completions.get('first')?.({
+      id: 'baseline-id',
+      filename: 'baseline.pftrace',
+      size: 8,
+    });
+    await baselineUpload;
+    expect(empty.getState()).toMatchObject({
+      currentTrace: {id: 'baseline-id'},
+      referenceTrace: {id: 'comparison-id'},
+      paneUploads: {
+        first: {status: 'idle'},
+        second: {status: 'idle'},
+      },
+    });
+  });
+
+  it('blocks pane uploads while analysis identity is locked', async () => {
+    const upload = vi.fn();
+    controller.setUploadHandler(upload);
+    controller.setSelectionLocked(true);
+
+    await expect(
+      controller.uploadTrace(
+        'first',
+        new File(['replacement'], 'replacement.pftrace'),
+      ),
+    ).resolves.toBe(false);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it('ignores an upload completion after the workspace scope resets', async () => {
+    let completeUpload:
+      | ((trace: {id: string; filename: string; size: number}) => void)
+      | undefined;
+    controller.setUploadHandler(
+      () =>
+        new Promise((resolve) => {
+          completeUpload = resolve;
+        }),
+    );
+
+    const upload = controller.uploadTrace(
+      'first',
+      new File(['stale'], 'stale.pftrace'),
+    );
+    controller.resetScope();
+    completeUpload?.({id: 'stale', filename: 'stale.pftrace', size: 5});
+
+    await expect(upload).resolves.toBe(false);
+    expect(controller.getState()).toMatchObject({
+      open: false,
+      currentTrace: null,
+      referenceTrace: null,
+      catalog: [],
+      paneUploads: {
+        first: {status: 'idle', error: null},
+        second: {status: 'idle', error: null},
+      },
+    });
+  });
+
+  it('selects any two historical traces without keeping the page trace in the pair', () => {
+    expect(controller.selectTrace({pane: 'second', traceId: 'history-a'})).toBe(
+      true,
+    );
+    expect(controller.selectTrace({pane: 'first', traceId: 'history-b'})).toBe(
+      true,
+    );
+
+    expect(controller.getState()).toMatchObject({
+      pageTrace: {id: 'backend-current'},
+      currentPane: 'first',
+      currentTrace: {id: 'history-b'},
+      referenceTrace: {id: 'history-a'},
+    });
+    expect(controller.getTraceForPane('first')?.id).toBe('history-b');
+    expect(controller.getTraceForPane('second')?.id).toBe('history-a');
+  });
+
+  it('swaps baseline and comparison when either side selects the opposite trace', () => {
+    controller.selectTrace({pane: 'second', traceId: 'history-a'});
+    controller.selectTrace({pane: 'first', traceId: 'history-b'});
+
+    expect(controller.selectTrace({pane: 'first', traceId: 'history-a'})).toBe(
+      true,
+    );
+
+    expect(controller.getState()).toMatchObject({
+      currentPane: 'first',
+      currentTrace: {id: 'history-a'},
+      referenceTrace: {id: 'history-b'},
+    });
+  });
+
+  it('exposes an explicit baseline and comparison swap operation', () => {
+    controller.selectTrace({pane: 'second', traceId: 'history-a'});
+    controller.setActiveTraceSide('current');
+
+    expect(controller.swapTraces()).toBe(true);
+    expect(controller.getState()).toMatchObject({
+      currentPane: 'first',
+      currentTrace: {id: 'history-a'},
+      referenceTrace: {id: 'backend-current'},
+      activeTraceSide: 'current',
+    });
   });
 
   it('keeps 5 GiB trace selection as lightweight metadata state', () => {
@@ -79,29 +252,29 @@ describe('TracePairWorkspaceController', () => {
     expect(fetchTrace).not.toHaveBeenCalled();
   });
 
-  it('atomically moves current to the other pane when history is selected there', () => {
+  it('replaces the baseline when the first selector chooses a historical trace', () => {
     expect(controller.selectTrace({pane: 'first', traceId: 'history-a'})).toBe(
       true,
     );
 
     expect(controller.getState()).toMatchObject({
-      currentPane: 'second',
-      currentTrace: {id: 'backend-current'},
-      referenceTrace: {id: 'history-a', filename: 'history-a.pftrace'},
+      currentPane: 'first',
+      currentTrace: {id: 'history-a', filename: 'history-a.pftrace'},
+      referenceTrace: null,
     });
     expect(controller.getTraceForPane('first')?.id).toBe('history-a');
-    expect(controller.getTraceForPane('second')?.id).toBe('backend-current');
+    expect(controller.getTraceForPane('second')).toBeNull();
   });
 
   it('lets either selector swap the same pair without duplicating a trace', () => {
-    controller.selectTrace({pane: 'first', traceId: 'history-a'});
+    controller.selectTrace({pane: 'second', traceId: 'history-a'});
     expect(
-      controller.selectTrace({pane: 'first', traceId: 'backend-current'}),
+      controller.selectTrace({pane: 'second', traceId: 'backend-current'}),
     ).toBe(true);
 
     expect(controller.getState().currentPane).toBe('first');
-    expect(controller.getTraceForPane('first')?.id).toBe('backend-current');
-    expect(controller.getTraceForPane('second')?.id).toBe('history-a');
+    expect(controller.getTraceForPane('first')?.id).toBe('history-a');
+    expect(controller.getTraceForPane('second')?.id).toBe('backend-current');
   });
 
   it('changes only the reference identity when another history trace is selected', () => {
@@ -148,7 +321,7 @@ describe('TracePairWorkspaceController', () => {
 
     expect(controller.getState()).toMatchObject({
       open: false,
-      currentPane: 'second',
+      currentPane: 'first',
       referenceTrace: {id: 'history-b'},
       layout: 'vertical',
       splitPercent: 64,
