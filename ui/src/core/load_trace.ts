@@ -77,6 +77,10 @@ import {bindBackendUploadTargetToViewer} from './smartperfetto_viewer_transport'
 import {showModal} from '../widgets/modal';
 import m from 'mithril';
 import {isSmartPerfettoOidcMode} from './smartperfetto_auth';
+import {
+  WORKSPACE_TRACE_ID_ARG,
+  WORKSPACE_TRACE_LAUNCH_ARG,
+} from './workspace_trace_launch';
 
 const ENABLE_CHROME_RELIABLE_RANGE_ZOOM_FLAG = featureFlags.register({
   id: 'enableChromeReliableRangeZoom',
@@ -449,16 +453,27 @@ async function loadTraceIntoEngine(
   const routeArgs: Record<string, string | boolean> = {
     local_cache_key: cacheUuid,
   };
-  if (traceSource.type === 'HTTP_RPC' && isSmartPerfettoDualTracePane(app)) {
+  const currentRouteArgs = Router.parseUrl(window.location.href).args;
+  const isWorkspaceTraceLaunch =
+    currentRouteArgs[WORKSPACE_TRACE_LAUNCH_ARG] === true ||
+    currentRouteArgs[WORKSPACE_TRACE_LAUNCH_ARG] === 'true';
+  if (
+    traceSource.type === 'HTTP_RPC' &&
+    (isSmartPerfettoDualTracePane(app) || isWorkspaceTraceLaunch)
+  ) {
     for (const key of [
       'smartperfettoDualTrace',
       'smartperfettoTraceId',
       'smartperfettoPane',
+      WORKSPACE_TRACE_LAUNCH_ARG,
+      WORKSPACE_TRACE_ID_ARG,
       'traceFileName',
       'mode',
       'hideSidebar',
     ] as const) {
-      const value = app.initialRouteArgs[key];
+      const value = isWorkspaceTraceLaunch
+        ? currentRouteArgs[key]
+        : app.initialRouteArgs[key];
       if (value !== undefined) routeArgs[key] = value;
     }
   }

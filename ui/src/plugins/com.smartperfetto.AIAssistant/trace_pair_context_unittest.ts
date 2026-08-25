@@ -40,6 +40,10 @@ describe('buildHorizontalTracePairContext', () => {
       workspaceOpen: false,
       splitPercent: 50,
       aliases: expect.objectContaining({
+        baseline: 'current',
+        comparison: 'reference',
+        '基线': 'current',
+        '对比': 'reference',
         left: 'current',
         top: 'current',
         '左侧': 'current',
@@ -83,7 +87,7 @@ describe('buildHorizontalTracePairContext', () => {
 });
 
 describe('buildTracePairContext', () => {
-  it('uses a language-neutral fallback name for the reference trace', () => {
+  it('uses a language-neutral fallback name for the comparison trace', () => {
     const context = buildTracePairContext({
       currentTraceId: 'trace-current',
       currentTraceName: 'current.trace',
@@ -98,7 +102,7 @@ describe('buildTracePairContext', () => {
       minimizedTraceSides: new Set<TracePairTraceSide>(),
     });
 
-    expect(context?.panes[1].traceName).toBe('Reference Trace');
+    expect(context?.panes[1].traceName).toBe('Comparison Trace');
   });
 
   it('marks both panes live when the same-page workspace is open', () => {

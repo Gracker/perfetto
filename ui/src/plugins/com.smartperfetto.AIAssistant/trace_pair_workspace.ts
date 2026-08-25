@@ -16,6 +16,7 @@ export {installTracePairFrameRedrawListener} from './trace_pair_workspace_frame_
 
 export interface TracePairWorkspaceAttrs {
   readonly controller: TracePairWorkspaceController;
+  readonly onAssistant?: () => void;
 }
 
 export class TracePairWorkspace
@@ -52,6 +53,7 @@ export class TracePairWorkspace
       attrs.controller,
       this.resize.isResizing(),
       (event) => this.resize.start(event, attrs.controller),
+      attrs.onAssistant,
     );
   }
 }

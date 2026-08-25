@@ -38,6 +38,8 @@ import {
   getBackendUploadIdentityKey,
 } from '../../core/backend_uploader';
 import {setBackendUploadState} from '../../core/backend_upload_state';
+import {persistTracePairWorkspace} from './trace_pair_workspace_persistence';
+import {TracePairWorkspaceController as ConcreteTracePairWorkspaceController} from './trace_pair_workspace_state';
 
 beforeEach(() => {
   setUiLanguagePreference('zh-CN');
@@ -1077,7 +1079,7 @@ describe('AIPanel /goto navigation', () => {
 
     expect(text).toContain('表 9');
     expect(text).toContain('表格');
-    expect(text).toContain('参考 Trace');
+    expect(text).toContain('对比 Trace');
     expect(text).toContain('阶段 phase-2 · Validate contention');
     expect(text).toContain('阶段归因 inferred');
     expect(text).toContain('42 行');
@@ -1510,6 +1512,39 @@ describe('AIPanel trace-pair session restore', () => {
     sessionStorage.clear();
   });
 
+  it('restores a persisted zero-start pair when its baseline becomes the main viewer trace', () => {
+    const persisted = new ConcreteTracePairWorkspaceController();
+    persisted.open({
+      scope: {key: 'zero-start', backendUrl: 'http://localhost:3000'},
+    });
+    persisted.setCatalog([
+      {id: 'backend-baseline', filename: 'baseline.pftrace'},
+      {id: 'backend-comparison', filename: 'comparison.pftrace'},
+    ]);
+    persisted.selectTrace({pane: 'first', traceId: 'backend-baseline'});
+    persisted.selectTrace({pane: 'second', traceId: 'backend-comparison'});
+    persistTracePairWorkspace(
+      persisted.getState(),
+      'http://localhost:3000',
+    );
+
+    const panel = createMutableTestPanel();
+    panel.state.settings.backendUrl = 'http://localhost:3000';
+    panel.state.backendTraceId = 'backend-baseline';
+    panel.state.currentTraceFingerprint = 'fingerprint-baseline';
+    panel.fetchAvailableTraces = vi.fn(async () => {});
+
+    (panel as any).restorePersistedTracePairWorkspace();
+
+    expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
+      open: true,
+      currentTrace: {id: 'backend-baseline'},
+      referenceTrace: {id: 'backend-comparison'},
+    });
+    expect(panel.state.referenceTraceId).toBe('backend-comparison');
+    expect(panel.fetchAvailableTraces).toHaveBeenCalledTimes(1);
+  });
+
   it('restores explicit raw trace comparison identity from local session metadata', () => {
     const session = sessionManager.createSession(
       'trace-a',
@@ -1519,6 +1554,8 @@ describe('AIPanel trace-pair session restore', () => {
     sessionManager.updateSession('trace-a', session.sessionId, {
       agentSessionId: 'agent-compare',
       type: 'comparison',
+      tracePairBaselineBackendTraceId: 'history-baseline',
+      tracePairBaselineTraceName: 'baseline.trace',
       referenceBackendTraceId: 'backend-reference',
       referenceTraceName: 'reference.trace',
       tracePairLayout: 'vertical',
@@ -1533,6 +1570,7 @@ describe('AIPanel trace-pair session restore', () => {
     expect(panel.loadSession(session.sessionId)).toBe(true);
 
     expect(panel.state.referenceTraceId).toBe('backend-reference');
+    expect(panel.state.tracePairBaselineTraceId).toBe('history-baseline');
     expect(panel.state.referenceTraceName).toBe('reference.trace');
     expect(panel.state.tracePairWorkspaceOpen).toBe(false);
     expect(panel.state.tracePairLayout).toBe('vertical');
@@ -1546,7 +1584,8 @@ describe('AIPanel trace-pair session restore', () => {
       panes: [
         expect.objectContaining({
           traceSide: 'current',
-          traceId: 'backend-current',
+          traceId: 'history-baseline',
+          traceName: 'baseline.trace',
         }),
         expect.objectContaining({
           traceSide: 'reference',
@@ -1615,7 +1654,7 @@ describe('AIPanel trace-pair session restore', () => {
 
     expect(panel.tracePairWorkspaceController.getState()).toMatchObject({
       referenceTrace: {id: 'history-b', filename: 'history-b.pftrace'},
-      currentPane: 'second',
+      currentPane: 'first',
       layout: 'vertical',
       splitPercent: 64,
     });
@@ -1767,7 +1806,7 @@ describe('AIPanel trace-pair session restore', () => {
 
     panel.tracePairWorkspaceController.selectTrace({
       pane: 'second',
-      traceId: 'backend-current',
+      traceId: 'history-a',
     });
     panel.syncTracePairStateFromController();
     expect(panel.state.agentSessionId).toBe('agent-a');
@@ -1800,11 +1839,16 @@ describe('AIPanel trace-pair session restore', () => {
       },
     });
     panel.tracePairWorkspaceController.setCatalog([
-      {id: 'backend-reference', filename: 'reference.trace'},
+      {id: 'history-baseline', filename: 'baseline.trace'},
+      {id: 'history-comparison', filename: 'comparison.trace'},
     ]);
     panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second',
+      traceId: 'history-comparison',
+    });
+    panel.tracePairWorkspaceController.selectTrace({
       pane: 'first',
-      traceId: 'backend-reference',
+      traceId: 'history-baseline',
     });
     panel.tracePairWorkspaceController.setLayout('vertical');
     panel.tracePairWorkspaceController.setSplitPercent(66);
@@ -1846,33 +1890,32 @@ describe('AIPanel trace-pair session restore', () => {
     const requestBody = JSON.parse(String(init?.body));
     expect(requestBody).toMatchObject({
       query: '对比上方和下方 Trace 的启动速度差异',
-      traceId: 'backend-current',
-      referenceTraceId: 'backend-reference',
+      traceId: 'history-baseline',
+      referenceTraceId: 'history-comparison',
       options: {
         tracePairContext: {
           schemaVersion: 1,
           layout: 'vertical',
-          primarySide: 'bottom',
-          referenceSide: 'top',
-          activeSide: 'top',
+          primarySide: 'top',
+          referenceSide: 'bottom',
+          activeSide: 'bottom',
           workspaceOpen: true,
           splitPercent: 66,
           maximizedTraceSide: 'reference',
           panes: [
             {
-              side: 'bottom',
+              side: 'top',
               traceSide: 'current',
-              traceId: 'backend-current',
-              traceName: 'current.trace',
-              traceFingerprint: 'fingerprint-current',
+              traceId: 'history-baseline',
+              traceName: 'baseline.trace',
               active: false,
               visualState: 'context_only',
             },
             {
-              side: 'top',
+              side: 'bottom',
               traceSide: 'reference',
-              traceId: 'backend-reference',
-              traceName: 'reference.trace',
+              traceId: 'history-comparison',
+              traceName: 'comparison.trace',
               active: true,
               visualState: 'live',
             },
@@ -1881,12 +1924,14 @@ describe('AIPanel trace-pair session restore', () => {
       },
     });
     expect(requestBody.options.tracePairContext.aliases).toMatchObject({
-      上方: 'reference',
-      上边: 'reference',
-      下方: 'current',
-      下边: 'current',
-      top: 'reference',
-      bottom: 'current',
+      baseline: 'current',
+      comparison: 'reference',
+      上方: 'current',
+      上边: 'current',
+      下方: 'reference',
+      下边: 'reference',
+      top: 'current',
+      bottom: 'reference',
     });
     expect(panel.listenToAgentSSE).toHaveBeenCalledWith('agent-session');
   });

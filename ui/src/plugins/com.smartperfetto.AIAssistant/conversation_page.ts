@@ -4,6 +4,10 @@
 
 import m from 'mithril';
 import type {App} from '../../public/app';
+import {BackendUploader} from '../../core/backend_uploader';
+import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
+import {buildWorkspaceTraceViewerHash} from '../../core/workspace_trace_launch';
+import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
 
 import {
   analysisContextRequiresFullMode,
@@ -37,6 +41,12 @@ import {
   PageAuthLifecycle,
   type PageAuthTransition,
 } from './page_auth_lifecycle';
+import {TracePairWorkspace} from './trace_pair_workspace';
+import {TracePairWorkspaceController} from './trace_pair_workspace_state';
+import {
+  loadPersistedTracePairWorkspace,
+  persistTracePairWorkspace,
+} from './trace_pair_workspace_persistence';
 
 function messageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -58,6 +68,13 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     (transition) => this.handleAuthTransition(transition),
   );
   private readonly settings = sessionManager.loadSettings();
+  private readonly traceUploader = new BackendUploader(
+    this.settings.backendUrl,
+    this.settings.backendApiKey,
+  );
+  private readonly tracePairWorkspaceController =
+    new TracePairWorkspaceController();
+  private unsubscribeTracePair?: () => void;
   private store: StoredConversation = loadConversationStore(this.settings.backendUrl);
   private readonly startQueue = new ConversationStartQueue(
     () => this.store.sessionId,
@@ -75,6 +92,33 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
 
   oncreate(): void {
     this.authLifecycle.mount();
+    if (!isSmartPerfettoOidcMode()) {
+      this.tracePairWorkspaceController.setUploadHandler(
+        async (_pane, file) => {
+          const result = await this.traceUploader.upload({type: 'FILE', file});
+          if (!result.success || !result.traceId) {
+            throw new Error(result.error || uiText(
+              'Trace 上传失败',
+              'Trace upload failed',
+            ));
+          }
+          return {
+            id: result.traceId,
+            filename: file.name,
+            size: file.size,
+            uploadedAt: new Date().toISOString(),
+          };
+        },
+      );
+      this.restoreTracePairWorkspace();
+      this.unsubscribeTracePair =
+        this.tracePairWorkspaceController.subscribe(() => {
+          persistTracePairWorkspace(
+            this.tracePairWorkspaceController.getState(),
+            this.settings.backendUrl,
+          );
+        });
+    }
   }
 
   onremove(): void {
@@ -82,6 +126,9 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     this.activeController?.abort();
     this.activeController = undefined;
     this.activeReceipt = undefined;
+    this.unsubscribeTracePair?.();
+    this.unsubscribeTracePair = undefined;
+    this.tracePairWorkspaceController.setUploadHandler(undefined);
     const authState = this.authLifecycle.getState();
     if (authState.kind === 'ready' && authState.authority.oidc) {
       this.startQueue.reset({persist: false});
@@ -95,6 +142,10 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       (message) => message.fullHandoff,
     )?.fullHandoff;
     return m('main.ai-conversation-page', [
+      m(TracePairWorkspace, {
+        controller: this.tracePairWorkspaceController,
+        onAssistant: () => this.launchTracePairAnalysis(attrs.app),
+      }),
       m('header.ai-conversation-page-header', [
         m('div', [
           m('h1', uiText('AI 对话', 'AI Conversation')),
@@ -103,9 +154,22 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
             'No trace is attached. Discuss requirements, performance concepts, analysis methods, or authorized source code; trace claims will state their evidence boundary.',
           )),
         ]),
-        m('button', {
-          onclick: () => void this.startNewConversation(),
-        }, uiText('新对话', 'New conversation')),
+        m('div.ai-conversation-page-header-actions', [
+          m('button', {
+            'data-open-zero-trace-pair': '',
+            'disabled': isSmartPerfettoOidcMode(),
+            'onclick': () => this.openTracePairWorkspace(),
+            'title': isSmartPerfettoOidcMode()
+              ? uiText(
+                  'OIDC Viewer 使用页面本地 Trace，不支持后端双窗上传',
+                  'OIDC Viewer uses page-local traces and does not support backend dual uploads',
+                )
+              : uiText('打开空双窗并上传两份 Trace', 'Open empty dual view and upload two traces'),
+          }, uiText('双 Trace', 'Dual Trace')),
+          m('button', {
+            onclick: () => void this.startNewConversation(),
+          }, uiText('新对话', 'New conversation')),
+        ]),
       ]),
       m('section.ai-conversation-page-thread',
         this.store.messages.length > 0
@@ -173,6 +237,63 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         }, this.activeReceipt ? uiText('修正方向', 'Steer') : uiText('发送', 'Send')),
       ]),
     ]);
+  }
+
+  private tracePairScope() {
+    const context = getSmartPerfettoRequestContext();
+    return {
+      key: [
+        context.tenantId,
+        context.userId,
+        context.workspaceId,
+        this.settings.backendUrl.replace(/\/+$/, ''),
+        'zero-start',
+      ].join(':'),
+      backendUrl: this.settings.backendUrl,
+    };
+  }
+
+  private openTracePairWorkspace(): void {
+    if (isSmartPerfettoOidcMode()) return;
+    this.tracePairWorkspaceController.open({scope: this.tracePairScope()});
+  }
+
+  private restoreTracePairWorkspace(): void {
+    const saved = loadPersistedTracePairWorkspace(this.settings.backendUrl);
+    if (!saved) return;
+    this.tracePairWorkspaceController.open({scope: this.tracePairScope()});
+    const catalog = [saved.baseline, saved.comparison].filter(
+      (trace): trace is NonNullable<typeof trace> => trace !== undefined,
+    );
+    this.tracePairWorkspaceController.setCatalog(catalog);
+    if (saved.baseline) {
+      this.tracePairWorkspaceController.selectTrace({
+        pane: 'first',
+        traceId: saved.baseline.id,
+      });
+    }
+    if (saved.comparison) {
+      this.tracePairWorkspaceController.selectTrace({
+        pane: 'second',
+        traceId: saved.comparison.id,
+      });
+    }
+    this.tracePairWorkspaceController.setLayout(saved.layout);
+    this.tracePairWorkspaceController.setSplitPercent(saved.splitPercent);
+    if (!saved.open) this.tracePairWorkspaceController.close();
+  }
+
+  private launchTracePairAnalysis(app: App): void {
+    const state = this.tracePairWorkspaceController.getState();
+    if (!state.currentTrace || !state.referenceTrace) return;
+    this.tracePairWorkspaceController.close();
+    persistTracePairWorkspace(state, this.settings.backendUrl);
+    app.navigate(
+      buildWorkspaceTraceViewerHash({
+        id: state.currentTrace.id,
+        filename: state.currentTrace.filename,
+      }),
+    );
   }
 
   private renderFullHandoff(app: App, handoff: ConversationFullHandoff): m.Children {

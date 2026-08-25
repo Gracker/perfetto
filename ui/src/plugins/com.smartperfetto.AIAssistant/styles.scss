@@ -72,6 +72,12 @@
   }
 }
 
+.ai-conversation-page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ai-conversation-page-header button,
 .ai-conversation-full-handoff button,
 .ai-conversation-page-send {
@@ -5821,6 +5827,46 @@ tr.detail-row {
   .pf-icon {
     font-size: 28px;
   }
+}
+
+.ai-trace-pair-upload {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid var(--pf-color-accent);
+  border-radius: 5px;
+  background: tint(var(--pf-color-accent), 10%);
+  color: var(--pf-color-accent);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+
+  input {
+    display: none;
+  }
+
+  &.is-compact {
+    min-height: 24px;
+    padding: 3px 7px;
+    font-size: 10px;
+  }
+
+  &.is-disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+  }
+}
+
+.ai-trace-pair-upload-error {
+  align-self: center;
+  max-width: 420px;
+  padding: 4px 8px;
+  color: var(--pf-color-danger);
+  font-size: 11px;
+  text-align: center;
 }
 
 .ai-trace-pair-icon-btn:disabled {

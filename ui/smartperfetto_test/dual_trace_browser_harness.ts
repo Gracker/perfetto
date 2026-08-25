@@ -129,12 +129,18 @@ export async function waitForEmbeddedTraces(page: Page): Promise<void> {
               | {
                   isLoadingTrace?: boolean;
                   trace?: {engine?: {numRequestsPending?: number}};
-                }
+              }
               | undefined;
+            const home = document.querySelector('.pf-home-page');
+            const homeVisible =
+              home instanceof HTMLElement &&
+              home.getClientRects().length > 0 &&
+              getComputedStyle(home).visibility !== 'hidden';
             return (
               window.location.hash.includes('smartperfettoTraceId=') &&
               app?.isLoadingTrace === false &&
               app.trace?.engine?.numRequestsPending === 0 &&
+              !homeVisible &&
               document.querySelector('.pf-track') !== null &&
               document.querySelector('.progress.progress-anim') === null
             );
@@ -159,6 +165,14 @@ export async function waitForEmbeddedTraces(page: Page): Promise<void> {
               | {trace?: {engine?: {numRequestsPending?: number}}}
               | undefined
           )?.trace?.engine?.numRequestsPending,
+          homeVisible: (() => {
+            const home = document.querySelector('.pf-home-page');
+            return (
+              home instanceof HTMLElement &&
+              home.getClientRects().length > 0 &&
+              getComputedStyle(home).visibility !== 'hidden'
+            );
+          })(),
           trackCount: document.querySelectorAll('.pf-track').length,
           title: document.title,
         }));

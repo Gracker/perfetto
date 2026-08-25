@@ -26,9 +26,9 @@ export function normalizePaneSide(value: unknown): TracePaneSide | undefined {
 export function traceSideLabel(
   traceSide: TracePairTraceSide | undefined,
 ): string {
-  if (traceSide === 'current') return uiText('当前 Trace', 'Current trace');
+  if (traceSide === 'current') return uiText('基线 Trace', 'Baseline trace');
   if (traceSide === 'reference') {
-    return uiText('参考 Trace', 'Reference trace');
+    return uiText('对比 Trace', 'Comparison trace');
   }
   return '';
 }

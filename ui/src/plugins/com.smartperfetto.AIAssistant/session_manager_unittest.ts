@@ -525,6 +525,8 @@ describe('SessionManager session storage CAS', () => {
 
     manager.updateSession('trace-a', session.sessionId, {
       type: 'comparison',
+      tracePairBaselineBackendTraceId: 'backend-a',
+      tracePairBaselineTraceName: 'baseline.trace',
       referenceBackendTraceId: 'backend-b',
       referenceTraceName: 'reference.trace',
       tracePairLayout: 'vertical',
@@ -535,6 +537,7 @@ describe('SessionManager session storage CAS', () => {
     expect(manager.loadSession(session.sessionId)).toEqual(
       expect.objectContaining({
         type: 'comparison',
+        tracePairBaselineBackendTraceId: 'backend-a',
         referenceBackendTraceId: 'backend-b',
         tracePairLayout: 'vertical',
         tracePairCurrentPane: 'second',
@@ -543,6 +546,8 @@ describe('SessionManager session storage CAS', () => {
 
     manager.updateSession('trace-a', session.sessionId, {
       type: 'single',
+      tracePairBaselineBackendTraceId: undefined,
+      tracePairBaselineTraceName: undefined,
       referenceBackendTraceId: undefined,
       referenceTraceName: undefined,
       tracePairLayout: undefined,
@@ -553,6 +558,7 @@ describe('SessionManager session storage CAS', () => {
 
     const restored = manager.loadSession(session.sessionId);
     expect(restored).toEqual(expect.objectContaining({type: 'single'}));
+    expect(restored).not.toHaveProperty('tracePairBaselineBackendTraceId');
     expect(restored).not.toHaveProperty('referenceBackendTraceId');
     expect(restored).not.toHaveProperty('tracePairLayout');
     expect(restored).not.toHaveProperty('tracePairCurrentPane');

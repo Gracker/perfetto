@@ -95,9 +95,10 @@ export function renderTracePairWorkspace(
   controller: TracePairWorkspaceController,
   resizing: boolean,
   startResize: (event: PointerEvent) => void,
+  onAssistant?: () => void,
 ): m.Children {
   const state = controller.getState();
-  if (!state.open || !state.scope || !state.currentTrace) return null;
+  if (!state.open || !state.scope) return null;
   const floatingState = getFloatingState();
   const assistantExpanded =
     floatingState.mode === 'sidebar' && !floatingState.sidebar.collapsed;
@@ -109,14 +110,10 @@ export function renderTracePairWorkspace(
     .join(' ');
   const bodyClass = [
     `layout-${state.layout}`,
-    state.minimizedTraceSides.has(
-      state.currentPane === 'first' ? 'current' : 'reference',
-    )
+    state.minimizedTraceSides.has('current')
       ? 'first-minimized'
       : '',
-    state.minimizedTraceSides.has(
-      state.currentPane === 'first' ? 'reference' : 'current',
-    )
+    state.minimizedTraceSides.has('reference')
       ? 'second-minimized'
       : '',
   ]
@@ -133,9 +130,13 @@ export function renderTracePairWorkspace(
         m('span', uiText('双 Trace 工作区', 'Dual-Trace Workspace')),
       ]),
       m('div.ai-trace-pair-summary', [
-        m('span', state.currentTrace.filename),
+        m('span', state.currentTrace
+          ? `${uiText('基线', 'Baseline')}: ${state.currentTrace.filename}`
+          : uiText('请选择基线 Trace', 'Select a baseline trace')),
         m('span.ai-trace-pair-summary-separator', 'vs'),
-        m('span', state.referenceTrace?.filename || uiText('请选择历史 Trace', 'Select a historical trace')),
+        m('span', state.referenceTrace
+          ? `${uiText('对比', 'Comparison')}: ${state.referenceTrace.filename}`
+          : uiText('请选择对比 Trace', 'Select a comparison trace')),
       ]),
       state.catalogLoading
         ? m('span.ai-trace-pair-catalog-status', uiText('正在加载 Trace...', 'Loading traces...'))
@@ -149,10 +150,15 @@ export function renderTracePairWorkspace(
           {
             'type': 'button',
             'class': assistantExpanded ? 'active' : '',
-            'onclick': toggleWorkspaceAssistant,
+            'onclick': onAssistant ?? toggleWorkspaceAssistant,
+            'disabled': onAssistant
+              ? !state.currentTrace || !state.referenceTrace
+              : false,
             'title': assistantExpanded
               ? uiText('收起 AI 助手', 'Collapse AI assistant')
-              : uiText('打开 AI 助手', 'Open AI assistant'),
+              : onAssistant && (!state.currentTrace || !state.referenceTrace)
+                ? uiText('请先在两侧加载 Trace', 'Load both traces first')
+                : uiText('打开 AI 助手', 'Open AI assistant'),
             'aria-label': assistantExpanded
               ? uiText('收起 AI 助手', 'Collapse AI assistant')
               : uiText('打开 AI 助手', 'Open AI assistant'),
@@ -163,6 +169,19 @@ export function renderTracePairWorkspace(
         ),
         ...LAYOUT_BUTTONS.map((button) =>
           renderLayoutButton(controller, button),
+        ),
+        m(
+          'button.ai-trace-pair-tool-btn',
+          {
+            type: 'button',
+            disabled: state.selectionLocked || !state.referenceTrace,
+            onclick: () => controller.swapTraces(),
+            title: state.selectionLocked
+              ? uiText('分析运行中，Trace 交换已锁定', 'Trace swapping is locked while analysis is running')
+              : uiText('交换基线与对比 Trace', 'Swap baseline and comparison traces'),
+            'data-trace-pair-swap': '',
+          },
+          [m('i.pf-icon', 'swap_horiz'), uiText('交换', 'Swap')],
         ),
         m(
           'button.ai-trace-pair-tool-btn',

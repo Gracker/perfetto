@@ -11,6 +11,7 @@ import {
 import {ConversationPage} from './conversation_page';
 import {sessionManager} from './session_manager';
 import {DEFAULT_SETTINGS} from './types';
+import {loadPersistedTracePairWorkspace} from './trace_pair_workspace_persistence';
 
 function installOidcSession(
   userId = 'user-a',
@@ -102,6 +103,76 @@ afterEach(() => {
 });
 
 describe('ConversationPage OIDC lifecycle', () => {
+  it('opens an empty dual-trace launcher without an active trace in local mode', () => {
+    window.__SMARTPERFETTO_CONFIG__ = {
+      oidcEnabled: false,
+      backendUrl: 'http://backend',
+    };
+    window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+    const page = createPage();
+
+    page.openTracePairWorkspace();
+
+    expect(page.tracePairWorkspaceController.getState()).toMatchObject({
+      open: true,
+      pageTrace: null,
+      currentTrace: null,
+      referenceTrace: null,
+    });
+    page.onremove();
+  });
+
+  it('uploads two new pane files and hands the persisted pair to the main viewer', async () => {
+    window.__SMARTPERFETTO_CONFIG__ = {
+      oidcEnabled: false,
+      backendUrl: 'http://backend',
+    };
+    window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: true,
+        trace: {id: 'baseline-id', leaseId: 'baseline-lease'},
+      }), {status: 200, headers: {'content-type': 'application/json'}}))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: true,
+        trace: {id: 'comparison-id', leaseId: 'comparison-lease'},
+      }), {status: 200, headers: {'content-type': 'application/json'}}));
+    vi.stubGlobal('fetch', fetchMock);
+    const page = createPage();
+    const app = {navigate: vi.fn()};
+    page.openTracePairWorkspace();
+
+    await Promise.all([
+      page.tracePairWorkspaceController.uploadTrace(
+        'first',
+        new File(['baseline'], 'baseline.pftrace'),
+      ),
+      page.tracePairWorkspaceController.uploadTrace(
+        'second',
+        new File(['comparison'], 'comparison.pftrace'),
+      ),
+    ]);
+    page.launchTracePairAnalysis(app);
+
+    expect(page.tracePairWorkspaceController.getState()).toMatchObject({
+      open: false,
+      currentTrace: {id: 'baseline-id'},
+      referenceTrace: {id: 'comparison-id'},
+    });
+    expect(loadPersistedTracePairWorkspace('http://backend')).toMatchObject({
+      open: true,
+      baseline: {id: 'baseline-id'},
+      comparison: {id: 'comparison-id'},
+    });
+    expect(app.navigate).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'smartperfettoWorkspaceTraceId=baseline-id',
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    page.onremove();
+  });
+
   it('completes a no-trace OIDC conversation with the same page authority', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(startResponse())

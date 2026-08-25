@@ -68,6 +68,7 @@ import {getSmartPerfettoBackendCspSources} from '../core/smartperfetto_backend_u
 import {getBackendUploader} from '../core/backend_uploader';
 import {isSmartPerfettoOidcMode} from '../core/smartperfetto_auth';
 import type {Route} from '../public/app';
+import {parseWorkspaceTraceLaunch} from '../core/workspace_trace_launch';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -118,7 +119,7 @@ const CSP_WS_PERMISSIVE_PORT = featureFlags.register({
   defaultValue: false,
 });
 
-function routeChange(route: Route) {
+function routeChange(route: Route, app?: AppImpl) {
   raf.scheduleFullRedraw(() => {
     if (route.fragment) {
       // This needs to happen after the next redraw call. It's not enough
@@ -130,8 +131,15 @@ function routeChange(route: Route) {
       }
     }
   });
+  if (app && parseWorkspaceTraceLaunch(window.location.href)) {
+    void maybeOpenSmartPerfettoWorkspaceTrace(app);
+    return;
+  }
+  activeWorkspaceTraceLaunchId = undefined;
   maybeOpenTraceFromRoute(route);
 }
+
+let activeWorkspaceTraceLaunchId: string | undefined;
 
 async function maybeOpenSmartPerfettoDualTracePane(
   app: AppImpl,
@@ -172,6 +180,42 @@ async function maybeOpenSmartPerfettoDualTracePane(
     app.httpRpc.httpRpcAvailable = true;
     await app.openTraceFromHttpRpc();
   } catch (error) {
+    reportError(error);
+  }
+  return true;
+}
+
+async function maybeOpenSmartPerfettoWorkspaceTrace(
+  app: AppImpl,
+): Promise<boolean> {
+  const launch = parseWorkspaceTraceLaunch(window.location.href);
+  if (!launch) return false;
+  if (activeWorkspaceTraceLaunchId === launch.traceId) return true;
+  if (isSmartPerfettoOidcMode()) {
+    console.warn('[SmartPerfetto] OIDC Viewer does not open backend workspace traces');
+    app.httpRpc.httpRpcAvailable = false;
+    return true;
+  }
+  activeWorkspaceTraceLaunchId = launch.traceId;
+  try {
+    const result = await getBackendUploader().openExistingTrace(
+      launch.traceId,
+      'workspace-main',
+    );
+    if (!result.success || !result.rpcTarget) {
+      throw new Error(result.error ?? 'Backend did not return an RPC target');
+    }
+    const state = await HttpRpcEngine.checkTargetConnection(result.rpcTarget);
+    if (!state.connected) {
+      throw new Error(
+        `Workspace trace processor connection failed: ${state.failure ?? 'unknown error'}`,
+      );
+    }
+    HttpRpcEngine.setRpcTarget(result.rpcTarget);
+    app.httpRpc.httpRpcAvailable = true;
+    await app.openTraceFromHttpRpc();
+  } catch (error) {
+    activeWorkspaceTraceLaunchId = undefined;
     reportError(error);
   }
   return true;
@@ -418,7 +462,7 @@ function onCssLoaded(app: AppImpl) {
   const pages = app.pages;
   pages.registerPage({route: '/', render: () => m(HomePage)});
   const router = new Router();
-  router.onRouteChanged = routeChange;
+  router.onRouteChanged = (route) => routeChange(route, app);
 
   const themeSetting = app.settings.register({
     id: 'theme',
@@ -523,10 +567,12 @@ function onCssLoaded(app: AppImpl) {
 
     // Handles the initial ?local_cache_key=123 or ?s=permalink or ?url=...
     // cases.
-    routeChange(route);
+    routeChange(route, app);
   };
 
-  void maybeOpenSmartPerfettoDualTracePane(app).then((handled) => {
+  void maybeOpenSmartPerfettoWorkspaceTrace(app).then(async (handled) => {
+    if (handled) return;
+    handled = await maybeOpenSmartPerfettoDualTracePane(app);
     if (handled) return;
     if (isSmartPerfettoOidcMode()) {
       finishStartup();

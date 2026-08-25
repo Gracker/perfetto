@@ -8,18 +8,14 @@ import {
   cancelAgent,
   deleteTrace,
   getDualTraceFixturePaths,
-  getTraceProcessorPortRange,
   listTraces,
-  uploadTrace,
   type WorkspaceTrace,
 } from './smartperfetto_e2e_helper';
-import {parseUploadResponse} from './dual_trace_contract';
 import {
   aiStatusLocator,
   acceptCookieConsent,
   BrowserNetworkLedger,
   dragSplitterToPercent,
-  DualTracePerfettoHelper,
   installFrameProbes,
   readFrameProbes,
   waitForEmbeddedTraces,
@@ -30,7 +26,7 @@ import {expectEmbeddedFramesWithoutAssistantOwners} from './dual_trace_assertion
 export class DualTraceScenario {
   readonly ledger: BrowserNetworkLedger;
   lightTrace: WorkspaceTrace | null = null;
-  heavyTraceId: string | null = null;
+  heavyHistoryTrace: WorkspaceTrace | null = null;
   initialFrameProbes: ReadonlyArray<FrameProbe> = [];
   initialTraceFileRequests: ReadonlyArray<string> = [];
 
@@ -51,51 +47,38 @@ export class DualTraceScenario {
         'smartperfetto-ai-settings',
         JSON.stringify({backendApiKey: apiKey}),
       );
+      localStorage.setItem('ai-analysis-mode', 'full');
     }, backendApiKey);
     expect(await listTraces(this.request)).toEqual([]);
     const fixtures = getDualTraceFixturePaths();
-    this.lightTrace = await uploadTrace(this.request, fixtures.light);
-    const traceProcessorPorts = getTraceProcessorPortRange();
-    expect(this.lightTrace.port).toBeGreaterThanOrEqual(
-      traceProcessorPorts.min,
-    );
-    expect(this.lightTrace.port).toBeLessThanOrEqual(traceProcessorPorts.max);
 
     await this.page.goto('/');
-    await this.page.evaluate(() => {
-      localStorage.setItem('ai-analysis-mode', 'full');
-    });
-    const uploadResponsePromise = this.page.waitForResponse((response) => {
-      const path = new URL(response.url()).pathname;
-      return (
-        response.request().method() === 'POST' &&
-        path.endsWith('/traces/upload')
-      );
-    });
-    const perfetto = new DualTracePerfettoHelper(this.page, {
-      'lacunh_heavy.pftrace': fixtures.heavy,
-    });
-    await perfetto.openProductionTraceFile('lacunh_heavy.pftrace');
-    const heavyUpload = await parseUploadResponse(await uploadResponsePromise);
-    this.heavyTraceId = heavyUpload.trace.id;
-
     await acceptCookieConsent(this.page);
-    await expect(aiStatusLocator(this.page)).toBeVisible();
-    await aiStatusLocator(this.page).click();
-    await expect(this.page.locator('.ai-panel')).toBeVisible();
-    await this.page.getByTitle('打开双 Trace 工作区').click();
+    await this.page.getByRole('button', {name: 'AI Assistant'}).click();
+    await expect(this.page.locator('.ai-conversation-page')).toBeVisible();
+    await this.page.locator('button[data-open-zero-trace-pair]').click();
     await expect(this.page.locator('.ai-trace-pair-workspace')).toBeVisible();
 
-    const referenceSelector = this.page.locator(
-      'section[data-trace-side="reference"] select.ai-trace-pair-selector',
-    );
-    await expect(
-      referenceSelector.locator(`option[value="${this.lightTrace.id}"]`),
-    ).toContainText('launch_light.pftrace');
-    await referenceSelector.selectOption(this.lightTrace.id);
-    await expect(referenceSelector.locator('option:checked')).toContainText(
-      'launch_light.pftrace',
-    );
+    await Promise.all([
+      this.page
+        .locator('input[data-trace-pair-upload="first"]')
+        .setInputFiles(fixtures.heavy),
+      this.page
+        .locator('input[data-trace-pair-upload="second"]')
+        .setInputFiles(fixtures.light),
+    ]);
+    await expect.poll(() => listTraces(this.request), {timeout: 120_000})
+      .toHaveLength(2);
+    const traces = await listTraces(this.request);
+    this.lightTrace = traces.find(
+      (trace) => trace.filename === 'launch_light.pftrace',
+    ) ?? null;
+    this.heavyHistoryTrace = traces.find(
+      (trace) => trace.filename === 'lacunh_heavy.pftrace',
+    ) ?? null;
+    if (!this.lightTrace || !this.heavyHistoryTrace) {
+      throw new Error('Zero-start pane uploads did not create both traces');
+    }
     await expect(this.page.locator('.ai-trace-pair-summary')).toContainText(
       'lacunh_heavy.pftrace',
     );
@@ -104,8 +87,26 @@ export class DualTraceScenario {
     );
 
     await waitForEmbeddedTraces(this.page);
+    await this.page.reload();
+    await expect(this.page.locator('.ai-conversation-page')).toBeVisible();
+    await expect(this.page.locator('.ai-trace-pair-workspace')).toBeVisible();
+    await expect(
+      this.page.locator('section[data-trace-side="current"] select'),
+    ).toHaveValue(this.heavyHistoryTrace.id);
+    await expect(
+      this.page.locator('section[data-trace-side="reference"] select'),
+    ).toHaveValue(this.lightTrace.id);
+    await waitForEmbeddedTraces(this.page);
+    await this.page.locator('[data-trace-pair-assistant]').click();
+    await expect(this.page).toHaveURL(/smartperfettoWorkspaceTraceId=/);
+    await expect(aiStatusLocator(this.page)).toBeVisible({timeout: 120_000});
+    await expect(this.page.locator('.ai-trace-pair-workspace')).toBeVisible();
+    await waitForEmbeddedTraces(this.page);
+    await this.page.locator('[data-trace-pair-assistant]').click();
+    await expect(this.page.locator('.ai-panel')).toBeVisible();
     expect(this.ledger.traceFileUrls).toEqual([]);
-    expect(this.ledger.traceViewerAuthenticated).toEqual([true, true]);
+    expect(this.ledger.traceViewerAuthenticated.length).toBeGreaterThanOrEqual(2);
+    expect(this.ledger.traceViewerAuthenticated.every(Boolean)).toBe(true);
     const frameTraceIds = await this.page
       .locator('iframe.ai-trace-pair-frame')
       .evaluateAll((frames) =>
@@ -123,7 +124,7 @@ export class DualTraceScenario {
         }),
       );
     expect(frameTraceIds.map((frame) => frame.traceId).sort()).toEqual(
-      [this.heavyTraceId, this.lightTrace.id].sort(),
+      [this.heavyHistoryTrace.id, this.lightTrace.id].sort(),
     );
     expect(frameTraceIds.every((frame) => frame.url === null)).toBe(true);
     expect(
@@ -147,10 +148,11 @@ export class DualTraceScenario {
       .toBe(viewerRequestsBeforeReload + 1);
     await waitForEmbeddedTraces(this.page);
     await expectEmbeddedFramesWithoutAssistantOwners(this.page);
+    await this.swapTraceRolesTwice();
+    await waitForEmbeddedTraces(this.page);
     this.initialFrameProbes = await installFrameProbes(this.page);
     await dragSplitterToPercent(this.page, 58);
     await this.page.locator('section[data-trace-side="current"]').hover();
-    await this.swapPanePositionsTwice();
     await this.expectFramesStable();
     this.initialTraceFileRequests = this.ledger.traceFileSnapshot();
   }
@@ -192,9 +194,9 @@ export class DualTraceScenario {
         0,
       );
     }
-    if (this.heavyTraceId) {
-      await deleteTrace(this.request, this.heavyTraceId);
-      this.heavyTraceId = null;
+    if (this.heavyHistoryTrace) {
+      await deleteTrace(this.request, this.heavyHistoryTrace.id);
+      this.heavyHistoryTrace = null;
     }
     if (this.lightTrace) {
       await deleteTrace(this.request, this.lightTrace.id);
@@ -203,18 +205,15 @@ export class DualTraceScenario {
     expect(await listTraces(this.request)).toEqual([]);
   }
 
-  private async swapPanePositionsTwice(): Promise<void> {
-    const referenceSelector = this.page.locator(
-      'section[data-trace-side="reference"] select.ai-trace-pair-selector',
-    );
-    if (!this.heavyTraceId) throw new Error('Heavy trace is unavailable');
-    await referenceSelector.selectOption(this.heavyTraceId);
+  private async swapTraceRolesTwice(): Promise<void> {
+    const swap = this.page.locator('button[data-trace-pair-swap]');
+    await swap.click();
     await expect(
-      this.page.locator('section[data-trace-side="current"]'),
-    ).toHaveAttribute('data-pane-slot', 'second');
-    await referenceSelector.selectOption(this.heavyTraceId);
+      this.page.locator('section[data-trace-side="current"] select'),
+    ).toHaveValue(this.lightTrace?.id ?? '');
+    await swap.click();
     await expect(
-      this.page.locator('section[data-trace-side="current"]'),
-    ).toHaveAttribute('data-pane-slot', 'first');
+      this.page.locator('section[data-trace-side="current"] select'),
+    ).toHaveValue(this.heavyHistoryTrace?.id ?? '');
   }
 }

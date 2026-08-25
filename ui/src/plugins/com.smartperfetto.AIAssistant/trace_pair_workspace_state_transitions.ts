@@ -9,7 +9,6 @@ import {
   type HydrateTracePairWorkspaceOptions,
   type OpenTracePairWorkspaceInput,
   type SelectTraceForPaneInput,
-  type TracePairPaneSlot,
   type TracePairWorkspaceState,
 } from './trace_pair_workspace_state_model';
 
@@ -26,13 +25,9 @@ function shouldPreserveLivePair(
   return (
     options.preserveLivePair &&
     state.scope?.key === input.scope.key &&
-    state.currentTrace?.id === input.currentTrace.id &&
+    state.pageTrace?.id === input.currentTrace?.id &&
     (state.open || state.referenceTrace !== null)
   );
-}
-
-function otherPane(pane: TracePairPaneSlot): TracePairPaneSlot {
-  return pane === 'first' ? 'second' : 'first';
 }
 
 export function normalizeTracePairSplitPercent(splitPercent: number): number {
@@ -44,20 +39,26 @@ export function openTracePairWorkspace(
   input: OpenTracePairWorkspaceInput,
 ): TracePairWorkspaceState {
   const sameScope = state.scope?.key === input.scope.key;
-  const sameCurrent = state.currentTrace?.id === input.currentTrace.id;
-  if (sameScope && sameCurrent) {
+  const nextPageTrace = input.currentTrace ?? null;
+  const samePageTrace = state.pageTrace?.id === nextPageTrace?.id;
+  if (sameScope && samePageTrace) {
+    const baselineWasPageTrace = state.currentTrace?.id === state.pageTrace?.id;
     return {
       ...state,
       open: true,
       scope: input.scope,
-      currentTrace: input.currentTrace,
+      pageTrace: nextPageTrace,
+      currentTrace: baselineWasPageTrace
+        ? nextPageTrace
+        : state.currentTrace,
     };
   }
   return {
     ...createInitialTracePairWorkspaceState(),
     open: true,
     scope: input.scope,
-    currentTrace: input.currentTrace,
+    pageTrace: nextPageTrace,
+    currentTrace: nextPageTrace,
     selectionLocked: state.selectionLocked,
   };
 }
@@ -76,10 +77,16 @@ export function hydrateTracePairWorkspace(
   return {
     ...createInitialTracePairWorkspaceState(),
     scope: input.scope,
-    currentTrace: input.currentTrace,
+    pageTrace: input.currentTrace ?? null,
+    currentTrace: input.baselineTrace ?? input.currentTrace ?? null,
     referenceTrace: input.referenceTrace,
-    currentPane: input.currentPane === 'second' ? 'second' : 'first',
-    catalog: [input.referenceTrace],
+    currentPane: 'first',
+    catalog: [
+      ...(input.baselineTrace && input.baselineTrace.id !== input.currentTrace?.id
+        ? [input.baselineTrace]
+        : []),
+      input.referenceTrace,
+    ],
     layout: input.layout === 'vertical' ? 'vertical' : 'horizontal',
     splitPercent,
     activeTraceSide:
@@ -96,17 +103,34 @@ export function hydrateSingleTraceWorkspace(
   return {
     ...createInitialTracePairWorkspaceState(),
     scope: input.scope,
-    currentTrace: input.currentTrace,
+    pageTrace: input.currentTrace ?? null,
+    currentTrace: input.currentTrace ?? null,
   };
+}
+
+function reconcileTrace(
+  trace: WorkspaceTraceCatalogItem | null,
+  catalog: ReadonlyArray<WorkspaceTraceCatalogItem>,
+): WorkspaceTraceCatalogItem | null {
+  if (!trace) return null;
+  return catalog.find((item) => item.id === trace.id) ?? trace;
 }
 
 export function reconcileTracePairCatalog(
   state: TracePairWorkspaceState,
   catalog: ReadonlyArray<WorkspaceTraceCatalogItem>,
 ): TracePairWorkspaceState {
-  const currentCatalogItem = state.currentTrace
-    ? catalog.find((item) => item.id === state.currentTrace?.id)
-    : undefined;
+  const pageCatalogItem = reconcileTrace(state.pageTrace, catalog);
+  const pageTrace = state.pageTrace && pageCatalogItem
+    ? {
+        ...pageCatalogItem,
+        filename: state.pageTrace.filename || pageCatalogItem.filename,
+        ...(state.pageTrace.fingerprint
+          ? {fingerprint: state.pageTrace.fingerprint}
+          : {}),
+      }
+    : state.pageTrace;
+  const currentCatalogItem = reconcileTrace(state.currentTrace, catalog);
   const currentTrace = state.currentTrace && currentCatalogItem
     ? {
         ...currentCatalogItem,
@@ -116,12 +140,10 @@ export function reconcileTracePairCatalog(
           : {}),
       }
     : state.currentTrace;
-  const referenceTrace = state.referenceTrace
-    ? catalog.find((item) => item.id === state.referenceTrace?.id) ??
-      state.referenceTrace
-    : null;
+  const referenceTrace = reconcileTrace(state.referenceTrace, catalog);
   return {
     ...state,
+    pageTrace,
     currentTrace,
     catalog: [...catalog],
     referenceTrace,
@@ -130,33 +152,97 @@ export function reconcileTracePairCatalog(
   };
 }
 
+function findSelectableTrace(
+  state: TracePairWorkspaceState,
+  traceId: string,
+): WorkspaceTraceCatalogItem | null {
+  if (state.pageTrace?.id === traceId) return state.pageTrace;
+  if (state.currentTrace?.id === traceId) return state.currentTrace;
+  if (state.referenceTrace?.id === traceId) return state.referenceTrace;
+  return state.catalog.find((item) => item.id === traceId) ?? null;
+}
+
+export function swapTracePair(
+  state: TracePairWorkspaceState,
+): TraceSelectionResult {
+  if (
+    state.selectionLocked ||
+    !state.currentTrace ||
+    !state.referenceTrace
+  ) {
+    return {state, selected: false};
+  }
+  return {
+    selected: true,
+    state: {
+      ...state,
+      currentPane: 'first',
+      currentTrace: state.referenceTrace,
+      referenceTrace: state.currentTrace,
+      maximizedTraceSide: null,
+      minimizedTraceSides: new Set(),
+    },
+  };
+}
+
 export function selectTraceForPane(
   state: TracePairWorkspaceState,
   input: SelectTraceForPaneInput,
 ): TraceSelectionResult {
-  if (state.selectionLocked || !state.currentTrace) {
+  if (state.selectionLocked) {
     return {state, selected: false};
   }
-  if (input.traceId === state.currentTrace.id) {
-    if (state.currentPane === input.pane) return {state, selected: true};
+  const selectedTrace = findSelectableTrace(state, input.traceId);
+  if (!selectedTrace) return {state, selected: false};
+
+  if (input.pane === 'first') {
+    if (selectedTrace.id === state.currentTrace?.id) {
+      return {state, selected: true};
+    }
+    if (selectedTrace.id === state.referenceTrace?.id) {
+      if (state.currentTrace) return swapTracePair(state);
+      return {
+        selected: true,
+        state: {
+          ...state,
+          currentTrace: selectedTrace,
+          referenceTrace: null,
+        },
+      };
+    }
     return {
       selected: true,
       state: {
         ...state,
-        currentPane: input.pane,
+        currentPane: 'first',
+        currentTrace: selectedTrace,
         maximizedTraceSide: null,
         minimizedTraceSides: new Set(),
       },
     };
   }
-  const reference = state.catalog.find((item) => item.id === input.traceId);
-  if (!reference) return {state, selected: false};
+
+  if (selectedTrace.id === state.referenceTrace?.id) {
+    return {state, selected: true};
+  }
+  if (selectedTrace.id === state.currentTrace?.id) {
+    return state.referenceTrace
+      ? swapTracePair(state)
+      : {
+          selected: true,
+          state: {
+            ...state,
+            currentTrace: null,
+            referenceTrace: selectedTrace,
+          },
+        };
+  }
   return {
     selected: true,
     state: {
       ...state,
-      currentPane: otherPane(input.pane),
-      referenceTrace: reference,
+      currentPane: 'first',
+      referenceTrace: selectedTrace,
       maximizedTraceSide: null,
       minimizedTraceSides: new Set(),
     },
@@ -169,6 +255,7 @@ export function clearTracePairReference(
   if (state.selectionLocked || !state.referenceTrace) return null;
   return {
     ...state,
+    currentTrace: state.pageTrace,
     referenceTrace: null,
     currentPane: 'first',
     maximizedTraceSide: null,

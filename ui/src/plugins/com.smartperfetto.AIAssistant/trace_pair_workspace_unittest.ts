@@ -65,6 +65,57 @@ describe('TracePairWorkspace', () => {
     expect(controller.getState().splitPercent).toBe(52);
   });
 
+  it('renders upload controls for empty panes and replacement controls for selected traces', () => {
+    const empty = new TracePairWorkspaceController();
+    empty.open({
+      scope: {
+        key: 'tenant/user/workspace/zero-start',
+        backendUrl: 'http://127.0.0.1:3000',
+      },
+    });
+    empty.setUploadHandler(async (_pane, file) => ({
+      id: file.name,
+      filename: file.name,
+      size: file.size,
+    }));
+    m.mount(root, {view: () => m(TracePairWorkspace, {controller: empty})});
+
+    expect(
+      root.querySelectorAll('input[data-trace-pair-upload]'),
+    ).toHaveLength(2);
+    expect(root.textContent).toContain('Upload trace');
+    expect(
+      root.querySelector('section[data-pane-slot="first"]')?.textContent,
+    ).toContain('Select a baseline trace above');
+    expect(
+      root.querySelector('section[data-pane-slot="second"]')?.textContent,
+    ).toContain('Select a comparison trace above');
+
+    empty.setCatalog([{id: 'baseline', filename: 'baseline.pftrace'}]);
+    empty.selectTrace({pane: 'first', traceId: 'baseline'});
+    m.redraw.sync();
+    expect(
+      root.querySelector('section[data-pane-slot="first"]')?.textContent,
+    ).toContain('Replace file');
+  });
+
+  it('shows a replacement upload error inside the populated pane', async () => {
+    controller.setUploadHandler(async () => {
+      throw new Error('replacement failed');
+    });
+    m.mount(root, {view: () => m(TracePairWorkspace, {controller})});
+
+    await controller.uploadTrace(
+      'first',
+      new File(['replacement'], 'replacement.pftrace'),
+    );
+    m.redraw.sync();
+
+    expect(
+      root.querySelector('section[data-pane-slot="first"]')?.textContent,
+    ).toContain('replacement failed');
+  });
+
   it('keeps both iframe nodes alive across layout-only changes', () => {
     controller.selectTrace({pane: 'second', traceId: 'history-a'});
     m.mount(root, {view: () => m(TracePairWorkspace, {controller})});
@@ -81,6 +132,8 @@ describe('TracePairWorkspace', () => {
     const referenceSrc = referenceFrame?.src;
     expect(currentSrc).toContain('smartperfettoTraceId=current');
     expect(referenceSrc).toContain('smartperfettoTraceId=history-a');
+    expect(currentSrc).toContain('#!/viewer?');
+    expect(referenceSrc).toContain('#!/viewer?');
     expect(currentSrc).not.toContain('url=');
     expect(referenceSrc).not.toContain('url=');
 
@@ -171,6 +224,39 @@ describe('TracePairWorkspace', () => {
         'option[value="history-unique"]',
       )?.textContent,
     ).toBe('launch_heavy.pftrace');
+  });
+
+  it('renders arbitrary historical baseline/comparison choices and swaps them', () => {
+    controller.selectTrace({pane: 'second', traceId: 'history-a'});
+    controller.selectTrace({pane: 'first', traceId: 'history-unique'});
+    m.mount(root, {view: () => m(TracePairWorkspace, {controller})});
+
+    expect(
+      root.querySelector('section[data-pane-slot="first"]')?.textContent,
+    ).toContain('Baseline');
+    expect(
+      root.querySelector('section[data-pane-slot="second"]')?.textContent,
+    ).toContain('Comparison');
+    expect(
+      root.querySelector<HTMLSelectElement>(
+        'section[data-pane-slot="first"] select',
+      )?.value,
+    ).toBe('history-unique');
+    expect(
+      root.querySelector<HTMLSelectElement>(
+        'section[data-pane-slot="second"] select',
+      )?.value,
+    ).toBe('history-a');
+
+    root
+      .querySelector<HTMLButtonElement>('button[data-trace-pair-swap]')
+      ?.click();
+    m.redraw.sync();
+
+    expect(controller.getState()).toMatchObject({
+      currentTrace: {id: 'history-a'},
+      referenceTrace: {id: 'history-unique'},
+    });
   });
 
   it('makes running identity controls visibly and behaviorally immutable', () => {

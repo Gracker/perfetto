@@ -11,6 +11,7 @@ import {
   type OpenTracePairWorkspaceInput,
   type SelectTraceForPaneInput,
   type TracePairPaneSlot,
+  type TracePairPaneUploadState,
   type TracePairWorkspaceState,
   type TracePairWorkspaceTrace,
 } from './trace_pair_workspace_state_model';
@@ -22,6 +23,7 @@ import {
   openTracePairWorkspace,
   reconcileTracePairCatalog,
   selectTraceForPane,
+  swapTracePair,
 } from './trace_pair_workspace_state_transitions';
 
 export type {
@@ -30,14 +32,25 @@ export type {
   OpenTracePairWorkspaceInput,
   SelectTraceForPaneInput,
   TracePairPaneSlot,
+  TracePairPaneUploadState,
   TracePairWorkspaceScope,
   TracePairWorkspaceState,
   TracePairWorkspaceTrace,
 } from './trace_pair_workspace_state_model';
 
+export type TracePairUploadHandler = (
+  pane: TracePairPaneSlot,
+  file: File,
+) => Promise<WorkspaceTraceCatalogItem>;
+
 export class TracePairWorkspaceController {
   private state = createInitialTracePairWorkspaceState();
   private catalogRequest = 0;
+  private uploadHandler?: TracePairUploadHandler;
+  private readonly uploadRequests: Record<TracePairPaneSlot, number> = {
+    first: 0,
+    second: 0,
+  };
   private readonly listeners = new Set<() => void>();
 
   getState(): Readonly<TracePairWorkspaceState> {
@@ -50,6 +63,12 @@ export class TracePairWorkspaceController {
   }
 
   open(input: OpenTracePairWorkspaceInput): void {
+    if (
+      this.state.scope?.key !== input.scope.key ||
+      this.state.pageTrace?.id !== input.currentTrace?.id
+    ) {
+      this.invalidateUploadRequests();
+    }
     this.state = openTracePairWorkspace(this.state, input);
     this.notify();
   }
@@ -61,6 +80,7 @@ export class TracePairWorkspaceController {
     const state = hydrateTracePairWorkspace(this.state, input, options);
     if (!state) return;
     this.catalogRequest += 1;
+    this.invalidateUploadRequests();
     this.state = state;
     this.notify();
   }
@@ -72,23 +92,27 @@ export class TracePairWorkspaceController {
     const state = hydrateSingleTraceWorkspace(this.state, input, options);
     if (!state) return;
     this.catalogRequest += 1;
+    this.invalidateUploadRequests();
     this.state = state;
     this.notify();
   }
 
   close(): void {
     if (!this.state.open || this.state.selectionLocked) return;
+    this.invalidateUploadRequests();
     this.state = {
       ...this.state,
       open: false,
       maximizedTraceSide: null,
       minimizedTraceSides: new Set(),
+      paneUploads: createInitialTracePairWorkspaceState().paneUploads,
     };
     this.notify();
   }
 
   resetScope(): void {
     this.catalogRequest += 1;
+    this.invalidateUploadRequests();
     this.state = createInitialTracePairWorkspaceState();
     this.notify();
   }
@@ -132,6 +156,64 @@ export class TracePairWorkspaceController {
     return result.selected;
   }
 
+  setUploadHandler(handler: TracePairUploadHandler | undefined): void {
+    if (handler === this.uploadHandler) return;
+    this.invalidateUploadRequests();
+    this.uploadHandler = handler;
+    this.state = {
+      ...this.state,
+      paneUploads: createInitialTracePairWorkspaceState().paneUploads,
+    };
+    this.notify();
+  }
+
+  hasUploadHandler(): boolean {
+    return this.uploadHandler !== undefined;
+  }
+
+  async uploadTrace(pane: TracePairPaneSlot, file: File): Promise<boolean> {
+    if (this.state.selectionLocked || !this.uploadHandler || file.size === 0) {
+      return false;
+    }
+    const request = ++this.uploadRequests[pane];
+    this.setPaneUploadState(pane, {status: 'uploading', error: null});
+    try {
+      const trace = await this.uploadHandler(pane, file);
+      if (request !== this.uploadRequests[pane]) return false;
+      const catalog = [
+        ...this.state.catalog.filter((item) => item.id !== trace.id),
+        trace,
+      ];
+      let next = reconcileTracePairCatalog(this.state, catalog);
+      next = selectTraceForPane(next, {pane, traceId: trace.id}).state;
+      this.state = {
+        ...next,
+        paneUploads: {
+          ...next.paneUploads,
+          [pane]: {status: 'idle', error: null},
+        },
+      };
+      this.notify();
+      return true;
+    } catch (error) {
+      if (request !== this.uploadRequests[pane]) return false;
+      this.setPaneUploadState(pane, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  swapTraces(): boolean {
+    const result = swapTracePair(this.state);
+    if (result.state !== this.state) {
+      this.state = result.state;
+      this.notify();
+    }
+    return result.selected;
+  }
+
   clearReference(): void {
     const state = clearTracePairReference(this.state);
     if (!state) return;
@@ -148,7 +230,7 @@ export class TracePairWorkspaceController {
   getTraceForPane(
     pane: TracePairPaneSlot,
   ): TracePairWorkspaceTrace | WorkspaceTraceCatalogItem | null {
-    return this.state.currentPane === pane
+    return pane === 'first'
       ? this.state.currentTrace
       : this.state.referenceTrace;
   }
@@ -209,6 +291,22 @@ export class TracePairWorkspaceController {
       minimizedTraceSides: new Set(),
     };
     this.notify();
+  }
+
+  private setPaneUploadState(
+    pane: TracePairPaneSlot,
+    upload: TracePairPaneUploadState,
+  ): void {
+    this.state = {
+      ...this.state,
+      paneUploads: {...this.state.paneUploads, [pane]: upload},
+    };
+    this.notify();
+  }
+
+  private invalidateUploadRequests(): void {
+    this.uploadRequests.first += 1;
+    this.uploadRequests.second += 1;
   }
 
   private notify(): void {
