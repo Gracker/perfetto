@@ -446,6 +446,7 @@ perfetto_cc_library(
         ":src_trace_processor_importers_systrace_full",
         ":src_trace_processor_importers_systrace_systrace_line",
         ":src_trace_processor_importers_systrace_systrace_parser",
+        ":src_trace_processor_io",
         ":src_trace_processor_lib",
         ":src_trace_processor_metatrace",
         ":src_trace_processor_metrics_metrics",
@@ -594,6 +595,7 @@ perfetto_cc_library(
         ":include_perfetto_public_base",
         ":include_perfetto_public_protozero",
         ":include_perfetto_trace_processor_basic_types",
+        ":include_perfetto_trace_processor_io",
         ":include_perfetto_trace_processor_storage",
         ":include_perfetto_trace_processor_trace_processor",
         ":include_perfetto_trace_processor_util",
@@ -754,7 +756,9 @@ perfetto_cc_library(
         ":src_trace_processor_importers_systrace_full",
         ":src_trace_processor_importers_systrace_systrace_line",
         ":src_trace_processor_importers_systrace_systrace_parser",
+        ":src_trace_processor_io",
         ":src_trace_processor_lib",
+        ":src_trace_processor_local_file_system",
         ":src_trace_processor_metatrace",
         ":src_trace_processor_metrics_metrics",
         ":src_trace_processor_perfetto_sql_engine_engine",
@@ -918,6 +922,7 @@ perfetto_cc_library(
         ":include_perfetto_public_base",
         ":include_perfetto_public_protozero",
         ":include_perfetto_trace_processor_basic_types",
+        ":include_perfetto_trace_processor_io",
         ":include_perfetto_trace_processor_storage",
         ":include_perfetto_trace_processor_trace_processor",
         ":include_perfetto_trace_processor_util",
@@ -1047,6 +1052,7 @@ perfetto_cc_library(
         ":include_perfetto_public_base",
         ":include_perfetto_public_protozero",
         ":include_perfetto_trace_processor_basic_types",
+        ":include_perfetto_trace_processor_io",
         ":include_perfetto_trace_processor_storage",
         ":include_perfetto_trace_processor_trace_processor",
         ":include_perfetto_trace_processor_util",
@@ -1705,6 +1711,14 @@ perfetto_filegroup(
     srcs = [
         "include/perfetto/trace_processor/basic_types.h",
         "include/perfetto/trace_processor/status.h",
+    ],
+)
+
+# GN target: //include/perfetto/trace_processor:io
+perfetto_filegroup(
+    name = "include_perfetto_trace_processor_io",
+    srcs = [
+        "include/perfetto/trace_processor/io.h",
     ],
 )
 
@@ -2500,8 +2514,12 @@ perfetto_filegroup(
     name = "src_trace_processor_core_tree_tree",
     srcs = [
         "src/trace_processor/core/tree/tree.h",
+        "src/trace_processor/core/tree/tree_column_ops.cc",
+        "src/trace_processor/core/tree/tree_column_ops.h",
         "src/trace_processor/core/tree/tree_from_dataframe.cc",
         "src/trace_processor/core/tree/tree_from_dataframe.h",
+        "src/trace_processor/core/tree/tree_path_interner.cc",
+        "src/trace_processor/core/tree/tree_path_interner.h",
     ],
 )
 
@@ -5524,6 +5542,8 @@ perfetto_filegroup(
     name = "src_trace_processor_sqlite_sqlite",
     srcs = [
         "src/trace_processor/sqlite/committed_state_manager.h",
+        "src/trace_processor/sqlite/file_system_vfs.cc",
+        "src/trace_processor/sqlite/file_system_vfs.h",
         "src/trace_processor/sqlite/module_state_manager.cc",
         "src/trace_processor/sqlite/module_state_manager.h",
         "src/trace_processor/sqlite/scoped_db.h",
@@ -5751,6 +5771,7 @@ perfetto_cc_library(
         ":include_perfetto_public_base",
         ":include_perfetto_public_protozero",
         ":include_perfetto_trace_processor_basic_types",
+        ":include_perfetto_trace_processor_io",
         ":include_perfetto_trace_processor_storage",
         ":include_perfetto_trace_processor_trace_processor",
         ":include_perfetto_trace_processor_util",
@@ -6182,6 +6203,14 @@ perfetto_filegroup(
     ],
 )
 
+# GN target: //src/trace_processor:io
+perfetto_filegroup(
+    name = "src_trace_processor_io",
+    srcs = [
+        "src/trace_processor/io.cc",
+    ],
+)
+
 # GN target: //src/trace_processor:lib
 perfetto_filegroup(
     name = "src_trace_processor_lib",
@@ -6196,6 +6225,15 @@ perfetto_filegroup(
         "src/trace_processor/trace_processor.cc",
         "src/trace_processor/trace_processor_impl.cc",
         "src/trace_processor/trace_processor_impl.h",
+    ],
+)
+
+# GN target: //src/trace_processor:local_file_system
+perfetto_filegroup(
+    name = "src_trace_processor_local_file_system",
+    srcs = [
+        "src/trace_processor/local_file_system.cc",
+        "src/trace_processor/local_file_system.h",
     ],
 )
 
@@ -11505,6 +11543,7 @@ perfetto_cc_library(
         ":src_trace_processor_importers_systrace_full",
         ":src_trace_processor_importers_systrace_systrace_line",
         ":src_trace_processor_importers_systrace_systrace_parser",
+        ":src_trace_processor_io",
         ":src_trace_processor_lib",
         ":src_trace_processor_metatrace",
         ":src_trace_processor_metrics_metrics",
@@ -11650,6 +11689,7 @@ perfetto_cc_library(
         ":include_perfetto_public_base",
         ":include_perfetto_public_protozero",
         ":include_perfetto_trace_processor_basic_types",
+        ":include_perfetto_trace_processor_io",
         ":include_perfetto_trace_processor_storage",
         ":include_perfetto_trace_processor_trace_processor",
         ":include_perfetto_trace_processor_util",
@@ -11789,6 +11829,7 @@ perfetto_cc_binary(
         ":include_perfetto_public_base",
         ":include_perfetto_public_protozero",
         ":include_perfetto_trace_processor_basic_types",
+        ":include_perfetto_trace_processor_io",
         ":include_perfetto_trace_processor_storage",
         ":include_perfetto_trace_processor_trace_processor",
         ":include_perfetto_trace_processor_util",
@@ -11844,6 +11885,7 @@ perfetto_cc_binary(
         ":src_trace_processor_importers_systrace_full",
         ":src_trace_processor_importers_systrace_systrace_line",
         ":src_trace_processor_importers_systrace_systrace_parser",
+        ":src_trace_processor_io",
         ":src_trace_processor_lib",
         ":src_trace_processor_metatrace",
         ":src_trace_processor_metrics_metrics",

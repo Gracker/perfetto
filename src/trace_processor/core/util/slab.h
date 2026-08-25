@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "perfetto/base/logging.h"
 #include "perfetto/ext/base/utils.h"
 #include "perfetto/public/compiler.h"
 #include "src/trace_processor/core/util/span.h"
@@ -61,14 +62,36 @@ class Slab {
   Slab(const Slab&) = delete;
   Slab& operator=(const Slab&) = delete;
 
+  // Alignment of every slab allocation. 64 bytes is the widest SIMD register
+  // we target and the alignment Arrow recommends for its buffers, so a slab
+  // and a buffer mapped out of an Arrow file are interchangeable.
+  static constexpr size_t kAlignment = 64;
+
   // Allocates a new slab with the specified number of elements.
   //
   // size: Number of elements to allocate space for.
   // Returns a new Slab object with the requested capacity.
   static Slab<T> Alloc(uint64_t size) {
-    return Slab(
-        static_cast<T*>(base::AlignedAlloc(alignof(T), size * sizeof(T))),
-        size);
+    static_assert(alignof(T) <= kAlignment, "T is over-aligned for a Slab");
+    // Allocations too small to hold a whole vector register cannot benefit
+    // from the wider alignment, and paying for it on the many tiny slabs the
+    // parser creates measurably costs memory.
+    uint64_t bytes = size * sizeof(T);
+    size_t alignment = bytes >= kAlignment ? kAlignment : alignof(T);
+    return Slab(static_cast<T*>(base::AlignedAlloc(alignment, bytes)), size);
+  }
+
+  // Shrinks the logical size without changing the underlying allocation.
+  void Truncate(uint64_t size) {
+    PERFETTO_CHECK(size <= size_);
+    size_ = size;
+  }
+
+  // Transfers this allocation into a byte slab without copying.
+  Slab<uint8_t> TakeAsBytes() && {
+    static_assert(std::is_trivially_copyable_v<T>);
+    uint64_t bytes = size_ * sizeof(T);
+    return Slab<uint8_t>(reinterpret_cast<uint8_t*>(data_.release()), bytes);
   }
 
   // Returns a pointer to the underlying data.
@@ -96,6 +119,9 @@ class Slab {
   }
 
  private:
+  template <typename U>
+  friend class Slab;
+
   // Constructor used by Alloc.
   Slab(T* data, uint64_t size) : data_(data), size_(size) {}
 
