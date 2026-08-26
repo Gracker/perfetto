@@ -2,7 +2,25 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {describe, expect, it, vi} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
+
+const apiMocks = vi.hoisted(() => ({
+  acceptPending: vi.fn(),
+  authorizeExtensions: vi.fn(),
+  reindexCodebase: vi.fn(),
+  rejectPending: vi.fn(),
+}));
+
+vi.mock('./codebase_api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./codebase_api')>();
+  return {
+    ...actual,
+    acceptPendingCodebaseGeneration: apiMocks.acceptPending,
+    authorizeAvailableCodebaseExtensions: apiMocks.authorizeExtensions,
+    reindexCodebase: apiMocks.reindexCodebase,
+    rejectPendingCodebaseGeneration: apiMocks.rejectPending,
+  };
+});
 
 import type {CodebaseSummary, ExternalKnowledgeSourceSummary} from './codebase_api';
 import {
@@ -51,6 +69,36 @@ function source(
     ...overrides,
   };
 }
+
+function collectText(node: any): string {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(collectText).join(' ');
+  return collectText(node.children);
+}
+
+function findNode(node: any, predicate: (candidate: any) => boolean): any {
+  if (!node) return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findNode(child, predicate);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (predicate(node)) return node;
+  return findNode(node.children, predicate);
+}
+
+beforeEach(() => {
+  apiMocks.acceptPending.mockReset().mockResolvedValue(codebase());
+  apiMocks.authorizeExtensions.mockReset().mockResolvedValue(codebase());
+  apiMocks.rejectPending.mockReset().mockResolvedValue(codebase());
+  apiMocks.reindexCodebase.mockReset().mockResolvedValue({
+    chunksAdded: 1,
+    activationDisposition: 'active',
+  });
+});
 
 describe('external knowledge active-index contract', () => {
   it('requires consent, active generation, fingerprint, and indexed chunks', () => {
@@ -193,5 +241,291 @@ describe('codebase lifecycle contract', () => {
       codebaseIds: ['codebase-b'],
       knowledgeSourceIds: ['wiki-a'],
     });
+  });
+
+  it('clears pending and authorization busy state before reloading', async () => {
+    vi.stubGlobal('window', {confirm: vi.fn(() => true)});
+    const panel = new CodebasePanel() as any;
+    panel.backendUrl = 'http://backend';
+    panel.apiKey = 'key';
+    panel.scopeKey = 'scope';
+    panel.loadEpoch = 1;
+    panel.load = vi.fn(async () => {
+      panel.loadEpoch++;
+    });
+    const pending = codebase({
+      selectionPolicyRevision: 1,
+      grantRevision: 1,
+      pendingGeneration: {
+        candidateGenerationId: 'candidate',
+        chunkCount: 1,
+        createdAt: 1,
+        coverage: {
+          selectionPolicyRevision: 1,
+          enumerationBackend: 'ripgrep',
+          backendFidelity: 'exact',
+          enumerationComplete: true,
+          deterministic: true,
+          filesEnumerated: 2,
+          filesSelected: 1,
+          bytesSelected: 10,
+          chunksIndexed: 1,
+          truncated: true,
+          complete: false,
+        },
+      },
+    });
+
+    await panel.resolvePendingGeneration(pending, true);
+    expect(panel.pendingAction).toBeNull();
+    expect(panel.reindexingId).toBeNull();
+
+    await panel.authorizeAvailableExtensions(codebase({
+      eligibleForSendToProvider: true,
+      availableNotConsentedExtensions: ['.dart'],
+    }));
+    expect(panel.extensionAuthorizationId).toBeNull();
+    expect(panel.updatingConsentId).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it('requires informed confirmation before authorizing named extensions', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('window', {confirm});
+    const panel = new CodebasePanel() as any;
+    panel.backendUrl = 'http://backend';
+    panel.loadEpoch = 1;
+
+    await panel.authorizeAvailableExtensions(codebase({
+      eligibleForSendToProvider: true,
+      availableNotConsentedExtensions: ['.dart', '.swift'],
+    }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/\.dart.*\.swift|\.swift.*\.dart/s));
+    expect(apiMocks.authorizeExtensions).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('renders degraded coverage, maintenance guidance, extension names, and live feedback', () => {
+    const panel = new CodebasePanel() as any;
+    panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: [], knowledgeSourceIds: []};
+    panel.success = 'Updated';
+    const rendered = panel.renderCodebase(codebase({
+      eligibleForSendToProvider: true,
+      availableNotConsentedExtensions: ['.dart', '.swift'],
+      activeIndexCoverage: {
+        selectionPolicyRevision: 2,
+        enumerationBackend: 'node-walk',
+        backendFidelity: 'degraded',
+        enumerationComplete: true,
+        deterministic: true,
+        filesEnumerated: 2,
+        filesSelected: 1,
+        bytesSelected: 10,
+        chunksIndexed: 1,
+        truncated: true,
+        complete: false,
+        truncationReason: 'file_budget',
+      },
+      maintenanceWarning: 'inactive_chunk_cleanup_failed',
+      reindexRequired: 'selection_scope_narrowed',
+    }));
+    const renderedText = collectText(rendered);
+
+    expect(renderedText).toContain('.dart');
+    expect(renderedText).toContain('.swift');
+    expect(renderedText).toMatch(/1\s*\/\s*2/);
+    expect(renderedText).toMatch(/file_budget/);
+    expect(renderedText).toMatch(/rebuild|重建/i);
+    expect(findNode(rendered, node => node.attrs?.['aria-live'] === 'polite')).toBeDefined();
+  });
+
+  it('does not expose pending candidate actions after deletion starts', () => {
+    const panel = new CodebasePanel() as any;
+    panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: [], knowledgeSourceIds: []};
+    const rendered = panel.renderCodebase(codebase({
+      lifecycleState: 'deleting',
+      eligibleForSendToProvider: true,
+      availableNotConsentedExtensions: ['.dart'],
+      pendingGeneration: {
+        candidateGenerationId: 'stale-candidate',
+        chunkCount: 1,
+        createdAt: 1,
+        coverage: {
+          selectionPolicyRevision: 1,
+          enumerationBackend: 'ripgrep',
+          backendFidelity: 'exact',
+          enumerationComplete: true,
+          deterministic: true,
+          filesEnumerated: 2,
+          filesSelected: 1,
+          bytesSelected: 10,
+          chunksIndexed: 1,
+          truncated: true,
+          complete: false,
+        },
+      },
+    }));
+    const renderedText = collectText(rendered);
+
+    expect(renderedText).not.toMatch(/Accept limited index|接受受限索引/);
+    expect(renderedText).not.toMatch(/Reject candidate|丢弃候选/);
+    expect(renderedText).not.toMatch(/Authorize languages|授权新语言/);
+  });
+
+  it('describes a staged candidate instead of claiming reindex activation', async () => {
+    apiMocks.reindexCodebase.mockResolvedValueOnce({
+      chunksAdded: 3,
+      activationDisposition: 'pending',
+      coverage: {
+        selectionPolicyRevision: 1,
+        enumerationBackend: 'ripgrep',
+        backendFidelity: 'exact',
+        enumerationComplete: true,
+        deterministic: true,
+        filesEnumerated: 10,
+        filesSelected: 3,
+        bytesSelected: 100,
+        chunksIndexed: 3,
+        truncated: true,
+        complete: false,
+        truncationReason: 'file_budget',
+      },
+    });
+    const panel = new CodebasePanel() as any;
+    panel.backendUrl = 'http://backend';
+    panel.loadEpoch = 1;
+    panel.load = vi.fn(async () => {
+      panel.loadEpoch++;
+    });
+
+    await panel.reindex(codebase());
+
+    expect(panel.success).toMatch(/candidate|候选/i);
+    expect(panel.success).toMatch(/complete index|完整索引/i);
+  });
+
+  it('confirms the exact downgrade before accepting a limited candidate', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('window', {confirm});
+    const panel = new CodebasePanel() as any;
+    panel.backendUrl = 'http://backend';
+    panel.loadEpoch = 1;
+    const pending = codebase({
+      pendingGeneration: {
+        candidateGenerationId: 'candidate',
+        chunkCount: 3,
+        createdAt: 1,
+        coverage: {
+          selectionPolicyRevision: 1,
+          enumerationBackend: 'ripgrep',
+          backendFidelity: 'exact',
+          enumerationComplete: true,
+          deterministic: true,
+          filesEnumerated: 10,
+          filesSelected: 3,
+          bytesSelected: 100,
+          chunksIndexed: 3,
+          truncated: true,
+          complete: false,
+          truncationReason: 'file_budget',
+        },
+      },
+    });
+
+    await panel.resolvePendingGeneration(pending, true);
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/3.*10.*file_budget.*replace|3.*10.*file_budget.*替换/is));
+    expect(apiMocks.acceptPending).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('disables conflicting operations while a codebase mutation is in progress', () => {
+    const panel = new CodebasePanel() as any;
+    panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: [], knowledgeSourceIds: []};
+    panel.pendingAction = {codebaseId: 'codebase-a', action: 'accept'};
+    const rendered = panel.renderCodebase(codebase({
+      eligibleForSendToProvider: true,
+      pendingGeneration: {
+        candidateGenerationId: 'candidate',
+        chunkCount: 1,
+        createdAt: 1,
+        coverage: {
+          selectionPolicyRevision: 1,
+          enumerationBackend: 'ripgrep',
+          backendFidelity: 'exact',
+          enumerationComplete: true,
+          deterministic: true,
+          filesEnumerated: 2,
+          filesSelected: 1,
+          bytesSelected: 10,
+          chunksIndexed: 1,
+          truncated: true,
+          complete: false,
+        },
+      },
+    }));
+
+    for (const label of ['Update optional index', 'Revoke content access', 'Delete codebase']) {
+      expect(findNode(rendered, node =>
+        node.tag === 'button' && collectText(node).includes(label))?.attrs.disabled).toBe(true);
+    }
+  });
+
+  it('announces final success and error outcomes', () => {
+    const panel = new CodebasePanel() as any;
+    panel.featureEnabled = true;
+    panel.loading = false;
+    panel.codebases = [];
+    panel.knowledgeSources = [];
+    panel.selection = {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: []};
+    panel.success = 'Saved';
+    panel.error = 'Failed';
+
+    const rendered = panel.view({attrs: {}} as any);
+    expect(collectText(findNode(rendered, node => node.attrs?.role === 'status'))).toContain('Saved');
+    expect(collectText(findNode(rendered, node => node.attrs?.role === 'alert'))).toContain('Failed');
+  });
+
+  it('clears busy state when an unrelated list load finishes during a mutation', async () => {
+    vi.stubGlobal('window', {confirm: vi.fn(() => true)});
+    let resolveAccept!: (value: CodebaseSummary) => void;
+    apiMocks.acceptPending.mockImplementationOnce(() => new Promise(resolve => {
+      resolveAccept = resolve;
+    }));
+    const panel = new CodebasePanel() as any;
+    panel.backendUrl = 'http://backend';
+    panel.scopeKey = 'scope';
+    panel.loadEpoch = 1;
+    const pending = codebase({
+      pendingGeneration: {
+        candidateGenerationId: 'candidate',
+        chunkCount: 1,
+        createdAt: 1,
+        coverage: {
+          selectionPolicyRevision: 1,
+          enumerationBackend: 'ripgrep',
+          backendFidelity: 'exact',
+          enumerationComplete: true,
+          deterministic: true,
+          filesEnumerated: 2,
+          filesSelected: 1,
+          bytesSelected: 10,
+          chunksIndexed: 1,
+          truncated: true,
+          complete: false,
+          truncationReason: 'file_budget',
+        },
+      },
+    });
+
+    const action = panel.resolvePendingGeneration(pending, true);
+    await Promise.resolve();
+    panel.loadEpoch++;
+    resolveAccept(pending);
+    await action;
+
+    expect(panel.pendingAction).toBeNull();
+    vi.unstubAllGlobals();
   });
 });

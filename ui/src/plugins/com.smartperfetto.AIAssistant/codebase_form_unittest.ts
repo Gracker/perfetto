@@ -161,4 +161,30 @@ describe('CodebaseForm', () => {
     expect(form.rootPath).toBe('');
     expect(form.displayName).toBe('');
   });
+
+  it('clears stale preview results when a suggested scope is applied', () => {
+    const {form} = formHarness();
+    form.preview = {
+      blocked: false,
+      acceptedFileCount: 10,
+      skippedFileCount: 0,
+      acceptedFiles: [],
+      skippedFiles: [],
+    };
+
+    form.applySuggestedPathFilters('frameworks/base');
+
+    expect(form.pathFilters).toBe('frameworks/base');
+    expect(form.preview).toBeNull();
+    expect(form.scopeApplicationNotice).toMatch(/frameworks\/base/);
+    expect(collectText(form.view({attrs: formHarness().attrs} as any))).toMatch(/Preview again|重新预览/);
+
+    const rendered = form.view({attrs: formHarness().attrs} as any);
+    const pathFilters = findNode(
+      rendered,
+      node => node.attrs?.id === 'smartperfetto-codebase-path-filters',
+    );
+    pathFilters.attrs.oninput({target: {value: 'frameworks/native'}});
+    expect(form.scopeApplicationNotice).toBeNull();
+  });
 });

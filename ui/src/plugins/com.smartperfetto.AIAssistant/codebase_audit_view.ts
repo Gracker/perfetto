@@ -164,6 +164,28 @@ export class CodebaseAuditView implements m.ClassComponent<CodebaseAuditViewAttr
       this.renderRow(text('索引代次', 'Index generation'), audit?.indexGeneration),
       this.renderRow(text('活动代次', 'Active generation'), audit?.activeGeneration),
       this.renderRow(
+        text('索引覆盖', 'Index coverage'),
+        audit?.activeIndexCoverage
+          ? `${audit.activeIndexCoverage.filesSelected}/${audit.activeIndexCoverage.filesEnumerated}`
+          : undefined,
+      ),
+      this.renderRow(
+        text('枚举后端', 'Enumeration backend'),
+        audit?.activeIndexCoverage
+          ? `${audit.activeIndexCoverage.enumerationBackend}/${audit.activeIndexCoverage.backendFidelity}`
+          : undefined,
+      ),
+      this.renderRow(
+        text('覆盖完整', 'Coverage complete'),
+        audit?.activeIndexCoverage?.complete,
+      ),
+      this.renderRow(
+        text('截断原因', 'Truncation reason'),
+        audit?.activeIndexCoverage?.truncationReason,
+      ),
+      this.renderRow(text('维护提示', 'Maintenance warning'), audit?.maintenanceWarning),
+      this.renderRow(text('重建要求', 'Reindex required'), audit?.reindexRequired),
+      this.renderRow(
         text('内容指纹', 'Content fingerprint'),
         compactFingerprint(audit?.contentFingerprint),
         audit?.contentFingerprint,

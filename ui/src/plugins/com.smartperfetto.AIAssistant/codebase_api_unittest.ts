@@ -5,13 +5,72 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
+  acceptPendingCodebaseGeneration,
   deleteCodebase,
   getCodebaseDirectoryPickerCapability,
   previewCodebaseRoot,
   registerExternalKnowledgeSource,
   reindexExternalKnowledgeSource,
+  rejectPendingCodebaseGeneration,
   selectCodebaseDirectory,
 } from './codebase_api';
+
+describe('pending codebase generation API', () => {
+  it('binds accept and reject requests to the reviewed candidate generation', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({success: true, codebase: {}}),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = {
+      codebaseId: 'codebase/a',
+      kind: 'app_source' as const,
+      displayName: 'App',
+      indexGeneration: 2,
+      selectionPolicyRevision: 3,
+      grantRevision: 4,
+      pendingGeneration: {
+        candidateGenerationId: 'candidate/a',
+        chunkCount: 1,
+        createdAt: 1,
+        coverage: {
+          selectionPolicyRevision: 3,
+          enumerationBackend: 'ripgrep' as const,
+          backendFidelity: 'exact' as const,
+          enumerationComplete: true,
+          deterministic: true,
+          filesEnumerated: 2,
+          filesSelected: 1,
+          bytesSelected: 10,
+          chunksIndexed: 1,
+          truncated: true,
+          complete: false,
+        },
+      },
+    };
+
+    await acceptPendingCodebaseGeneration('http://backend', pending, 'key');
+    await (rejectPendingCodebaseGeneration as any)(
+      'http://backend',
+      pending.codebaseId,
+      pending.pendingGeneration.candidateGenerationId,
+      'key',
+    );
+
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({
+      selectionPolicyRevision: 3,
+      grantRevision: 4,
+      candidateGenerationId: 'candidate/a',
+    }));
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({
+      candidateGenerationId: 'candidate/a',
+    }));
+  });
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

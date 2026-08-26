@@ -111,6 +111,10 @@ export interface CodebasePreview {
   acceptedFileCount: number;
   skippedFileCount: number;
   complete?: boolean;
+  enumerationComplete?: boolean;
+  filesEnumerated?: number;
+  filesSelected?: number;
+  bytesSelected?: number;
   truncationReason?: string;
   enumerationBackend?: 'ripgrep' | 'git' | 'node-walk';
   backendFidelity?: 'exact' | 'degraded';
@@ -207,6 +211,8 @@ export interface ReindexCodebaseResult {
   blockedFiles?: number;
   redactionHitCount?: number;
   success?: boolean;
+  activationDisposition?: 'active' | 'pending';
+  coverage?: IndexCoverage;
 }
 
 export interface RegisterExternalKnowledgeSourceInput {
@@ -343,6 +349,8 @@ export async function acceptPendingCodebaseGeneration(
   codebase: CodebaseSummary,
   apiKey?: string,
 ): Promise<CodebaseSummary> {
+  const candidateGenerationId = codebase.pendingGeneration?.candidateGenerationId;
+  if (!candidateGenerationId) throw new Error('pending_generation_not_found');
   const res = await smartPerfettoFetch(
     buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebase.codebaseId)}/pending/accept`),
     {
@@ -351,6 +359,7 @@ export async function acceptPendingCodebaseGeneration(
       body: JSON.stringify({
         selectionPolicyRevision: codebase.selectionPolicyRevision ?? 1,
         grantRevision: codebase.grantRevision ?? 1,
+        candidateGenerationId,
       }),
     },
   );
@@ -360,11 +369,16 @@ export async function acceptPendingCodebaseGeneration(
 export async function rejectPendingCodebaseGeneration(
   backendUrl: string,
   codebaseId: string,
+  candidateGenerationId: string,
   apiKey?: string,
 ): Promise<CodebaseSummary> {
   const res = await smartPerfettoFetch(
     buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/pending/reject`),
-    {method: 'POST', headers: buildHeaders(apiKey), body: JSON.stringify({})},
+    {
+      method: 'POST',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({candidateGenerationId}),
+    },
   );
   return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
 }

@@ -282,6 +282,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private buildId = '';
   private licenseTag = '';
   private pathFilters = '';
+  private scopeApplicationNotice: string | null = null;
   private excludeGlobs = '';
   private sendToProvider = false;
   private preview: CodebasePreview | null = null;
@@ -427,6 +428,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     const scopeKey = attrs.scopeKey;
     this.loading = true;
     this.error = null;
+    this.scopeApplicationNotice = null;
     m.redraw();
     try {
       const preview = await previewCodebaseRoot(
@@ -442,6 +444,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       );
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.preview = preview;
+      this.scopeApplicationNotice = null;
     } catch (e: unknown) {
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.error = e instanceof Error ? e.message : text('预览失败', 'Preview failed');
@@ -600,6 +603,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
               this.displayNameWasSuggested = false;
             }
             this.preview = null;
+            this.scopeApplicationNotice = null;
             this.error = null;
           },
         }),
@@ -653,10 +657,10 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
               type: 'button',
               style: {...STYLES.button, margin: '4px 4px 0 0'},
               onclick: () => {
-                this.pathFilters = this.preview!.manifestProjects!
+                this.applySuggestedPathFilters(this.preview!.manifestProjects!
                   .filter(project => project.groups.includes(group))
                   .map(project => project.path)
-                  .join('\n');
+                  .join('\n'));
               },
             }, group)),
           ])
@@ -668,7 +672,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
               type: 'button',
               style: {...STYLES.button, margin: '4px 4px 0 0'},
               onclick: () => {
-                this.pathFilters = project.path;
+                this.applySuggestedPathFilters(project.path);
               },
             }, project.path)),
           ])
@@ -680,12 +684,22 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
               type: 'button',
               style: {...STYLES.button, margin: '4px 4px 0 0'},
               onclick: () => {
-                this.pathFilters = suggestion.prefix;
+                this.applySuggestedPathFilters(suggestion.prefix);
               },
             }, `${suggestion.prefix} (${suggestion.fileCount})`)),
           ])
         : null,
     ]);
+  }
+
+  private applySuggestedPathFilters(pathFilters: string): void {
+    this.pathFilters = pathFilters;
+    this.preview = null;
+    this.error = null;
+    this.scopeApplicationNotice = text(
+      `已应用范围 ${pathFilters}，请重新预览。`,
+      `Applied scope ${pathFilters}. Preview again.`,
+    );
   }
 
   private renderRequiredMetadata(
@@ -763,6 +777,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
               this.pathFilters,
               (value) => {
                 this.pathFilters = value;
+                this.scopeApplicationNotice = null;
               },
               {
                 hint: text(
@@ -885,6 +900,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             this.pathFilters,
             (value) => {
               this.pathFilters = value;
+              this.scopeApplicationNotice = null;
             },
             {
               required: true,
@@ -916,6 +932,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         ]),
       ]),
       this.renderPreview(),
+      this.scopeApplicationNotice
+        ? m('div', {style: STYLES.hint, role: 'status'}, this.scopeApplicationNotice)
+        : null,
       this.error ? m('div', {style: STYLES.error}, this.error) : null,
       m('div', {style: STYLES.actions}, [
         m(
