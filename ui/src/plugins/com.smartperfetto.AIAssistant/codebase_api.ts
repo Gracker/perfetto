@@ -40,6 +40,14 @@ export interface CodebaseSummary {
   licenseTag?: string;
   indexGeneration: number;
   activeGeneration?: string;
+  activeIndexState?: 'active' | 'none';
+  selectionPolicyRevision?: number;
+  grantRevision?: number;
+  availableNotConsentedExtensions?: string[];
+  maintenanceWarning?: 'inactive_chunk_cleanup_failed' | 'pending_generation_expired';
+  reindexRequired?: 'selection_scope_narrowed';
+  activeIndexCoverage?: IndexCoverage;
+  pendingGeneration?: PendingGeneration;
   contentFingerprint?: string;
   indexedRevision?: string;
   indexedDirty?: boolean;
@@ -57,6 +65,28 @@ export interface CodebaseSummary {
     consentedBy?: string;
     consentHash?: string;
   };
+}
+
+export interface IndexCoverage {
+  selectionPolicyRevision: number;
+  enumerationBackend: 'ripgrep' | 'git' | 'node-walk';
+  backendFidelity: 'exact' | 'degraded';
+  enumerationComplete: boolean;
+  deterministic: boolean;
+  filesEnumerated: number;
+  filesSelected: number;
+  bytesSelected: number;
+  chunksIndexed: number;
+  truncated: boolean;
+  complete: boolean;
+  truncationReason?: string;
+}
+
+export interface PendingGeneration {
+  candidateGenerationId: string;
+  coverage: IndexCoverage;
+  chunkCount: number;
+  createdAt: number;
 }
 
 export interface ExternalKnowledgeSourceSummary {
@@ -80,8 +110,17 @@ export interface CodebasePreview {
   blockedReason?: string;
   acceptedFileCount: number;
   skippedFileCount: number;
-  acceptedFiles: string[];
-  skippedFiles: string[];
+  complete?: boolean;
+  truncationReason?: string;
+  enumerationBackend?: 'ripgrep' | 'git' | 'node-walk';
+  backendFidelity?: 'exact' | 'degraded';
+  deterministic?: boolean;
+  recommendedAction?: 'narrow_scope';
+  scopeSuggestions?: Array<{prefix: string; fileCount: number}>;
+  manifestProjects?: Array<{name: string; path: string; groups: string[]}>;
+  manifestGroups?: string[];
+  acceptedFiles: Array<string | {relativePath: string; sizeBytes: number}>;
+  skippedFiles: Array<string | {relativePath: string; reason: string}>;
 }
 
 export interface CodebaseAudit {
@@ -90,6 +129,13 @@ export interface CodebaseAudit {
   rootAuthorization?: CodebaseRootAuthorization;
   indexGeneration: number;
   activeGeneration?: string;
+  activeIndexState?: 'active' | 'none';
+  selectionPolicyRevision?: number;
+  grantRevision?: number;
+  activeIndexCoverage?: IndexCoverage;
+  pendingGeneration?: PendingGeneration;
+  maintenanceWarning?: string;
+  reindexRequired?: string;
   contentFingerprint?: string;
   indexedRevision?: string;
   indexedDirty?: boolean;
@@ -274,6 +320,7 @@ export async function previewCodebaseRoot(
   rootPath: string,
   apiKey?: string,
   directorySelectionId?: string,
+  selection?: Pick<RegisterCodebaseInput, 'kind' | 'pathFilters' | 'excludeGlobs'>,
 ): Promise<CodebasePreview> {
   const res = await smartPerfettoFetch(
     buildCodebaseApiUrl(backendUrl, '/codebases/preview'),
@@ -283,11 +330,43 @@ export async function previewCodebaseRoot(
       body: JSON.stringify({
         rootPath,
         ...(directorySelectionId ? {directorySelectionId} : {}),
+        ...(selection ?? {}),
       }),
     },
   );
   const body = await readJsonOrThrow<{preview: CodebasePreview}>(res);
   return body.preview;
+}
+
+export async function acceptPendingCodebaseGeneration(
+  backendUrl: string,
+  codebase: CodebaseSummary,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebase.codebaseId)}/pending/accept`),
+    {
+      method: 'POST',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({
+        selectionPolicyRevision: codebase.selectionPolicyRevision ?? 1,
+        grantRevision: codebase.grantRevision ?? 1,
+      }),
+    },
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
+}
+
+export async function rejectPendingCodebaseGeneration(
+  backendUrl: string,
+  codebaseId: string,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/pending/reject`),
+    {method: 'POST', headers: buildHeaders(apiKey), body: JSON.stringify({})},
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
 }
 
 export async function getCodebaseDirectoryPickerCapability(
@@ -387,6 +466,22 @@ export async function updateCodebaseConsent(
   );
   const body = await readJsonOrThrow<{codebase: CodebaseSummary}>(res);
   return body.codebase;
+}
+
+export async function authorizeAvailableCodebaseExtensions(
+  backendUrl: string,
+  codebaseId: string,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
+    {
+      method: 'PATCH',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({authorizeAvailableExtensions: true}),
+    },
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
 }
 
 export async function updateExternalKnowledgeSourceConsent(

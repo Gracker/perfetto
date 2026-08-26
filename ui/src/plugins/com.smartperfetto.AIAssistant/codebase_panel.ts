@@ -27,10 +27,13 @@ import type {
   ExternalKnowledgeSourceSummary,
 } from './codebase_api';
 import {
+  acceptPendingCodebaseGeneration,
+  authorizeAvailableCodebaseExtensions,
   deleteCodebase,
   listCodebases,
   listExternalKnowledgeSources,
   registerExternalKnowledgeSource,
+  rejectPendingCodebaseGeneration,
   reindexCodebase,
   reindexExternalKnowledgeSource,
   updateCodebaseConsent,
@@ -209,6 +212,11 @@ export function optionalIndexCopyForActiveRoot(): string {
 
 export function codebaseDeletionPending(codebase: CodebaseSummary): boolean {
   return codebase.lifecycleState === 'deleting';
+}
+
+export function codebaseCanAuthorizeAvailableExtensions(codebase: CodebaseSummary): boolean {
+  return codebase.eligibleForSendToProvider === true &&
+    (codebase.availableNotConsentedExtensions?.length ?? 0) > 0;
 }
 
 export function analysisContextForFeatureAvailability(
@@ -632,6 +640,54 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     }
   }
 
+  private async resolvePendingGeneration(codebase: CodebaseSummary, accept: boolean) {
+    if (this.readOnly || this.reindexingId) return;
+    const epoch = this.loadEpoch;
+    const backendUrl = this.backendUrl;
+    const apiKey = this.apiKey;
+    this.reindexingId = codebase.codebaseId;
+    this.error = null;
+    try {
+      if (accept) await acceptPendingCodebaseGeneration(backendUrl, codebase, apiKey);
+      else await rejectPendingCodebaseGeneration(backendUrl, codebase.codebaseId, apiKey);
+      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) return;
+      this.success = accept
+        ? text('已启用受限索引候选。', 'Accepted the limited index candidate.')
+        : text('已丢弃受限索引候选。', 'Rejected the limited index candidate.');
+      await this.load();
+    } catch (error) {
+      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) return;
+      this.error = error instanceof Error ? error.message : text('候选索引操作失败', 'Pending index action failed');
+    } finally {
+      if (this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) {
+        this.reindexingId = null;
+        m.redraw();
+      }
+    }
+  }
+
+  private async authorizeAvailableExtensions(codebase: CodebaseSummary) {
+    if (this.readOnly || this.updatingConsentId) return;
+    const epoch = this.loadEpoch;
+    const backendUrl = this.backendUrl;
+    const apiKey = this.apiKey;
+    this.updatingConsentId = `codebase:${codebase.codebaseId}`;
+    try {
+      await authorizeAvailableCodebaseExtensions(backendUrl, codebase.codebaseId, apiKey);
+      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) return;
+      this.success = text('已授权新语言范围。', 'Authorized the newly available languages.');
+      await this.load();
+    } catch (error) {
+      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) return;
+      this.error = error instanceof Error ? error.message : text('授权新语言失败', 'Failed to authorize new languages');
+    } finally {
+      if (this.requestIdentityIsCurrent(epoch, backendUrl, apiKey)) {
+        this.updatingConsentId = null;
+        m.redraw();
+      }
+    }
+  }
+
   private async deleteRegisteredCodebase(codebase: CodebaseSummary) {
     if (this.readOnly || this.deletingId !== null) return;
     const confirmed = typeof window === 'undefined' || window.confirm(text(
@@ -719,6 +775,28 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       codebase.lastIngestError
         ? m('div', {style: STYLES.error}, codebase.lastIngestError)
         : null,
+      (codebase.availableNotConsentedExtensions?.length ?? 0) > 0
+        ? m('div', {style: {...STYLES.meta, marginTop: '8px'}}, [
+            text(
+              `${codebase.availableNotConsentedExtensions!.length} 种新语言可用，但尚未授权发送。`,
+              `${codebase.availableNotConsentedExtensions!.length} newly available languages are not consented for provider send.`,
+            ),
+            codebaseCanAuthorizeAvailableExtensions(codebase)
+              ? m('button', {
+                  type: 'button',
+                  style: {...STYLES.button, marginLeft: '8px'},
+                  disabled: this.readOnly || this.updatingConsentId !== null,
+                  onclick: () => this.authorizeAvailableExtensions(codebase),
+                }, text('授权新语言', 'Authorize languages'))
+              : null,
+          ])
+        : null,
+      codebase.pendingGeneration
+        ? m('div', {style: STYLES.error}, text(
+            `受限索引候选：${codebase.pendingGeneration.coverage.filesSelected}/${codebase.pendingGeneration.coverage.filesEnumerated} 个文件。完整索引仍保持启用。`,
+            `Limited index candidate: ${codebase.pendingGeneration.coverage.filesSelected}/${codebase.pendingGeneration.coverage.filesEnumerated} files. The complete index remains active.`,
+          ))
+        : null,
       deletionPending
         ? m(
             'div',
@@ -756,6 +834,22 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           },
           isExpanded ? text('收起审计', 'Hide audit') : text('审计', 'Audit'),
         ),
+        codebase.pendingGeneration
+          ? m('button', {
+              type: 'button',
+              style: STYLES.button,
+              disabled: this.readOnly || isReindexing,
+              onclick: () => this.resolvePendingGeneration(codebase, true),
+            }, text('接受受限索引', 'Accept limited index'))
+          : null,
+        codebase.pendingGeneration
+          ? m('button', {
+              type: 'button',
+              style: STYLES.button,
+              disabled: this.readOnly || isReindexing,
+              onclick: () => this.resolvePendingGeneration(codebase, false),
+            }, text('丢弃候选', 'Reject candidate'))
+          : null,
         m(
           'button',
           {

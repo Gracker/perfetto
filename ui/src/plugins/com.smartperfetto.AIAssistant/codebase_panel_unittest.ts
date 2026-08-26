@@ -10,6 +10,7 @@ import {
   analysisContextForFeatureAvailability,
   codebaseAvailableForOnDemandAccess,
   codebaseDeletionPending,
+  codebaseCanAuthorizeAvailableExtensions,
   codebaseHasActiveIndex,
   CodebasePanel,
   externalKnowledgeSourceHasActiveIndex,
@@ -144,6 +145,17 @@ describe('codebase lifecycle contract', () => {
     expect(codebaseDeletionPending(codebase({lifecycleState: 'deleting'}))).toBe(true);
     expect(codebaseDeletionPending(codebase())).toBe(false);
     expect(codebaseHasActiveIndex(codebase({chunkCount: 0}))).toBe(false);
+  });
+
+  it('offers new-language authorization only after provider-send consent exists', () => {
+    expect(codebaseCanAuthorizeAvailableExtensions(codebase({
+      eligibleForSendToProvider: false,
+      availableNotConsentedExtensions: ['.dart'],
+    }))).toBe(false);
+    expect(codebaseCanAuthorizeAvailableExtensions(codebase({
+      eligibleForSendToProvider: true,
+      availableNotConsentedExtensions: ['.dart'],
+    }))).toBe(true);
   });
 
   it('keeps an unindexed but available source selected for on-demand access', () => {

@@ -49,6 +49,23 @@ const CODEBASE_KINDS: CodebaseKind[] = [
   'oem_sdk',
 ];
 
+function previewIssueText(reason?: string): string {
+  switch (reason) {
+    case 'root_not_found':
+      return text('找不到该源码文件夹，请确认路径仍存在。', 'The source folder was not found.');
+    case 'root_outside_allowlist':
+      return text('该路径尚未获得后端授权，请使用“选择文件夹”。', 'This path is not authorized; use Choose folder.');
+    case 'time_budget':
+      return text('扫描超时；请缩小路径范围后重试。', 'The scan timed out; narrow the path scope and retry.');
+    case 'enumeration_budget':
+    case 'file_budget':
+    case 'byte_budget':
+      return text('源码范围较大，当前结果不完整；建议增加路径过滤。', 'The source scope is large and coverage is incomplete; add path filters.');
+    default:
+      return text('源码预览未完成，请检查路径和过滤条件。', 'Source preview did not complete; check the path and filters.');
+  }
+}
+
 const STYLES = {
   intro: {
     marginBottom: '16px',
@@ -417,6 +434,11 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         this.rootPath,
         apiKey,
         this.directorySelectionId ?? undefined,
+        {
+          kind: this.kind,
+          pathFilters: splitLines(this.pathFilters),
+          excludeGlobs: splitLines(this.excludeGlobs),
+        },
       );
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.preview = preview;
@@ -614,7 +636,54 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         `Skipped files: ${this.preview.skippedFileCount}`,
       )),
       this.preview.blocked
-        ? m('div', {style: STYLES.error}, this.preview.blockedReason || text('已阻止', 'Blocked'))
+        ? m('div', {style: STYLES.error}, previewIssueText(this.preview.blockedReason))
+        : this.preview.complete === false
+          ? m('div', {style: STYLES.error}, previewIssueText(this.preview.truncationReason))
+        : null,
+      this.preview.enumerationBackend
+        ? m('div', text(
+            `枚举后端：${this.preview.enumerationBackend}（${this.preview.backendFidelity ?? 'exact'}）`,
+            `Enumerator: ${this.preview.enumerationBackend} (${this.preview.backendFidelity ?? 'exact'})`,
+          ))
+        : null,
+      (this.preview.manifestGroups?.length ?? 0) > 0
+        ? m('div', {style: {marginTop: '8px'}}, [
+            m('div', text('Manifest 分组', 'Manifest groups')),
+            ...this.preview.manifestGroups!.slice(0, 12).map(group => m('button', {
+              type: 'button',
+              style: {...STYLES.button, margin: '4px 4px 0 0'},
+              onclick: () => {
+                this.pathFilters = this.preview!.manifestProjects!
+                  .filter(project => project.groups.includes(group))
+                  .map(project => project.path)
+                  .join('\n');
+              },
+            }, group)),
+          ])
+        : null,
+      (this.preview.manifestProjects?.length ?? 0) > 0
+        ? m('div', {style: {marginTop: '8px'}}, [
+            m('div', text('Manifest 项目', 'Manifest projects')),
+            ...this.preview.manifestProjects!.slice(0, 12).map(project => m('button', {
+              type: 'button',
+              style: {...STYLES.button, margin: '4px 4px 0 0'},
+              onclick: () => {
+                this.pathFilters = project.path;
+              },
+            }, project.path)),
+          ])
+        : null,
+      (this.preview.scopeSuggestions?.length ?? 0) > 0 && !this.preview.manifestProjects?.length
+        ? m('div', {style: {marginTop: '8px'}}, [
+            m('div', text('建议缩小到', 'Suggested scopes')),
+            ...this.preview.scopeSuggestions!.slice(0, 8).map(suggestion => m('button', {
+              type: 'button',
+              style: {...STYLES.button, margin: '4px 4px 0 0'},
+              onclick: () => {
+                this.pathFilters = suggestion.prefix;
+              },
+            }, `${suggestion.prefix} (${suggestion.fileCount})`)),
+          ])
         : null,
     ]);
   }
