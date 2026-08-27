@@ -29,6 +29,7 @@ import type {
 import {
   acceptPendingCodebaseGeneration,
   authorizeAvailableCodebaseExtensions,
+  authorizeCurrentCodebaseSelection,
   deleteCodebase,
   listCodebases,
   listExternalKnowledgeSources,
@@ -220,6 +221,12 @@ export function codebaseCanAuthorizeAvailableExtensions(codebase: CodebaseSummar
     (codebase.availableNotConsentedExtensions?.length ?? 0) > 0;
 }
 
+export function codebaseCanAuthorizeCurrentSelection(codebase: CodebaseSummary): boolean {
+  return (codebase.lifecycleState ?? 'active') === 'active' &&
+    codebase.eligibleForSendToProvider === true &&
+    codebase.providerGrantScopeCurrent === false;
+}
+
 export function analysisContextForFeatureAvailability(
   selection: AnalysisContextSelection,
   featureEnabled: boolean,
@@ -267,6 +274,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private deletingId: string | null = null;
   private updatingConsentId: string | null = null;
   private extensionAuthorizationId: string | null = null;
+  private selectionAuthorizationId: string | null = null;
   private reindexingKnowledgeId: string | null = null;
   private registeringKnowledge = false;
   private knowledgeRootPath = '';
@@ -309,6 +317,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.deletingId = null;
       this.updatingConsentId = null;
       this.extensionAuthorizationId = null;
+      this.selectionAuthorizationId = null;
       this.reindexingKnowledgeId = null;
       this.registeringKnowledge = false;
       this.success = null;
@@ -388,6 +397,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.deletingId !== null ||
       this.pendingAction !== null ||
       this.extensionAuthorizationId !== null ||
+      this.selectionAuthorizationId !== null ||
       this.updatingConsentId?.startsWith('codebase:') === true;
   }
 
@@ -767,6 +777,48 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     }
   }
 
+  private async authorizeCurrentSelection(codebase: CodebaseSummary) {
+    if (this.readOnly || this.codebaseMutationInProgress()) return;
+    const includeScope = codebase.pathFilters?.length
+      ? codebase.pathFilters.join(', ')
+      : text('全部已选源码', 'all selected source');
+    const excludeScope = codebase.excludeGlobs?.length
+      ? codebase.excludeGlobs.join(', ')
+      : text('无', 'none');
+    const confirmed = typeof window === 'undefined' || window.confirm(text(
+      `确认把 ${codebase.displayName} 的当前路径选择加入 provider 内容授权？包含范围：${includeScope}；排除规则：${excludeScope}。`,
+      `Authorize the current path selection for provider content from ${codebase.displayName}? Included scope: ${includeScope}; exclusions: ${excludeScope}.`,
+    ));
+    if (!confirmed) return;
+    const identityEpoch = this.identityEpoch;
+    const backendUrl = this.backendUrl;
+    const apiKey = this.apiKey;
+    this.selectionAuthorizationId = codebase.codebaseId;
+    this.error = null;
+    this.success = null;
+    try {
+      await authorizeCurrentCodebaseSelection(backendUrl, codebase.codebaseId, apiKey);
+      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
+      this.success = text('已授权当前路径范围。', 'Authorized the current path scope.');
+      if (this.selectionAuthorizationId === codebase.codebaseId) {
+        this.selectionAuthorizationId = null;
+      }
+      await this.load();
+    } catch (error) {
+      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
+      this.error = error instanceof Error
+        ? error.message
+        : text('授权当前路径范围失败', 'Failed to authorize the current path scope');
+    } finally {
+      if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
+        if (this.selectionAuthorizationId === codebase.codebaseId) {
+          this.selectionAuthorizationId = null;
+        }
+        m.redraw();
+      }
+    }
+  }
+
   private async deleteRegisteredCodebase(codebase: CodebaseSummary) {
     if (this.readOnly || this.codebaseMutationInProgress()) return;
     const confirmed = typeof window === 'undefined' || window.confirm(text(
@@ -818,6 +870,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       ? this.pendingAction.action
       : undefined;
     const authorizingExtensions = this.extensionAuthorizationId === codebase.codebaseId;
+    const authorizingSelection = this.selectionAuthorizationId === codebase.codebaseId;
     const mutationBusy = this.codebaseMutationInProgress();
     const isDeleting = this.deletingId === codebase.codebaseId;
     const deletionPending = codebaseDeletionPending(codebase);
@@ -895,6 +948,25 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
                 }, authorizingExtensions
                   ? text('授权中…', 'Authorizing…')
                   : text('授权新语言', 'Authorize languages'))
+              : null,
+          ])
+        : null,
+      codebase.providerGrantScopeCurrent === false
+        ? m('div', {style: {...STYLES.meta, marginTop: '8px'}}, [
+            text(
+              '当前选择范围与 provider 内容授权不一致；只有二者交集可发送正文，其余路径仅用于元数据定位。',
+              'The current selection differs from provider content consent; only their intersection can send source text, and other paths remain metadata-only.',
+            ),
+            codebaseCanAuthorizeCurrentSelection(codebase)
+              ? m('button', {
+                  type: 'button',
+                  style: {...STYLES.button, marginLeft: '8px'},
+                  disabled: this.readOnly || mutationBusy,
+                  'aria-busy': authorizingSelection ? 'true' : 'false',
+                  onclick: () => this.authorizeCurrentSelection(codebase),
+                }, authorizingSelection
+                  ? text('授权中…', 'Authorizing…')
+                  : text('授权当前范围', 'Authorize current scope'))
               : null,
           ])
         : null,
@@ -1009,6 +1081,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         pendingAction === 'accept' ? text('正在接受索引候选。', 'Accepting index candidate.') : null,
         pendingAction === 'reject' ? text('正在丢弃索引候选。', 'Rejecting index candidate.') : null,
         authorizingExtensions ? text('正在更新语言授权。', 'Updating language consent.') : null,
+        authorizingSelection ? text('正在更新路径授权。', 'Updating path consent.') : null,
       ]),
       isExpanded
         ? m(CodebaseAuditView, {

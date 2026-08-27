@@ -43,9 +43,13 @@ export interface CodebaseSummary {
   activeIndexState?: 'active' | 'none';
   selectionPolicyRevision?: number;
   grantRevision?: number;
+  providerGrantScopeCurrent?: boolean;
   availableNotConsentedExtensions?: string[];
   maintenanceWarning?: 'inactive_chunk_cleanup_failed' | 'pending_generation_expired';
-  reindexRequired?: 'selection_scope_narrowed';
+  reindexRequired?:
+    | 'selection_scope_narrowed'
+    | 'selection_scope_changed'
+    | 'provider_language_scope_expanded';
   activeIndexCoverage?: IndexCoverage;
   pendingGeneration?: PendingGeneration;
   contentFingerprint?: string;
@@ -123,6 +127,7 @@ export interface CodebasePreview {
   scopeSuggestions?: Array<{prefix: string; fileCount: number}>;
   manifestProjects?: Array<{name: string; path: string; groups: string[]}>;
   manifestGroups?: string[];
+  manifestUnavailableReason?: string;
   acceptedFiles: Array<string | {relativePath: string; sizeBytes: number}>;
   skippedFiles: Array<string | {relativePath: string; reason: string}>;
 }
@@ -248,7 +253,10 @@ async function readJsonOrThrow<T>(res: Response): Promise<T> {
     body = null;
   }
   if (!res.ok || body?.success === false) {
-    throw new Error(body?.error || `Codebase API failed: ${res.status}`);
+    const guidance = [body?.message, body?.hint]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .join(' ');
+    throw new Error(guidance || body?.error || `Codebase API failed: ${res.status}`);
   }
   return body as T;
 }
@@ -493,6 +501,22 @@ export async function authorizeAvailableCodebaseExtensions(
       method: 'PATCH',
       headers: buildHeaders(apiKey),
       body: JSON.stringify({authorizeAvailableExtensions: true}),
+    },
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
+}
+
+export async function authorizeCurrentCodebaseSelection(
+  backendUrl: string,
+  codebaseId: string,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
+    {
+      method: 'PATCH',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({authorizeCurrentSelection: true}),
     },
   );
   return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;

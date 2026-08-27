@@ -7,6 +7,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 const apiMocks = vi.hoisted(() => ({
   acceptPending: vi.fn(),
   authorizeExtensions: vi.fn(),
+  authorizeSelection: vi.fn(),
   reindexCodebase: vi.fn(),
   rejectPending: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock('./codebase_api', async (importOriginal) => {
     ...actual,
     acceptPendingCodebaseGeneration: apiMocks.acceptPending,
     authorizeAvailableCodebaseExtensions: apiMocks.authorizeExtensions,
+    authorizeCurrentCodebaseSelection: apiMocks.authorizeSelection,
     reindexCodebase: apiMocks.reindexCodebase,
     rejectPendingCodebaseGeneration: apiMocks.rejectPending,
   };
@@ -29,6 +31,7 @@ import {
   codebaseAvailableForOnDemandAccess,
   codebaseDeletionPending,
   codebaseCanAuthorizeAvailableExtensions,
+  codebaseCanAuthorizeCurrentSelection,
   codebaseHasActiveIndex,
   CodebasePanel,
   externalKnowledgeSourceHasActiveIndex,
@@ -93,6 +96,7 @@ function findNode(node: any, predicate: (candidate: any) => boolean): any {
 beforeEach(() => {
   apiMocks.acceptPending.mockReset().mockResolvedValue(codebase());
   apiMocks.authorizeExtensions.mockReset().mockResolvedValue(codebase());
+  apiMocks.authorizeSelection.mockReset().mockResolvedValue(codebase());
   apiMocks.rejectPending.mockReset().mockResolvedValue(codebase());
   apiMocks.reindexCodebase.mockReset().mockResolvedValue({
     chunksAdded: 1,
@@ -206,6 +210,22 @@ describe('codebase lifecycle contract', () => {
     }))).toBe(true);
   });
 
+  it('offers current-selection authorization only for an active consented mismatch', () => {
+    expect(codebaseCanAuthorizeCurrentSelection(codebase({
+      eligibleForSendToProvider: true,
+      providerGrantScopeCurrent: false,
+    }))).toBe(true);
+    expect(codebaseCanAuthorizeCurrentSelection(codebase({
+      eligibleForSendToProvider: false,
+      providerGrantScopeCurrent: false,
+    }))).toBe(false);
+    expect(codebaseCanAuthorizeCurrentSelection(codebase({
+      lifecycleState: 'deleting',
+      eligibleForSendToProvider: true,
+      providerGrantScopeCurrent: false,
+    }))).toBe(false);
+  });
+
   it('keeps an unindexed but available source selected for on-demand access', () => {
     const panel = new CodebasePanel() as any;
     const onSelectionChange = vi.fn();
@@ -306,12 +326,32 @@ describe('codebase lifecycle contract', () => {
     vi.unstubAllGlobals();
   });
 
+  it('requires informed confirmation before authorizing the current path scope', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('window', {confirm});
+    const panel = new CodebasePanel() as any;
+    panel.backendUrl = 'http://backend';
+    panel.loadEpoch = 1;
+
+    await panel.authorizeCurrentSelection(codebase({
+      eligibleForSendToProvider: true,
+      providerGrantScopeCurrent: false,
+      pathFilters: ['app', 'lib'],
+      excludeGlobs: ['**/generated/**'],
+    }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/app.*lib.*generated/s));
+    expect(apiMocks.authorizeSelection).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
   it('renders degraded coverage, maintenance guidance, extension names, and live feedback', () => {
     const panel = new CodebasePanel() as any;
     panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: [], knowledgeSourceIds: []};
     panel.success = 'Updated';
     const rendered = panel.renderCodebase(codebase({
       eligibleForSendToProvider: true,
+      providerGrantScopeCurrent: false,
       availableNotConsentedExtensions: ['.dart', '.swift'],
       activeIndexCoverage: {
         selectionPolicyRevision: 2,
@@ -334,6 +374,7 @@ describe('codebase lifecycle contract', () => {
 
     expect(renderedText).toContain('.dart');
     expect(renderedText).toContain('.swift');
+    expect(renderedText).toMatch(/current selection|当前选择/i);
     expect(renderedText).toMatch(/1\s*\/\s*2/);
     expect(renderedText).toMatch(/file_budget/);
     expect(renderedText).toMatch(/rebuild|重建/i);

@@ -6,6 +6,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
   acceptPendingCodebaseGeneration,
+  authorizeCurrentCodebaseSelection,
   deleteCodebase,
   getCodebaseDirectoryPickerCapability,
   previewCodebaseRoot,
@@ -14,6 +15,30 @@ import {
   rejectPendingCodebaseGeneration,
   selectCodebaseDirectory,
 } from './codebase_api';
+
+describe('codebase selection consent API', () => {
+  it('uses the explicit current-selection authorization action', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({success: true, codebase: {codebaseId: 'codebase/a'}}),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await authorizeCurrentCodebaseSelection('http://backend', 'codebase/a', 'key');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://backend/api/rag/codebases/codebase%2Fa/consent',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({authorizeCurrentSelection: true}),
+      }),
+    );
+  });
+});
 
 describe('pending codebase generation API', () => {
   it('binds accept and reject requests to the reviewed candidate generation', async () => {
@@ -214,6 +239,23 @@ describe('codebase directory picker API', () => {
         }),
       }),
     );
+  });
+
+  it('surfaces human guidance while the response retains a stable error code', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        success: false,
+        error: 'effective_source_selection_empty',
+        message: 'No source files matched the effective selection.',
+        hint: 'Check path filters and supported extensions.',
+      }),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(previewCodebaseRoot('http://backend', '/empty'))
+      .rejects.toThrow(/No source files.*Check path filters/s);
   });
 });
 

@@ -650,6 +650,12 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             `Enumerator: ${this.preview.enumerationBackend} (${this.preview.backendFidelity ?? 'exact'})`,
           ))
         : null,
+      this.preview.manifestUnavailableReason
+        ? m('div', {style: STYLES.error}, text(
+            `Manifest 元数据不可用（${this.preview.manifestUnavailableReason}）；文件枚举结果仍可使用。`,
+            `Manifest metadata is unavailable (${this.preview.manifestUnavailableReason}); file enumeration remains usable.`,
+          ))
+        : null,
       (this.preview.manifestGroups?.length ?? 0) > 0
         ? m('div', {style: {marginTop: '8px'}}, [
             m('div', text('Manifest 分组', 'Manifest groups')),

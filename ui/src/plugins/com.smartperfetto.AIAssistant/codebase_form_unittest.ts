@@ -187,4 +187,23 @@ describe('CodebaseForm', () => {
     pathFilters.attrs.oninput({target: {value: 'frameworks/native'}});
     expect(form.scopeApplicationNotice).toBeNull();
   });
+
+  it('keeps enumeration results visible when optional manifest metadata is unavailable', () => {
+    const {form, view} = formHarness();
+    form.preview = {
+      blocked: false,
+      complete: true,
+      acceptedFileCount: 12,
+      skippedFileCount: 0,
+      manifestUnavailableReason: 'source_metadata_too_large',
+      acceptedFiles: [],
+      skippedFiles: [],
+    };
+
+    const renderedText = collectText(view());
+
+    expect(renderedText).toMatch(/12/);
+    expect(renderedText).toMatch(/manifest.*unavailable|manifest.*不可用/i);
+    expect(renderedText).toMatch(/source_metadata_too_large/);
+  });
 });
