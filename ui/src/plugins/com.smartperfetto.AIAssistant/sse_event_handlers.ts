@@ -67,6 +67,7 @@ import {
   traceLocationLabel,
 } from './trace_location_label';
 import {uiOutputLanguage, uiText} from './ui_language';
+import {parseSourceUseReceipt} from './analysis_context';
 
 /** Set to true for verbose SSE event logging during development. */
 const DEBUG_SSE = false;
@@ -99,6 +100,7 @@ type AnalysisCompletedPayload = {
   smartScenePreview?: SmartScenePreviewPayload;
   quickRun?: QuickRunReceipt;
   analysisReceipt?: AnalysisReceipt;
+  sourceUseReceipt?: Message['sourceUseReceipt'];
   uiActionProposals?: UiActionProposalV1[];
 };
 
@@ -148,6 +150,7 @@ function toAnalysisCompletedPayload(
   const conclusionContract = source.conclusionContract;
   if (isRecord(conclusionContract)) {
     payload.conclusionContract = conclusionContract;
+    payload.sourceUseReceipt = parseSourceUseReceipt(conclusionContract);
   }
   if (Array.isArray(source.claimSupport)) {
     payload.claimSupport = source.claimSupport;
@@ -4669,6 +4672,7 @@ export function handleAnalysisCompletedEvent(
       payload?.smartScenePreview ||
       payload?.quickRun ||
       payload?.analysisReceipt ||
+      payload?.sourceUseReceipt ||
       payload?.uiActionProposals?.length
     ) {
       // Attach reportUrl to the existing answer/conclusion message. If the
@@ -4690,6 +4694,9 @@ export function handleAnalysisCompletedEvent(
             ...(payload?.analysisReceipt
               ? {analysisReceipt: payload.analysisReceipt}
               : {}),
+            ...(payload?.sourceUseReceipt
+              ? {sourceUseReceipt: payload.sourceUseReceipt}
+              : {}),
             ...uiActionProposalMessageUpdate(payload),
             ...(canonicalContent
               ? {content: canonicalContent}
@@ -4708,55 +4715,12 @@ export function handleAnalysisCompletedEvent(
           {persist: true},
         );
       } else {
-        // No streamed answer — find the last assistant message (conclusion added by 'conclusion' event)
-        const messages = ctx.getMessages();
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (
-            messages[i].role === 'assistant' &&
-            messages[i].flowTag !== 'streaming_flow' &&
-            !messages[i].sqlResult &&
-            messages[i].content.trim().length > 0
-          ) {
-            ctx.updateMessage(
-              messages[i].id,
-              {
-                ...(reportUrl && !messages[i].reportUrl
-                  ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
-                  : {}),
-                ...(payload?.smartScenePreview
-                  ? {smartScenePreview: payload.smartScenePreview}
-                  : {}),
-                ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-                ...(payload?.analysisReceipt
-                  ? {analysisReceipt: payload.analysisReceipt}
-                  : {}),
-                ...uiActionProposalMessageUpdate(payload),
-                content:
-                  canonicalContent ||
-                  buildVisibleConclusionContentWithReportAppendix(
-                    messages[i].content,
-                    conclusionContract,
-                    ctx,
-                    resultSnapshotId,
-                    payload,
-                  ),
-              },
-              {persist: true},
-            );
-            break;
-          }
-        }
-        if (
-          canonicalContent &&
-          !messages.some(
-            (msg) =>
-              msg.role === 'assistant' &&
-              !msg.sqlResult &&
-              msg.content.trim().length > 0,
-          )
-        ) {
+        // Without an explicit current-run message identity, never attach
+        // terminal metadata to an arbitrary prior assistant message.
+        if (canonicalContent) {
+          const messageId = ctx.generateId();
           ctx.addMessage({
-            id: ctx.generateId(),
+            id: messageId,
             role: 'assistant',
             content: canonicalContent,
             timestamp: Date.now(),
@@ -4768,8 +4732,44 @@ export function handleAnalysisCompletedEvent(
             ...(payload?.analysisReceipt
               ? {analysisReceipt: payload.analysisReceipt}
               : {}),
+            ...(payload?.sourceUseReceipt
+              ? {sourceUseReceipt: payload.sourceUseReceipt}
+              : {}),
             ...uiActionProposalMessageUpdate(payload),
           });
+          ctx.streamingAnswer.messageId = messageId;
+          ctx.streamingAnswer.content = canonicalContent;
+          ctx.streamingAnswer.pending = '';
+          ctx.streamingAnswer.status = 'completed';
+        } else {
+          // Preserve the legacy report-metadata backfill, but never put a
+          // source-use receipt on a message without a current-run identity.
+          const messages = ctx.getMessages();
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const message = messages[i];
+            if (
+              message.role !== 'assistant' ||
+              message.flowTag === 'streaming_flow' ||
+              message.sqlResult ||
+              message.content.trim().length === 0
+            ) {
+              continue;
+            }
+            ctx.updateMessage(message.id, {
+              ...(reportUrl && !message.reportUrl
+                ? {reportUrl: `${ctx.backendUrl}${reportUrl}`}
+                : {}),
+              ...(payload?.smartScenePreview
+                ? {smartScenePreview: payload.smartScenePreview}
+                : {}),
+              ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+              ...(payload?.analysisReceipt
+                ? {analysisReceipt: payload.analysisReceipt}
+                : {}),
+              ...uiActionProposalMessageUpdate(payload),
+            }, {persist: true});
+            break;
+          }
         }
       }
     } else if (payload?.reportError) {
@@ -4846,6 +4846,9 @@ export function handleAnalysisCompletedEvent(
           ...(payload?.analysisReceipt
             ? {analysisReceipt: payload.analysisReceipt}
             : {}),
+          ...(payload?.sourceUseReceipt
+            ? {sourceUseReceipt: payload.sourceUseReceipt}
+            : {}),
           ...uiActionProposalMessageUpdate(payload),
         },
         {persist: true},
@@ -4860,8 +4863,9 @@ export function handleAnalysisCompletedEvent(
       );
 
       if (!hasConclusionAlready) {
+        const messageId = ctx.generateId();
         ctx.addMessage({
-          id: ctx.generateId(),
+          id: messageId,
           role: 'assistant',
           content: content,
           timestamp: Date.now(),
@@ -4873,8 +4877,15 @@ export function handleAnalysisCompletedEvent(
           ...(payload?.analysisReceipt
             ? {analysisReceipt: payload.analysisReceipt}
             : {}),
+          ...(payload?.sourceUseReceipt
+            ? {sourceUseReceipt: payload.sourceUseReceipt}
+            : {}),
           ...uiActionProposalMessageUpdate(payload),
         });
+        ctx.streamingAnswer.messageId = messageId;
+        ctx.streamingAnswer.content = content;
+        ctx.streamingAnswer.pending = '';
+        ctx.streamingAnswer.status = 'completed';
       }
     }
   }
@@ -4888,6 +4899,7 @@ export function handleAnalysisCompletedEvent(
       (reportUrl ||
         payload?.quickRun ||
         payload?.analysisReceipt ||
+        payload?.sourceUseReceipt ||
         payload?.uiActionProposals?.length) &&
       streamedAnswerMessageId
     ) {
@@ -4907,6 +4919,9 @@ export function handleAnalysisCompletedEvent(
             ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
             ...(payload?.analysisReceipt
               ? {analysisReceipt: payload.analysisReceipt}
+              : {}),
+            ...(payload?.sourceUseReceipt
+              ? {sourceUseReceipt: payload.sourceUseReceipt}
               : {}),
             ...uiActionProposalMessageUpdate(payload),
           },
@@ -6471,12 +6486,17 @@ function handleSSEEventInner(
             {persist: true},
           );
         } else {
+          const messageId = ctx.generateId();
           ctx.addMessage({
-            id: ctx.generateId(),
+            id: messageId,
             role: 'assistant',
             content,
             timestamp: Date.now(),
           });
+          ctx.streamingAnswer.messageId = messageId;
+          ctx.streamingAnswer.content = content;
+          ctx.streamingAnswer.pending = '';
+          ctx.streamingAnswer.status = 'completed';
         }
       }
 

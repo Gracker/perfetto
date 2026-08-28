@@ -141,6 +141,7 @@ describe('SettingsModal codebase binding', () => {
       onCheckStatus: vi.fn(async () => ({connected: true})),
       onProviderSelectionChange: vi.fn(),
       onAnalysisContextChange: vi.fn(),
+      onAnalysisAuthorizationChange: vi.fn(),
     };
     const modal = new SettingsModal() as any;
     const vnode = {attrs} as any;
@@ -157,6 +158,9 @@ describe('SettingsModal codebase binding', () => {
       apiKey: 'committed-key',
       readOnly: true,
     });
+    expect(panel.attrs.onAuthorizationChange).toBe(
+      attrs.onAnalysisAuthorizationChange,
+    );
     expect(collectText(view)).toContain('Save connection settings');
 
     modal.currentTab = 'providers';

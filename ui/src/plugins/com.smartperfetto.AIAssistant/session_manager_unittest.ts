@@ -236,6 +236,15 @@ describe('SessionManager OIDC storage isolation', () => {
       role: 'assistant',
       content: 'Ordinary analysis explanation',
       timestamp: 1,
+      sourceUseReceipt: {
+        schemaVersion: 'source_use_receipt@1',
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: ['oidc-codebase-receipt-canary'],
+        queriedCodebaseIds: ['oidc-codebase-receipt-canary'],
+        usedCodebaseIds: [],
+        status: 'located',
+        mechanismStatuses: ['compatible'],
+      },
     };
     const transientMessage: Message = {
       id: 'transient-message',
@@ -287,6 +296,7 @@ describe('SessionManager OIDC storage isolation', () => {
       'agent-request-canary',
       'snapshot-canary',
       'pinned-evidence-ref-canary',
+      'oidc-codebase-receipt-canary',
     ]) {
       expect(rawHistory).not.toContain(canary);
       expect(rawSessions).not.toContain(canary);
@@ -420,6 +430,34 @@ describe('SessionManager OIDC storage isolation', () => {
     expect(sessionStorage.getItem(scopedKey)).toBeNull();
     expect(sessionStorage.getItem(legacyWindowKey)).toBeNull();
     expect(localStorage.getItem(PENDING_BACKEND_TRACE_KEY)).toBeNull();
+  });
+});
+
+describe('SessionManager safe source-use receipt storage', () => {
+  it('preserves the bounded receipt in normal local session history', () => {
+    const manager = new SessionManager();
+    const message: Message = {
+      id: 'source-receipt-message',
+      role: 'assistant',
+      content: 'Safe conclusion.',
+      timestamp: 1,
+      sourceUseReceipt: {
+        schemaVersion: 'source_use_receipt@1',
+        codeAwareMode: 'metadata_only',
+        selectedCodebaseIds: ['cb-a'],
+        queriedCodebaseIds: ['cb-a'],
+        usedCodebaseIds: ['cb-a'],
+        status: 'located',
+        coverageComplete: true,
+        mechanismStatuses: ['compatible'],
+      },
+    };
+
+    manager.saveHistory([message], null, 'trace-a');
+
+    expect(manager.loadLegacyHistory()?.messages[0].sourceUseReceipt).toEqual(
+      message.sourceUseReceipt,
+    );
   });
 });
 

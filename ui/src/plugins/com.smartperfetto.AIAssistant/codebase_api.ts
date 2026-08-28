@@ -20,9 +20,6 @@ import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 
 export type CodebaseKind = 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk';
-export type CodebaseRootAuthorization =
-  | 'configured_allowlist'
-  | 'native_picker';
 
 export interface CodebaseSummary {
   codebaseId: string;
@@ -30,7 +27,6 @@ export interface CodebaseSummary {
   kind: CodebaseKind;
   displayName: string;
   rootAvailable?: boolean;
-  rootAuthorization?: CodebaseRootAuthorization;
   commitHash?: string;
   vendor?: string;
   buildId?: string;
@@ -135,7 +131,6 @@ export interface CodebasePreview {
 export interface CodebaseAudit {
   codebaseId: string;
   kind: CodebaseKind;
-  rootAuthorization?: CodebaseRootAuthorization;
   indexGeneration: number;
   activeGeneration?: string;
   activeIndexState?: 'active' | 'none';
@@ -181,6 +176,12 @@ export interface RegisterCodebaseInput {
   symbolMapPaths?: string[];
   licenseTag?: string;
   sendToProvider: boolean;
+}
+
+/** Complete replacement of the two repeatable source-selection fields. */
+export interface UpdateCodebaseSelectionInput {
+  pathFilters: string[];
+  excludeGlobs: string[];
 }
 
 export interface CodebaseDirectoryPickerCapability {
@@ -488,6 +489,29 @@ export async function updateCodebaseConsent(
   );
   const body = await readJsonOrThrow<{codebase: CodebaseSummary}>(res);
   return body.codebase;
+}
+
+export async function updateCodebaseSelection(
+  backendUrl: string,
+  codebaseId: string,
+  input: UpdateCodebaseSelectionInput,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(
+      backendUrl,
+      `/codebases/${encodeURIComponent(codebaseId)}/selection`,
+    ),
+    {
+      method: 'PATCH',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({
+        pathFilters: [...input.pathFilters],
+        excludeGlobs: [...input.excludeGlobs],
+      }),
+    },
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
 }
 
 export async function authorizeAvailableCodebaseExtensions(

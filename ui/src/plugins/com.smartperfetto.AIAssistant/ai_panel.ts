@@ -269,6 +269,7 @@ import {setUiLanguagePreference, uiOutputLanguage, uiText} from './ui_language';
 import {
   analysisContextAfterBackendError,
   analysisContextRequiresFullMode,
+  bumpAnalysisContextAuthorizationEpoch,
   EMPTY_ANALYSIS_CONTEXT,
   loadAnalysisContext,
   normalizeAnalysisContext,
@@ -3544,6 +3545,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               onProviderSelectionChange: () => this.onProviderSelectionChange(),
               onAnalysisContextChange: (selection: AnalysisContextSelection) =>
                 this.onAnalysisContextChange(selection),
+              onAnalysisAuthorizationChange: () =>
+                this.onAnalysisAuthorizationChange(),
               initialStatus: this.serverStatus.connected
                 ? this.serverStatus
                 : undefined,
@@ -4146,6 +4149,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   this.renderQuickRunReceipt(msg.quickRun),
                                   this.renderAnalysisReceipt(
                                     msg.analysisReceipt,
+                                  ),
+                                  this.renderSourceUseReceipt(
+                                    msg.sourceUseReceipt,
                                   ),
                                   this.renderExternalIssueReporting(msg),
                                   this.renderUiActionProposals(
@@ -5489,6 +5495,113 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           `Report ${gateLabel[receipt.qualityGates.finalReportContract]}`,
         ),
       ),
+    ]);
+  }
+
+  private renderSourceUseReceipt(
+    receipt?: Message['sourceUseReceipt'],
+  ): m.Children {
+    if (!receipt || receipt.schemaVersion !== 'source_use_receipt@1') {
+      return null;
+    }
+    const allowedStatuses = new Set([
+      'pending',
+      'not_needed',
+      'disallowed',
+      'no_queryable_anchor',
+      'attempted',
+      'located',
+      'corroborated',
+      'ambiguous_candidates',
+      'not_found_complete',
+      'search_incomplete',
+      'unverified',
+    ]);
+    const allowedReasonCodes = new Set([
+      'not_needed',
+      'disallowed',
+      'no_queryable_anchor',
+      'ambiguous_candidates',
+      'not_found_complete',
+      'search_incomplete',
+      'unverified',
+    ]);
+    const allowedMechanisms = new Set([
+      'corroborated',
+      'compatible',
+      'ambiguous',
+      'unverified',
+    ]);
+    if (
+      !allowedStatuses.has(receipt.status) ||
+      (receipt.codeAwareMode !== 'metadata_only' &&
+        receipt.codeAwareMode !== 'provider_send')
+    ) {
+      return null;
+    }
+    const reasonCode = receipt.reasonCode &&
+      allowedReasonCodes.has(receipt.reasonCode)
+      ? receipt.reasonCode
+      : undefined;
+    const safeIds = (value: unknown): string[] => Array.isArray(value)
+      ? value
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter((item) =>
+            item.length > 0 &&
+            item.length <= 96 &&
+            /^[A-Za-z0-9][A-Za-z0-9_.:@+-]*$/.test(item))
+          .slice(0, 24)
+      : [];
+    const selected = safeIds(receipt.selectedCodebaseIds);
+    const queried = safeIds(receipt.queriedCodebaseIds);
+    const used = safeIds(receipt.usedCodebaseIds);
+    const incompleteReasons = Array.isArray(receipt.incompleteReasons)
+      ? receipt.incompleteReasons
+          .filter((reason): reason is string =>
+            typeof reason === 'string' &&
+            reason.length <= 128 &&
+            /^[a-z][a-z0-9_.:-]*$/.test(reason))
+          .slice(0, 20)
+      : [];
+    const mechanismStatuses = Array.isArray(receipt.mechanismStatuses)
+      ? receipt.mechanismStatuses
+          .filter((status) => allowedMechanisms.has(status))
+          .slice(0, 4)
+      : [];
+    return m('details.ai-source-use-receipt', [
+      m('summary', {style: {
+        minHeight: '40px',
+        display: 'flex',
+        alignItems: 'center',
+        cursor: 'pointer',
+      }}, uiText(
+        `源码使用回执 · ${receipt.status} · 使用 ${used.length}/${selected.length}`,
+        `Source-use receipt · ${receipt.status} · used ${used.length}/${selected.length}`,
+      )),
+      m('div.ai-quick-run-receipt', [
+        m('span.ai-quick-run-chip', receipt.codeAwareMode),
+        reasonCode
+          ? m('span.ai-quick-run-chip', `${uiText('原因', 'reason')} ${reasonCode}`)
+          : null,
+        typeof receipt.coverageComplete === 'boolean'
+          ? m(
+              `span.ai-quick-run-chip.${receipt.coverageComplete ? 'ok' : 'warn'}`,
+              receipt.coverageComplete
+                ? uiText('覆盖完整', 'coverage complete')
+                : uiText('覆盖不完整', 'coverage incomplete'),
+            )
+          : null,
+        m('span.ai-quick-run-chip', `${uiText('已选', 'selected')} ${selected.join(', ') || '-'}`),
+        m('span.ai-quick-run-chip', `${uiText('已查询', 'queried')} ${queried.join(', ') || '-'}`),
+        m('span.ai-quick-run-chip', `${uiText('已使用', 'used')} ${used.join(', ') || '-'}`),
+        ...incompleteReasons.map((reason) =>
+          m('span.ai-quick-run-chip.warn', `${uiText('不完整', 'incomplete')} ${reason}`)
+        ),
+        ...mechanismStatuses.map((status) =>
+          m('span.ai-quick-run-chip', `${uiText('机制', 'mechanism')} ${status}`)
+        ),
+      ]),
     ]);
   }
 
@@ -7016,6 +7129,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
     this.saveCurrentSession();
     m.redraw();
+  }
+
+  private onAnalysisAuthorizationChange(): void {
+    if (this.isAnalysisIdentityLocked()) return;
+    this.onAnalysisContextChange(
+      bumpAnalysisContextAuthorizationEpoch(this.state.analysisContext),
+    );
   }
 
   private analysisContextRequestOptions(): Record<string, unknown> {

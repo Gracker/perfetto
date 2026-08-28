@@ -25,12 +25,14 @@ import type {
   CodebasePreview,
   CodebaseSummary,
   RegisterCodebaseInput,
+  UpdateCodebaseSelectionInput,
 } from './codebase_api';
 import {
   getCodebaseDirectoryPickerCapability,
   previewCodebaseRoot,
   registerCodebase,
   selectCodebaseDirectory,
+  updateCodebaseSelection,
 } from './codebase_api';
 import {uiText as text} from './ui_language';
 
@@ -38,8 +40,20 @@ export interface CodebaseFormAttrs {
   backendUrl: string;
   apiKey?: string;
   scopeKey: string;
+  /** Present only when editing the safe selection policy of a registration. */
+  codebase?: CodebaseSummary;
   onRegistered: (codebase: CodebaseSummary) => void;
+  onUpdated?: (codebase: CodebaseSummary) => void;
   onCancel: () => void;
+}
+
+export interface CodebaseSelectionImpact {
+  changed: boolean;
+  previous: UpdateCodebaseSelectionInput;
+  replacement: UpdateCodebaseSelectionInput;
+  selectionPolicyRevision: {current: number; next: number};
+  invalidatesActiveIndex: boolean;
+  providerGrantMayMismatch: boolean;
 }
 
 const CODEBASE_KINDS: CodebaseKind[] = [
@@ -233,6 +247,39 @@ function splitLines(value: string): string[] {
     .filter((item) => item.length > 0);
 }
 
+function canonicalSelectionLines(value: string | readonly string[] | undefined): string[] {
+  const entries = typeof value === 'string' ? splitLines(value) : [...(value ?? [])];
+  return [...new Set(entries.map((item) => item.trim()).filter(Boolean))].sort();
+}
+
+export function buildCodebaseSelectionImpact(
+  codebase: CodebaseSummary,
+  pathFilters: string,
+  excludeGlobs: string,
+): CodebaseSelectionImpact {
+  const previous = {
+    pathFilters: canonicalSelectionLines(codebase.pathFilters),
+    excludeGlobs: canonicalSelectionLines(codebase.excludeGlobs),
+  };
+  const replacement = {
+    pathFilters: canonicalSelectionLines(pathFilters),
+    excludeGlobs: canonicalSelectionLines(excludeGlobs),
+  };
+  const currentRevision = codebase.selectionPolicyRevision ?? 1;
+  return {
+    changed: JSON.stringify(previous) !== JSON.stringify(replacement),
+    previous,
+    replacement,
+    selectionPolicyRevision: {
+      current: currentRevision,
+      next: currentRevision + 1,
+    },
+    invalidatesActiveIndex: codebase.activeIndexState === 'active' ||
+      Boolean(codebase.activeGeneration),
+    providerGrantMayMismatch: codebase.eligibleForSendToProvider === true,
+  };
+}
+
 function optionalString(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
@@ -296,7 +343,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private backendUrl = '';
   private apiKey?: string;
   private scopeKey = '';
+  private editingIdentity = '';
   private onRegistered: CodebaseFormAttrs['onRegistered'] = () => {};
+  private onUpdated: NonNullable<CodebaseFormAttrs['onUpdated']> = () => {};
 
   oninit(vnode: m.Vnode<CodebaseFormAttrs>) {
     this.mounted = true;
@@ -317,11 +366,15 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   }
 
   private syncAttrs(attrs: CodebaseFormAttrs) {
-    if (
+    const backendIdentityChanged =
       attrs.backendUrl !== this.backendUrl ||
       attrs.apiKey !== this.apiKey ||
-      attrs.scopeKey !== this.scopeKey
-    ) {
+      attrs.scopeKey !== this.scopeKey;
+    const editingIdentity = attrs.codebase
+      ? `${attrs.scopeKey}\0${attrs.codebase.codebaseId}`
+      : '';
+    const editingIdentityChanged = editingIdentity !== this.editingIdentity;
+    if (backendIdentityChanged) {
       this.requestEpoch += 1;
       this.loading = false;
       this.choosingDirectory = false;
@@ -339,13 +392,29 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       this.backendUrl = attrs.backendUrl;
       this.apiKey = attrs.apiKey;
       this.scopeKey = attrs.scopeKey;
-      void this.loadDirectoryPickerCapability(attrs);
+      if (!attrs.codebase) void this.loadDirectoryPickerCapability(attrs);
     } else {
       this.backendUrl = attrs.backendUrl;
       this.apiKey = attrs.apiKey;
       this.scopeKey = attrs.scopeKey;
     }
+    if (editingIdentityChanged) {
+      this.requestEpoch += 1;
+      this.editingIdentity = editingIdentity;
+      this.loading = false;
+      this.error = null;
+      this.preview = null;
+      this.scopeApplicationNotice = null;
+      if (attrs.codebase) {
+        this.kind = attrs.codebase.kind;
+        this.pathFilters = canonicalSelectionLines(attrs.codebase.pathFilters)
+          .join('\n');
+        this.excludeGlobs = canonicalSelectionLines(attrs.codebase.excludeGlobs)
+          .join('\n');
+      }
+    }
     this.onRegistered = attrs.onRegistered;
+    this.onUpdated = attrs.onUpdated ?? (() => {});
   }
 
   private requestIsCurrent(
@@ -498,6 +567,44 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     } catch (e: unknown) {
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.error = e instanceof Error ? e.message : text('注册失败', 'Registration failed');
+    } finally {
+      if (this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
+        this.loading = false;
+        m.redraw();
+      }
+    }
+  }
+
+  private async saveSelection(attrs: CodebaseFormAttrs): Promise<void> {
+    const codebase = attrs.codebase;
+    if (!codebase || this.loading) return;
+    const impact = buildCodebaseSelectionImpact(
+      codebase,
+      this.pathFilters,
+      this.excludeGlobs,
+    );
+    if (!impact.changed) return;
+    const epoch = ++this.requestEpoch;
+    const backendUrl = attrs.backendUrl;
+    const apiKey = attrs.apiKey;
+    const scopeKey = attrs.scopeKey;
+    this.loading = true;
+    this.error = null;
+    m.redraw();
+    try {
+      const updated = await updateCodebaseSelection(
+        backendUrl,
+        codebase.codebaseId,
+        impact.replacement,
+        apiKey,
+      );
+      if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      this.onUpdated(updated);
+    } catch (error) {
+      if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      this.error = error instanceof Error
+        ? error.message
+        : text('保存源码范围失败', 'Failed to save source scope');
     } finally {
       if (this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
         this.loading = false;
@@ -708,6 +815,122 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     );
   }
 
+  private renderSelectionImpact(impact: CodebaseSelectionImpact): m.Children {
+    const scopeText = (values: readonly string[], empty: string) =>
+      values.length > 0 ? values.join(', ') : empty;
+    return m('div', {style: STYLES.advanced}, [
+      m('div', {style: STYLES.advancedBody}, [
+        m('div', {style: STYLES.hint}, text(
+          `包含范围：${scopeText(impact.previous.pathFilters, '全部')} → ${scopeText(impact.replacement.pathFilters, '全部')}`,
+          `Included scope: ${scopeText(impact.previous.pathFilters, 'all')} → ${scopeText(impact.replacement.pathFilters, 'all')}`,
+        )),
+        m('div', {style: STYLES.hint}, text(
+          `排除规则：${scopeText(impact.previous.excludeGlobs, '无')} → ${scopeText(impact.replacement.excludeGlobs, '无')}`,
+          `Exclude globs: ${scopeText(impact.previous.excludeGlobs, 'none')} → ${scopeText(impact.replacement.excludeGlobs, 'none')}`,
+        )),
+        m('div', {style: STYLES.hint}, text(
+          `选择修订：${impact.selectionPolicyRevision.current} → ${impact.selectionPolicyRevision.next}`,
+          `Selection revision: ${impact.selectionPolicyRevision.current} → ${impact.selectionPolicyRevision.next}`,
+        )),
+        impact.invalidatesActiveIndex
+          ? m('div', {style: STYLES.error}, text(
+              '保存后当前可选索引将失效，并标记为需要重建。按需源码读取仍使用新范围。',
+              'Saving invalidates the active optional index and marks it for reindex. On-demand source access immediately uses the new scope.',
+            ))
+          : null,
+        impact.providerGrantMayMismatch
+          ? m('div', {style: STYLES.error}, text(
+              'provider 内容授权可能与新范围不一致；保存后请检查“授权当前范围”，并在需要时重建索引。',
+              'Provider content consent may not match the replacement scope. After saving, review “Authorize current scope” and reindex when needed.',
+            ))
+          : null,
+        !impact.changed
+          ? m('div', {style: STYLES.hint}, text(
+              '当前没有范围变化。',
+              'There are no selection changes.',
+            ))
+          : null,
+      ]),
+    ]);
+  }
+
+  private renderSelectionEditor(
+    attrs: CodebaseFormAttrs,
+    codebase: CodebaseSummary,
+  ): m.Children {
+    const impact = buildCodebaseSelectionImpact(
+      codebase,
+      this.pathFilters,
+      this.excludeGlobs,
+    );
+    const pathFiltersRequired = codebaseFieldRequirements(codebase.kind).pathFilters;
+    const pathFilters = impact.replacement.pathFilters;
+    const saveDisabled = this.loading ||
+      !impact.changed ||
+      (pathFiltersRequired && pathFilters.length === 0);
+    return m('div', [
+      m('div', {style: STYLES.intro}, text(
+        `编辑 ${codebase.displayName} 的相对路径选择。后端不会披露注册根路径，因此这里不会重新扫描或显示文件数量。`,
+        `Edit the relative path selection for ${codebase.displayName}. The backend does not disclose the registered root, so this form does not rescan it or show file counts.`,
+      )),
+      this.renderField(
+        'smartperfetto-codebase-path-filters',
+        text('索引路径范围', 'Index path scope'),
+        this.pathFilters,
+        (value) => {
+          this.pathFilters = value;
+          this.error = null;
+        },
+        {
+          required: pathFiltersRequired,
+          hint: pathFiltersRequired
+            ? text(
+                '内核源码至少需要一个相对路径前缀；逗号或换行分隔。',
+                'Kernel source requires at least one relative path prefix, separated by commas or new lines.',
+              )
+            : text(
+                '完整替换已有路径前缀；留空表示全部受支持源码。',
+                'Completely replaces the existing prefixes. Empty means all supported source files.',
+              ),
+        },
+      ),
+      this.renderField(
+        'smartperfetto-codebase-exclude-globs',
+        text('额外排除规则', 'Additional exclude globs'),
+        this.excludeGlobs,
+        (value) => {
+          this.excludeGlobs = value;
+          this.error = null;
+        },
+        {
+          hint: text(
+            '完整替换已有相对 glob；逗号或换行分隔。',
+            'Completely replaces the existing relative globs, separated by commas or new lines.',
+          ),
+        },
+      ),
+      this.renderSelectionImpact(impact),
+      this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,
+      m('div', {style: STYLES.actions}, [
+        m('button', {
+          type: 'button',
+          style: STYLES.button,
+          disabled: this.loading,
+          onclick: () => attrs.onCancel(),
+        }, text('取消', 'Cancel')),
+        m('button', {
+          type: 'button',
+          style: {...STYLES.button, ...STYLES.primary},
+          disabled: saveDisabled,
+          'aria-busy': this.loading ? 'true' : 'false',
+          onclick: () => this.saveSelection(attrs),
+        }, this.loading
+          ? text('保存中…', 'Saving…')
+          : text('保存范围', 'Save selection')),
+      ]),
+    ]);
+  }
+
   private renderRequiredMetadata(
     requirements: CodebaseFieldRequirements,
   ): m.Children {
@@ -839,6 +1062,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
 
   view(vnode: m.Vnode<CodebaseFormAttrs>): m.Children {
     this.syncAttrs(vnode.attrs);
+    if (vnode.attrs.codebase) {
+      return this.renderSelectionEditor(vnode.attrs, vnode.attrs.codebase);
+    }
     const requirements = codebaseFieldRequirements(this.kind);
     const registrationReady = this.rootPath.trim().length > 0 &&
       (!requirements.vendor || this.vendor.trim().length > 0) &&

@@ -92,9 +92,47 @@ export interface Message {
   smartScenePreview?: SmartScenePreviewPayload;
   quickRun?: QuickRunReceipt;
   analysisReceipt?: AnalysisReceipt;
+  /** Bounded terminal-run source-use metadata; never contains source references or text. */
+  sourceUseReceipt?: SourceUseReceipt;
   uiActionProposals?: UiActionProposalV1[];
   /** Compact provenance shown only for dedicated conversation answers. */
   conversationEvidence?: Array<{id: string; label: string; source?: string}>;
+}
+
+export type SourceUseStatus =
+  | 'pending'
+  | 'not_needed'
+  | 'disallowed'
+  | 'no_queryable_anchor'
+  | 'attempted'
+  | 'located'
+  | 'corroborated'
+  | 'ambiguous_candidates'
+  | 'not_found_complete'
+  | 'search_incomplete'
+  | 'unverified';
+
+export type SourceMechanismStatus =
+  | 'corroborated'
+  | 'compatible'
+  | 'ambiguous'
+  | 'unverified';
+
+/** Privacy-safe per-run projection of the terminal source decision. */
+export interface SourceUseReceipt {
+  schemaVersion: 'source_use_receipt@1';
+  codeAwareMode: 'metadata_only' | 'provider_send';
+  selectedCodebaseIds: string[];
+  queriedCodebaseIds: string[];
+  usedCodebaseIds: string[];
+  status: SourceUseStatus;
+  reasonCode?: Exclude<
+    SourceUseStatus,
+    'pending' | 'attempted' | 'located' | 'corroborated'
+  >;
+  coverageComplete?: boolean;
+  incompleteReasons?: string[];
+  mechanismStatuses: SourceMechanismStatus[];
 }
 
 export interface QuickRunReceipt {
@@ -925,6 +963,8 @@ export interface AnalysisContextSelection {
   codeAwareMode: CodeAwareAnalysisMode;
   codebaseIds: string[];
   knowledgeSourceIds: string[];
+  /** Explicit local invalidation boundary for source/RAG authorization changes. */
+  authorizationEpoch?: number;
 }
 
 /**

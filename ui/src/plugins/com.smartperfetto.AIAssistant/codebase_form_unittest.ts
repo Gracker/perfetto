@@ -6,9 +6,11 @@ import {describe, expect, it, vi} from 'vitest';
 
 import type {CodebaseFormAttrs} from './codebase_form';
 import {
+  buildCodebaseSelectionImpact,
   codebaseFieldRequirements,
   CodebaseForm,
 } from './codebase_form';
+import type {CodebaseSummary} from './codebase_api';
 
 function collectText(node: any): string {
   if (node === null || node === undefined) return '';
@@ -85,6 +87,114 @@ describe('codebase registration field requirements', () => {
 });
 
 describe('CodebaseForm', () => {
+  it('builds a deterministic replacement impact without inventing file counts', () => {
+    const registered: CodebaseSummary = {
+      codebaseId: 'codebase-a',
+      kind: 'app_source',
+      displayName: 'App',
+      indexGeneration: 3,
+      activeGeneration: 'generation-3',
+      activeIndexState: 'active',
+      selectionPolicyRevision: 7,
+      grantRevision: 4,
+      eligibleForSendToProvider: true,
+      providerGrantScopeCurrent: true,
+      pathFilters: ['src'],
+      excludeGlobs: ['**/generated/**'],
+    };
+
+    const impact = buildCodebaseSelectionImpact(
+      registered,
+      'lib\nsrc\nlib',
+      '**/fixtures/**\n**/generated/**',
+    );
+
+    expect(impact).toEqual({
+      changed: true,
+      previous: {
+        pathFilters: ['src'],
+        excludeGlobs: ['**/generated/**'],
+      },
+      replacement: {
+        pathFilters: ['lib', 'src'],
+        excludeGlobs: ['**/fixtures/**', '**/generated/**'],
+      },
+      selectionPolicyRevision: {current: 7, next: 8},
+      invalidatesActiveIndex: true,
+      providerGrantMayMismatch: true,
+    });
+    expect(JSON.stringify(impact)).not.toMatch(/fileCount|acceptedFile|rootPath/);
+  });
+
+  it('renders registered selection editing without asking for the undisclosed root', () => {
+    const {form, attrs} = formHarness();
+    const editing: CodebaseSummary = {
+      codebaseId: 'codebase-a',
+      kind: 'app_source',
+      displayName: 'App',
+      indexGeneration: 2,
+      activeGeneration: 'generation-2',
+      activeIndexState: 'active',
+      selectionPolicyRevision: 3,
+      grantRevision: 1,
+      eligibleForSendToProvider: true,
+      pathFilters: ['src'],
+      excludeGlobs: ['**/generated/**'],
+    };
+    const editAttrs = {
+      ...attrs,
+      codebase: editing,
+      onUpdated: vi.fn(),
+    };
+    form.onbeforeupdate({attrs: editAttrs} as any);
+    form.pathFilters = 'src\nlib';
+
+    const rendered = form.view({attrs: editAttrs} as any);
+    const renderedText = collectText(rendered);
+
+    expect(renderedText).toMatch(/src.*lib/s);
+    expect(renderedText).toMatch(/revision.*3.*4|修订.*3.*4/is);
+    expect(renderedText).toMatch(/reindex|重建/i);
+    expect(renderedText).toMatch(/provider.*authoriz|provider.*授权/i);
+    expect(renderedText).not.toMatch(/Source folder|源码文件夹|Accepted files|可接受文件/);
+    expect(findNode(
+      rendered,
+      node => node.tag === 'button' && /Save selection|保存范围/.test(collectText(node)),
+    )?.attrs.disabled).toBe(false);
+  });
+
+  it('keeps no-change edits and cancellation side-effect free', () => {
+    const {form, attrs} = formHarness();
+    const editing: CodebaseSummary = {
+      codebaseId: 'codebase-a',
+      kind: 'app_source',
+      displayName: 'App',
+      indexGeneration: 2,
+      selectionPolicyRevision: 2,
+      pathFilters: ['src'],
+      excludeGlobs: ['**/generated/**'],
+    };
+    const onUpdated = vi.fn();
+    const onCancel = vi.fn();
+    const editAttrs = {...attrs, codebase: editing, onUpdated, onCancel};
+    form.onbeforeupdate({attrs: editAttrs} as any);
+
+    const rendered = form.view({attrs: editAttrs} as any);
+    const save = findNode(
+      rendered,
+      node => node.tag === 'button' && /Save selection|保存范围/.test(collectText(node)),
+    );
+    const cancel = findNode(
+      rendered,
+      node => node.tag === 'button' && /Cancel|取消/.test(collectText(node)),
+    );
+
+    expect(save.attrs.disabled).toBe(true);
+    cancel.attrs.onclick();
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onUpdated).not.toHaveBeenCalled();
+  });
+
   it('makes folder selection primary and removes redundant commit input', () => {
     const {view} = formHarness();
     const rendered = view();

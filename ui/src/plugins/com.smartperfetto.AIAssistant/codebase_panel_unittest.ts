@@ -256,10 +256,33 @@ describe('codebase lifecycle contract', () => {
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-b', 'codebase-a'],
       knowledgeSourceIds: ['wiki-a'],
+      authorizationEpoch: 4,
     }, 'codebase-a')).toEqual({
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-b'],
       knowledgeSourceIds: ['wiki-a'],
+      authorizationEpoch: 5,
+    });
+  });
+
+  it('emits an explicit authorization epoch when policy changes but selection does not', () => {
+    const panel = new CodebasePanel() as any;
+    const onSelectionChange = vi.fn();
+    panel.selection = {
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['codebase-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: 9,
+    };
+    panel.onSelectionChange = onSelectionChange;
+
+    panel.emitAuthorizationChange();
+
+    expect(onSelectionChange).toHaveBeenCalledWith({
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['codebase-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: 10,
     });
   });
 
@@ -345,6 +368,32 @@ describe('codebase lifecycle contract', () => {
     vi.unstubAllGlobals();
   });
 
+  it('emits the explicit parent authorization callback after the real mutation succeeds', async () => {
+    vi.stubGlobal('window', {confirm: vi.fn(() => true)});
+    const panel = new CodebasePanel() as any;
+    const onAuthorizationChange = vi.fn();
+    panel.backendUrl = 'http://backend';
+    panel.scopeKey = 'scope';
+    panel.selection = {
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['codebase-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: 2,
+    };
+    panel.onAuthorizationChange = onAuthorizationChange;
+    panel.load = vi.fn(async () => {});
+
+    await panel.authorizeCurrentSelection(codebase({
+      eligibleForSendToProvider: true,
+      providerGrantScopeCurrent: false,
+      pathFilters: ['src'],
+    }));
+
+    expect(apiMocks.authorizeSelection).toHaveBeenCalledOnce();
+    expect(onAuthorizationChange).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
   it('renders degraded coverage, maintenance guidance, extension names, and live feedback', () => {
     const panel = new CodebasePanel() as any;
     panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: [], knowledgeSourceIds: []};
@@ -369,6 +418,8 @@ describe('codebase lifecycle contract', () => {
       },
       maintenanceWarning: 'inactive_chunk_cleanup_failed',
       reindexRequired: 'selection_scope_narrowed',
+      selectionPolicyRevision: 7,
+      grantRevision: 5,
     }));
     const renderedText = collectText(rendered);
 
@@ -378,7 +429,14 @@ describe('codebase lifecycle contract', () => {
     expect(renderedText).toMatch(/1\s*\/\s*2/);
     expect(renderedText).toMatch(/file_budget/);
     expect(renderedText).toMatch(/rebuild|重建/i);
+    expect(renderedText).toMatch(/selection.*7|选择.*7/i);
+    expect(renderedText).toMatch(/grant.*5|授权.*5/i);
     expect(findNode(rendered, node => node.attrs?.['aria-live'] === 'polite')).toBeDefined();
+    const editButton = findNode(rendered, node =>
+      node.tag === 'button' && /Edit scope|编辑范围/.test(collectText(node))
+    );
+    expect(editButton).toBeDefined();
+    expect(Number.parseInt(String(editButton.attrs.style.minHeight), 10)).toBeGreaterThanOrEqual(40);
   });
 
   it('does not expose pending candidate actions after deletion starts', () => {

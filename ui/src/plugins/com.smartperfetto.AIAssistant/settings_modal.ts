@@ -47,6 +47,7 @@ export interface SettingsModalAttrs {
   onCheckStatus: (backendUrl: string, apiKey: string) => Promise<ServerStatus>;
   onProviderSelectionChange: () => void;
   onAnalysisContextChange?: (selection: AnalysisContextSelection) => void;
+  onAnalysisAuthorizationChange?: () => void;
   initialStatus?: ServerStatus;
   applicationUpdateStatus?: ApplicationUpdateStatus;
   applicationUpdateChecking?: boolean;
@@ -1439,6 +1440,8 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                       readOnly: readOnly || backendBindingDirty,
                       onSelectionChange:
                         vnode.attrs.onAnalysisContextChange ?? (() => {}),
+                      onAuthorizationChange:
+                        vnode.attrs.onAnalysisAuthorizationChange,
                     }),
                   ],
                 )

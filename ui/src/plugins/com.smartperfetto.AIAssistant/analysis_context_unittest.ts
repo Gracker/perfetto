@@ -7,6 +7,9 @@ import {describe, expect, it} from 'vitest';
 import {
   analysisContextAfterBackendError,
   analysisContextRequiresFullMode,
+  bumpAnalysisContextAuthorizationEpoch,
+  normalizeAnalysisContext,
+  parseSourceUseReceipt,
   selectedCodebaseLabels,
 } from './analysis_context';
 import type {AnalysisContextSelection} from './types';
@@ -32,6 +35,142 @@ describe('analysisContextRequiresFullMode', () => {
       codebaseIds: ['stale-ui-selection'],
       knowledgeSourceIds: [],
     })).toBe(false);
+  });
+});
+
+describe('analysis context authorization epoch', () => {
+  it('normalizes and advances a bounded explicit session boundary', () => {
+    expect(normalizeAnalysisContext({
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['cb-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: -1,
+    })).toEqual({
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['cb-a'],
+      knowledgeSourceIds: [],
+    });
+
+    expect(bumpAnalysisContextAuthorizationEpoch({
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['cb-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: 8,
+    })).toEqual({
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['cb-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: 9,
+    });
+  });
+});
+
+describe('source-use receipt privacy projection', () => {
+  it('keeps only bounded decision fields and unique mechanism statuses', () => {
+    const rawCanary = 'RAW_SOURCE_CANARY_/Users/private/root/Main.kt:42';
+    const receipt = parseSourceUseReceipt({
+      schemaVersion: 'conclusion_contract_v1',
+      sourceUseDecision: {
+        schemaVersion: 'source_use_decision@1',
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: ['cb-a', 'cb-b', 'cb-a'],
+        queriedCodebaseIds: ['cb-b', 'cb-a'],
+        usedCodebaseIds: ['cb-b'],
+        status: 'search_incomplete',
+        reasonCode: 'search_incomplete',
+        coverageComplete: false,
+        incompleteReasons: ['time_budget', 'time_budget', '../private'],
+        attemptedTools: [rawCanary],
+        references: [{
+          id: 'source-ref-a',
+          filePath: rawCanary,
+          lineRange: {start: 1, end: 2},
+          snippet: rawCanary,
+          root: rawCanary,
+          query: rawCanary,
+        }],
+      },
+      sourceReferences: [{filePath: rawCanary, snippet: rawCanary}],
+      sourceClaimBindings: [
+        {
+          claimId: 'claim-a',
+          mechanismStatus: 'corroborated',
+          sourceReferenceIds: ['source-ref-a'],
+          reason: rawCanary,
+        },
+        {claimId: 'claim-b', mechanismStatus: 'corroborated'},
+        {claimId: 'claim-c', mechanismStatus: 'compatible'},
+        {claimId: 'claim-d', mechanismStatus: 'not-valid'},
+      ],
+      rootPath: rawCanary,
+      snippet: rawCanary,
+      query: rawCanary,
+    });
+
+    expect(receipt).toEqual({
+      schemaVersion: 'source_use_receipt@1',
+      codeAwareMode: 'provider_send',
+      selectedCodebaseIds: ['cb-a', 'cb-b'],
+      queriedCodebaseIds: ['cb-b', 'cb-a'],
+      usedCodebaseIds: ['cb-b'],
+      status: 'search_incomplete',
+      reasonCode: 'search_incomplete',
+      coverageComplete: false,
+      incompleteReasons: ['time_budget'],
+      mechanismStatuses: ['corroborated', 'compatible'],
+    });
+    expect(JSON.stringify(receipt)).not.toContain(rawCanary);
+    for (const forbidden of [
+      'references',
+      'sourceReferences',
+      'filePath',
+      'lineRange',
+      'snippet',
+      'rootPath',
+      'query',
+      'attemptedTools',
+      'reason',
+    ]) {
+      expect(receipt).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('fails closed on malformed required fields and bounds identifier lists', () => {
+    expect(parseSourceUseReceipt({
+      sourceUseDecision: {
+        schemaVersion: 'source_use_decision@1',
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: ['cb-a'],
+        queriedCodebaseIds: [],
+        usedCodebaseIds: [],
+        status: 'located',
+      },
+    })).toBeUndefined();
+    expect(parseSourceUseReceipt({
+      schemaVersion: 'conclusion_contract_v1',
+      sourceUseDecision: {
+        schemaVersion: 'source_use_decision@1',
+        codeAwareMode: 'provider_send',
+        selectedCodebaseIds: 'cb-a',
+        queriedCodebaseIds: [],
+        usedCodebaseIds: [],
+        status: 'located',
+      },
+    })).toBeUndefined();
+
+    const bounded = parseSourceUseReceipt({
+      schemaVersion: 'conclusion_contract_v1',
+      sourceUseDecision: {
+        schemaVersion: 'source_use_decision@1',
+        codeAwareMode: 'metadata_only',
+        selectedCodebaseIds: Array.from({length: 100}, (_, index) => `cb-${index}`),
+        queriedCodebaseIds: Array.from({length: 100}, (_, index) => `cb-${index}`),
+        usedCodebaseIds: [],
+        status: 'located',
+      },
+    });
+    expect(bounded?.selectedCodebaseIds.length).toBeLessThanOrEqual(24);
+    expect(bounded?.queriedCodebaseIds.length).toBeLessThanOrEqual(24);
   });
 });
 

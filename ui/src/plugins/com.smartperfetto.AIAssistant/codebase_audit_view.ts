@@ -73,14 +73,6 @@ export function formatAuditDate(value: number | string | undefined): string {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
-export function formatRootAuthorization(
-  value: CodebaseAudit['rootAuthorization'],
-): string {
-  return value === 'native_picker'
-    ? text('系统文件夹选择', 'System folder selection')
-    : text('配置的 allowlist', 'Configured allowlist');
-}
-
 export class CodebaseAuditView implements m.ClassComponent<CodebaseAuditViewAttrs> {
   private audit: CodebaseAudit | null = null;
   private loading = true;
@@ -156,12 +148,18 @@ export class CodebaseAuditView implements m.ClassComponent<CodebaseAuditViewAttr
       this.renderRow('ID', vnode.attrs.codebase.codebaseId),
       this.renderRow(text('类型', 'Kind'), audit?.kind || vnode.attrs.codebase.kind),
       this.renderRow(
-        text('路径授权', 'Path authorization'),
-        formatRootAuthorization(
-          audit?.rootAuthorization ?? vnode.attrs.codebase.rootAuthorization,
-        ),
+        text('选择修订', 'Selection revision'),
+        audit?.selectionPolicyRevision ?? vnode.attrs.codebase.selectionPolicyRevision,
+      ),
+      this.renderRow(
+        text('授权修订', 'Grant revision'),
+        audit?.grantRevision ?? vnode.attrs.codebase.grantRevision,
       ),
       this.renderRow(text('索引代次', 'Index generation'), audit?.indexGeneration),
+      this.renderRow(
+        text('活动索引状态', 'Active index state'),
+        audit?.activeIndexState ?? vnode.attrs.codebase.activeIndexState,
+      ),
       this.renderRow(text('活动代次', 'Active generation'), audit?.activeGeneration),
       this.renderRow(
         text('索引覆盖', 'Index coverage'),

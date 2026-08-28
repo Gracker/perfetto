@@ -4,7 +4,7 @@
 
 import {describe, expect, it} from 'vitest';
 
-import {CodebaseAuditView, formatRootAuthorization} from './codebase_audit_view';
+import {CodebaseAuditView} from './codebase_audit_view';
 
 function collectText(node: any): string {
   if (node === null || node === undefined) return '';
@@ -13,19 +13,7 @@ function collectText(node: any): string {
   return collectText(node.children);
 }
 
-describe('codebase audit path authorization', () => {
-  it('makes persistent native-picker authorization visible', () => {
-    expect(formatRootAuthorization('native_picker')).toMatch(
-      /系统文件夹选择|System folder selection/,
-    );
-    expect(formatRootAuthorization('configured_allowlist')).toMatch(
-      /配置的 allowlist|Configured allowlist/,
-    );
-    expect(formatRootAuthorization(undefined)).toMatch(
-      /配置的 allowlist|Configured allowlist/,
-    );
-  });
-
+describe('codebase audit safe management state', () => {
   it('renders active coverage and maintenance state in the audit surface', () => {
     const view = new CodebaseAuditView() as any;
     view.loading = false;
@@ -33,6 +21,9 @@ describe('codebase audit path authorization', () => {
       codebaseId: 'codebase-a',
       kind: 'app_source',
       indexGeneration: 2,
+      activeIndexState: 'active',
+      selectionPolicyRevision: 3,
+      grantRevision: 2,
       chunkCount: 1,
       blockedFileCount: 0,
       redactionHitCount: 0,
@@ -70,5 +61,9 @@ describe('codebase audit path authorization', () => {
     expect(text).toContain('file_budget');
     expect(text).toContain('inactive_chunk_cleanup_failed');
     expect(text).toContain('selection_scope_narrowed');
+    expect(text).toMatch(/Selection revision|选择修订/);
+    expect(text).toMatch(/Grant revision|授权修订/);
+    expect(text).not.toMatch(/Path authorization|路径授权|allowlist|folder selection/i);
+    expect(JSON.stringify(rendered)).not.toContain('rootAuthorization');
   });
 });

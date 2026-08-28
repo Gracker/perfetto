@@ -27,6 +27,7 @@ import {
   toggleSidebarCollapsedWithTransientState,
 } from './ai_transient_state';
 import {sessionManager} from './session_manager';
+import {SettingsModal} from './settings_modal';
 import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import type {TracePairWorkspaceScope} from './trace_pair_workspace_state_model';
 import type {AIPanelState} from './types';
@@ -131,6 +132,19 @@ function findVNodeById(node: any, id: string): any {
   }
   if (node.attrs?.id === id) return node;
   return findVNodeById(node.children, id);
+}
+
+function findVNodeByTag(node: any, tag: unknown): any {
+  if (node === null || node === undefined || node === false) return undefined;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findVNodeByTag(child, tag);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (node.tag === tag) return node;
+  return findVNodeByTag(node.children, tag);
 }
 
 describe('AIPanel conversation selection context', () => {
@@ -621,6 +635,75 @@ describe('AIPanel language identity', () => {
     expect(panel.analysisContextRequestOptions()).toMatchObject({
       outputLanguage: 'en',
     });
+  });
+});
+
+describe('AIPanel source authorization boundary', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  it('binds Settings authorization mutations to an authoritative session reset', () => {
+    const panel = new AIPanel() as any;
+    panel.state.showSettings = true;
+    panel.state.agentSessionId = 'agent-session-source-scope';
+    panel.state.analysisContext = {
+      codeAwareMode: 'provider_send',
+      codebaseIds: ['codebase-a'],
+      knowledgeSourceIds: [],
+      authorizationEpoch: 3,
+    };
+    const retireSession = vi
+      .spyOn(panel, 'retireBackendAgentSession')
+      .mockImplementation(() => true);
+    const resetConversation = vi
+      .spyOn(panel, 'resetConversationSession')
+      .mockImplementation(() => {});
+    vi.spyOn(panel, 'ensureAnalysisContextCodebaseLabels').mockImplementation(() => {});
+    vi.spyOn(panel, 'saveCurrentSession').mockImplementation(() => {});
+    vi.spyOn(panel, 'addMessage').mockImplementation(() => {});
+
+    const tree = panel.view({attrs: {}} as any);
+    const settingsModal = findVNodeByTag(tree, SettingsModal);
+
+    expect(settingsModal).toBeDefined();
+    expect(settingsModal.attrs.onAnalysisAuthorizationChange).toBeTypeOf(
+      'function',
+    );
+    settingsModal.attrs.onAnalysisAuthorizationChange();
+
+    expect(retireSession).toHaveBeenCalledOnce();
+    expect(resetConversation).toHaveBeenCalledOnce();
+    expect(panel.analysisContextRequestOptions()).not.toHaveProperty(
+      'authorizationEpoch',
+    );
+    expect(panel.state.analysisContext.authorizationEpoch).toBe(4);
+  });
+
+  it('renders a compact receipt with safe status, coverage, ids, and mechanisms only', () => {
+    const panel = new AIPanel() as any;
+    const rendered = panel.renderSourceUseReceipt({
+      schemaVersion: 'source_use_receipt@1',
+      codeAwareMode: 'provider_send',
+      selectedCodebaseIds: ['cb-a', 'cb-b'],
+      queriedCodebaseIds: ['cb-b'],
+      usedCodebaseIds: ['cb-b'],
+      status: 'search_incomplete',
+      reasonCode: 'search_incomplete',
+      coverageComplete: false,
+      incompleteReasons: ['time_budget'],
+      mechanismStatuses: ['corroborated', 'compatible'],
+    });
+    const renderedText = collectVNodeText(rendered);
+
+    expect(rendered?.tag).toBe('details');
+    expect(rendered?.attrs?.className).toContain('ai-source-use-receipt');
+    expect(renderedText).toMatch(/search_incomplete/);
+    expect(renderedText).toMatch(/cb-a.*cb-b/s);
+    expect(renderedText).toMatch(/time_budget/);
+    expect(renderedText).toMatch(/corroborated.*compatible/s);
+    expect(renderedText).not.toMatch(/filePath|lineRange|snippet|rootPath|query/);
   });
 });
 

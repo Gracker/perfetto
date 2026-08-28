@@ -40,7 +40,11 @@ import {
   updateCodebaseConsent,
   updateExternalKnowledgeSourceConsent,
 } from './codebase_api';
-import {normalizeAnalysisContext, sameAnalysisContext} from './analysis_context';
+import {
+  bumpAnalysisContextAuthorizationEpoch,
+  normalizeAnalysisContext,
+  sameAnalysisContext,
+} from './analysis_context';
 import {CodebaseAuditView} from './codebase_audit_view';
 import {CodebaseForm} from './codebase_form';
 import {codebaseExcerptCache} from './codebase_excerpt_cache';
@@ -54,9 +58,11 @@ export interface CodebasePanelAttrs {
   selection: AnalysisContextSelection;
   readOnly?: boolean;
   onSelectionChange: (selection: AnalysisContextSelection) => void;
+  /** Invalidate the parent agent session after a successful policy mutation. */
+  onAuthorizationChange?: () => void;
 }
 
-type ViewMode = 'list' | 'add-codebase' | 'add-knowledge';
+type ViewMode = 'list' | 'add-codebase' | 'edit-codebase' | 'add-knowledge';
 
 export function externalKnowledgeSourceHasActiveIndex(
   source: ExternalKnowledgeSourceSummary,
@@ -92,6 +98,7 @@ const STYLES = {
     marginTop: '4px',
   },
   button: {
+    minHeight: '40px',
     border: '1px solid var(--chat-border)',
     borderRadius: '8px',
     background: 'var(--chat-bg-secondary)',
@@ -242,7 +249,7 @@ export function analysisContextAfterCodebaseDelete(
   selection: AnalysisContextSelection,
   codebaseId: string,
 ): AnalysisContextSelection {
-  return normalizeAnalysisContext({
+  return bumpAnalysisContextAuthorizationEpoch({
     ...selection,
     codebaseIds: selection.codebaseIds.filter((id) => id !== codebaseId),
   });
@@ -268,6 +275,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private success: string | null = null;
   private featureEnabled = true;
   private viewMode: ViewMode = 'list';
+  private editingCodebaseId: string | null = null;
   private expandedAuditId: string | null = null;
   private reindexingId: string | null = null;
   private pendingAction: {codebaseId: string; action: 'accept' | 'reject'} | null = null;
@@ -289,6 +297,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private selection = normalizeAnalysisContext(null);
   private readOnly = false;
   private onSelectionChange: (selection: AnalysisContextSelection) => void = () => {};
+  private onAuthorizationChange: (() => void) | undefined;
 
   oninit(vnode: m.Vnode<CodebasePanelAttrs>) {
     this.backendUrl = vnode.attrs.backendUrl;
@@ -322,6 +331,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.registeringKnowledge = false;
       this.success = null;
       this.expandedAuditId = null;
+      this.editingCodebaseId = null;
       this.viewMode = 'list';
       codebaseExcerptCache.clearForPanelUnmount();
       this.load();
@@ -332,6 +342,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     this.selection = normalizeAnalysisContext(attrs.selection);
     this.readOnly = attrs.readOnly === true;
     this.onSelectionChange = attrs.onSelectionChange;
+    this.onAuthorizationChange = attrs.onAuthorizationChange;
   }
 
   onremove() {
@@ -449,6 +460,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.success = sendToProvider
         ? text(`已授权 ${codebase.displayName}`, `Authorized ${codebase.displayName}`)
         : text(`已撤销 ${codebase.displayName} 的内容发送权限`, `Revoked provider content access for ${codebase.displayName}`);
+      this.emitAuthorizationChange();
       if (this.updatingConsentId === operationId) this.updatingConsentId = null;
       await this.load();
     } catch (e: unknown) {
@@ -485,6 +497,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.success = sendToProvider
         ? text(`已授权 ${source.displayName}`, `Authorized ${source.displayName}`)
         : text(`已撤销 ${source.displayName} 的内容发送权限`, `Revoked provider content access for ${source.displayName}`);
+      this.emitAuthorizationChange();
       if (this.updatingConsentId === operationId) this.updatingConsentId = null;
       await this.load();
     } catch (e: unknown) {
@@ -503,6 +516,15 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     if (sameAnalysisContext(normalized, this.selection)) return;
     this.selection = normalized;
     this.onSelectionChange(normalized);
+  }
+
+  /** Force a new agent session after a source/RAG authorization boundary changes. */
+  private emitAuthorizationChange(): void {
+    if (this.onAuthorizationChange) {
+      this.onAuthorizationChange();
+      return;
+    }
+    this.emitSelection(bumpAnalysisContextAuthorizationEpoch(this.selection));
   }
 
   private reconcileSelection(input: {
@@ -625,6 +647,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       await reindexExternalKnowledgeSource(backendUrl, source.sourceId, apiKey);
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
       this.success = text(`已重新索引 ${source.displayName}`, `Reindexed ${source.displayName}`);
+      this.emitAuthorizationChange();
       this.reindexingKnowledgeId = null;
       await this.load();
     } catch (error) {
@@ -663,6 +686,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           `已更新 ${codebase.displayName} 的可选索引：${result.chunksAdded ?? 0} 个分片`,
           `Updated the optional index for ${codebase.displayName}: ${result.chunksAdded ?? 0} chunks`,
         );
+        this.emitAuthorizationChange();
       } else if (result.activationDisposition === 'pending') {
         this.success = text(
           `已生成受限索引候选（${result.coverage?.filesSelected ?? 0}/${result.coverage?.filesEnumerated ?? 0} 个文件），等待确认；当前完整索引仍保持启用。`,
@@ -722,6 +746,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.success = accept
         ? text('已启用受限索引候选。', 'Accepted the limited index candidate.')
         : text('已丢弃受限索引候选。', 'Rejected the limited index candidate.');
+      if (accept) this.emitAuthorizationChange();
       if (
         this.pendingAction?.codebaseId === codebase.codebaseId &&
         this.pendingAction.action === action
@@ -760,6 +785,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       await authorizeAvailableCodebaseExtensions(backendUrl, codebase.codebaseId, apiKey);
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
       this.success = text('已授权新语言范围。', 'Authorized the newly available languages.');
+      this.emitAuthorizationChange();
       if (this.extensionAuthorizationId === codebase.codebaseId) {
         this.extensionAuthorizationId = null;
       }
@@ -800,6 +826,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       await authorizeCurrentCodebaseSelection(backendUrl, codebase.codebaseId, apiKey);
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
       this.success = text('已授权当前路径范围。', 'Authorized the current path scope.');
+      this.emitAuthorizationChange();
       if (this.selectionAuthorizationId === codebase.codebaseId) {
         this.selectionAuthorizationId = null;
       }
@@ -899,6 +926,18 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       m('div', {style: STYLES.chips}, [
         m('span', {style: STYLES.chip}, `${text('分片', 'chunks')} ${codebase.chunkCount ?? 0}`),
         m('span', {style: STYLES.chip}, `${text('代际', 'gen')} ${codebase.indexGeneration}`),
+        m('span', {style: STYLES.chip}, text(
+          `选择 ${codebase.selectionPolicyRevision ?? 1}`,
+          `selection ${codebase.selectionPolicyRevision ?? 1}`,
+        )),
+        m('span', {style: STYLES.chip}, text(
+          `授权 ${codebase.grantRevision ?? 1}`,
+          `grant ${codebase.grantRevision ?? 1}`,
+        )),
+        m('span', {style: STYLES.chip}, text(
+          `活动索引 ${codebase.activeIndexState ?? (codebase.activeGeneration ? 'active' : 'none')}`,
+          `active index ${codebase.activeIndexState ?? (codebase.activeGeneration ? 'active' : 'none')}`,
+        )),
         m('span', {style: STYLES.chip}, `${text('索引', 'ingest')} ${formatDate(codebase.lastIngestAt)}`),
         codebase.vendor ? m('span', {style: STYLES.chip}, codebase.vendor) : null,
         codebase.buildId ? m('span', {style: STYLES.chip}, codebase.buildId) : null,
@@ -909,6 +948,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           ? m('span', {style: STYLES.chip}, text('等待删除重试', 'deletion pending'))
           : null,
       ]),
+      m('div', {style: {...STYLES.meta, marginTop: '8px'}}, text(
+        `包含范围：${codebase.pathFilters?.length ? codebase.pathFilters.join(', ') : '全部'}；排除规则：${codebase.excludeGlobs?.length ? codebase.excludeGlobs.join(', ') : '无'}`,
+        `Included scope: ${codebase.pathFilters?.length ? codebase.pathFilters.join(', ') : 'all'}; exclude globs: ${codebase.excludeGlobs?.length ? codebase.excludeGlobs.join(', ') : 'none'}`,
+      )),
       codebase.lastIngestError
         ? m('div', {style: STYLES.error}, codebase.lastIngestError)
         : null,
@@ -1002,6 +1045,15 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           )
         : null,
       m('div', {style: STYLES.actions}, [
+        m('button', {
+          type: 'button',
+          style: STYLES.button,
+          disabled: this.readOnly || mutationBusy || deletionPending,
+          onclick: () => {
+            this.editingCodebaseId = codebase.codebaseId;
+            this.viewMode = 'edit-codebase';
+          },
+        }, text('编辑范围', 'Edit scope')),
         m(
           'button',
           {
@@ -1291,6 +1343,49 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
 
   view(_vnode: m.Vnode<CodebasePanelAttrs>): m.Children {
     if (this.viewMode === 'add-knowledge') return this.renderKnowledgeSourceForm();
+    if (this.viewMode === 'edit-codebase') {
+      const codebase = this.codebases.find(
+        (candidate) => candidate.codebaseId === this.editingCodebaseId,
+      );
+      if (!codebase) {
+        this.viewMode = 'list';
+        this.editingCodebaseId = null;
+      } else {
+        return m('div', {style: STYLES.shell}, [
+          m('div', {style: STYLES.header}, [
+            m('div', [
+              m('h4', {style: STYLES.title}, text('编辑源码范围', 'Edit source scope')),
+              m('div', {style: STYLES.subtitle}, codebase.displayName),
+            ]),
+          ]),
+          m(CodebaseForm, {
+            backendUrl: this.backendUrl,
+            apiKey: this.apiKey,
+            scopeKey: this.scopeKey,
+            codebase,
+            onRegistered: () => {},
+            onUpdated: (updated) => {
+              codebaseExcerptCache.clearForCodebaseReindex(
+                updated.codebaseId,
+                updated.indexGeneration,
+              );
+              this.emitAuthorizationChange();
+              this.success = text(
+                `已保存 ${updated.displayName} 的源码范围`,
+                `Saved the source scope for ${updated.displayName}`,
+              );
+              this.editingCodebaseId = null;
+              this.viewMode = 'list';
+              void this.load();
+            },
+            onCancel: () => {
+              this.editingCodebaseId = null;
+              this.viewMode = 'list';
+            },
+          }),
+        ]);
+      }
+    }
     if (this.viewMode === 'add-codebase') {
       return m('div', {style: STYLES.shell}, [
         m('div', {style: STYLES.header}, [

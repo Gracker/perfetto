@@ -14,7 +14,60 @@ import {
   reindexExternalKnowledgeSource,
   rejectPendingCodebaseGeneration,
   selectCodebaseDirectory,
+  updateCodebaseSelection,
 } from './codebase_api';
+
+describe('codebase selection policy API', () => {
+  it('PATCHes the complete repeated filter replacement without changing request conventions', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        codebase: {
+          codebaseId: 'codebase/a',
+          kind: 'app_source',
+          displayName: 'App',
+          indexGeneration: 3,
+          selectionPolicyRevision: 4,
+          reindexRequired: 'selection_scope_changed',
+        },
+      }),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(updateCodebaseSelection(
+      'http://backend/',
+      'codebase/a',
+      {
+        pathFilters: ['app', 'lib'],
+        excludeGlobs: ['**/generated/**', '**/fixtures/**'],
+      },
+      'secret-key',
+    )).resolves.toMatchObject({
+      selectionPolicyRevision: 4,
+      reindexRequired: 'selection_scope_changed',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://backend/api/rag/codebases/codebase%2Fa/selection',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          pathFilters: ['app', 'lib'],
+          excludeGlobs: ['**/generated/**', '**/fixtures/**'],
+        }),
+      }),
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBeUndefined();
+    expect(
+      new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'),
+    ).toBe('Bearer secret-key');
+  });
+});
 
 describe('codebase selection consent API', () => {
   it('uses the explicit current-selection authorization action', async () => {

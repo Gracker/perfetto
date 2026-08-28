@@ -1250,6 +1250,111 @@ describe('handleAnalysisCompletedEvent', () => {
   });
 });
 
+describe('per-run source-use receipt projection', () => {
+  const conclusionContract = (rawCanary = 'RAW_SOURCE_CANARY') => ({
+    schemaVersion: 'conclusion_contract_v1',
+    mode: 'initial_report',
+    conclusions: [],
+    clusters: [],
+    evidenceChain: [],
+    uncertainties: [],
+    nextSteps: [],
+    sourceUseDecision: {
+      schemaVersion: 'source_use_decision@1',
+      codeAwareMode: 'provider_send',
+      selectedCodebaseIds: ['cb-a'],
+      queriedCodebaseIds: ['cb-a'],
+      usedCodebaseIds: ['cb-a'],
+      status: 'corroborated',
+      coverageComplete: true,
+      attemptedTools: [rawCanary],
+      references: [{filePath: rawCanary, snippet: rawCanary}],
+    },
+    sourceReferences: [{filePath: rawCanary, lineRange: {start: 1, end: 2}}],
+    sourceClaimBindings: [{
+      claimId: 'claim-a',
+      mechanismStatus: 'corroborated',
+      sourceReferenceIds: ['source-ref-a'],
+      reason: rawCanary,
+    }],
+  });
+
+  it('attaches the allowlisted receipt to the conclusion message and replays idempotently', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('conclusion', {
+      runId: 'run-a',
+      data: {conclusion: 'Current run answer.'},
+    }, ctx);
+    const terminalEvent = {
+      runId: 'run-a',
+      data: {
+        conclusion: 'Current run answer.',
+        conclusionContract: conclusionContract('PRIVATE_/Users/me/Main.kt'),
+      },
+    };
+
+    handleAnalysisCompletedEvent(terminalEvent, ctx);
+    handleAnalysisCompletedEvent(terminalEvent, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.streamingAnswer.messageId).toBe(ctx.messages[0].id);
+    expect(ctx.messages[0].sourceUseReceipt).toEqual({
+      schemaVersion: 'source_use_receipt@1',
+      codeAwareMode: 'provider_send',
+      selectedCodebaseIds: ['cb-a'],
+      queriedCodebaseIds: ['cb-a'],
+      usedCodebaseIds: ['cb-a'],
+      status: 'corroborated',
+      coverageComplete: true,
+      mechanismStatuses: ['corroborated'],
+    });
+    expect(JSON.stringify(ctx.messages[0].sourceUseReceipt)).not.toContain(
+      'PRIVATE_/Users/me/Main.kt',
+    );
+  });
+
+  it('does not attach receipt metadata to an arbitrary prior assistant message', () => {
+    const ctx = createMockContext();
+    ctx.addMessage({
+      id: 'old-answer',
+      role: 'assistant',
+      content: 'Answer from an earlier run.',
+      timestamp: 1,
+    });
+    ctx.setCompletionHandled(true);
+
+    handleAnalysisCompletedEvent({
+      runId: 'run-new',
+      data: {conclusionContract: conclusionContract()},
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].sourceUseReceipt).toBeUndefined();
+  });
+
+  it('fails closed when the decision payload is malformed', () => {
+    const ctx = createMockContext();
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: 'Safe narrative.',
+        conclusionContract: {
+          ...conclusionContract(),
+          sourceUseDecision: {
+            schemaVersion: 'source_use_decision@1',
+            codeAwareMode: 'provider_send',
+            selectedCodebaseIds: 'cb-a',
+            queriedCodebaseIds: [],
+            usedCodebaseIds: [],
+            status: 'located',
+          },
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[0].sourceUseReceipt).toBeUndefined();
+  });
+});
+
 // =============================================================================
 // Error Event Tests
 // =============================================================================

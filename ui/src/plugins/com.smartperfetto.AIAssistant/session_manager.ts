@@ -124,6 +124,7 @@ function projectOidcMessageForStorage(message: Message): Message | undefined {
     sourceContext: undefined,
     analysisReceipt: undefined,
     quickRun: undefined,
+    sourceUseReceipt: undefined,
     uiActionProposals: undefined,
     conversationEvidence: undefined,
     teachingPipeline: scrubOidcIdentityFields(projected.teachingPipeline) as Message['teachingPipeline'],
