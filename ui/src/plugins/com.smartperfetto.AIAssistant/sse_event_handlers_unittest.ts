@@ -1966,6 +1966,7 @@ describe('handleDataEvent', () => {
       ref: '表 1',
       title: 'Test Data',
       source: 'test_skill:step1',
+      reason: 'Explain why this query ran',
       rowCount: 1,
       evidenceRefId: 'data:skill:test_skill:step1:current:trace-a:hash',
       traceSide: 'current',

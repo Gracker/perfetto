@@ -750,6 +750,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     msg: Message,
     isProgressMessage: boolean,
   ): void {
+    dom.classList.toggle(
+      'ai-message-content-summary',
+      msg.sourceContext?.kind === 'summary',
+    );
     const lastRenderedContent = this.renderedMessageContent.get(dom);
     if (lastRenderedContent === msg.content) return;
 

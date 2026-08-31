@@ -1946,6 +1946,7 @@ function registerEnvelopeSourceContext(
       readStringField(metaRecord, 'planPhaseWarning') || undefined,
     producerReason: readStringField(metaRecord, 'producerReason') || undefined,
     toolNarration: readStringField(metaRecord, 'toolNarration') || undefined,
+    queryReviewPurpose: envelope.meta.queryReview?.purpose,
   });
 }
 
@@ -1973,6 +1974,7 @@ function registerDataSourceContext(
     planPhaseWarning?: string;
     producerReason?: string;
     toolNarration?: string;
+    queryReviewPurpose?: string;
   },
 ): DataSourceContext {
   const flow = ctx.streamingFlow;
@@ -1982,9 +1984,12 @@ function registerDataSourceContext(
   const title = inferDataSourceTitle(input);
   const producerReason = normalizeFlowLine(input.producerReason || '');
   const toolNarration = normalizeFlowLine(input.toolNarration || '');
-  const fallbackReason = isLowSignalReason(producerReason)
-    ? toolNarration
-    : producerReason || toolNarration;
+  const queryReviewPurpose = normalizeFlowLine(input.queryReviewPurpose || '');
+  const fallbackReason = !isLowSignalReason(queryReviewPurpose)
+    ? queryReviewPurpose
+    : !isLowSignalReason(producerReason)
+      ? producerReason
+      : toolNarration;
   const reason = isDiagnostic
     ? uiText(
         '失败诊断：该步骤未产出可用数据，只用于解释失败和指导重试，不能作为结论证据。',
