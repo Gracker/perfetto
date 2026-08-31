@@ -97,6 +97,8 @@ export interface Message {
   uiActionProposals?: UiActionProposalV1[];
   /** Compact provenance shown only for dedicated conversation answers. */
   conversationEvidence?: Array<{id: string; label: string; source?: string}>;
+  /** Non-blocking source supplement attached after the primary answer. */
+  conversationSourceEnrichment?: ConversationSourceEnrichmentUpdate;
 }
 
 export type SourceUseStatus =
@@ -134,6 +136,17 @@ export interface SourceUseReceipt {
   incompleteReasons?: string[];
   mechanismStatuses: SourceMechanismStatus[];
 }
+
+export type ConversationSourceEnrichmentUpdate =
+  | {status: 'running'}
+  | {
+      status: 'completed';
+      message: string;
+      evidence: Array<{id: string; label: string; source?: string}>;
+      metrics: {searchCalls: number; readCalls: number; durationMs: number};
+    }
+  | {status: 'failed'; errorCode: string}
+  | {status: 'cancelled'};
 
 export interface QuickRunReceipt {
   requestedMode: 'fast' | 'auto' | 'full';

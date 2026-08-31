@@ -8,6 +8,7 @@ import {
   conversationTraceContextChanged,
   parseConversationSseFrames,
   startConversationTurn,
+  streamConversationRun,
 } from './conversation_client';
 import type {SelectionContext} from './types';
 
@@ -89,5 +90,43 @@ describe('parseConversationSseFrames', () => {
     expect(parseConversationSseFrames(
       'event: note\r\ndata: first\r\ndata: second\r\n\r\n',
     ).events).toEqual([{type: 'note', data: 'first\nsecond'}]);
+  });
+});
+
+describe('streamConversationRun source enrichment', () => {
+  it('delivers the primary outcome immediately and continues to the source terminal event', async () => {
+    const frames = [
+      'event: run_completed\ndata: {"type":"run_completed","enrichmentPending":true,"outcome":{"kind":"answered","message":"primary"}}\n\n',
+      'event: source_enrichment_started\ndata: {"type":"source_enrichment_started"}\n\n',
+      'event: source_enrichment_completed\ndata: {"type":"source_enrichment_completed","message":"supplement","evidence":[],"metrics":{"searchCalls":1,"readCalls":2,"durationMs":40}}\n\n',
+    ];
+    const encoder = new TextEncoder();
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+    } as Response)));
+    const order: string[] = [];
+
+    const outcome = await streamConversationRun(
+      {backendUrl: 'http://backend'},
+      {sessionId: 'conversation-1', runId: 'run-1', isNewSession: true, traceContextAttached: true},
+      {
+        onPrimaryOutcome: primary => order.push(`primary:${primary.message}`),
+        onSourceEnrichment: enrichment => order.push(`source:${enrichment.status}`),
+      },
+    );
+
+    expect(outcome).toEqual({kind: 'answered', message: 'primary'});
+    expect(order).toEqual([
+      'primary:primary',
+      'source:running',
+      'source:completed',
+    ]);
   });
 });
