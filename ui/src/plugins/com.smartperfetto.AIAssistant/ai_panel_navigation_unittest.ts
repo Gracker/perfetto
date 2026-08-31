@@ -1110,6 +1110,36 @@ describe('AIPanel /goto navigation', () => {
     );
   });
 
+  it('marks summary messages for a compact schema-driven type hierarchy', () => {
+    const panel = new AIPanel() as any;
+    panel.renderMermaidInElement = vi.fn();
+    const dom = document.createElement('div');
+    const summaryMessage = {
+      id: 'summary-msg',
+      role: 'assistant',
+      content: '## SQL Summary\n\n### 关键指标\n\n🟢 **total_rows:** 42',
+      timestamp: Date.now(),
+      sourceContext: {
+        ref: '摘要 1',
+        title: 'SQL Summary',
+        source: 'execute_sql',
+        reason: 'Summarize SQL output',
+        meaning: 'Summary metrics',
+        kind: 'summary',
+      },
+    };
+
+    panel.renderMessageContent(dom, summaryMessage, false);
+    expect(dom.classList.contains('ai-message-content-summary')).toBe(true);
+
+    panel.renderMessageContent(
+      dom,
+      {...summaryMessage, id: 'normal-msg', content: '## 普通结论', sourceContext: undefined},
+      false,
+    );
+    expect(dom.classList.contains('ai-message-content-summary')).toBe(false);
+  });
+
   it('copies any normal conversation message content', async () => {
     vi.useFakeTimers();
     const panel = new AIPanel() as any;

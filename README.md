@@ -1,9 +1,15 @@
 > **Fork Notice:** This is a fork of [google/perfetto](https://github.com/google/perfetto)
 > maintained by [SmartPerfetto](https://github.com/Gracker/SmartPerfetto).
 >
-> **What's changed:** A custom UI plugin (`ui/src/plugins/com.smartperfetto.AIAssistant/`)
-> that adds an AI-powered analysis panel to the Perfetto UI. All other Perfetto code is
-> unmodified from upstream. Licensed under Apache 2.0 (same as upstream).
+> **What's changed:** The AI Assistant plugin lives under
+> `ui/src/plugins/com.smartperfetto.AIAssistant/`. The fork also carries reviewed
+> integration patches in selected Perfetto UI, transport, build, and test files; use
+> the fork diff and SmartPerfetto sync rules as the maintained patch inventory instead
+> of assuming every non-plugin file matches upstream.
+>
+> Upstream Perfetto remains Apache-2.0. SmartPerfetto-authored AI Assistant files carry
+> their file-level AGPL-3.0-or-later headers; preserve those license boundaries when
+> redistributing or syncing the fork.
 >
 > **Upstream sync:** This fork periodically merges from `google/perfetto` main branch.
 >
@@ -12,8 +18,13 @@
 > **Fork 说明：** 本仓库是 [google/perfetto](https://github.com/google/perfetto) 的 fork，
 > 由 [SmartPerfetto](https://github.com/Gracker/SmartPerfetto) 维护。
 >
-> **改动内容：** 新增了 AI 分析面板插件（`ui/src/plugins/com.smartperfetto.AIAssistant/`），
-> 其余 Perfetto 代码与上游保持一致。许可证：Apache 2.0（与上游相同）。
+> **改动内容：** AI Assistant 插件位于
+> `ui/src/plugins/com.smartperfetto.AIAssistant/`。本 fork 还在少量 Perfetto UI、
+> transport、build 和测试文件中维护经过审查的集成 patch；同步时应以 fork diff 和
+> SmartPerfetto 同步规则为 patch 清单，不能假定所有非插件文件都与上游一致。
+>
+> 上游 Perfetto 继续使用 Apache-2.0；SmartPerfetto 自有 AI Assistant 文件按各文件头
+> 使用 AGPL-3.0-or-later。再分发或同步时必须保留这两类许可证边界。
 >
 > **上游同步：** 本 fork 定期从 `google/perfetto` main 分支合并更新。
 

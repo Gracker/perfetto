@@ -5043,6 +5043,27 @@ tr.detail-row {
   }
 }
 
+.ai-message-content.ai-message-content-summary {
+  font-size: 12px;
+  line-height: 1.45;
+
+  h2 {
+    margin: 4px 0;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  h3 {
+    margin: 5px 0 3px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  p {
+    margin: 3px 0;
+  }
+}
+
 // ----------------------------------------------------------------------------
 // Severity Badge Styles
 // ----------------------------------------------------------------------------
