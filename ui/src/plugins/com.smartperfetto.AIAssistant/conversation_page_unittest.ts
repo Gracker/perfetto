@@ -65,6 +65,37 @@ function streamResponse(message = 'answer-a'): Response {
   });
 }
 
+function sourceEnrichmentStreamResponse(): {
+  response: Response;
+  completeSource(): void;
+} {
+  const encoder = new TextEncoder();
+  let streamController!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      controller.enqueue(encoder.encode(
+        'event: run_completed\ndata: {"type":"run_completed","enrichmentPending":true,"outcome":{"kind":"answered","message":"primary answer"}}\n\n',
+      ));
+      controller.enqueue(encoder.encode(
+        'event: source_enrichment_started\ndata: {"type":"source_enrichment_started"}\n\n',
+      ));
+    },
+  });
+  return {
+    response: new Response(body, {
+      status: 200,
+      headers: {'content-type': 'text/event-stream'},
+    }),
+    completeSource() {
+      streamController.enqueue(encoder.encode(
+        'event: source_enrichment_completed\ndata: {"type":"source_enrichment_completed","message":"source supplement","evidence":[{"id":"source-1","label":"Foo.kt:L10-L12"}],"metrics":{"searchCalls":1,"readCalls":2,"durationMs":40}}\n\n',
+      ));
+      streamController.close();
+    },
+  };
+}
+
 function deferredResponse(): {
   promise: Promise<Response>;
   resolve: (response: Response) => void;
@@ -189,6 +220,38 @@ describe('ConversationPage OIDC lifecycle', () => {
       'trace-free answer',
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    page.onremove();
+  });
+
+  it('shows the primary answer before source enrichment completes', async () => {
+    const stream = sourceEnrichmentStreamResponse();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(startResponse())
+      .mockResolvedValueOnce(stream.response);
+    vi.stubGlobal('fetch', fetchMock);
+    const page = createPage();
+    page.input = 'Analyze startup.';
+
+    const send = page.send();
+    await vi.waitFor(() => expect(page.store.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'primary answer',
+        sourceEnrichment: {status: 'running'},
+      }),
+    ])));
+
+    stream.completeSource();
+    await send;
+    expect(page.store.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        content: 'primary answer',
+        sourceEnrichment: expect.objectContaining({
+          status: 'completed',
+          message: 'source supplement',
+        }),
+      }),
+    ]));
     page.onremove();
   });
 

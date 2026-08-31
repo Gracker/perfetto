@@ -12,6 +12,7 @@ import {
   appendConversationMessage,
   clearConversationRuntimeIdentities,
   loadConversationStore,
+  updateConversationMessageSourceEnrichment,
 } from './conversation_store';
 import {invalidateSmartPerfettoAuthSession} from '../../core/smartperfetto_auth';
 
@@ -21,6 +22,38 @@ beforeEach(() => {
 });
 
 describe('conversation store private message persistence', () => {
+  it('updates source enrichment independently from the primary message', () => {
+    const backendUrl = 'http://localhost:9000';
+    appendConversationMessage(backendUrl, {
+      id: 'assistant-message',
+      role: 'assistant',
+      content: 'Primary answer',
+      timestamp: Date.now(),
+    });
+
+    updateConversationMessageSourceEnrichment(backendUrl, 'assistant-message', {
+      status: 'running',
+    });
+    expect(loadConversationStore(backendUrl).messages[0]).toMatchObject({
+      content: 'Primary answer',
+      sourceEnrichment: {status: 'running'},
+    });
+
+    updateConversationMessageSourceEnrichment(backendUrl, 'assistant-message', {
+      status: 'completed',
+      message: 'Source supplement',
+      evidence: [{id: 'source-1', label: 'Foo.kt:L10-L12'}],
+      metrics: {searchCalls: 1, readCalls: 2, durationMs: 40},
+    });
+    expect(loadConversationStore(backendUrl).messages[0]).toMatchObject({
+      content: 'Primary answer',
+      sourceEnrichment: {
+        status: 'completed',
+        message: 'Source supplement',
+      },
+    });
+  });
+
   it('keeps raw private query content in memory only', () => {
     const backendUrl = 'http://localhost:9000';
     const privateCanary = 'conversation-private-canary-must-not-persist';

@@ -5,7 +5,11 @@
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
-import type {AnalysisContextSelection, SelectionContext} from './types';
+import type {
+  AnalysisContextSelection,
+  ConversationSourceEnrichmentUpdate,
+  SelectionContext,
+} from './types';
 
 export interface ConversationEvidenceRef {
   id: string;
@@ -156,6 +160,8 @@ export async function streamConversationRun(
   options: {
     signal?: AbortSignal;
     onEvent?(event: ParsedConversationSseEvent): void;
+    onPrimaryOutcome?(outcome: ConversationOutcome): void;
+    onSourceEnrichment?(update: ConversationSourceEnrichmentUpdate): void;
   } = {},
 ): Promise<ConversationOutcome> {
   const url = buildAssistantApiV1Url(
@@ -172,6 +178,7 @@ export async function streamConversationRun(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let primaryOutcome: ConversationOutcome | undefined;
   while (true) {
     const {done, value} = await reader.read();
     buffer += decoder.decode(value, {stream: !done});
@@ -180,14 +187,49 @@ export async function streamConversationRun(
     for (const event of parsed.events) {
       options.onEvent?.(event);
       if (event.type === 'run_completed') {
-        return (event.data as {outcome: ConversationOutcome}).outcome;
+        const completed = event.data as {
+          outcome: ConversationOutcome;
+          enrichmentPending?: boolean;
+        };
+        primaryOutcome = completed.outcome;
+        options.onPrimaryOutcome?.(primaryOutcome);
+        if (completed.enrichmentPending !== true) return primaryOutcome;
       }
       if (event.type === 'run_failed') {
         throw new Error(String((event.data as {error?: unknown}).error || 'Conversation failed'));
       }
+      if (event.type === 'source_enrichment_started') {
+        options.onSourceEnrichment?.({status: 'running'});
+      }
+      if (event.type === 'source_enrichment_completed') {
+        const completed = event.data as {
+          message?: unknown;
+          evidence?: ConversationEvidenceRef[];
+          metrics?: {searchCalls: number; readCalls: number; durationMs: number};
+        };
+        options.onSourceEnrichment?.({
+          status: 'completed',
+          message: typeof completed.message === 'string' ? completed.message : '',
+          evidence: Array.isArray(completed.evidence) ? completed.evidence : [],
+          metrics: completed.metrics ?? {searchCalls: 0, readCalls: 0, durationMs: 0},
+        });
+        if (primaryOutcome) return primaryOutcome;
+      }
+      if (event.type === 'source_enrichment_failed') {
+        options.onSourceEnrichment?.({
+          status: 'failed',
+          errorCode: String((event.data as {errorCode?: unknown}).errorCode || 'source_enrichment_failed'),
+        });
+        if (primaryOutcome) return primaryOutcome;
+      }
+      if (event.type === 'source_enrichment_cancelled') {
+        options.onSourceEnrichment?.({status: 'cancelled'});
+        if (primaryOutcome) return primaryOutcome;
+      }
     }
     if (done) break;
   }
+  if (primaryOutcome) return primaryOutcome;
   throw new Error('Conversation stream ended before a result was received');
 }
 

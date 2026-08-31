@@ -19,6 +19,7 @@ import {
   cancelConversationRun,
   streamConversationRun,
   type ConversationFullHandoff,
+  type ConversationOutcome,
   type ConversationRunReceipt,
 } from './conversation_client';
 import {
@@ -27,6 +28,7 @@ import {
   clearConversationRuntimeIdentities,
   loadConversationStore,
   saveConversationStore,
+  updateConversationMessageSourceEnrichment,
   type StoredConversation,
   type StoredConversationMessage,
 } from './conversation_store';
@@ -41,6 +43,7 @@ import {
   PageAuthLifecycle,
   type PageAuthTransition,
 } from './page_auth_lifecycle';
+import type {ConversationSourceEnrichmentUpdate} from './types';
 import {TracePairWorkspace} from './trace_pair_workspace';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {
@@ -61,6 +64,37 @@ function renderMessageContent(message: StoredConversationMessage): m.Vnode {
       (dom as HTMLElement).innerHTML = formatMessage(message.content);
     },
   });
+}
+
+function renderSourceEnrichment(message: StoredConversationMessage): m.Children {
+  const enrichment = message.sourceEnrichment;
+  if (!enrichment) return null;
+  if (enrichment.status === 'running') {
+    return m('div.ai-conversation-source-enrichment.is-running',
+      uiText('源码补充中，不影响上方主结论…', 'Adding source context without blocking the primary answer…'));
+  }
+  if (enrichment.status === 'failed') {
+    return m('div.ai-conversation-source-enrichment.is-muted',
+      uiText('源码补充未在预算内完成，主结论不受影响。', 'Source enrichment did not finish within budget; the primary answer is unchanged.'));
+  }
+  if (enrichment.status === 'cancelled') {
+    return m('div.ai-conversation-source-enrichment.is-muted',
+      uiText('源码补充已取消。', 'Source enrichment was cancelled.'));
+  }
+  return m('details.ai-conversation-source-enrichment', {open: true}, [
+    m('summary', uiText(
+      `源码补充 · ${enrichment.metrics.searchCalls} 次搜索 / ${enrichment.metrics.readCalls} 次读取`,
+      `Source supplement · ${enrichment.metrics.searchCalls} search / ${enrichment.metrics.readCalls} reads`,
+    )),
+    m('div.ai-conversation-source-enrichment-content', {
+      oncreate: ({dom}) => {
+        (dom as HTMLElement).innerHTML = formatMessage(enrichment.message);
+      },
+      onupdate: ({dom}) => {
+        (dom as HTMLElement).innerHTML = formatMessage(enrichment.message);
+      },
+    }),
+  ]);
 }
 
 export class ConversationPage implements m.ClassComponent<{app: App}> {
@@ -89,6 +123,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   private activeController?: AbortController;
   private requestOrdinal = 0;
   private error = '';
+  private primaryConversationOutcomeReady = false;
 
   oncreate(): void {
     this.authLifecycle.mount();
@@ -123,9 +158,17 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
 
   onremove(): void {
     ++this.requestOrdinal;
+    const active = this.activeReceipt;
     this.activeController?.abort();
     this.activeController = undefined;
     this.activeReceipt = undefined;
+    this.primaryConversationOutcomeReady = false;
+    if (active) {
+      void cancelConversationRun({
+        backendUrl: this.settings.backendUrl,
+        apiKey: this.settings.backendApiKey,
+      }, active.sessionId, active.runId).catch(() => undefined);
+    }
     this.unsubscribeTracePair?.();
     this.unsubscribeTracePair = undefined;
     this.tracePairWorkspaceController.setUploadHandler(undefined);
@@ -191,6 +234,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
                       ]))),
                     ])
                   : null,
+                renderSourceEnrichment(message),
               ],
             ))
           : m('div.ai-conversation-page-empty', [
@@ -206,8 +250,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         : null,
       this.activeReceipt
         ? m('div.ai-conversation-page-running', uiText(
-            '正在回答。你可以继续输入来修正方向；新消息会先停止当前运行。',
-            'Answering. You can send another message to steer the response; it will stop the current run first.',
+            this.primaryConversationOutcomeReady
+              ? '主回答已完成，正在进行有界源码补充；新消息会停止补充。'
+              : '正在回答。你可以继续输入来修正方向；新消息会先停止当前运行。',
+            this.primaryConversationOutcomeReady
+              ? 'The primary answer is ready. Bounded source enrichment is running; a new message stops it.'
+              : 'Answering. You can send another message to steer the response; it will stop the current run first.',
           ))
         : null,
       this.error ? m('div.ai-conversation-page-error', this.error) : null,
@@ -234,7 +282,9 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         m('button.ai-conversation-page-send', {
           disabled: !this.input.trim(),
           onclick: () => void this.send(),
-        }, this.activeReceipt ? uiText('修正方向', 'Steer') : uiText('发送', 'Send')),
+        }, this.activeReceipt && !this.primaryConversationOutcomeReady
+          ? uiText('修正方向', 'Steer')
+          : uiText('发送', 'Send')),
       ]),
     ]);
   }
@@ -320,10 +370,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     this.activeController?.abort();
     this.activeController = undefined;
     this.activeReceipt = undefined;
+    this.primaryConversationOutcomeReady = false;
     this.startQueue.reset();
     this.store = clearConversationStore(this.settings.backendUrl);
     this.input = '';
     this.error = '';
+    this.primaryConversationOutcomeReady = false;
     m.redraw();
     if (!active || !this.authLifecycle.isCurrent(authority)) return;
     await cancelConversationRun({
@@ -392,24 +444,52 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       }
       this.activeReceipt = receipt;
       m.redraw();
+      let assistantMessageId: string | undefined;
+      let primaryCommitted = false;
+      const commitPrimaryOutcome = (outcome: ConversationOutcome) => {
+        if (
+          primaryCommitted ||
+          ordinal !== this.requestOrdinal ||
+          !this.authLifecycle.isCurrent(authority) ||
+          outcome.kind === 'cancelled'
+        ) return;
+        primaryCommitted = true;
+        this.primaryConversationOutcomeReady = true;
+        assistantMessageId = messageId('assistant');
+        this.store = appendConversationMessage(this.settings.backendUrl, {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: outcome.message,
+          timestamp: Date.now(),
+          evidence: outcome.evidence,
+          outcomeKind: outcome.kind,
+          ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
+        }, receipt.sessionId);
+        m.redraw();
+      };
+      const updateSourceEnrichment = (update: ConversationSourceEnrichmentUpdate) => {
+        if (!assistantMessageId || ordinal !== this.requestOrdinal) return;
+        this.store = updateConversationMessageSourceEnrichment(
+          this.settings.backendUrl,
+          assistantMessageId,
+          update,
+        );
+        m.redraw();
+      };
       const outcome = await streamConversationRun({
         backendUrl: this.settings.backendUrl,
         apiKey: this.settings.backendApiKey,
-      }, receipt, {signal: controller.signal});
+      }, receipt, {
+        signal: controller.signal,
+        onPrimaryOutcome: commitPrimaryOutcome,
+        onSourceEnrichment: updateSourceEnrichment,
+      });
       if (
         ordinal !== this.requestOrdinal ||
         !this.authLifecycle.isCurrent(authority) ||
         outcome.kind === 'cancelled'
       ) return;
-      this.store = appendConversationMessage(this.settings.backendUrl, {
-        id: messageId('assistant'),
-        role: 'assistant',
-        content: outcome.message,
-        timestamp: Date.now(),
-        evidence: outcome.evidence,
-        outcomeKind: outcome.kind,
-        ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
-      }, receipt.sessionId);
+      commitPrimaryOutcome(outcome);
     } catch (error) {
       if (
         controller.signal.aborted ||
@@ -424,7 +504,10 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       if (this.activeController === controller) {
         this.activeController = undefined;
       }
-      if (ordinal === this.requestOrdinal) this.activeReceipt = undefined;
+      if (ordinal === this.requestOrdinal) {
+        this.activeReceipt = undefined;
+        this.primaryConversationOutcomeReady = false;
+      }
       m.redraw();
     }
   }

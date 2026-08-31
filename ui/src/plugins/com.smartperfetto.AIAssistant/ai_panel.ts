@@ -115,6 +115,7 @@ import type {
   TeachingPipelineResult,
   TeachingTrackHint,
   TeachingWarning,
+  ConversationSourceEnrichmentUpdate,
 } from './types';
 import {resolveChatInputKeyAction} from './chat_input';
 import {
@@ -130,6 +131,7 @@ import {
   clearConversationStore,
   loadConversationStore,
   saveConversationStore,
+  updateConversationMessageSourceEnrichment,
 } from './conversation_store';
 import {ConversationStartQueue} from './conversation_start_queue';
 import {conversationTraceContextResetNotice} from './conversation_context_notice';
@@ -4105,6 +4107,43 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                           ]),
                                         )),
                                       ])
+                                    : null,
+                                  msg.conversationSourceEnrichment
+                                    ? msg.conversationSourceEnrichment.status === 'completed'
+                                      ? m('details.ai-conversation-source-enrichment', {open: true}, [
+                                          m('summary', uiText(
+                                            `源码补充 · ${msg.conversationSourceEnrichment.metrics.searchCalls} 次搜索 / ${msg.conversationSourceEnrichment.metrics.readCalls} 次读取`,
+                                            `Source supplement · ${msg.conversationSourceEnrichment.metrics.searchCalls} search / ${msg.conversationSourceEnrichment.metrics.readCalls} reads`,
+                                          )),
+                                          m('div.ai-conversation-source-enrichment-content', {
+                                            oncreate: ({dom}) => {
+                                              (dom as HTMLElement).innerHTML = formatMessage(
+                                                msg.conversationSourceEnrichment?.status === 'completed'
+                                                  ? msg.conversationSourceEnrichment.message
+                                                  : '',
+                                              );
+                                            },
+                                            onupdate: ({dom}) => {
+                                              (dom as HTMLElement).innerHTML = formatMessage(
+                                                msg.conversationSourceEnrichment?.status === 'completed'
+                                                  ? msg.conversationSourceEnrichment.message
+                                                  : '',
+                                              );
+                                            },
+                                          }),
+                                        ])
+                                      : m('div.ai-conversation-source-enrichment.is-muted',
+                                          msg.conversationSourceEnrichment.status === 'running'
+                                            ? uiText(
+                                                '源码补充中，不影响上方主结论…',
+                                                'Adding source context without blocking the primary answer…',
+                                              )
+                                            : msg.conversationSourceEnrichment.status === 'failed'
+                                              ? uiText(
+                                                  '源码补充未在预算内完成，主结论不受影响。',
+                                                  'Source enrichment did not finish within budget; the primary answer is unchanged.',
+                                                )
+                                              : uiText('源码补充已取消。', 'Source enrichment was cancelled.'))
                                     : null,
 
                                   // Detailed HTML report link and authenticated download action.
@@ -9771,6 +9810,7 @@ Click ⚙️ to configure backend connection.`,
         timestamp: message.timestamp,
         privateContent: message.privateContent,
         conversationEvidence: message.evidence,
+        conversationSourceEnrichment: message.sourceEnrichment,
       });
       knownIds.add(message.id);
     }
@@ -9888,8 +9928,52 @@ Click ⚙️ to configure backend connection.`,
         sessionId: receipt.sessionId,
         traceId: this.state.backendTraceId ?? undefined,
       });
+      let conversationAssistantMessage: Message | undefined;
       const outcome = await streamConversationRun(config, receipt, {
         signal: controller.signal,
+        onPrimaryOutcome: (primaryOutcome) => {
+          if (
+            ordinal !== this.conversationRequestOrdinal ||
+            primaryOutcome.kind === 'cancelled'
+          ) return;
+          const assistantMessage: Message = {
+            id: this.generateId(),
+            role: 'assistant' as const,
+            content: primaryOutcome.message,
+            timestamp: Date.now(),
+            conversationEvidence: primaryOutcome.evidence,
+          };
+          conversationAssistantMessage = assistantMessage;
+          this.addMessage(assistantMessage);
+          appendConversationMessage(config.backendUrl, {
+            id: assistantMessage.id,
+            role: 'assistant',
+            content: assistantMessage.content,
+            timestamp: assistantMessage.timestamp,
+            evidence: primaryOutcome.evidence,
+            outcomeKind: primaryOutcome.kind,
+            ...(primaryOutcome.kind === 'recommend_full'
+              ? {fullHandoff: primaryOutcome.handoff}
+              : {}),
+          }, receipt.sessionId);
+          this.pendingFullAnalysisHandoff = primaryOutcome.kind === 'recommend_full'
+            ? primaryOutcome.handoff
+            : undefined;
+          this.setLoadingState(false);
+          m.redraw();
+        },
+        onSourceEnrichment: (sourceEnrichment: ConversationSourceEnrichmentUpdate) => {
+          if (ordinal !== this.conversationRequestOrdinal) return;
+          const assistantMessage = conversationAssistantMessage;
+          if (!assistantMessage) return;
+          assistantMessage.conversationSourceEnrichment = sourceEnrichment;
+          updateConversationMessageSourceEnrichment(
+            config.backendUrl,
+            assistantMessage.id,
+            sourceEnrichment,
+          );
+          m.redraw();
+        },
         onEvent: (event) => {
           if (ordinal !== this.conversationRequestOrdinal) return;
           if (event.type !== 'runtime_update' || !event.data || typeof event.data !== 'object') return;
@@ -9909,26 +9993,6 @@ Click ⚙️ to configure backend connection.`,
         },
       });
       if (ordinal !== this.conversationRequestOrdinal || outcome.kind === 'cancelled') return;
-      const assistantMessage = {
-        id: this.generateId(),
-        role: 'assistant' as const,
-        content: outcome.message,
-        timestamp: Date.now(),
-        conversationEvidence: outcome.evidence,
-      };
-      this.addMessage(assistantMessage);
-      appendConversationMessage(config.backendUrl, {
-        id: assistantMessage.id,
-        role: assistantMessage.role,
-        content: assistantMessage.content,
-        timestamp: assistantMessage.timestamp,
-        evidence: outcome.evidence,
-        outcomeKind: outcome.kind,
-        ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
-      }, receipt.sessionId);
-      this.pendingFullAnalysisHandoff = outcome.kind === 'recommend_full'
-        ? outcome.handoff
-        : undefined;
     } catch (error) {
       if (controller.signal.aborted) return;
       if (ordinal !== this.conversationRequestOrdinal) return;
