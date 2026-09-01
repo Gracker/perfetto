@@ -38,6 +38,7 @@ import {
   handleSkillDiagnosticsEvent,
   handleSkillLayeredResultEvent,
   handleAnalysisCompletedEvent,
+  handleAnalysisSourceEnrichmentEvent,
   handleHypothesisGeneratedEvent,
   handleRoundStartEvent,
   handleAgentTaskDispatchedEvent,
@@ -701,6 +702,48 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].content).toContain('Main thread is blocked');
     expect(result.isTerminal).toBe(true);
     expect(result.stopLoading).toBe(true);
+  });
+
+  it('keeps the primary result usable while a deep source supplement is pending', () => {
+    const result = handleAnalysisCompletedEvent({
+      data: {
+        conclusion: 'Primary trace conclusion.',
+        sourceEnrichmentPending: true,
+      },
+    }, ctx);
+
+    expect(result.isTerminal).toBe(false);
+    expect(result.stopLoading).toBe(true);
+    expect(ctx.messages[0].content).toContain('Primary trace conclusion');
+    expect(ctx.messages[0].analysisSourceEnrichment).toEqual({status: 'running'});
+
+    const supplement = handleAnalysisSourceEnrichmentEvent(
+      'analysis_source_enrichment_completed',
+      {
+        message: 'Foo.kt:L10-L20 implements the traced path.',
+        metrics: {searchCalls: 3, readCalls: 7, durationMs: 9000},
+      },
+      ctx,
+    );
+    expect(supplement.isTerminal).toBe(true);
+    expect(ctx.messages[0].analysisSourceEnrichment).toEqual({
+      status: 'completed',
+      message: 'Foo.kt:L10-L20 implements the traced path.',
+      metrics: {searchCalls: 3, readCalls: 7, durationMs: 9000},
+    });
+
+    handleAnalysisCompletedEvent({
+      data: {
+        conclusion: 'Second primary trace conclusion.',
+        sourceEnrichmentPending: true,
+      },
+    }, ctx);
+    handleAnalysisSourceEnrichmentEvent(
+      'analysis_source_enrichment_cancelled',
+      {reason: 'user cancelled'},
+      ctx,
+    );
+    expect(ctx.messages[0].analysisSourceEnrichment).toEqual({status: 'cancelled'});
   });
 
   it('should support legacy answer field', () => {

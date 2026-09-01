@@ -459,6 +459,23 @@ describe('SessionManager safe source-use receipt storage', () => {
       message.sourceUseReceipt,
     );
   });
+
+  it('stores an in-flight deep source supplement as cancelled', () => {
+    const manager = new SessionManager();
+    const message: Message = {
+      id: 'source-enrichment-message',
+      role: 'assistant',
+      content: 'Primary conclusion.',
+      timestamp: 1,
+      analysisSourceEnrichment: {status: 'running'},
+    };
+
+    manager.saveHistory([message], null, 'trace-a');
+
+    expect(manager.loadLegacyHistory()?.messages[0].analysisSourceEnrichment)
+      .toEqual({status: 'cancelled'});
+    expect(message.analysisSourceEnrichment).toEqual({status: 'running'});
+  });
 });
 
 describe('SessionManager analysis mode', () => {

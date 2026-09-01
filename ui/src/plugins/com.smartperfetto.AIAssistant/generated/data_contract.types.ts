@@ -143,6 +143,9 @@ export interface ConclusionContract {
   clusters: ConclusionContractClusterItem[];
   evidenceChain: ConclusionContractEvidenceItem[];
   claims?: ConclusionContractClaimItem[];
+  sourceUseDecision?: Record<string, unknown>;
+  sourceReferences?: Record<string, unknown>[];
+  sourceClaimBindings?: Record<string, unknown>[];
   /**
    * Curated case-library recommendations selected by a retrieval/citation path.
    * Report rendering consumes this structured projection; retrieval remains
@@ -1475,6 +1478,8 @@ export interface AnalysisCompletedEvent {
     analysisReceipt?: AnalysisReceipt;
     uiActionProposals?: UiActionProposalV1[];
     smartScenePreview?: Record<string, unknown>;
+    /** Primary result is terminal, but a separate source supplement is still running. */
+    sourceEnrichmentPending?: boolean;
     terminalRunStatus?: 'completed' | 'quota_exceeded';
     findings: AnalysisCompletedFinding[];
     resultContract?: Record<string, unknown>;

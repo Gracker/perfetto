@@ -185,6 +185,7 @@ import {clearComparisonState} from './comparison_state_manager';
 import {handleSSEEvent as handleSSEEventExternal} from './sse_event_handlers';
 import type {SSEHandlerContext} from './sse_event_handlers';
 import {orderMessagesForDisplay} from './message_order';
+import {hasRunningAnalysisSourceEnrichment} from './analysis_source_enrichment_state';
 import {
   STEP_TO_OVERLAY,
   cleanupOverlayTracks,
@@ -3520,6 +3521,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       : engineInRpcMode || hasBackendTrace || hasUploadInProgress;
     const canSendFromCurrentSurface =
       isInRpcMode || this.state.analysisMode === 'conversation';
+    const analysisSourceEnrichmentRunning = hasRunningAnalysisSourceEnrichment(
+      this.state.messages,
+    );
 
     // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
     const sessions = isInRpcMode ? this.getCurrentTraceSessions() : [];
@@ -4147,6 +4151,46 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                   'Source enrichment did not finish within budget; the primary answer is unchanged.',
                                                 )
                                               : uiText('源码补充已取消。', 'Source enrichment was cancelled.'))
+                                    : null,
+                                  msg.analysisSourceEnrichment
+                                    ? msg.analysisSourceEnrichment.status === 'completed'
+                                      ? m('details.ai-conversation-source-enrichment', {open: true}, [
+                                          m('summary', uiText(
+                                            `深度源码补充 · ${msg.analysisSourceEnrichment.metrics.searchCalls} 次搜索 / ${msg.analysisSourceEnrichment.metrics.readCalls} 次读取`,
+                                            `Deep source supplement · ${msg.analysisSourceEnrichment.metrics.searchCalls} searches / ${msg.analysisSourceEnrichment.metrics.readCalls} reads`,
+                                          )),
+                                          m('div.ai-conversation-source-enrichment-content', {
+                                            oncreate: ({dom}) => {
+                                              (dom as HTMLElement).innerHTML = formatMessage(
+                                                msg.analysisSourceEnrichment?.status === 'completed'
+                                                  ? msg.analysisSourceEnrichment.message
+                                                  : '',
+                                              );
+                                            },
+                                            onupdate: ({dom}) => {
+                                              (dom as HTMLElement).innerHTML = formatMessage(
+                                                msg.analysisSourceEnrichment?.status === 'completed'
+                                                  ? msg.analysisSourceEnrichment.message
+                                                  : '',
+                                              );
+                                            },
+                                          }),
+                                        ])
+                                      : m('div.ai-conversation-source-enrichment.is-muted',
+                                          msg.analysisSourceEnrichment.status === 'running'
+                                            ? uiText(
+                                                '主结论已完成，正在独立进行深度源码补充…',
+                                                'Primary analysis is complete; deep source enrichment is running separately…',
+                                              )
+                                            : msg.analysisSourceEnrichment.status === 'failed'
+                                              ? uiText(
+                                                  '深度源码补充失败，主结论不受影响。',
+                                                  'Deep source enrichment failed; the primary analysis is unchanged.',
+                                                )
+                                              : uiText(
+                                                  '深度源码补充已取消，主结论不受影响。',
+                                                  'Deep source enrichment was cancelled; the primary analysis is unchanged.',
+                                                ))
                                     : null,
 
                                   // Detailed HTML report link and authenticated download action.
@@ -4907,20 +4951,35 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                               },
                               m('i.pf-icon', 'stop_circle'),
                             )
-                          : m(
-                              'button.ai-send-btn',
-                              {
-                                'class': !canSendFromCurrentSurface ? 'disabled' : '',
-                                'onclick': () => this.sendMessage(),
-                                'disabled': !canSendFromCurrentSurface,
-                                'title': uiText(
-                                  '发送（Enter）',
-                                  'Send (Enter)',
-                                ),
-                                'aria-label': uiText('发送', 'Send'),
-                              },
-                              m('i.pf-icon', 'send'),
-                            ),
+                          : [
+                              analysisSourceEnrichmentRunning
+                                ? m(
+                                    'button.ai-send-btn.ai-stop-btn',
+                                    {
+                                      onclick: () => this.cancelAnalysis(),
+                                      title: uiText(
+                                        '停止深度源码补充',
+                                        'Stop deep source enrichment',
+                                      ),
+                                    },
+                                    m('i.pf-icon', 'stop_circle'),
+                                  )
+                                : null,
+                              m(
+                                'button.ai-send-btn',
+                                {
+                                  'class': !canSendFromCurrentSurface ? 'disabled' : '',
+                                  'onclick': () => this.sendMessage(),
+                                  'disabled': !canSendFromCurrentSurface,
+                                  'title': uiText(
+                                    '发送（Enter）',
+                                    'Send (Enter)',
+                                  ),
+                                  'aria-label': uiText('发送', 'Send'),
+                                },
+                                m('i.pf-icon', 'send'),
+                              ),
+                            ],
                       ]),
                     ]),
                     m(
@@ -10751,6 +10810,15 @@ Click ⚙️ to configure backend connection.`,
   ): void {
     this.analysisCancellationPending = false;
     this.setLoadingState(false);
+    if (status === 'source_enrichment_cancelled') {
+      this.handleSSEEvent('analysis_source_enrichment_cancelled', {
+        reason,
+      });
+      updateAISharedState({status: 'completed', currentPhase: ''});
+      this.saveCurrentSession();
+      m.redraw();
+      return;
+    }
     if (status !== 'cancelled') {
       updateAISharedState({
         status: status === 'completed' ? 'completed' : 'error',
@@ -11031,12 +11099,16 @@ Click ⚙️ to configure backend connection.`,
                     }
                     this.handleSSEEvent(eventType, data);
 
-                    // Check for terminal events (no need to reconnect after these)
-                    // 'conclusion' from agentv3 is near-terminal (answer done) but
-                    // 'analysis_completed' follows with reportUrl after HTML report
-                    // generation. Only close on analysis_completed/analysis_cancelled/error/end.
+                    const sourceEnrichmentPending =
+                      eventType === 'analysis_completed' &&
+                      data?.data?.sourceEnrichmentPending === true;
+                    // Primary completion may be followed by a detached source
+                    // supplement. Keep the stream open only for that explicit case.
                     if (
-                      eventType === 'analysis_completed' ||
+                      (eventType === 'analysis_completed' && !sourceEnrichmentPending) ||
+                      eventType === 'analysis_source_enrichment_completed' ||
+                      eventType === 'analysis_source_enrichment_failed' ||
+                      eventType === 'analysis_source_enrichment_cancelled' ||
                       eventType === 'analysis_cancelled' ||
                       eventType === 'error' ||
                       eventType === 'end'

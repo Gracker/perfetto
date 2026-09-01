@@ -101,6 +101,7 @@ type AnalysisCompletedPayload = {
   quickRun?: QuickRunReceipt;
   analysisReceipt?: AnalysisReceipt;
   sourceUseReceipt?: Message['sourceUseReceipt'];
+  sourceEnrichmentPending?: boolean;
   uiActionProposals?: UiActionProposalV1[];
 };
 
@@ -205,6 +206,9 @@ function toAnalysisCompletedPayload(
   if (isRecord(source.analysisReceipt)) {
     payload.analysisReceipt =
       source.analysisReceipt as unknown as AnalysisReceipt;
+  }
+  if (source.sourceEnrichmentPending === true) {
+    payload.sourceEnrichmentPending = true;
   }
   if (Array.isArray(source.uiActionProposals)) {
     payload.uiActionProposals =
@@ -4628,6 +4632,16 @@ function renderConclusionContract(
 /**
  * Process analysis_completed event - final analysis result.
  */
+function updateCurrentAnswerSourceEnrichment(
+  ctx: SSEHandlerContext,
+  update: Message['analysisSourceEnrichment'],
+): void {
+  const messageId = ctx.streamingAnswer.messageId;
+  if (!messageId || !update) return;
+  if (!ctx.getMessages().some((message) => message.id === messageId)) return;
+  ctx.updateMessage(messageId, {analysisSourceEnrichment: update}, {persist: true});
+}
+
 export function handleAnalysisCompletedEvent(
   data: RawSSEEvent,
   ctx: SSEHandlerContext,
@@ -4636,6 +4650,7 @@ export function handleAnalysisCompletedEvent(
   const architecture = readStringField(eventRecord, 'architecture');
   const rawPayload = asRecord(eventRecord.data);
   const payload = toAnalysisCompletedPayload(eventRecord.data);
+  const sourceEnrichmentPending = payload?.sourceEnrichmentPending === true;
   const rawConclusionContract = rawPayload.conclusionContract;
   const conclusionContract =
     payload?.conclusionContract ??
@@ -4783,7 +4798,10 @@ export function handleAnalysisCompletedEvent(
         payload.reportError,
       );
     }
-    return {isTerminal: true, stopLoading: true};
+    if (sourceEnrichmentPending) {
+      updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
+    }
+    return {isTerminal: !sourceEnrichmentPending, stopLoading: true};
   }
 
   // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
@@ -4949,6 +4967,45 @@ export function handleAnalysisCompletedEvent(
     completeStreamingAnswer(ctx);
   }
 
+  if (sourceEnrichmentPending) {
+    updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
+  }
+  return {isTerminal: !sourceEnrichmentPending, stopLoading: true};
+}
+
+export function handleAnalysisSourceEnrichmentEvent(
+  eventType: string,
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext,
+): SSEHandlerResult {
+  const eventRecord = asRecord(data);
+  const payload = asRecord(eventRecord.data ?? eventRecord);
+  if (eventType === 'analysis_source_enrichment_started') {
+    updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
+    return {};
+  }
+  if (eventType === 'analysis_source_enrichment_completed') {
+    const message = readStringField(payload, 'message');
+    const metrics = asRecord(payload.metrics);
+    updateCurrentAnswerSourceEnrichment(ctx, {
+      status: 'completed',
+      message,
+      metrics: {
+        searchCalls: readNumberField(metrics, 'searchCalls'),
+        readCalls: readNumberField(metrics, 'readCalls'),
+        durationMs: readNumberField(metrics, 'durationMs'),
+      },
+    });
+    return {isTerminal: true, stopLoading: true};
+  }
+  if (eventType === 'analysis_source_enrichment_failed') {
+    updateCurrentAnswerSourceEnrichment(ctx, {
+      status: 'failed',
+      errorCode: readStringField(payload, 'errorCode', 'analysis_source_enrichment_failed'),
+    });
+    return {isTerminal: true, stopLoading: true};
+  }
+  updateCurrentAnswerSourceEnrichment(ctx, {status: 'cancelled'});
   return {isTerminal: true, stopLoading: true};
 }
 
@@ -6344,6 +6401,12 @@ function handleSSEEventInner(
 
     case 'analysis_completed':
       return handleAnalysisCompletedEvent(eventData, ctx);
+
+    case 'analysis_source_enrichment_started':
+    case 'analysis_source_enrichment_completed':
+    case 'analysis_source_enrichment_failed':
+    case 'analysis_source_enrichment_cancelled':
+      return handleAnalysisSourceEnrichmentEvent(eventType, eventData, ctx);
 
     case 'analysis_cancelled':
       return handleAnalysisCancelledEvent(eventData, ctx);

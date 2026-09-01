@@ -7,6 +7,7 @@ import {uiText} from './ui_language';
 export interface PrivateMessageStorageMarker {
   content: string;
   privateContent?: boolean;
+  analysisSourceEnrichment?: {status: string};
 }
 
 export function privateQueryStoragePlaceholder(): string {
@@ -20,7 +21,13 @@ export function privateQueryStoragePlaceholder(): string {
 export function projectMessageForStorage<T extends PrivateMessageStorageMarker>(
   message: T,
 ): T {
-  return message.privateContent
+  const projected = message.privateContent
     ? {...message, content: privateQueryStoragePlaceholder()}
     : message;
+  return projected.analysisSourceEnrichment?.status === 'running'
+    ? {
+        ...projected,
+        analysisSourceEnrichment: {status: 'cancelled'},
+      } as T
+    : projected;
 }

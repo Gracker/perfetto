@@ -99,6 +99,8 @@ export interface Message {
   conversationEvidence?: Array<{id: string; label: string; source?: string}>;
   /** Non-blocking source supplement attached after the primary answer. */
   conversationSourceEnrichment?: ConversationSourceEnrichmentUpdate;
+  /** Deep source supplement for Fast/Auto/Full analysis. */
+  analysisSourceEnrichment?: AnalysisSourceEnrichmentUpdate;
 }
 
 export type SourceUseStatus =
@@ -143,6 +145,16 @@ export type ConversationSourceEnrichmentUpdate =
       status: 'completed';
       message: string;
       evidence: Array<{id: string; label: string; source?: string}>;
+      metrics: {searchCalls: number; readCalls: number; durationMs: number};
+    }
+  | {status: 'failed'; errorCode: string}
+  | {status: 'cancelled'};
+
+export type AnalysisSourceEnrichmentUpdate =
+  | {status: 'running'}
+  | {
+      status: 'completed';
+      message: string;
       metrics: {searchCalls: number; readCalls: number; durationMs: number};
     }
   | {status: 'failed'; errorCode: string}
