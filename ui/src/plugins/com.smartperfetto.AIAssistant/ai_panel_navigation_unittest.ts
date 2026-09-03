@@ -2180,6 +2180,9 @@ describe('AIPanel trace-pair session restore', () => {
 
     const analysisPromise = panel.handleChatMessage('continued analysis');
     await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(1));
+    const continuationBody = JSON.parse(String(fetchBackend.mock.calls[0][1]?.body));
+    expect(continuationBody.sessionId).toBe('agent-existing');
+    expect(continuationBody.options.analysisMode).toBe('auto');
 
     const cancellationPromise = panel.cancelAnalysis();
     expect(fetchBackend).toHaveBeenCalledTimes(1);

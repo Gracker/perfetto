@@ -10297,11 +10297,14 @@ Click ⚙️ to configure backend connection.`,
       }
 
       // Build request body, include sessionId for multi-turn dialogue
+      const analysisModeForTurn = this.state.agentSessionId
+        ? 'auto'
+        : this.state.analysisMode;
       const requestBody: Record<string, any> = {
         query: message,
         traceId: this.state.backendTraceId,
         options: {
-          analysisMode: this.state.analysisMode,
+          analysisMode: analysisModeForTurn,
           ...this.analysisContextRequestOptions(),
         },
       };
