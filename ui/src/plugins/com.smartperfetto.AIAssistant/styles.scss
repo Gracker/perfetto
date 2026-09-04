@@ -2619,6 +2619,19 @@
       box-shadow: var(--chat-shadow-md);
     }
   }
+
+  // Stop and state a new direction. Kept visually secondary to plain stop so
+  // the destructive-looking control is not the louder of the two.
+  &.ai-redirect-btn {
+    background: var(--chat-bg-secondary);
+    border: 1px solid var(--chat-border);
+    color: var(--chat-text);
+
+    &:hover {
+      filter: brightness(1.08);
+      box-shadow: var(--chat-shadow-md);
+    }
+  }
 }
 
 .ai-input-divider {

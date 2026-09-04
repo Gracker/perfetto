@@ -1008,12 +1008,12 @@ describe('handleAnalysisCompletedEvent', () => {
 
     expect(ctx.flowMessages).toHaveLength(1);
     const flowContent = ctx.flowMessages[0].content;
-    expect(flowContent).toContain('🧵 对话时间线');
-    expect(flowContent).toContain('#1');
-    expect(flowContent).toContain('#2');
+    expect(flowContent).toContain('🧭 分析过程');
     expect(flowContent).toContain('进入 discovery');
     expect(flowContent).toContain('执行 SQL');
-    expect(flowContent.indexOf('#1')).toBeLessThan(flowContent.indexOf('#2'));
+    expect(flowContent.indexOf('进入 discovery')).toBeLessThan(
+      flowContent.indexOf('执行 SQL'),
+    );
   });
 
   it('should keep agent-driven metadata out of the visible conclusion', () => {
@@ -4016,7 +4016,7 @@ describe('handleAnswerTokenEvent', () => {
     expect(ctx.streamingAnswer.status).toBe('completed');
   });
 
-  it('should mirror streamed answer checkpoints into the conversation timeline', () => {
+  it('should record answer start and end in the process view without echoing the answer', () => {
     handleAnswerTokenEvent(
       {
         data: {
@@ -4040,12 +4040,13 @@ describe('handleAnswerTokenEvent', () => {
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
     expect(ctx.flowMessages).toHaveLength(1);
     const timeline = ctx.flowMessages[0].content;
-    expect(timeline).toContain('🧵 对话时间线');
-    expect(timeline).toContain('#A1');
+    expect(timeline).toContain('🧭 分析过程');
     expect(timeline).toContain('开始流式输出分析结果');
-    expect(timeline).toContain('流式更新');
-    expect(timeline).toContain('最终更新');
     expect(timeline).toContain('最终回答已输出');
+    // The answer streams in its own bubble; mirroring snippets here printed
+    // the same text twice once the process view moved below the answer.
+    expect(timeline).not.toContain('流式更新');
+    expect(timeline).not.toContain('最终更新');
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(0);
   });
 
@@ -4075,8 +4076,15 @@ describe('handleAnswerTokenEvent', () => {
     handleAnswerTokenEvent({data: {done: true}}, ctx);
 
     const timeline = ctx.flowMessages[0].content;
-    expect(timeline).toContain('#1');
-    expect(timeline).toContain('#A1');
+    // Answer checkpoints sort after every backend step rather than
+    // interleaving with the backend ordinal sequence, and the answer body
+    // itself stays out of the process view.
+    expect(timeline).toContain('开始分析');
+    expect(timeline).toContain('开始流式输出分析结果');
+    expect(timeline).not.toContain('关键发现');
+    expect(timeline.indexOf('开始分析')).toBeLessThan(
+      timeline.indexOf('开始流式输出分析结果'),
+    );
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
   });
 });
@@ -4107,7 +4115,7 @@ describe('handleConversationStepEvent', () => {
     );
 
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).not.toContain('#2');
+    expect(ctx.flowMessages[0].content).not.toContain('第二步');
 
     handleConversationStepEvent(
       {
@@ -4123,18 +4131,76 @@ describe('handleConversationStepEvent', () => {
     );
 
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('#1');
-    expect(ctx.flowMessages[0].content).not.toContain('#2');
+    expect(ctx.flowMessages[0].content).toContain('第一步');
+    expect(ctx.flowMessages[0].content).not.toContain('第二步');
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
 
     // End event forces timeline flush, including buffered out-of-order step #2.
     handleSSEEvent('end', {}, ctx);
 
     const content = ctx.flowMessages[0].content;
-    expect(content).toContain('#1');
-    expect(content).toContain('#2');
-    expect(content.indexOf('#1')).toBeLessThan(content.indexOf('#2'));
+    expect(content).toContain('第一步');
+    expect(content).toContain('第二步');
+    expect(content.indexOf('第一步')).toBeLessThan(content.indexOf('第二步'));
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(2);
+  });
+
+  function step(
+    ordinal: number,
+    text: string,
+    options: {phase?: string; sourceEventType?: string} = {},
+  ) {
+    return {
+      id: `evt-${ordinal}`,
+      data: {
+        ordinal,
+        phase: options.phase ?? 'tool',
+        role: 'agent',
+        content: {text},
+        ...(options.sourceEventType
+          ? {source: {eventType: options.sourceEventType}}
+          : {}),
+      },
+    };
+  }
+
+  it('emphasizes a plan phase boundary without indenting the steps around it', () => {
+    // A tool call is dispatched before the auto transition it triggers, so
+    // indenting under a phase would claim a membership the stream cannot back.
+    handleConversationStepEvent(step(1, '调用 Skill scrolling_analysis'), ctx);
+    handleConversationStepEvent(
+      step(2, '进入阶段「概览」', {phase: 'progress', sourceEventType: 'plan_phase_updated'}),
+      ctx,
+    );
+    handleSSEEvent('end', {}, ctx);
+
+    const lines = ctx.flowMessages[0].content.split('\n');
+    expect(lines.find((line) => line.includes('进入阶段'))).toBe('- ▸ **进入阶段「概览」**');
+    expect(lines.find((line) => line.includes('scrolling_analysis'))?.startsWith('- 🔧 ')).toBe(true);
+  });
+
+  it('never indents a step, whatever the phase events do', () => {
+    handleConversationStepEvent(
+      step(1, '进入阶段「概览」', {phase: 'progress', sourceEventType: 'plan_phase_updated'}),
+      ctx,
+    );
+    // Overrun the retained-step cap so the only phase line falls off.
+    for (let ordinal = 2; ordinal <= 70; ordinal += 1) {
+      handleConversationStepEvent(step(ordinal, `步骤 ${ordinal}`), ctx);
+    }
+    handleSSEEvent('end', {}, ctx);
+
+    const content = ctx.flowMessages[0].content;
+    expect(content).not.toContain('进入阶段「概览」');
+    expect(content.split('\n').filter((line) => line.startsWith('  - '))).toEqual([]);
+  });
+
+  it('marks a failed tool call as an error rather than a result', () => {
+    handleConversationStepEvent(step(1, 'update_plan_phase 失败：summary 太短', {phase: 'error'}), ctx);
+    handleSSEEvent('end', {}, ctx);
+
+    expect(ctx.flowMessages[0].content).toContain('⚠');
+    expect(ctx.flowMessages[0].content).toContain('update_plan_phase 失败');
   });
 
   it('should deduplicate repeated events by event id', () => {
@@ -4152,7 +4218,7 @@ describe('handleConversationStepEvent', () => {
     handleConversationStepEvent(step, ctx);
 
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content.match(/#1/g)?.length || 0).toBe(1);
+    expect(ctx.flowMessages[0].content.match(/唯一步骤/g)?.length || 0).toBe(1);
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
   });
 });
@@ -4490,8 +4556,8 @@ describe('handleSSEEvent', () => {
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('🧵 对话时间线');
-    expect(ctx.flowMessages[0].content).toContain('#1');
+    expect(ctx.flowMessages[0].content).toContain('🧭 分析过程');
+    expect(ctx.flowMessages[0].content).toContain('开始分析');
   });
 });
 

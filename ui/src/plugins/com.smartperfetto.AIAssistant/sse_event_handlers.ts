@@ -541,11 +541,6 @@ const STREAM_FLOW_LIMITS = {
 
 const ANSWER_STREAM_RENDER_INTERVAL_MS = 16;
 const ANSWER_STREAM_PENDING_CHUNK_SIZE = 24;
-const ANSWER_TIMELINE_SNAPSHOT_MIN_CHARS = 24;
-const ANSWER_TIMELINE_SNAPSHOT_MIN_DELTA_CHARS = 48;
-const ANSWER_TIMELINE_SNAPSHOT_FORCE_DELTA_CHARS = 160;
-const ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
-const ANSWER_TIMELINE_SNIPPET_MAX_CHARS = 220;
 
 type StreamingFlowSection =
   | 'phase'
@@ -590,7 +585,8 @@ function flowSectionLines(
     case 'output':
       return flow.outputs;
     case 'conversation':
-      return flow.conversationLines;
+      // Structured steps are rendered by buildConversationTimelineMarkdown.
+      return [];
   }
 }
 
@@ -681,15 +677,23 @@ function buildStreamingFlowContent(
       lines.push(uiText('### 📤 中间产出', '### 📤 Intermediate output'));
       break;
     case 'conversation':
-      lines.push(uiText('### 🧵 对话时间线', '### 🧵 Conversation timeline'));
+      lines.push(uiText('### 🧭 分析过程', '### 🧭 Analysis process'));
       break;
   }
 
-  const sectionLines = flowSectionLines(flow, section);
-  if (sectionLines.length > 0) {
-    lines.push('');
-    for (const item of sectionLines) {
-      lines.push(`- ${item}`);
+  if (section === 'conversation') {
+    const timelineLines = buildConversationTimelineMarkdown(flow);
+    if (timelineLines.length > 0) {
+      lines.push('');
+      lines.push(...timelineLines);
+    }
+  } else {
+    const sectionLines = flowSectionLines(flow, section);
+    if (sectionLines.length > 0) {
+      lines.push('');
+      for (const item of sectionLines) {
+        lines.push(`- ${item}`);
+      }
     }
   }
 
@@ -886,65 +890,102 @@ function refreshSubAgentCards(ctx: SSEHandlerContext): void {
   }
 }
 
-function getConversationPhaseLabel(
-  phase: ConversationStepTimelineItem['phase'],
-): string {
-  switch (phase) {
-    case 'progress':
-      return uiText('进度', 'Progress');
+
+
+/** Backend event that marks a plan phase boundary. */
+const PLAN_PHASE_SOURCE_EVENT_TYPE = 'plan_phase_updated';
+/** Marks the synthetic checkpoints the frontend adds around the answer stream. */
+const ANSWER_TIMELINE_SOURCE_EVENT_TYPE = 'answer_stream';
+/**
+ * Answer checkpoints are ordered after every backend step. Backend ordinals are
+ * a per-run counter, so a large base keeps the two sequences from interleaving.
+ */
+const ANSWER_TIMELINE_ORDINAL_BASE = 1_000_000;
+
+function isPlanPhaseStep(step: ConversationStepTimelineItem): boolean {
+  return step.sourceEventType === PLAN_PHASE_SOURCE_EVENT_TYPE;
+}
+
+/**
+ * Append a step, keeping the list ordered and bounded.
+ *
+ * Trimming drops the oldest steps. Phase lines are boundary markers rather
+ * than containers, so losing one cannot strand the steps that followed it.
+ */
+function appendConversationTimelineStep(
+  flow: StreamingFlowState,
+  step: ConversationStepTimelineItem,
+): boolean {
+  const steps = flow.conversationSteps;
+  const last = steps[steps.length - 1];
+  if (last && last.ordinal === step.ordinal && last.text === step.text) return false;
+
+  steps.push(step);
+  if (steps.length > 1 && steps[steps.length - 2].ordinal > step.ordinal) {
+    steps.sort((a, b) => a.ordinal - b.ordinal);
+  }
+  if (steps.length > STREAM_FLOW_LIMITS.conversation) {
+    steps.splice(0, steps.length - STREAM_FLOW_LIMITS.conversation);
+  }
+  return true;
+}
+
+function conversationStepIcon(step: ConversationStepTimelineItem): string {
+  if (isPlanPhaseStep(step)) return '▸';
+  switch (step.phase) {
     case 'thinking':
-      return uiText('思考', 'Reasoning');
+      return '💭';
     case 'tool':
-      return uiText('工具', 'Tool');
+      return '🔧';
     case 'result':
-      return uiText('结果', 'Result');
+      return '→';
     case 'error':
-      return uiText('错误', 'Error');
+      return '⚠';
+    case 'progress':
+    default:
+      return '·';
   }
 }
 
-function getConversationRoleLabel(
-  role: ConversationStepTimelineItem['role'],
-): string {
-  return role === 'system'
-    ? uiText('系统', 'System')
-    : uiText('助手', 'Assistant');
-}
-
-function renderConversationStepLine(
-  step: ConversationStepTimelineItem,
-): string {
-  const phaseLabel = getConversationPhaseLabel(step.phase);
-  const roleLabel = getConversationRoleLabel(step.role);
-  const timeStr = step.timestamp
-    ? new Date(step.timestamp).toLocaleTimeString(uiText('zh-CN', 'en-US'), {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      })
-    : '';
-  const timePrefix = timeStr ? `\`${timeStr}\` ` : '';
-  return `${timePrefix}#${step.ordinal} [${phaseLabel}/${roleLabel}] ${step.text}`;
-}
-
-function renderAnswerTimelineLine(
-  flow: StreamingFlowState,
-  phase: ConversationStepTimelineItem['phase'],
-  role: ConversationStepTimelineItem['role'],
-  text: string,
-): string {
-  const phaseLabel = getConversationPhaseLabel(phase);
-  const roleLabel = getConversationRoleLabel(role);
-  const timeStr = new Date().toLocaleTimeString(uiText('zh-CN', 'en-US'), {
+function conversationStepTime(step: ConversationStepTimelineItem): string {
+  if (!step.timestamp) return '';
+  return new Date(step.timestamp).toLocaleTimeString(uiText('zh-CN', 'en-US'), {
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
   });
-  flow.answerTimelineOrdinal += 1;
-  return `\`${timeStr}\` #A${flow.answerTimelineOrdinal} [${phaseLabel}/${roleLabel}] ${text}`;
 }
+
+/**
+ * Render the analysis process.
+ *
+ * Plan phases are boundary markers, not containers. Indenting steps under a
+ * phase would assert that each step belongs to it, and the stream cannot
+ * support that claim: a tool call is dispatched *before* the auto transition it
+ * triggers, and a phase can be closed retroactively after later work already
+ * started. Only `data` events carry a real `planPhaseId`. So the phase line is
+ * emphasized and the steps stay flat — a weaker layout that is never wrong,
+ * which also removes any way for trimming to strand an indented step.
+ */
+function buildConversationTimelineMarkdown(
+  flow: StreamingFlowState,
+): string[] {
+  const steps = flow.conversationSteps;
+  if (steps.length === 0) return [];
+
+  return steps.map((step) => {
+    const icon = conversationStepIcon(step);
+    if (isPlanPhaseStep(step)) {
+      return `- ${icon} **${step.text}**`;
+    }
+    const time = conversationStepTime(step);
+    const timePrefix = time ? `\`${time}\` ` : '';
+    return `- ${icon} ${timePrefix}${step.text}`;
+  });
+}
+
+
 
 function appendAnswerTimelineLine(
   ctx: SSEHandlerContext,
@@ -962,12 +1003,17 @@ function appendAnswerTimelineLine(
     flow.startedAt = Date.now();
   }
 
-  const line = renderAnswerTimelineLine(flow, phase, role, lineText);
-  const changed = appendFlowLine(
-    flow.conversationLines,
-    line,
-    STREAM_FLOW_LIMITS.conversation,
-  );
+  flow.answerTimelineOrdinal += 1;
+  const changed = appendConversationTimelineStep(flow, {
+    // Answer checkpoints have no backend ordinal; keep them after the
+    // backend steps so the process reads in the order it happened.
+    ordinal: ANSWER_TIMELINE_ORDINAL_BASE + flow.answerTimelineOrdinal,
+    phase,
+    role,
+    text: lineText,
+    timestamp: Date.now(),
+    sourceEventType: ANSWER_TIMELINE_SOURCE_EVENT_TYPE,
+  });
   if (changed) {
     refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
   }
@@ -986,94 +1032,14 @@ function ensureAnswerTimelineStarted(ctx: SSEHandlerContext): void {
   );
 }
 
-function compactAnswerTimelineLine(line: string): string {
-  return line
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/^#{1,6}\s+/, '')
-    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
-function isLowSignalAnswerTimelineLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) return true;
-  if (/^```/.test(trimmed)) return true;
-  if (/^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed)) {
-    return true;
-  }
-  if (/^\|?\s*[-:\s|]+\s*\|?$/.test(trimmed)) return true;
-  if (/^#{1,6}\s*$/.test(trimmed)) return true;
-  return false;
-}
 
-function trimAnswerTimelineSnippet(value: string): string {
-  if (value.length <= ANSWER_TIMELINE_SNIPPET_MAX_CHARS) return value;
-  return `${value.slice(0, ANSWER_TIMELINE_SNIPPET_MAX_CHARS - 1).trimEnd()}…`;
-}
 
-function extractAnswerTimelineSnippet(answerText: string): string {
-  const lines = answerText
-    .split(/\n+/)
-    .map((line) => compactAnswerTimelineLine(line))
-    .filter((line) => !isLowSignalAnswerTimelineLine(line));
 
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const candidate = trimAnswerTimelineSnippet(lines[i]);
-    if (candidate.length >= 8) return candidate;
-  }
 
-  return trimAnswerTimelineSnippet(compactAnswerTimelineLine(answerText));
-}
-
-function shouldAppendAnswerTimelineSnapshot(
-  flow: StreamingFlowState,
-  token: string,
-  snippet: string,
-  textLength: number,
-  options: {force?: boolean} = {},
-): boolean {
-  if (!snippet || snippet === flow.answerTimelineLastSnapshot) return false;
-  if (options.force === true) return true;
-  if (snippet.length < ANSWER_TIMELINE_SNAPSHOT_MIN_CHARS) return false;
-
-  const now = Date.now();
-  const charDelta = Math.max(
-    0,
-    textLength - flow.answerTimelineLastSnapshotCharCount,
-  );
-  const intervalOk =
-    flow.answerTimelineLastSnapshotAt === null ||
-    now - flow.answerTimelineLastSnapshotAt >=
-      ANSWER_TIMELINE_SNAPSHOT_MIN_INTERVAL_MS;
-  const boundary = token.includes('\n') || /[。！？!?；;：:]$/.test(token);
-
-  return (
-    charDelta >= ANSWER_TIMELINE_SNAPSHOT_FORCE_DELTA_CHARS ||
-    (boundary && charDelta >= ANSWER_TIMELINE_SNAPSHOT_MIN_DELTA_CHARS) ||
-    (intervalOk && charDelta >= ANSWER_TIMELINE_SNAPSHOT_MIN_DELTA_CHARS)
-  );
-}
-
-function recordAnswerTimelineSnapshot(
-  ctx: SSEHandlerContext,
-  snippet: string,
-  textLength: number,
-  label = uiText('流式更新', 'Streaming update'),
-): void {
-  const flow = ctx.streamingFlow;
-  if (
-    appendAnswerTimelineLine(ctx, 'result', 'agent', `${label}: ${snippet}`)
-  ) {
-    flow.answerTimelineLastSnapshot = snippet;
-    flow.answerTimelineLastSnapshotCharCount = textLength;
-    flow.answerTimelineLastSnapshotAt = Date.now();
-  }
-}
 
 function syncAnswerStreamToConversationTimeline(
   ctx: SSEHandlerContext,
-  token: string,
   options: {force?: boolean; completed?: boolean} = {},
 ): void {
   const answer = ctx.streamingAnswer;
@@ -1085,26 +1051,11 @@ function syncAnswerStreamToConversationTimeline(
   }
 
   const flow = ctx.streamingFlow;
-  const snippet = extractAnswerTimelineSnippet(answerText);
   const textLength = answerText.length;
-  if (
-    shouldAppendAnswerTimelineSnapshot(
-      flow,
-      token,
-      snippet,
-      textLength,
-      options,
-    )
-  ) {
-    recordAnswerTimelineSnapshot(
-      ctx,
-      snippet,
-      textLength,
-      options.completed === true
-        ? uiText('最终更新', 'Final update')
-        : uiText('流式更新', 'Streaming update'),
-    );
-  }
+  // Answer snippets are deliberately not mirrored into the process view. They
+  // existed to keep the timeline moving while it sat above the answer; the
+  // answer bubble streams live on its own, and with the process shown below the
+  // answer these snapshots would print the same text twice.
 
   if (options.completed === true && !flow.answerTimelineCompleted) {
     flow.answerTimelineCompleted = true;
@@ -1173,14 +1124,7 @@ function flushConversationTimeline(
     }
 
     delete flow.conversationPendingSteps[nextOrdinal];
-    const line = renderConversationStepLine(step);
-    if (
-      appendFlowLine(
-        flow.conversationLines,
-        line,
-        STREAM_FLOW_LIMITS.conversation,
-      )
-    ) {
+    if (appendConversationTimelineStep(flow, step)) {
       changed = true;
     }
     flow.conversationLastOrdinal = nextOrdinal;
@@ -1215,7 +1159,7 @@ function persistSettledStreamingFlow(ctx: SSEHandlerContext): void {
   });
   if (ctx.streamingFlow.conversationEnabled) {
     refreshStreamingFlowMessage(ctx, 'conversation', {
-      createIfMissing: ctx.streamingFlow.conversationLines.length > 0,
+      createIfMissing: ctx.streamingFlow.conversationSteps.length > 0,
       persist: true,
     });
   }
@@ -6223,6 +6167,9 @@ export function handleConversationStepEvent(
       ),
       text,
       timestamp: eventTimestamp > 0 ? eventTimestamp : Date.now(),
+      sourceEventType:
+        normalizeFlowLine(readStringField(asRecord(payload.source), 'eventType')) ||
+        undefined,
     };
   }
 
@@ -6255,6 +6202,9 @@ function mergeConversationTimelineFromAnalysisCompleted(
         timestamp: readNumberField(step, 'timestamp', 0) || undefined,
         content: {
           text: readStringField(step, 'text'),
+        },
+        source: {
+          eventType: readStringField(step, 'sourceEventType') || undefined,
         },
       },
     };
@@ -6302,11 +6252,11 @@ export function handleAnswerTokenEvent(
     if (shouldFlush) {
       flushStreamingAnswer(ctx, {persist: false});
     }
-    syncAnswerStreamToConversationTimeline(ctx, token);
+    syncAnswerStreamToConversationTimeline(ctx);
   }
 
   if (done) {
-    syncAnswerStreamToConversationTimeline(ctx, '', {
+    syncAnswerStreamToConversationTimeline(ctx, {
       force: true,
       completed: true,
     });

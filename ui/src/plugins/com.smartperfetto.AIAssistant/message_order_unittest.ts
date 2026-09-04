@@ -38,12 +38,12 @@ describe('AI Assistant message display order', () => {
     expect(ids(orderMessagesForDisplay(messages))).toEqual([
       'ready',
       'user',
-      'timeline',
       'answer',
+      'timeline',
     ]);
   });
 
-  it('keeps streaming timeline reordering inside a conversation round', () => {
+  it('renders the analysis process after the answer it produced', () => {
     const messages = [
       message('ready', 'assistant'),
       message('user-1', 'user'),
@@ -58,12 +58,12 @@ describe('AI Assistant message display order', () => {
     expect(ids(orderMessagesForDisplay(messages))).toEqual([
       'ready',
       'user-1',
-      'timeline-1',
       'answer-1',
+      'timeline-1',
       'round-2',
       'user-2',
-      'timeline-2',
       'answer-2',
+      'timeline-2',
     ]);
   });
 
@@ -76,6 +76,22 @@ describe('AI Assistant message display order', () => {
     expect(ids(orderMessagesForDisplay(messages))).toEqual([
       'ready',
       'progress-note',
+    ]);
+  });
+
+  it('keeps other assistant cards above both the answer and the process', () => {
+    const messages = [
+      message('user', 'user'),
+      message('timeline', 'assistant', 'streaming_flow'),
+      message('answer', 'assistant', 'answer_stream'),
+      message('data-card', 'assistant'),
+    ];
+
+    expect(ids(orderMessagesForDisplay(messages))).toEqual([
+      'user',
+      'data-card',
+      'answer',
+      'timeline',
     ]);
   });
 });

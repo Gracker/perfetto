@@ -489,6 +489,12 @@ export interface ConversationStepTimelineItem {
   role: 'agent' | 'system';
   text: string;
   timestamp?: number;
+  /**
+   * Backend event this step was derived from. The five-value `phase` cannot
+   * distinguish a plan phase boundary from ordinary progress, and matching on
+   * the localized wording breaks under English output.
+   */
+  sourceEventType?: string;
 }
 
 /** Tracked sub-agent state for UI cards. */
@@ -547,7 +553,12 @@ export interface StreamingFlowState {
   outputMessageId: string | null;
   conversationMessageId: string | null;
   conversationEnabled: boolean;
-  conversationLines: string[];
+  /**
+   * Rendered steps, kept structured rather than pre-formatted strings: phase
+   * grouping has to survive trimming, reconnect replay, and runs where plan
+   * boundaries never arrive (private-knowledge runs suppress them).
+   */
+  conversationSteps: ConversationStepTimelineItem[];
   conversationLastOrdinal: number;
   conversationLastRenderedAt: number | null;
   conversationPendingSteps: Record<number, ConversationStepTimelineItem>;
@@ -555,9 +566,6 @@ export interface StreamingFlowState {
   /** Synthetic answer-stream checkpoints rendered into the conversation timeline. */
   answerTimelineStarted: boolean;
   answerTimelineOrdinal: number;
-  answerTimelineLastSnapshot: string;
-  answerTimelineLastSnapshotCharCount: number;
-  answerTimelineLastSnapshotAt: number | null;
   answerTimelineCompleted: boolean;
   status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
   phases: string[];
@@ -586,16 +594,13 @@ export function createStreamingFlowState(): StreamingFlowState {
     outputMessageId: null,
     conversationMessageId: null,
     conversationEnabled: false,
-    conversationLines: [],
+    conversationSteps: [],
     conversationLastOrdinal: 0,
     conversationLastRenderedAt: null,
     conversationPendingSteps: {},
     conversationSeenEventIds: new Set<string>(),
     answerTimelineStarted: false,
     answerTimelineOrdinal: 0,
-    answerTimelineLastSnapshot: '',
-    answerTimelineLastSnapshotCharCount: 0,
-    answerTimelineLastSnapshotAt: null,
     answerTimelineCompleted: false,
     status: 'idle',
     phases: [],

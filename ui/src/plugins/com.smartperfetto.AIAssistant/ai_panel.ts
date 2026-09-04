@@ -684,6 +684,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private sseAbortController: AbortController | null = null;
   private analysisRequestCoordinator = new AnalysisRequestCoordinator();
   private analysisCancellationPending = false;
+  /** Set by "stop and redirect"; consumed when the run reaches a terminal state. */
+  private redirectAfterCancellation = false;
   private analysisCancellationRequest: Promise<void> | null = null;
   // Paragraph-level progressive reveal: tracks how many children have been animated per message
   private revealedBlockCounts = new Map<string, number>();
@@ -4943,14 +4945,27 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         }),
                         m('div.ai-input-divider'),
                         this.state.isLoading && this.state.analysisMode !== 'conversation'
-                          ? m(
-                              'button.ai-send-btn.ai-stop-btn',
-                              {
-                                onclick: () => this.cancelAnalysis(),
-                                title: uiText('停止分析', 'Stop analysis'),
-                              },
-                              m('i.pf-icon', 'stop_circle'),
-                            )
+                          ? [
+                              m(
+                                'button.ai-send-btn.ai-redirect-btn',
+                                {
+                                  onclick: () => void this.stopAndRedirectAnalysis(),
+                                  title: uiText(
+                                    '停止并改方向：看到分析跑偏时，停下来直接说该往哪走',
+                                    'Stop and redirect: halt the analysis and say where it should go instead',
+                                  ),
+                                },
+                                m('i.pf-icon', 'edit_note'),
+                              ),
+                              m(
+                                'button.ai-send-btn.ai-stop-btn',
+                                {
+                                  onclick: () => this.cancelAnalysis(),
+                                  title: uiText('停止分析', 'Stop analysis'),
+                                },
+                                m('i.pf-icon', 'stop_circle'),
+                              ),
+                            ]
                           : [
                               analysisSourceEnrichmentRunning
                                 ? m(
@@ -10767,6 +10782,33 @@ Click ⚙️ to configure backend connection.`,
     this.state.sseConnectionState = 'disconnected';
   }
 
+  /**
+   * Read a cancel conflict that actually means "this run is already over".
+   *
+   * `RUN_NOT_CANCELLABLE` and `RUN_NOT_ACTIVE` both arrive as 409 and both mean
+   * the run no longer needs stopping. Any other error is a real failure.
+   */
+  private async readTerminalCancellationConflict(
+    response: Response,
+    runId: string,
+  ): Promise<{status: string; reason?: string} | null> {
+    if (response.status !== 409) return null;
+    const payload: unknown = await response.json().catch(() => null);
+    if (typeof payload !== 'object' || payload === null) return null;
+    const record = payload as Record<string, unknown>;
+    if (record.runId !== runId) return null;
+    if (record.code !== 'RUN_NOT_CANCELLABLE' && record.code !== 'RUN_NOT_ACTIVE') {
+      return null;
+    }
+    return {
+      status: typeof record.status === 'string' ? record.status : 'completed',
+      reason: uiText(
+        '停止请求到达时该次分析已经结束。',
+        'The analysis had already finished when the stop request arrived.',
+      ),
+    };
+  }
+
   private async requestBackendCancellation(
     sessionId: string,
     runId: string,
@@ -10781,6 +10823,11 @@ Click ⚙️ to configure backend connection.`,
       body: JSON.stringify({runId}),
     });
     if (!response.ok) {
+      // A run that finished just before the stop arrived is terminal, not a
+      // failed stop. Reporting it as a failure told the user the stop did not
+      // work and re-subscribed the SSE stream to a run that was already over.
+      const terminal = await this.readTerminalCancellationConflict(response, runId);
+      if (terminal) return terminal;
       throw new Error(`HTTP ${response.status}`);
     }
     const payload: unknown = await response.json();
@@ -10813,6 +10860,7 @@ Click ⚙️ to configure backend connection.`,
   ): void {
     this.analysisCancellationPending = false;
     this.setLoadingState(false);
+    this.consumeRedirectIntent();
     if (status === 'source_enrichment_cancelled') {
       this.handleSSEEvent('analysis_source_enrichment_cancelled', {
         reason,
@@ -10854,6 +10902,9 @@ Click ⚙️ to configure backend connection.`,
 
   private handleCancellationFailure(sessionId: string, error: unknown): void {
     this.analysisCancellationPending = false;
+    // The stop did not take; the analysis may still be running, so do not
+    // hand the composer back.
+    this.redirectAfterCancellation = false;
     if (!this.state.agentSessionId?.trim()) {
       this.state.agentSessionId = null;
     }
@@ -10901,6 +10952,43 @@ Click ⚙️ to configure backend connection.`,
       });
     this.analysisCancellationRequest = request;
     return request;
+  }
+
+  private focusChatInput(): void {
+    setTimeout(() => {
+      const textarea = document.getElementById(
+        'ai-input',
+      ) as HTMLTextAreaElement | null;
+      textarea?.focus();
+    }, 0);
+  }
+
+  /**
+   * Stop the current analysis and hand the keyboard back to the user.
+   *
+   * This is the answer to watching the analysis go the wrong way: stop it and
+   * say where it should go instead. Focus must not move until the backend
+   * confirms the run is terminal, or the user would type against a live run.
+   *
+   * The wait cannot be a simple `await`: when the run id has not arrived yet,
+   * `cancelAnalysis()` returns immediately and the cancellation completes
+   * later through the request coordinator. So the intent is recorded here and
+   * consumed by whichever path settles the run.
+   */
+  private async stopAndRedirectAnalysis(): Promise<void> {
+    this.redirectAfterCancellation = true;
+    await this.cancelAnalysis();
+  }
+
+  /**
+   * Called from every terminal cancellation path. A run that was already
+   * finished when the stop arrived is terminal too, so it also releases the
+   * composer; only an outright stop failure leaves the analysis running.
+   */
+  private consumeRedirectIntent(): void {
+    if (!this.redirectAfterCancellation) return;
+    this.redirectAfterCancellation = false;
+    this.focusChatInput();
   }
 
   private cancelAnalysis(): Promise<void> {
@@ -13360,7 +13448,7 @@ Click ⚙️ to configure backend connection.`,
       thoughts: [...f.thoughts],
       tools: [...f.tools],
       outputs: [...f.outputs],
-      conversationLines: [...f.conversationLines],
+      conversationSteps: f.conversationSteps.map((step) => ({...step})),
       conversationPendingSteps: {...f.conversationPendingSteps},
       conversationSeenEventIds: new Set(f.conversationSeenEventIds),
       subAgents: f.subAgents.map((s) => ({...s})),
