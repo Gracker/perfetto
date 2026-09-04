@@ -16,6 +16,7 @@
 import {describe, expect, it} from 'vitest';
 
 import {handleSSEEvent, type SSEHandlerContext} from './sse_event_handlers';
+import {orderMessagesForDisplay} from './message_order';
 import type {Message} from './types';
 import {createStreamingFlowState} from './types';
 import realEvents from './testdata/real_process_view_events.json';
@@ -62,6 +63,42 @@ function replay(run: CapturedRun): string {
 
   expect(flowMessages).toHaveLength(1);
   return flowMessages[0].content;
+}
+
+/**
+ * Lay the round out the way the panel does, using the real ordering function.
+ *
+ * The question a reader asks is not "what number does `phase()` return" but
+ * "where does the process view appear". This renders the answer to that.
+ */
+function renderOrderedTranscript(processView: string): string {
+  const round: Message[] = [
+    {id: 'u1', role: 'user', content: '分析滑动性能问题的根因', timestamp: 1},
+    {
+      id: 'flow',
+      role: 'assistant',
+      content: processView,
+      timestamp: 2,
+      flowTag: 'streaming_flow',
+    },
+    {
+      id: 'ans',
+      role: 'assistant',
+      content: '## 综合结论\n\n主线程在自定义滑动动画内同步执行重负载，是唯一主导根因。',
+      timestamp: 3,
+      flowTag: 'answer_stream',
+    },
+  ];
+  return orderMessagesForDisplay(round)
+    .map((msg) => {
+      const label = msg.role === 'user'
+        ? '用户提问'
+        : msg.flowTag === 'answer_stream'
+          ? '回答'
+          : '分析过程';
+      return `--- ${label} (${msg.flowTag ?? msg.role}) ---\n\n${msg.content}`;
+    })
+    .join('\n\n');
 }
 
 describe.each(Object.entries(RUNS))('process view on a real run: %s', (_name, run) => {
@@ -125,12 +162,31 @@ describe.each(Object.entries(RUNS))('process view on a real run: %s', (_name, ru
     const dumpDir = process.env.SMARTPERFETTO_DUMP_PROCESS_VIEW;
     if (dumpDir) {
       // Writing the rendered view out is how a human checks what a reader
-      // actually sees, without needing the whole UI running.
+      // actually sees, without needing the whole UI running. The transcript
+      // variant additionally runs the real display ordering, so the position
+      // of the process view relative to the answer is observable rather than
+      // argued about.
       const fs = require('fs') as typeof import('fs');
       fs.mkdirSync(dumpDir, {recursive: true});
       fs.writeFileSync(`${dumpDir}/${_name}.md`, rendered, 'utf8');
+      fs.writeFileSync(
+        `${dumpDir}/${_name}.transcript.md`,
+        renderOrderedTranscript(rendered),
+        'utf8',
+      );
     }
     expect(rendered.length).toBeGreaterThan(200);
+  });
+
+  it('places the process view after the answer within the round', () => {
+    // The real display ordering, not an argument about phase numbers.
+    const transcript = renderOrderedTranscript(rendered);
+    const question = transcript.indexOf('--- 用户提问');
+    const answer = transcript.indexOf('--- 回答');
+    const process = transcript.indexOf('--- 分析过程');
+    expect(question).toBeGreaterThanOrEqual(0);
+    expect(question).toBeLessThan(answer);
+    expect(answer).toBeLessThan(process);
   });
 
   it('is headed as the analysis process in the active language', () => {
