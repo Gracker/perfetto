@@ -854,7 +854,12 @@ function pushStreamingOutput(ctx: SSEHandlerContext, line: string): void {
 }
 
 /**
- * Push a conversation timeline step directly (for sub-agent events in timeline mode).
+ * Push a locally generated timeline step (sub-agent delegation and completion).
+ *
+ * These carry no backend ordinal, so they use their own numbering space. Taking
+ * `conversationLastOrdinal + 1` instead consumed the next backend ordinal, and
+ * the real step that later arrived with that number was discarded as
+ * out-of-order: every sub-agent delegation silently swallowed one step.
  */
 function pushConversationStep(
   ctx: SSEHandlerContext,
@@ -863,16 +868,15 @@ function pushConversationStep(
   text: string,
 ): void {
   const flow = ctx.streamingFlow;
-  const ordinal = flow.conversationLastOrdinal + 1;
-  flow.conversationPendingSteps[ordinal] = {
-    ordinal,
+  flow.localStepOrdinal += 1;
+  const changed = appendConversationTimelineStep(flow, {
+    ordinal: LOCAL_STEP_ORDINAL_BASE + flow.localStepOrdinal,
     phase,
     role,
     text,
     timestamp: Date.now(),
-  };
-  const changed = flushConversationTimeline(ctx);
-  if (!changed) {
+  });
+  if (changed) {
     refreshStreamingFlowMessage(ctx, 'conversation', {createIfMissing: true});
   }
 }
@@ -897,17 +901,27 @@ const PLAN_PHASE_SOURCE_EVENT_TYPE = 'plan_phase_updated';
 /** Marks the synthetic checkpoints the frontend adds around the answer stream. */
 const ANSWER_TIMELINE_SOURCE_EVENT_TYPE = 'answer_stream';
 /**
- * Answer checkpoints are ordered after every backend step. Backend ordinals are
- * a per-run counter, so a large base keeps the two sequences from interleaving.
+ * Locally generated steps carry ordinals from their own numbering spaces so
+ * they cannot collide with the backend's per-run counter. Display order comes
+ * from arrival, not from these numbers.
  */
-const ANSWER_TIMELINE_ORDINAL_BASE = 1_000_000;
+const ANSWER_TIMELINE_ORDINAL_BASE = 2_000_000;
+const LOCAL_STEP_ORDINAL_BASE = 1_000_000;
 
 function isPlanPhaseStep(step: ConversationStepTimelineItem): boolean {
   return step.sourceEventType === PLAN_PHASE_SOURCE_EVENT_TYPE;
 }
 
 /**
- * Append a step, keeping the list ordered and bounded.
+ * Append a step in arrival order, bounded.
+ *
+ * The list is deliberately not sorted by ordinal. Backend steps are already
+ * ordered before they get here — `flushConversationTimeline` releases them
+ * strictly by `conversationLastOrdinal + 1` — while locally generated steps
+ * (sub-agent delegation, answer checkpoints) carry ordinals from separate
+ * numbering spaces that exist to avoid collisions, not to express time.
+ * Sorting by ordinal therefore pushed every sub-agent delegation to the end of
+ * the run instead of leaving it where it happened.
  *
  * Trimming drops the oldest steps. Phase lines are boundary markers rather
  * than containers, so losing one cannot strand the steps that followed it.
@@ -921,9 +935,6 @@ function appendConversationTimelineStep(
   if (last && last.ordinal === step.ordinal && last.text === step.text) return false;
 
   steps.push(step);
-  if (steps.length > 1 && steps[steps.length - 2].ordinal > step.ordinal) {
-    steps.sort((a, b) => a.ordinal - b.ordinal);
-  }
   if (steps.length > STREAM_FLOW_LIMITS.conversation) {
     steps.splice(0, steps.length - STREAM_FLOW_LIMITS.conversation);
   }

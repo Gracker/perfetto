@@ -281,6 +281,11 @@ import {
   sameAnalysisContext,
   saveAnalysisContext,
 } from './analysis_context';
+import {
+  RUN_CONFLICT_RETRY_INTERVAL_MS,
+  RUN_CONFLICT_WAIT_MS,
+  isTransientRunConflict,
+} from './analysis_run_conflict';
 import {listCodebases} from './codebase_api';
 import type {
   SmartDisplayedScene,
@@ -7269,6 +7274,29 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     };
   }
 
+  /**
+   * Wait out a settling session instead of reporting its conflict as a failure.
+   *
+   * Bounded: if the session is still busy at the deadline the original
+   * response is returned unchanged, so a genuinely stuck run still surfaces.
+   */
+  private async retryWhileSessionIsSettling(
+    initial: Response,
+    dispatch: () => Promise<Response>,
+  ): Promise<Response> {
+    let response = initial;
+    const deadline = Date.now() + RUN_CONFLICT_WAIT_MS;
+    while (Date.now() < deadline) {
+      const payload = await response.clone().json().catch(() => null);
+      if (!isTransientRunConflict(response.status, payload)) return response;
+      await new Promise((resolve) =>
+        setTimeout(resolve, RUN_CONFLICT_RETRY_INTERVAL_MS),
+      );
+      response = await dispatch();
+    }
+    return response;
+  }
+
   private async postAnalysisRequestWithContextFallback(
     apiUrl: string,
     requestBody: Record<string, any>,
@@ -7279,7 +7307,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(requestBody),
       });
-    const response = await dispatch();
+    let response = await dispatch();
+    response = await this.retryWhileSessionIsSettling(response, dispatch);
     if (response.status !== 409) return response;
 
     const errorData = await response

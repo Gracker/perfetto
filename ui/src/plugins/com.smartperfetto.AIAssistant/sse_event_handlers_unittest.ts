@@ -4203,6 +4203,28 @@ describe('handleConversationStepEvent', () => {
     expect(ctx.flowMessages[0].content).toContain('update_plan_phase 失败');
   });
 
+  it('does not let a sub-agent step consume a backend ordinal', () => {
+    // The local step used to take `conversationLastOrdinal + 1`; the real
+    // backend step that later arrived with that number was then dropped as
+    // out-of-order, so each delegation silently swallowed one step.
+    handleConversationStepEvent(step(1, '第一步'), ctx);
+    handleSSEEvent('sub_agent_started', {
+      data: {agentName: 'frame-expert', description: '下钻掉帧帧'},
+    }, ctx);
+    handleConversationStepEvent(step(2, '第二步'), ctx);
+    handleSSEEvent('end', {}, ctx);
+
+    const content = ctx.flowMessages[0].content;
+    expect(content).toContain('第一步');
+    expect(content).toContain('第二步');
+    expect(content).toContain('frame-expert');
+    // The delegation happened between the two backend steps and must read that
+    // way: its ordinal lives in a separate space purely to avoid collisions.
+    expect(content.indexOf('第一步')).toBeLessThan(content.indexOf('frame-expert'));
+    expect(content.indexOf('frame-expert')).toBeLessThan(content.indexOf('第二步'));
+    expect(ctx.streamingFlow.conversationLastOrdinal).toBe(2);
+  });
+
   it('should deduplicate repeated events by event id', () => {
     const step = {
       id: 'evt-1',

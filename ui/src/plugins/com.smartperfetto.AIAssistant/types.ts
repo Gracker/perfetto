@@ -564,6 +564,8 @@ export interface StreamingFlowState {
   conversationPendingSteps: Record<number, ConversationStepTimelineItem>;
   conversationSeenEventIds: Set<string>;
   /** Synthetic answer-stream checkpoints rendered into the conversation timeline. */
+  /** Counter for locally generated steps, kept out of the backend sequence. */
+  localStepOrdinal: number;
   answerTimelineStarted: boolean;
   answerTimelineOrdinal: number;
   answerTimelineCompleted: boolean;
@@ -599,6 +601,7 @@ export function createStreamingFlowState(): StreamingFlowState {
     conversationLastRenderedAt: null,
     conversationPendingSteps: {},
     conversationSeenEventIds: new Set<string>(),
+    localStepOrdinal: 0,
     answerTimelineStarted: false,
     answerTimelineOrdinal: 0,
     answerTimelineCompleted: false,
