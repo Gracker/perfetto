@@ -691,6 +691,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private analysisCancellationPending = false;
   /** Set by "stop and redirect"; consumed when the run reaches a terminal state. */
   private redirectAfterCancellation = false;
+  /**
+   * Sessions whose runtime reported it cannot record interactions.
+   *
+   * Keyed by session because support is a property of the runtime backing that
+   * session, not of the panel: a new session on a runtime that does implement
+   * focus tracking must start reporting again, and a reply that arrives after
+   * the user switched sessions must not silence the new one.
+   */
+  private readonly focusTrackingUnsupportedSessions = new Set<string>();
   private analysisCancellationRequest: Promise<void> | null = null;
   // Paragraph-level progressive reveal: tracks how many children have been animated per message
   private revealedBlockCounts = new Map<string, number>();
@@ -7817,6 +7826,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
 
+    // This session's runtime already said it cannot record interactions;
+    // posting again on every click would be traffic for nothing.
+    if (this.focusTrackingUnsupportedSessions.has(sessionId)) return;
+
     // Fire and forget - don't block UI for interaction tracking
     this.fetchBackend(
       buildAssistantApiV1Url(backendUrl, `/${sessionId}/interaction`),
@@ -7834,20 +7847,38 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         }),
       },
     )
-      .then((response) => {
+      .then(async (response) => {
         if (!response.ok) {
           console.warn(
             '[AIPanel] Failed to send interaction:',
             response.status,
           );
-        } else {
+          return;
+        }
+        const payload = await response.json().catch(() => null);
+        if (payload && payload.supported === false) {
+          // Record against the session this reply belongs to, not the one that
+          // happens to be active now.
+          this.focusTrackingUnsupportedSessions.add(sessionId);
+          if (this.focusTrackingUnsupportedSessions.size > 32) {
+            const oldest = this.focusTrackingUnsupportedSessions.values().next().value;
+            if (typeof oldest === 'string') {
+              this.focusTrackingUnsupportedSessions.delete(oldest);
+            }
+          }
           if (DEBUG_AI_PANEL) {
             console.log(
-              '[AIPanel] Interaction captured:',
-              interaction.type,
-              interaction.target,
+              `[AIPanel] Focus tracking unsupported for session ${sessionId}; stopping interaction capture for it.`,
             );
           }
+          return;
+        }
+        if (DEBUG_AI_PANEL) {
+          console.log(
+            '[AIPanel] Interaction captured:',
+            interaction.type,
+            interaction.target,
+          );
         }
       })
       .catch((error) => {
