@@ -100,7 +100,7 @@ export interface ConclusionContractClaimReference {
   rowIndex?: number;
   rowSelector?: Record<string, string | number | boolean>;
   column?: string;
-  value?: string | number | boolean;
+  value?: string | number | boolean | null;
   sourceRef?: string;
   sourceToolCallId?: string;
   /** Canonical durable artifact id for artifact-backed claims. */
@@ -145,6 +145,8 @@ export interface ClaimSemanticsV1 {
   };
   /** The proposition value is distinct from a cited cell's value. */
   numeric?: {operator: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte'; value: number | string; unit: string};
+  /** Original claimed location, not metadata filled from a later lookup. */
+  source?: {sourceReferenceId: string; filePath: string; lineRange: {start: number; end: number}};
 }
 
 export interface ConclusionContractParseIssue {
@@ -152,6 +154,8 @@ export interface ConclusionContractParseIssue {
     'invalid_claim' | 'invalid_reference' | 'invalid_semantics' | 'duplicate_claim_id' |
     'invalid_relation_proposal' | 'duplicate_proposal_id' | 'untrusted_parser_metadata';
   path: string;
+  /** Fixed schema facts only; no raw values, user keys or source paths. */
+  details?: ConclusionContractStructureDetail[];
 }
 
 export type ConclusionBindingEligibility = 'eligible' | 'ineligible' | 'legacy_unchecked';
@@ -216,6 +220,18 @@ export interface ConclusionContract {
   uncertainties: string[];
   nextSteps: string[];
   metadata?: ConclusionContractMetadata;
+}
+
+/** Fixed schema facts remain self-contained in generated frontend contract types. */
+export interface ConclusionContractStructureDetail {
+  field: '$' | '$.schemaVersion' | '$.mode' | '$.conclusions' | '$.conclusions[]' |
+    '$.conclusions[].statement' | '$.conclusions[].rank' | '$.clusters' | '$.clusters[]' | '$.clusters[].cluster' |
+    '$.evidenceChain' | '$.evidenceChain[]' | '$.evidenceChain[].conclusionId' | '$.evidenceChain[].text' |
+    '$.uncertainties' | '$.uncertainties[]' | '$.nextSteps' | '$.nextSteps[]';
+  reason: 'missing_required' | 'wrong_type' | 'invalid_literal' | 'invalid_enum' | 'invalid_number';
+  expected: 'object' | 'array' | 'string' | 'finite_number' | 'conclusion_contract_v1' | 'conclusion_mode';
+  actual: 'missing' | 'undefined' | 'null' | 'array' | 'object' | 'string' |
+    'number' | 'nonfinite_number' | 'boolean' | 'other';
 }
 
 export interface ConclusionSidecarMachineSegment {
@@ -311,6 +327,8 @@ export type ClaimKindV1 =
 
 export interface EvidenceContextV1 {
   traceId: string;
+  /** Original execution capture, assigned only while binding an issued evidence read. */
+  captureId?: string;
   traceSide?: EvidenceTraceSide;
   paneSide?: EvidencePaneSide;
   toolCallId?: string;
@@ -406,7 +424,7 @@ export interface EvidenceRelationEndpointV1 {
   rowIndex?: number;
   rowSelector?: Record<string, string | number | boolean>;
   column?: string;
-  value?: string | number | boolean;
+  value?: string | number | boolean | null;
 }
 
 export interface EvidenceRelationProofBindingV1 {
@@ -518,9 +536,24 @@ export interface ClaimReferenceVerificationResult {
 
 export type DeterministicClaimProofKind =
   | 'numeric_cell'
+  | 'captured_cell'
+  | 'source_location'
   | 'interval_overlap'
   | 'comparison_delta'
   | 'none';
+
+/** Original native row used by a finite proof; no occurrence or causal assertion is implied. */
+export interface DeterministicNativeRowIdentity {
+  anchorId: string;
+  evidenceRefId: string;
+  captureId: string;
+  traceId: string;
+  traceSide: 'current' | 'reference';
+  relation: string;
+  idColumn: string;
+  id: number;
+  schemaFingerprint: string;
+}
 
 export interface DeterministicClaimProof {
   kind: DeterministicClaimProofKind;
@@ -529,6 +562,7 @@ export interface DeterministicClaimProof {
   reason: string;
   anchorIds: string[];
   evidenceRefIds: string[];
+  nativeRows?: DeterministicNativeRowIdentity[];
 }
 
 export interface ClaimPropositionCoverage {

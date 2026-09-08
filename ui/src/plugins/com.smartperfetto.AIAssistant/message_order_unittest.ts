@@ -38,12 +38,12 @@ describe('AI Assistant message display order', () => {
     expect(ids(orderMessagesForDisplay(messages))).toEqual([
       'ready',
       'user',
-      'answer',
       'timeline',
+      'answer',
     ]);
   });
 
-  it('renders the analysis process after the answer it produced', () => {
+  it('ends each round with its own answer regardless of arrival order', () => {
     const messages = [
       message('ready', 'assistant'),
       message('user-1', 'user'),
@@ -51,19 +51,19 @@ describe('AI Assistant message display order', () => {
       message('timeline-1', 'assistant', 'streaming_flow'),
       message('round-2', 'system', 'round_separator'),
       message('user-2', 'user'),
-      message('answer-2', 'assistant', 'answer_stream'),
       message('timeline-2', 'assistant', 'streaming_flow'),
+      message('answer-2', 'assistant', 'answer_stream'),
     ];
 
     expect(ids(orderMessagesForDisplay(messages))).toEqual([
       'ready',
       'user-1',
-      'answer-1',
       'timeline-1',
+      'answer-1',
       'round-2',
       'user-2',
-      'answer-2',
       'timeline-2',
+      'answer-2',
     ]);
   });
 
@@ -90,8 +90,40 @@ describe('AI Assistant message display order', () => {
     expect(ids(orderMessagesForDisplay(messages))).toEqual([
       'user',
       'data-card',
-      'answer',
       'timeline',
+      'answer',
     ]);
+  });
+
+  it('keeps earlier rounds intact while the current round streams and updates its steps', () => {
+    const firstRound = [
+      message('user-1', 'user'),
+      message('answer-1', 'assistant', 'answer_stream'),
+      message('timeline-1', 'assistant', 'streaming_flow'),
+    ];
+    const secondRound = [
+      message('round-2', 'system', 'round_separator'),
+      message('user-2', 'user'),
+      message('timeline-2', 'assistant', 'streaming_flow'),
+    ];
+    const messages = [...firstRound, ...secondRound];
+    const firstRoundOrder = ['user-1', 'timeline-1', 'answer-1'];
+    expect(ids(orderMessagesForDisplay(messages))).toEqual([
+      ...firstRoundOrder, 'round-2', 'user-2', 'timeline-2',
+    ]);
+
+    messages.push(message('answer-2', 'assistant', 'answer_stream'));
+    secondRound[2].content = 'Updated second-round steps';
+    secondRound[2].timestamp = 2000;
+    messages.push(message('late-data-2', 'assistant'));
+    const originalOrder = ids(messages);
+
+    expect(ids(orderMessagesForDisplay(messages))).toEqual([
+      ...firstRoundOrder,
+      'round-2', 'user-2', 'late-data-2', 'timeline-2', 'answer-2',
+    ]);
+    expect(ids(messages)).toEqual(originalOrder);
+    expect(firstRound[1].content).toBe('answer-1');
+    expect(firstRound[2].content).toBe('timeline-1');
   });
 });

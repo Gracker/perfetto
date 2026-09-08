@@ -178,15 +178,15 @@ describe.each(Object.entries(RUNS))('process view on a real run: %s', (_name, ru
     expect(rendered.length).toBeGreaterThan(200);
   });
 
-  it('places the process view after the answer within the round', () => {
+  it('places the process view before the answer within the round', () => {
     // The real display ordering, not an argument about phase numbers.
     const transcript = renderOrderedTranscript(rendered);
     const question = transcript.indexOf('--- 用户提问');
     const answer = transcript.indexOf('--- 回答');
     const process = transcript.indexOf('--- 分析过程');
     expect(question).toBeGreaterThanOrEqual(0);
-    expect(question).toBeLessThan(answer);
-    expect(answer).toBeLessThan(process);
+    expect(question).toBeLessThan(process);
+    expect(process).toBeLessThan(answer);
   });
 
   it('is headed as the analysis process in the active language', () => {

@@ -22,7 +22,7 @@ function buildRoundIndexMap(messages: readonly Message[]): Map<string, number> {
  * The assistant can append the process view and answer bubbles out of order
  * while an analysis is running. We still keep pre-turn assistant/system cards
  * (notably the initial "AI Assistant ready" card) before the first user prompt,
- * and the analysis process is rendered after the answer it produced.
+ * and each round ends with its answer after its analysis process.
  */
 export function orderMessagesForDisplay(
   messages: readonly Message[],
@@ -51,10 +51,9 @@ export function orderMessagesForDisplay(
     }
   });
 
-  // Within a round: pre-turn cards, the question, everything else, the answer,
-  // and finally the analysis process. The process view sits last so the answer
-  // stays adjacent to the question once it arrives; while the run is still
-  // going there is no answer yet, so the process is still what the reader sees.
+  // Within each round: pre-turn cards, the question, other cards, the analysis
+  // process, and finally the answer. Round boundaries take precedence, so a
+  // previous round's answer always stays before the next question.
   const phase = (msg: Message): number => {
     const round = roundIndexMap.get(msg.id) ?? 0;
     const index = originalIndexMap.get(msg.id) ?? 0;
@@ -62,8 +61,8 @@ export function orderMessagesForDisplay(
 
     if (firstUserIndex !== undefined && index < firstUserIndex) return 0;
     if (msg.role === 'user') return 1;
-    if (msg.flowTag === 'streaming_flow') return 4;
-    if (msg.flowTag === 'answer_stream') return 3;
+    if (msg.flowTag === 'streaming_flow') return 3;
+    if (msg.flowTag === 'answer_stream') return 4;
     return 2;
   };
 

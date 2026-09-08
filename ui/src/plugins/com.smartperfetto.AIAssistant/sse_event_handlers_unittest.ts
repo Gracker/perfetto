@@ -56,6 +56,7 @@ import {
   handleConversationStepEvent,
 } from './sse_event_handlers';
 import {setUiLanguagePreference} from './ui_language';
+import {orderMessagesForDisplay} from './message_order';
 
 import {
   Message,
@@ -1069,6 +1070,75 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].content).toContain('对K1聚类下钻');
   });
 
+  it('preserves all structured fallback output beyond the former 3/12/6/6 limits', () => {
+    const conclusions = Array.from({length: 4}, (_, index) => ({
+      rank: index + 1, statement: `完整结论-${index + 1}`,
+    }));
+    const evidenceChain = Array.from({length: 13}, (_, index) => ({
+      conclusionId: `C${index % 4 + 1}`, text: `完整证据-${index + 1}`,
+    }));
+    const uncertainties = Array.from({length: 7}, (_, index) => `完整不确定性-${index + 1}`);
+    const nextSteps = Array.from({length: 7}, (_, index) => `完整下一步-${index + 1}`);
+    const payload = {conclusionContract: {
+      schemaVersion: 'conclusion_contract_v1', mode: 'initial_report',
+      conclusions, evidenceChain, clusters: [], uncertainties, nextSteps,
+    }};
+    const original = structuredClone(payload);
+
+    handleAnalysisCompletedEvent({data: payload}, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    const output = ctx.messages[0].content;
+    for (const expected of [
+      conclusions.map(item => item.statement), evidenceChain.map(item => item.text), uncertainties, nextSteps,
+    ]) {
+      let previousPosition = -1;
+      for (const item of expected) {
+        const position = output.indexOf(item);
+        expect(position).toBeGreaterThan(previousPosition);
+        previousPosition = position;
+      }
+    }
+    expect(output).toContain('4. 完整结论-4');
+    expect(output).toContain('完整证据-13');
+    expect(output).toContain('完整不确定性-7');
+    expect(output).toContain('完整下一步-7');
+    expect(payload).toEqual(original);
+  });
+
+  it('keeps invalid fallback records and empty values filtered after removing output caps', () => {
+    handleAnalysisCompletedEvent({data: {conclusionContract: {
+      conclusions: [null, 'INVALID_CONCLUSION_RECORD', {statement: '有效结论'}],
+      evidenceChain: [null, 'INVALID_EVIDENCE_RECORD', {conclusionId: 'C1', text: '有效证据'}],
+      uncertainties: [null, '', '有效不确定性'],
+      nextSteps: [null, '', '有效下一步'],
+    }}}, ctx);
+
+    const output = ctx.messages[0].content;
+    expect(output).toContain('1. 有效结论');
+    expect(output).toContain('有效证据');
+    expect(output).toContain('有效不确定性');
+    expect(output).toContain('有效下一步');
+    expect(output).not.toMatch(/INVALID_CONCLUSION_RECORD|INVALID_EVIDENCE_RECORD|\bnull\b/);
+  });
+
+  it('retains authoritative narrative output instead of replacing it with structured fallback collections', () => {
+    const narrative = '模型原生正文。\n\n' + '详细分析与证据说明。'.repeat(40) + '\n\n原生正文末尾保留。';
+    handleAnalysisCompletedEvent({data: {
+      conclusion: narrative,
+      conclusionContract: {
+        conclusions: Array.from({length: 4}, (_, index) => ({statement: `FALLBACK_CONCLUSION_${index}`})),
+        evidenceChain: Array.from({length: 13}, (_, index) => ({text: `FALLBACK_EVIDENCE_${index}`})),
+        uncertainties: Array.from({length: 7}, (_, index) => `FALLBACK_UNCERTAINTY_${index}`),
+        nextSteps: Array.from({length: 7}, (_, index) => `FALLBACK_NEXT_STEP_${index}`),
+      },
+    }}, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toBe(narrative);
+    expect(ctx.messages[0].content).not.toContain('FALLBACK_');
+  });
+
   it('should use jank cluster heading when scene id is jank', () => {
     const data = {
       architecture: 'agent-driven',
@@ -1349,7 +1419,9 @@ describe('per-run source-use receipt projection', () => {
       usedCodebaseIds: ['cb-a'],
       status: 'corroborated',
       coverageComplete: true,
-      mechanismStatuses: ['corroborated'],
+      sourceTextAvailable: false,
+      bindingVerificationStatus: 'not_checked',
+      mechanismStatuses: [],
     });
     expect(JSON.stringify(ctx.messages[0].sourceUseReceipt)).not.toContain(
       'PRIVATE_/Users/me/Main.kt',
@@ -3764,7 +3836,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('最终结论');
+    expect(ctx.messages[0].content).toContain('结果完整性提示');
+    expect(ctx.messages[0].content.endsWith('\n\n最终结论')).toBe(true);
+    expect(ctx.streamingFlow.status).toBe('partial');
     expect(ctx.messages[0].content).not.toContain('## 断言验证结果');
     expect(ctx.messages[0].content).not.toContain('Verifier: failed');
     expect(ctx.messages[0].content).not.toContain(
@@ -4385,7 +4459,71 @@ describe('handleSSEEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toBe('Final conclusion');
+    expect(ctx.messages[0].flowTag).toBe('answer_stream');
   });
+
+  it.each(['streamed', 'conclusion', 'completed', 'recovered'])(
+    'keeps each %s answer after its own timeline and before the next round',
+    (mode) => {
+      const transcript: Message[] = [];
+      const answers: Message[] = [];
+      const timelines: string[] = [];
+
+      for (const round of [1, 2]) {
+        if (round > 1) {
+          transcript.push({id: 'round-2', role: 'system', content: 'Round 2',
+            timestamp: 2, flowTag: 'round_separator'});
+        }
+        transcript.push({id: `user-${round}`, role: 'user',
+          content: `Question ${round}`, timestamp: round});
+        let sequence = 0;
+        const roundCtx = createMockContext({
+          generateId: () => `round-${round}-message-${++sequence}`,
+          addMessage: (msg) => {transcript.push(msg);},
+          getMessages: () => transcript,
+          updateMessage: (id, updates) => {
+            const index = transcript.findIndex((msg) => msg.id === id);
+            if (index !== -1) transcript[index] = {...transcript[index], ...updates};
+          },
+        });
+        handleSSEEvent('conversation_step', {data: {
+          eventId: `step-${round}-1`, ordinal: 1, phase: 'tool', role: 'agent',
+          content: {text: `Round ${round} analysis step`},
+        }}, roundCtx);
+        timelines.push(roundCtx.streamingFlow.conversationMessageId!);
+        const conclusion = `Final conclusion for round ${round}`;
+        if (mode === 'streamed') {
+          handleSSEEvent('answer_token', {data: {token: conclusion, done: true}}, roundCtx);
+        }
+        if (mode === 'streamed' || mode === 'conclusion') {
+          handleSSEEvent('conclusion', {data: {conclusion}}, roundCtx);
+          expect(orderMessagesForDisplay(transcript).at(-1)?.content).toBe(conclusion);
+        }
+        if (mode === 'recovered') roundCtx.setCompletionHandled(true);
+        const answerIdBeforeMetadata = roundCtx.streamingAnswer.messageId;
+        handleSSEEvent('conversation_step', {data: {
+          eventId: `step-${round}-2`, ordinal: 2, phase: 'result', role: 'system',
+          content: {text: `Round ${round} verification finished`},
+        }}, roundCtx);
+        handleSSEEvent('analysis_completed', {data: {
+          conclusion, success: true, reportUrl: `/reports/round-${round}.html`,
+          completion: {schemaVersion: 1, status: 'completed'},
+        }}, roundCtx);
+        const answer = orderMessagesForDisplay(transcript).at(-1)!;
+        expect(answer.flowTag).toBe('answer_stream');
+        expect(answer.content).toBe(conclusion);
+        expect(answer.reportUrl).toBe(`http://localhost:3000/reports/round-${round}.html`);
+        if (answerIdBeforeMetadata) expect(answer.id).toBe(answerIdBeforeMetadata);
+        answers.push({...answer});
+      }
+
+      expect(orderMessagesForDisplay(transcript).map((msg) => msg.id)).toEqual([
+        'user-1', timelines[0], answers[0].id,
+        'round-2', 'user-2', timelines[1], answers[1].id,
+      ]);
+      expect(transcript.find((msg) => msg.id === answers[0].id)).toEqual(answers[0]);
+    },
+  );
 
   it('should replace early streamed answer tokens with canonical conclusion text', () => {
     handleSSEEvent(
@@ -4447,15 +4585,17 @@ describe('handleSSEEvent', () => {
 
     expect(getAISharedState().status).toBe('quota_exceeded');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
+    handleSSEEvent('end', {}, ctx);
+    expect(getAISharedState().status).toBe('quota_exceeded');
   });
 
   it.each([
     {terminalRunStatus: 'failed', success: true, partial: true, expected: 'error', flow: 'failed'},
     {terminalRunStatus: 'cancelled', success: false, partial: true, expected: 'cancelled', flow: 'cancelled'},
-    {terminalRunStatus: 'quota_exceeded', success: false, partial: true, expected: 'quota_exceeded', flow: 'completed'},
-    {terminalRunStatus: 'completed', success: false, partial: false, expected: 'completed', flow: 'completed'},
+    {terminalRunStatus: 'quota_exceeded', success: false, partial: true, expected: 'quota_exceeded', flow: 'partial'},
+    {terminalRunStatus: 'completed', success: false, partial: false, expected: 'partial', flow: 'partial'},
     {success: false, expected: 'error', flow: 'failed'},
-    {success: true, partial: true, expected: 'partial', flow: 'completed'},
+    {success: true, partial: true, expected: 'partial', flow: 'partial'},
     {expected: 'completed', flow: 'completed'},
   ])('preserves terminal precedence and final body for %j', ({expected, flow, ...metadata}) => {
     const payload = {
@@ -4470,13 +4610,137 @@ describe('handleSSEEvent', () => {
     expect(ctx.streamingFlow.status).toBe(flow);
     // Partial results retain the existing completeness notice before the exact
     // model body. Run-status projection must preserve both surfaces.
-    if ('partial' in metadata && metadata.partial === true) {
+    if (expected === 'partial' || ('partial' in metadata && metadata.partial === true)) {
       expect(ctx.messages[0].content.endsWith(`\n\n${payload.conclusion}`)).toBe(true);
     } else {
       expect(ctx.messages[0].content).toBe(payload.conclusion);
     }
     expect(payload).toEqual(originalPayload);
     if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('failed');
+  });
+
+  it.each([
+    {partial: true},
+    {completion: {schemaVersion: 1, status: 'incomplete', reason: 'output_limit'}},
+    {completion: {schemaVersion: 1, status: 'unknown'}},
+    {deliveryAssurance: {schemaVersion: 1, completion: 'coverage_incomplete'}},
+    {deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'failed'}},
+    {conclusionContract: {schemaVersion: 'conclusion_contract_v1', bindingEligibility: 'ineligible', claims: []}},
+    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'failed', issues: [
+      {code: 'binding_ineligible', severity: 'error', claimId: 'Q1'},
+    ]}},
+    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'partial', issues: [
+      {code: 'binding_ineligible', severity: 'error', claimId: 'Q1'},
+    ]}},
+    {claimSupport: [{claimId: 'Q1', bindingEligibility: 'ineligible'}]},
+    {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@1', status: 'failed', bindings: []}},
+  ])('uses structured incomplete metadata consistently for terminal UI: %j', metadata => {
+    handleSSEEvent('progress', {data: {message: '正在核验分析结果'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '保留当前有依据的输出', success: true, terminalRunStatus: 'completed', ...metadata,
+    }}, ctx);
+    const rendered = ctx.flowMessages.map(message => message.content).join('\n');
+    expect(ctx.streamingFlow.status).toBe('partial');
+    expect(getAISharedState().status).toBe('partial');
+    expect(rendered).toContain('流程已结束');
+    expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
+    expect(ctx.messages[0].content).toContain('结果完整性提示');
+    expect(ctx.messages[0].content.endsWith('保留当前有依据的输出')).toBe(true);
+  });
+
+  it('waits for final verification after conclusion and corrects a late incomplete verdict idempotently', () => {
+    handleSSEEvent('progress', {data: {message: '正在查询源码'}}, ctx);
+    handleSSEEvent('conclusion', {data: {conclusion: '先显示可读结论'}}, ctx);
+    expect(ctx.streamingFlow.status).toBe('running');
+    const terminal = {data: {
+      conclusion: '先显示可读结论', terminalRunStatus: 'completed',
+      completion: {schemaVersion: 1, status: 'incomplete', reason: 'output_limit'},
+    }};
+    handleSSEEvent('analysis_completed', terminal, ctx);
+    handleSSEEvent('analysis_completed', terminal, ctx);
+    const rendered = ctx.flowMessages.map(message => message.content).join('\n');
+    expect(ctx.streamingFlow.status).toBe('partial');
+    expect(getAISharedState().status).toBe('partial');
+    expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content.match(/结果完整性提示/g)).toHaveLength(1);
+  });
+
+  it.each([
+    {initial: {partial: true}, state: 'partial', shared: 'partial'},
+    {initial: {success: false, terminalRunStatus: 'failed'}, state: 'failed', shared: 'error'},
+    {initial: {terminalRunStatus: 'quota_exceeded'}, state: 'partial', shared: 'quota_exceeded'},
+    {initial: {terminalRunStatus: 'cancelled'}, state: 'cancelled', shared: 'cancelled'},
+  ])('preserves the accepted $shared verdict through report-only and empty duplicates', ({initial, state, shared}) => {
+    handleSSEEvent('progress', {data: {message: '核验当前结果'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '保留本轮结果', terminationMessage: '本轮核验限制', ...initial,
+    }}, ctx);
+    const reason = ctx.streamingFlow.error;
+    for (const metadata of [{reportUrl: '/reports/late.html'}, {}, {reportUrl: '/reports/late.html'}]) {
+      handleSSEEvent('analysis_completed', {data: metadata}, ctx);
+      expect(ctx.streamingFlow.status).toBe(state);
+      expect(getAISharedState().status).toBe(shared);
+      expect(ctx.streamingFlow.error).toBe(reason);
+      expect(ctx.flowMessages.map(message => message.content).join('\n')).not.toContain('流程完成，结论已生成');
+    }
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/late.html');
+    if (state === 'failed') expect(ctx.streamingAnswer.status).toBe('failed');
+  });
+
+  it('does not use a metadata-only event or legacy body to clear provisional partial status', () => {
+    handleSSEEvent('progress', {data: {message: '分析当前结果'}}, ctx);
+    handleSSEEvent('conclusion', {data: {conclusion: '当前输出'}}, ctx);
+    handleSSEEvent('end', {}, ctx);
+    for (const metadata of [{reportUrl: '/reports/late.html'}, {}, {conclusion: '当前输出'}]) {
+      handleSSEEvent('analysis_completed', {data: metadata}, ctx);
+      expect(ctx.streamingFlow.status).toBe('partial');
+      expect(getAISharedState().status).toBe('partial');
+    }
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '当前输出', completion: {schemaVersion: 1, status: 'completed'},
+    }}, ctx);
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(getAISharedState().status).toBe('completed');
+    expect(ctx.streamingFlow.error).toBeNull();
+  });
+
+  it('starts a new run without the preceding run terminal verdict', () => {
+    const flow = createStreamingFlowState();
+    flow.lastTerminalStatus = 'failed';
+    Object.assign(flow, createStreamingFlowState());
+    expect(flow.lastTerminalStatus).toBeUndefined();
+    expect(flow.status).toBe('idle');
+  });
+
+  it('does not invent verification success when a stream ends after the conclusion', () => {
+    handleSSEEvent('progress', {data: {message: '分析过程'}}, ctx);
+    handleSSEEvent('conclusion', {data: {conclusion: '尚未核验的输出'}}, ctx);
+    handleSSEEvent('end', {}, ctx);
+    expect(ctx.streamingFlow.status).toBe('partial');
+    expect(getAISharedState().status).toBe('partial');
+    expect(ctx.flowMessages.map(message => message.content).join('\n')).toContain('未收到最终完成与核验状态');
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '已接收完整核验状态', completion: {schemaVersion: 1, status: 'completed'},
+      deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'passed'},
+    }}, ctx);
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(getAISharedState().status).toBe('completed');
+    expect(ctx.streamingFlow.error).toBeNull();
+  });
+
+  it('preserves normal completion without inferring failure from analysis text or optional source state', () => {
+    handleSSEEvent('progress', {data: {message: '核验当前输出'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '日志中的 output_limit 和 binding_ineligible 是待分析文本。', success: true,
+      terminalRunStatus: 'completed', completion: {schemaVersion: 1, status: 'completed'},
+      deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'passed', source: 'not_checked', report: 'not_applicable'},
+    }}, ctx);
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(getAISharedState().status).toBe('completed');
+    expect(ctx.flowMessages.map(message => message.content).join('\n')).toContain('流程完成，结论已生成');
+    expect(ctx.messages[0].content).not.toContain('结果完整性提示');
   });
 
   it('retains an authoritative failed body when completion metadata follows earlier tokens and conclusion', () => {

@@ -2,7 +2,17 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-import {describe, expect, it, vi} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
+
+const apiMocks = vi.hoisted(() => ({register: vi.fn()}));
+vi.mock('./codebase_api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./codebase_api')>(),
+  registerCodebase: apiMocks.register,
+}));
+
+beforeEach(() => {
+  apiMocks.register.mockReset();
+});
 
 import type {CodebaseFormAttrs} from './codebase_form';
 import {
@@ -233,7 +243,7 @@ describe('CodebaseForm', () => {
     )?.attrs.required).toBe(true);
     expect(findNode(
       rendered,
-      node => node.tag === 'button' && collectText(node) === 'Register',
+      node => node.tag === 'button' && collectText(node) === 'Add and use for analysis',
     )?.attrs.disabled).toBe(true);
 
     form.vendor = 'qualcomm';
@@ -241,7 +251,7 @@ describe('CodebaseForm', () => {
     rendered = view();
     expect(findNode(
       rendered,
-      node => node.tag === 'button' && collectText(node) === 'Register',
+      node => node.tag === 'button' && collectText(node) === 'Add and use for analysis',
     )?.attrs.disabled).toBe(false);
   });
 
@@ -315,5 +325,78 @@ describe('CodebaseForm', () => {
     expect(renderedText).toMatch(/12/);
     expect(renderedText).toMatch(/manifest.*unavailable|manifest.*不可用/i);
     expect(renderedText).toMatch(/source_metadata_too_large/);
+  });
+});
+
+
+describe('explicit registration consent', () => {
+  const registered: CodebaseSummary = {
+    codebaseId: 'new-source', kind: 'app_source', displayName: 'App',
+    rootAvailable: true, indexGeneration: 0, eligibleForSendToProvider: true,
+  };
+
+  it.each([
+    ['off', true, true],
+    ['provider_send', true, true],
+    ['metadata_only', true, false],
+    ['provider_send', false, false],
+  ] as const)('binds %s / use=%s to explicit body consent', async (mode, use, consent) => {
+    const {form, attrs} = formHarness();
+    attrs.codeAwareMode = mode;
+    form.rootPath = '/source/app';
+    form.excludeGlobs = 'private/**, **/secrets/**';
+    apiMocks.register.mockResolvedValue({codebase: registered});
+    await form.register(attrs, use);
+    expect(apiMocks.register).toHaveBeenCalledWith('http://backend', expect.objectContaining({
+      sendToProvider: consent,
+      excludeGlobs: ['private/**', '**/secrets/**'],
+    }), 'key');
+    expect(attrs.onRegistered).toHaveBeenCalledWith(registered, use);
+  });
+
+  it('keeps source kind and metadata in advanced settings and exclusions in the main flow', () => {
+    const {attrs, view} = formHarness();
+    attrs.codeAwareMode = 'metadata_only';
+    const rendered = view();
+    const advanced = findNode(rendered, node => node.tag === 'details');
+    expect(findNode(advanced, node => node.attrs?.id === 'smartperfetto-codebase-kind')).toBeDefined();
+    expect(findNode(advanced, node => node.attrs?.id === 'smartperfetto-codebase-exclude-globs')).toBeUndefined();
+    expect(collectText(rendered)).toContain('without granting source-text access');
+    expect(collectText(rendered)).toContain('Add for locate-only analysis');
+    expect(collectText(rendered)).not.toContain('Index path scope');
+  });
+
+  it('does not register twice after success even if the consumer cannot refresh', async () => {
+    const {form, attrs} = formHarness();
+    form.rootPath = '/source/app';
+    apiMocks.register.mockResolvedValue({codebase: registered});
+    attrs.onRegistered = vi.fn(() => { throw new Error('refresh failed'); });
+    await form.register(attrs, true);
+    await form.register(attrs, true);
+    expect(apiMocks.register).toHaveBeenCalledOnce();
+    expect(form.registeredCodebase).toEqual(registered);
+  });
+
+  it('keeps the completion callback bound to the original click and ignores backend changes', async () => {
+    const {form, attrs} = formHarness();
+    form.rootPath = '/source/app';
+    let resolve!: (value: unknown) => void;
+    apiMocks.register.mockImplementation(() => new Promise(done => { resolve = done; }));
+    const pending = form.register(attrs, true);
+    const replaced = {...attrs, scopeKey: 'different-workspace', onRegistered: vi.fn()};
+    form.onbeforeupdate({attrs: replaced});
+    resolve({codebase: registered});
+    await pending;
+    expect(attrs.onRegistered).not.toHaveBeenCalled();
+    expect(replaced.onRegistered).not.toHaveBeenCalled();
+    expect(form.registeredCodebase).toBeNull();
+  });
+
+  it('prevents programmatic registration when the form becomes read-only', async () => {
+    const {form, attrs} = formHarness();
+    attrs.readOnly = true;
+    form.rootPath = '/source/app';
+    await form.register(attrs, true);
+    expect(apiMocks.register).not.toHaveBeenCalled();
   });
 });

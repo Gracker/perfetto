@@ -129,6 +129,8 @@ export interface SourceUseReceipt {
   selectedCodebaseIds: string[];
   queriedCodebaseIds: string[];
   usedCodebaseIds: string[];
+  sourceTextAvailable?: boolean;
+  bindingVerificationStatus?: 'passed' | 'partial' | 'failed' | 'not_checked';
   status: SourceUseStatus;
   reasonCode?: Exclude<
     SourceUseStatus,
@@ -569,7 +571,9 @@ export interface StreamingFlowState {
   answerTimelineStarted: boolean;
   answerTimelineOrdinal: number;
   answerTimelineCompleted: boolean;
-  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'idle' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled';
+  /** Last accepted terminal verdict; metadata-only report backfills cannot replace it. */
+  lastTerminalStatus?: 'completed' | 'partial' | 'failed' | 'cancelled' | 'quota_exceeded';
   phases: string[];
   thoughts: string[];
   tools: string[];
@@ -606,6 +610,7 @@ export function createStreamingFlowState(): StreamingFlowState {
     answerTimelineOrdinal: 0,
     answerTimelineCompleted: false,
     status: 'idle',
+    lastTerminalStatus: undefined,
     phases: [],
     thoughts: [],
     tools: [],

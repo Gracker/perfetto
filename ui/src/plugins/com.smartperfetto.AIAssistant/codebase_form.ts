@@ -35,14 +35,17 @@ import {
   updateCodebaseSelection,
 } from './codebase_api';
 import {uiText as text} from './ui_language';
+import type {CodeAwareAnalysisMode} from './types';
 
 export interface CodebaseFormAttrs {
   backendUrl: string;
   apiKey?: string;
   scopeKey: string;
+  readOnly?: boolean;
+  codeAwareMode?: CodeAwareAnalysisMode;
   /** Present only when editing the safe selection policy of a registration. */
   codebase?: CodebaseSummary;
-  onRegistered: (codebase: CodebaseSummary) => void;
+  onRegistered: (codebase: CodebaseSummary, useForAnalysis: boolean) => void;
   onUpdated?: (codebase: CodebaseSummary) => void;
   onCancel: () => void;
 }
@@ -331,7 +334,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private pathFilters = '';
   private scopeApplicationNotice: string | null = null;
   private excludeGlobs = '';
-  private sendToProvider = false;
+  private registeredCodebase: CodebaseSummary | null = null;
   private preview: CodebasePreview | null = null;
   private loading = false;
   private choosingDirectory = false;
@@ -344,7 +347,6 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private apiKey?: string;
   private scopeKey = '';
   private editingIdentity = '';
-  private onRegistered: CodebaseFormAttrs['onRegistered'] = () => {};
   private onUpdated: NonNullable<CodebaseFormAttrs['onUpdated']> = () => {};
 
   oninit(vnode: m.Vnode<CodebaseFormAttrs>) {
@@ -379,6 +381,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       this.loading = false;
       this.choosingDirectory = false;
       this.preview = null;
+      this.registeredCodebase = null;
       this.error = null;
       this.directoryPickerCapability = null;
       if (this.directorySelectionId) {
@@ -413,7 +416,6 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
           .join('\n');
       }
     }
-    this.onRegistered = attrs.onRegistered;
     this.onUpdated = attrs.onUpdated ?? (() => {});
   }
 
@@ -525,11 +527,14 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     }
   }
 
-  private async register(attrs: CodebaseFormAttrs) {
+  private async register(attrs: CodebaseFormAttrs, useForAnalysis = false) {
+    if (attrs.readOnly || this.loading || this.registeredCodebase) return;
     const epoch = ++this.requestEpoch;
     const backendUrl = attrs.backendUrl;
     const apiKey = attrs.apiKey;
     const scopeKey = attrs.scopeKey;
+    // Keep the action bound to the context and permission reviewed at click time.
+    const onRegistered = attrs.onRegistered;
     this.loading = true;
     this.error = null;
     m.redraw();
@@ -537,7 +542,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     const input: RegisterCodebaseInput = {
       kind: this.kind,
       rootPath: this.rootPath.trim(),
-      sendToProvider: this.sendToProvider,
+      sendToProvider: useForAnalysis && attrs.codeAwareMode !== 'metadata_only',
       ...(this.directorySelectionId
         ? {directorySelectionId: this.directorySelectionId}
         : {}),
@@ -563,7 +568,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     try {
       const result = await registerCodebase(backendUrl, input, apiKey);
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
-      this.onRegistered(result.codebase);
+      // Registration is complete even if the subsequent list refresh fails.
+      this.registeredCodebase = result.codebase;
+      onRegistered(result.codebase, useForAnalysis);
     } catch (e: unknown) {
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.error = e instanceof Error ? e.message : text('注册失败', 'Registration failed');
@@ -577,7 +584,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
 
   private async saveSelection(attrs: CodebaseFormAttrs): Promise<void> {
     const codebase = attrs.codebase;
-    if (!codebase || this.loading) return;
+    if (!codebase || this.loading || attrs.readOnly) return;
     const impact = buildCodebaseSelectionImpact(
       codebase,
       this.pathFilters,
@@ -661,7 +668,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     const pickerDisabled = this.capabilityLoading ||
       !pickerAvailable ||
       this.loading ||
-      this.choosingDirectory;
+      this.choosingDirectory || attrs.readOnly === true;
     let hint: string;
     if (this.directorySelectionId) {
       hint = text(
@@ -866,7 +873,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     const pathFiltersRequired = codebaseFieldRequirements(codebase.kind).pathFilters;
     const pathFilters = impact.replacement.pathFilters;
     const saveDisabled = this.loading ||
-      !impact.changed ||
+      attrs.readOnly || !impact.changed ||
       (pathFiltersRequired && pathFilters.length === 0);
     return m('div', [
       m('div', {style: STYLES.intro}, text(
@@ -875,7 +882,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       )),
       this.renderField(
         'smartperfetto-codebase-path-filters',
-        text('索引路径范围', 'Index path scope'),
+        text('允许访问的源码范围', 'Allowed source access scope'),
         this.pathFilters,
         (value) => {
           this.pathFilters = value;
@@ -889,8 +896,8 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
                 'Kernel source requires at least one relative path prefix, separated by commas or new lines.',
               )
             : text(
-                '完整替换已有路径前缀；留空表示全部受支持源码。',
-                'Completely replaces the existing prefixes. Empty means all supported source files.',
+                '同时限制索引、搜索和按需读取；留空表示全部受支持源码。',
+                'Applies to indexing, search, and on-demand reads. Empty means all supported source files.',
               ),
         },
       ),
@@ -977,6 +984,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
 
   private renderAdvancedSettings(
     requirements: CodebaseFieldRequirements,
+    attrs: CodebaseFormAttrs,
   ): m.Children {
     return m('details', {style: STYLES.advanced}, [
       m(
@@ -985,6 +993,70 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         text('高级设置（可选）', 'Advanced settings (optional)'),
       ),
       m('div', {style: STYLES.advancedBody}, [
+        m('div', {style: STYLES.row}, [
+          m('div', {style: STYLES.field}, [
+            this.renderLabel(
+              'smartperfetto-codebase-kind',
+              text('源码类型', 'Source type'),
+              true,
+            ),
+            m(
+              'select',
+              {
+                id: 'smartperfetto-codebase-kind',
+                style: STYLES.input,
+                value: this.kind,
+                required: true,
+                'aria-required': 'true',
+                onchange: (e: Event) => {
+                  this.kind = (e.target as HTMLSelectElement).value as CodebaseKind;
+                  this.error = null;
+                },
+              },
+              CODEBASE_KINDS.map((kind) => m(
+                'option',
+                {value: kind},
+                kindLabel(kind),
+              )),
+            ),
+          ]),
+          this.renderField(
+            'smartperfetto-codebase-display-name',
+            text('显示名称', 'Display name'),
+            this.displayName,
+            (value) => {
+              this.displayName = value;
+              this.displayNameWasSuggested = false;
+            },
+            {
+              placeholder: text('默认使用文件夹名称', 'Defaults to the folder name'),
+              hint: text(
+                '只影响界面显示，不参与源码身份判断。',
+                'Affects display only; it is not part of source identity.',
+              ),
+            },
+          ),
+        ]),
+        this.renderRequiredMetadata(requirements),
+        requirements.pathFilters
+          ? this.renderField(
+              'smartperfetto-codebase-path-filters',
+              text('允许访问的源码范围', 'Allowed source access scope'),
+              this.pathFilters,
+              (value) => {
+                this.pathFilters = value;
+                this.scopeApplicationNotice = null;
+              },
+              {
+                required: true,
+                placeholder: text('例如 kernel/, drivers/', 'For example: kernel/, drivers/'),
+                hint: text(
+                  '内核源码必须限定相对路径前缀，使用逗号或换行分隔。',
+                  'Kernel source requires relative path prefixes, separated by commas or new lines.',
+                ),
+              },
+            )
+          : null,
         this.renderField(
           'smartperfetto-codebase-build-id',
           text('构建 ID', 'Build ID'),
@@ -1002,7 +1074,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         !requirements.pathFilters
           ? this.renderField(
               'smartperfetto-codebase-path-filters',
-              text('索引路径范围', 'Index path scope'),
+              text('允许访问的源码范围', 'Allowed source access scope'),
               this.pathFilters,
               (value) => {
                 this.pathFilters = value;
@@ -1010,26 +1082,12 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
               },
               {
                 hint: text(
-                  '使用逗号或换行分隔相对路径前缀；留空表示扫描全部受支持源码。',
-                  'Comma or newline separated relative path prefixes. Leave empty to scan all supported source files.',
+                  '同时限制索引、搜索和按需读取。逗号分隔相对路径前缀；留空表示全部受支持源码。',
+                  'Applies to indexing, search, and on-demand reads. Comma-separated relative prefixes; empty means all supported source files.',
                 ),
               },
             )
           : null,
-        this.renderField(
-          'smartperfetto-codebase-exclude-globs',
-          text('额外排除规则', 'Additional exclude globs'),
-          this.excludeGlobs,
-          (value) => {
-            this.excludeGlobs = value;
-          },
-          {
-            hint: text(
-              '使用逗号或换行分隔相对 glob；默认已排除 .git、build、node_modules 等目录。',
-              'Comma or newline separated relative globs. Common directories such as .git, build, and node_modules are already excluded.',
-            ),
-          },
-        ),
         this.kind === 'kernel_source'
           ? this.renderField(
               'smartperfetto-codebase-license',
@@ -1056,153 +1114,88 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             '原生符号产物导入尚未配置；当前符号查询来自已索引源码文本中提取的符号。',
             'Native symbol artifact ingestion is not configured. Symbol lookup currently uses symbols derived from indexed source text.',
           )),
+        m('button', {
+          type: 'button',
+          style: STYLES.button,
+          disabled: attrs.readOnly || this.loading || this.choosingDirectory || !this.rootPath.trim(),
+          onclick: () => this.previewRoot(attrs),
+        }, text('预览可访问文件', 'Preview accessible files')),
+        this.renderPreview(),
       ]),
     ]);
   }
 
   view(vnode: m.Vnode<CodebaseFormAttrs>): m.Children {
     this.syncAttrs(vnode.attrs);
-    if (vnode.attrs.codebase) {
-      return this.renderSelectionEditor(vnode.attrs, vnode.attrs.codebase);
+    const attrs = vnode.attrs;
+    if (attrs.codebase) {
+      return this.renderSelectionEditor(attrs, attrs.codebase);
     }
     const requirements = codebaseFieldRequirements(this.kind);
     const registrationReady = this.rootPath.trim().length > 0 &&
       (!requirements.vendor || this.vendor.trim().length > 0) &&
       (!requirements.licenseTag || this.licenseTag.trim().length > 0) &&
       (!requirements.pathFilters || splitLines(this.pathFilters).length > 0);
+    const disabled = attrs.readOnly || this.loading || this.choosingDirectory ||
+      !!this.registeredCodebase || !registrationReady;
+    const locateOnly = attrs.codeAwareMode === 'metadata_only';
     return m('div', [
-      m(
-        'div',
-        {style: STYLES.intro},
-        text(
-          '先选择源码类型和文件夹。只有当前类型确实需要的元数据才会显示为必填。',
-          'Choose the source type and folder first. Only metadata required by that source type is marked as required.',
-        ),
-      ),
-      m('div', {style: STYLES.row}, [
-        m('div', {style: STYLES.field}, [
-          this.renderLabel(
-            'smartperfetto-codebase-kind',
-            text('源码类型', 'Source type'),
-            true,
-          ),
-          m(
-            'select',
-            {
-              id: 'smartperfetto-codebase-kind',
-              style: STYLES.input,
-              value: this.kind,
-              required: true,
-              'aria-required': 'true',
-              onchange: (e: Event) => {
-                this.kind = (e.target as HTMLSelectElement).value as CodebaseKind;
-                this.error = null;
-              },
-            },
-            CODEBASE_KINDS.map((kind) => m(
-              'option',
-              {value: kind},
-              kindLabel(kind),
-            )),
-          ),
-        ]),
+      m('div', {style: STYLES.intro}, text(
+        '添加源码后即可按需搜索和读取，无需先构建索引。',
+        'Add a source folder to search and read it on demand. No index is required.',
+      )),
+      m('fieldset', {
+        disabled: attrs.readOnly || this.loading || !!this.registeredCodebase,
+        style: {border: 0, padding: 0, margin: 0, minWidth: 0},
+      }, [
+        this.renderRootPath(attrs),
         this.renderField(
-          'smartperfetto-codebase-display-name',
-          text('显示名称', 'Display name'),
-          this.displayName,
-          (value) => {
-            this.displayName = value;
-            this.displayNameWasSuggested = false;
-          },
-          {
-            placeholder: text('默认使用文件夹名称', 'Defaults to the folder name'),
-            hint: text(
-              '只影响界面显示，不参与源码身份判断。',
-              'Affects display only; it is not part of source identity.',
-            ),
-          },
+          'smartperfetto-codebase-exclude-globs',
+          text('不允许访问的路径', 'Excluded paths'),
+          this.excludeGlobs,
+          (value) => { this.excludeGlobs = value; this.preview = null; },
+          {hint: text(
+            '填写相对路径规则，例如 private/**、**/secrets/**，逗号分隔。默认跳过 .git、build、node_modules 等目录。',
+            'Relative patterns such as private/** or **/secrets/**, separated by commas. .git, build, and node_modules are already excluded.',
+          )},
         ),
+        this.renderAdvancedSettings(requirements, attrs),
       ]),
-      this.renderRootPath(vnode.attrs),
-      this.renderRequiredMetadata(requirements),
-      requirements.pathFilters
-        ? this.renderField(
-            'smartperfetto-codebase-path-filters',
-            text('索引路径范围', 'Index path scope'),
-            this.pathFilters,
-            (value) => {
-              this.pathFilters = value;
-              this.scopeApplicationNotice = null;
-            },
-            {
-              required: true,
-              placeholder: text('例如 kernel/, drivers/', 'For example: kernel/, drivers/'),
-              hint: text(
-                '内核源码必须限定相对路径前缀，使用逗号或换行分隔。',
-                'Kernel source requires relative path prefixes, separated by commas or new lines.',
-              ),
-            },
+      m('div', {style: STYLES.intro}, locateOnly
+        ? text(
+            '当前为仅定位模式。添加后只向模型提供文件、符号和行号，不授权发送源码正文。',
+            'Locate-only mode is active. Adding this folder supplies file, symbol, and line references without granting source-text access.',
           )
-        : null,
-      this.renderAdvancedSettings(requirements),
-      m('label', {style: STYLES.consent}, [
-        m('input[type=checkbox]', {
-          checked: this.sendToProvider,
-          onchange: (e: Event) => {
-            this.sendToProvider = (e.target as HTMLInputElement).checked;
-          },
-        }),
-        m('span', [
-          m('div', text(
-            '允许将选中的脱敏源码片段发送给模型提供商（可选，默认关闭）',
-            'Allow selected redacted excerpts to be sent to the model provider (optional, off by default)',
+        : text(
+            '点击“添加并用于分析”，即允许分析时使用的模型按需接收此文件夹中未排除的脱敏源码片段。可随时取消选择或撤销授权。',
+            '“Add and use for analysis” allows the model used for analysis to receive redacted snippets from this folder on demand, excluding the paths above. You can deselect it or revoke access at any time.',
           )),
-          m('div', {style: STYLES.hint}, text(
-            '关闭时仍可建立本地索引；每次分析还需要再次显式选择允许发送的模式。',
-            'Local indexing still works when off. Each analysis must separately opt into provider-send mode.',
-          )),
-        ]),
-      ]),
-      this.renderPreview(),
       this.scopeApplicationNotice
         ? m('div', {style: STYLES.hint, role: 'status'}, this.scopeApplicationNotice)
         : null,
-      this.error ? m('div', {style: STYLES.error}, this.error) : null,
+      this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,
+      this.registeredCodebase
+        ? m('div', {style: STYLES.hint, role: 'status'}, text(
+            '源码库已添加。请返回列表查看，无需重复添加。',
+            'The source folder was added. Return to the list; no repeat registration is needed.',
+          ))
+        : null,
       m('div', {style: STYLES.actions}, [
-        m(
-          'button',
-          {
-            type: 'button',
-            style: STYLES.button,
-            onclick: () => vnode.attrs.onCancel(),
-            disabled: this.loading || this.choosingDirectory,
-          },
-          text('取消', 'Cancel'),
-        ),
-        m(
-          'button',
-          {
-            type: 'button',
-            style: STYLES.button,
-            onclick: () => this.previewRoot(vnode.attrs),
-            disabled: this.loading ||
-              this.choosingDirectory ||
-              !this.rootPath.trim(),
-          },
-          text('预览', 'Preview'),
-        ),
-        m(
-          'button',
-          {
-            type: 'button',
-            style: {...STYLES.button, ...STYLES.primary},
-            onclick: () => this.register(vnode.attrs),
-            disabled: this.loading ||
-              this.choosingDirectory ||
-              !registrationReady,
-          },
-          text('注册', 'Register'),
-        ),
+        m('button', {
+          type: 'button', style: STYLES.button,
+          onclick: () => attrs.onCancel(), disabled: this.loading || this.choosingDirectory,
+        }, text('取消', 'Cancel')),
+        m('button', {
+          type: 'button', style: STYLES.button, disabled,
+          onclick: () => this.register(attrs, false),
+        }, text('仅添加，不用于分析', 'Add without using')),
+        m('button', {
+          type: 'button', style: {...STYLES.button, ...STYLES.primary}, disabled,
+          'aria-busy': this.loading ? 'true' : 'false',
+          onclick: () => this.register(attrs, true),
+        }, this.loading ? text('添加中…', 'Adding…') : locateOnly
+          ? text('添加并用于定位', 'Add for locate-only analysis')
+          : text('添加并用于分析', 'Add and use for analysis')),
       ]),
     ]);
   }

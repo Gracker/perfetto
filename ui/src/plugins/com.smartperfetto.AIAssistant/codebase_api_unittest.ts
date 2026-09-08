@@ -5,7 +5,9 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
+  CodebaseApiError,
   acceptPendingCodebaseGeneration,
+  reindexCodebase,
   authorizeCurrentCodebaseSelection,
   deleteCodebase,
   getCodebaseDirectoryPickerCapability,
@@ -380,5 +382,24 @@ describe('external knowledge source API', () => {
       'http://backend/api/rag/android-internals/sources/wiki%2Fa/reindex',
       expect.objectContaining({method: 'POST'}),
     );
+  });
+});
+
+
+describe('structured codebase failures', () => {
+  it('retains typed availability without assuming a truthy malformed value is permission', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 422, json: async () => ({success: false,
+        code: 'CODEBASE_INDEX_CAPACITY_EXCEEDED', message: 'Optional index capacity exceeded', onDemandAvailable: true,
+      }),
+    } as Response)));
+    await expect(reindexCodebase('http://backend', 'cb-a')).rejects.toMatchObject({
+      name: 'CodebaseApiError', code: 'CODEBASE_INDEX_CAPACITY_EXCEEDED', onDemandAvailable: true,
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 403, json: async () => ({success: false, error: 'forbidden', onDemandAvailable: 'true'}),
+    } as Response)));
+    await expect(reindexCodebase('http://backend', 'cb-a')).rejects.toBeInstanceOf(CodebaseApiError);
+    await expect(reindexCodebase('http://backend', 'cb-a')).rejects.toMatchObject({onDemandAvailable: undefined, status: 403});
   });
 });

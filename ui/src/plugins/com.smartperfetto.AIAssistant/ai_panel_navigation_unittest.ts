@@ -1368,10 +1368,16 @@ describe('AIPanel source authorization boundary', () => {
     expect(panel.state.analysisContext.authorizationEpoch).toBe(4);
   });
 
-  it('renders a compact receipt with safe status, coverage, ids, and mechanisms only', () => {
+  it.each([
+    ['zh-CN', '搜索覆盖不完整', '已选 2 个源码库；查询 1 个；定位 1 个。', '源码已支持机制结论'],
+    ['en', 'Incomplete search coverage', '2 codebases selected; 1 queried; 1 located.', 'Source supports a mechanism claim'],
+  ] as const)('renders the receipt in %s without raw ids or status codes', (language, coverage, counts, mechanism) => {
+    setUiLanguagePreference(language);
     const panel = new AIPanel() as any;
     const rendered = panel.renderSourceUseReceipt({
       schemaVersion: 'source_use_receipt@1',
+      bindingVerificationStatus: 'partial',
+      sourceTextAvailable: true,
       codeAwareMode: 'provider_send',
       selectedCodebaseIds: ['cb-a', 'cb-b'],
       queriedCodebaseIds: ['cb-b'],
@@ -1381,16 +1387,20 @@ describe('AIPanel source authorization boundary', () => {
       coverageComplete: false,
       incompleteReasons: ['time_budget'],
       mechanismStatuses: ['corroborated', 'compatible'],
+      snippet: 'PRIVATE_SOURCE_BODY_CANARY',
+      rootPath: '/Users/private/source-root',
+      references: [{filePath: 'private/Main.kt', lineRange: {start: 1, end: 20}}],
     });
     const renderedText = collectVNodeText(rendered);
 
     expect(rendered?.tag).toBe('details');
     expect(rendered?.attrs?.className).toContain('ai-source-use-receipt');
-    expect(renderedText).toMatch(/search_incomplete/);
-    expect(renderedText).toMatch(/cb-a.*cb-b/s);
-    expect(renderedText).toMatch(/time_budget/);
-    expect(renderedText).toMatch(/corroborated.*compatible/s);
-    expect(renderedText).not.toMatch(/filePath|lineRange|snippet|rootPath|query/);
+    expect(renderedText).toContain(coverage);
+    expect(renderedText).toContain(counts);
+    expect(renderedText).toContain(mechanism);
+    expect(renderedText).not.toMatch(/cb-a|cb-b|time_budget|search_incomplete/);
+    expect(renderedText).not.toMatch(/PRIVATE_SOURCE_BODY_CANARY|\/Users\/private\/source-root|private\/Main.kt/);
+    expect(renderedText).not.toMatch(/(?:filePath|lineRange|snippet|rootPath|query)\s*[:=]/);
   });
 });
 

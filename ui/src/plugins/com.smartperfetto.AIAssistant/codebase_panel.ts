@@ -27,6 +27,7 @@ import type {
   ExternalKnowledgeSourceSummary,
 } from './codebase_api';
 import {
+  CodebaseApiError,
   acceptPendingCodebaseGeneration,
   authorizeAvailableCodebaseExtensions,
   authorizeCurrentCodebaseSelection,
@@ -213,9 +214,52 @@ export function codebaseAvailableForOnDemandAccess(
 
 export function optionalIndexCopyForActiveRoot(): string {
   return text(
-    '该注册路径已可直接按需搜索/读取，无需重建。GitNexus 本地索引若已安装或可用，只作为可选导航；缺失、过期或失败时会回退。SmartPerfetto 索引仍是可选的语义/补丁加速。',
-    'This registered path is ready for bounded search/read and needs no rebuild. A local GitNexus index, when installed or available, is optional navigation only; missing, stale, or failed indexes fall back. The SmartPerfetto index remains optional semantic and patch acceleration.',
+    '无需索引即可按当前授权范围搜索和读取。索引是可选的检索加速项。',
+    'Search and read within the current authorization scope without an index. Indexing is optional retrieval acceleration.',
   );
+}
+
+/** This action authorizes only the newly added folder; latent selections stay off. */
+export function analysisContextAfterCodebaseRegistration(
+  selection: AnalysisContextSelection,
+  codebase: CodebaseSummary,
+  codebases: readonly CodebaseSummary[],
+): AnalysisContextSelection {
+  if (!codebaseAvailableForOnDemandAccess(codebase)) return selection;
+  const mode = selection.codeAwareMode === 'off' ? 'provider_send' : selection.codeAwareMode;
+  if (mode === 'provider_send' && codebase.eligibleForSendToProvider !== true) return selection;
+  const retained = selection.codeAwareMode === 'off' ? [] : selection.codebaseIds.filter(id => {
+    const source = codebases.find(candidate => candidate.codebaseId === id);
+    return source && codebaseAvailableForOnDemandAccess(source) &&
+      (mode !== 'provider_send' || source.eligibleForSendToProvider === true);
+  });
+  return normalizeAnalysisContext({
+    ...selection,
+    codeAwareMode: mode,
+    codebaseIds: [...retained, codebase.codebaseId],
+  });
+}
+
+export function codebaseIndexFailureMessage(
+  error: unknown,
+  refreshed?: CodebaseSummary,
+): string {
+  const capacity = error instanceof CodebaseApiError &&
+    error.code === 'CODEBASE_INDEX_CAPACITY_EXCEEDED';
+  const reason = capacity
+    ? text('源码较大，未能构建可选索引。', 'This source tree exceeds the optional index capacity.')
+    : text('可选索引构建失败。', 'The optional index could not be built.');
+  const available = error instanceof CodebaseApiError
+    ? error.status === 401 || error.status === 403 ? false : error.onDemandAvailable
+    : undefined;
+  const access = available === false || refreshed?.rootAvailable === false
+    ? text('当前无法按需访问，请检查源码文件夹与访问权限。', 'On-demand access is unavailable. Check the source folder and permissions.')
+    : available === true
+      ? text('已确认仍可按当前授权范围按需访问，无需先完成索引。', 'On-demand access within the current authorization scope is still available; indexing is not required.')
+      : refreshed?.rootAvailable === true
+        ? text('源码文件夹仍可访问；实际搜索和读取取决于当前授权。', 'The source folder remains accessible; search and reads depend on current authorization.')
+        : text('尚未确认按需访问是否可用，请刷新列表后检查。', 'On-demand availability could not be confirmed. Refresh the list to check.');
+  return `${reason} ${access}`;
 }
 
 export function codebaseDeletionPending(codebase: CodebaseSummary): boolean {
@@ -291,6 +335,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private knowledgeSendToProvider = false;
   private loadEpoch = 0;
   private identityEpoch = 0;
+  private registrationBoundaryRevision = 0;
+  private unavailableCodebaseIds = new Set<string>();
   private backendUrl = '';
   private apiKey?: string;
   private scopeKey = '';
@@ -319,6 +365,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.loadEpoch++;
       this.identityEpoch++;
       this.codebases = [];
+      this.unavailableCodebaseIds.clear();
       this.knowledgeSources = [];
       this.error = null;
       this.reindexingId = null;
@@ -338,7 +385,17 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     }
   }
 
+  onbeforeupdate(vnode: m.Vnode<CodebasePanelAttrs>) {
+    // Rebind before rendering children so a stale form never sees a new callback.
+    this.onupdate(vnode);
+    return true;
+  }
+
   private syncAttrs(attrs: CodebasePanelAttrs): void {
+    if (!sameAnalysisContext(this.selection, attrs.selection) ||
+        this.readOnly !== (attrs.readOnly === true)) {
+      this.registrationBoundaryRevision++;
+    }
     this.selection = normalizeAnalysisContext(attrs.selection);
     this.readOnly = attrs.readOnly === true;
     this.onSelectionChange = attrs.onSelectionChange;
@@ -351,7 +408,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     codebaseExcerptCache.clearForPanelUnmount();
   }
 
-  private async load() {
+  private async load(): Promise<boolean> {
     const epoch = ++this.loadEpoch;
     const backendUrl = this.backendUrl;
     const apiKey = this.apiKey;
@@ -364,9 +421,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         listCodebases(backendUrl, apiKey),
         listExternalKnowledgeSources(backendUrl, apiKey),
       ]);
-      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return false;
       const failures: string[] = [];
       if (codebaseResult.status === 'fulfilled') {
+        this.unavailableCodebaseIds.clear();
         this.featureEnabled = codebaseResult.value.featureEnabled;
         this.codebases = codebaseResult.value.codebases;
       } else {
@@ -386,13 +444,16 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         codebasesLoaded: codebaseResult.status === 'fulfilled',
         knowledgeLoaded: knowledgeResult.status === 'fulfilled',
       });
+      return codebaseResult.status === 'fulfilled';
     } catch (e: unknown) {
-      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
+      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return false;
       this.error = e instanceof Error ? e.message : text('加载分析上下文失败', 'Failed to load analysis context');
+      return false;
     } finally {
-      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
-      this.loading = false;
-      m.redraw();
+      if (this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
+        this.loading = false;
+        m.redraw();
+      }
     }
   }
 
@@ -545,7 +606,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         ...availableSelection,
         codebaseIds: availableSelection.codebaseIds.filter((id) => {
           const codebase = codebases.get(id);
-          return !!codebase && codebaseAvailableForOnDemandAccess(codebase) &&
+          return !!codebase && !this.unavailableCodebaseIds.has(id) &&
+            codebaseAvailableForOnDemandAccess(codebase) &&
             (availableSelection.codeAwareMode !== 'provider_send' ||
               codebase.eligibleForSendToProvider === true);
         }),
@@ -577,6 +639,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     if (
       this.readOnly ||
       this.selection.codeAwareMode === 'off' ||
+      this.unavailableCodebaseIds.has(codebase.codebaseId) ||
       !codebaseAvailableForOnDemandAccess(codebase) ||
       (this.selection.codeAwareMode === 'provider_send' && !codebase.eligibleForSendToProvider)
     ) return;
@@ -699,15 +762,21 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       await this.load();
     } catch (e: unknown) {
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.error = e instanceof Error
-        ? text(
-            `${e.message}；这不影响按需源码读取。`,
-            `${e.message}; on-demand source access remains available.`,
-          )
-        : text(
-            '可选索引构建失败；按需源码读取仍可使用。',
-            'Optional index build failed; on-demand source access remains available.',
-          );
+      const refreshed = await this.load();
+      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
+      if (e instanceof CodebaseApiError && (e.onDemandAvailable === false ||
+          e.status === 401 || e.status === 403)) {
+        this.unavailableCodebaseIds.add(codebase.codebaseId);
+        this.emitSelection({
+          ...this.selection,
+          codebaseIds: this.selection.codebaseIds.filter(id => id !== codebase.codebaseId),
+        });
+      }
+      const refreshError = this.error;
+      this.error = codebaseIndexFailureMessage(e, refreshed
+        ? this.codebases.find(candidate => candidate.codebaseId === codebase.codebaseId)
+        : undefined);
+      if (refreshError) this.error += ` ${refreshError}`;
     } finally {
       if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
         this.reindexingId = null;
@@ -903,7 +972,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     const deletionPending = codebaseDeletionPending(codebase);
     const selected = this.selection.codebaseIds.includes(codebase.codebaseId);
     const hasActiveIndex = codebaseHasActiveIndex(codebase);
-    const availableForOnDemandAccess = codebaseAvailableForOnDemandAccess(codebase);
+    const availableForOnDemandAccess = codebaseAvailableForOnDemandAccess(codebase) &&
+      !this.unavailableCodebaseIds.has(codebase.codebaseId);
     const selectionDisabled = this.readOnly ||
       this.selection.codeAwareMode === 'off' ||
       !availableForOnDemandAccess ||
@@ -918,11 +988,19 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           }),
           m('span', [
             m('div', {style: STYLES.name}, codebase.displayName),
-            m('div', {style: STYLES.meta}, codebase.codebaseId),
           ]),
         ]),
-        m('div', {style: STYLES.meta}, codebase.kind),
       ]),
+      m('div', {style: STYLES.subtitle}, !availableForOnDemandAccess
+        ? text('源码当前不可访问', 'Source is currently unavailable')
+        : selected && this.selection.codeAwareMode !== 'off'
+          ? this.selection.codeAwareMode === 'metadata_only'
+            ? text('已选中 · 仅定位文件和符号', 'Selected · file and symbol locations only')
+            : text('已选中 · 模型可按需读取源码片段', 'Selected · model may read snippets on demand')
+          : text('已添加 · 尚未用于分析', 'Added · not selected for analysis')),
+      m('details', [
+        m('summary', {style: {...STYLES.subtitle, minHeight: '40px', cursor: 'pointer', display: 'flex', alignItems: 'center'}},
+          text('访问范围、索引与管理', 'Access scope, indexing, and management')),
       m('div', {style: STYLES.chips}, [
         m('span', {style: STYLES.chip}, `${text('分片', 'chunks')} ${codebase.chunkCount ?? 0}`),
         m('span', {style: STYLES.chip}, `${text('代际', 'gen')} ${codebase.indexGeneration}`),
@@ -953,7 +1031,11 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         `Included scope: ${codebase.pathFilters?.length ? codebase.pathFilters.join(', ') : 'all'}; exclude globs: ${codebase.excludeGlobs?.length ? codebase.excludeGlobs.join(', ') : 'none'}`,
       )),
       codebase.lastIngestError
-        ? m('div', {style: STYLES.error}, codebase.lastIngestError)
+        ? m('div', {style: STYLES.error}, codebaseIndexFailureMessage(
+            new CodebaseApiError('', codebase.lastIngestError.startsWith('source_chunk_limit_exceeded:')
+              ? 'CODEBASE_INDEX_CAPACITY_EXCEEDED' : 'CODEBASE_INDEX_FAILED'),
+            codebase,
+          ))
         : null,
       codebase.activeIndexCoverage
         ? m('div', {
@@ -1143,6 +1225,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
             codebase,
           })
         : null,
+      ]),
     ]);
   }
 
@@ -1155,18 +1238,18 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       },
       {
         id: 'metadata_only',
-        label: text('仅元数据', 'Metadata only'),
+        label: text('仅定位', 'Locate only'),
         detail: text('只提供文件、符号与行号引用，不发送源码正文。', 'Use file, symbol, and line references without source text.'),
       },
       {
         id: 'provider_send',
-        label: text('完整源码', 'Full source'),
+        label: text('按需读取源码', 'Read source on demand'),
         detail: text('仅对已明确授权的源码发送脱敏片段。', 'Send redacted snippets only from explicitly consented codebases.'),
       },
     ];
     const current = modes.find((mode) => mode.id === this.selection.codeAwareMode) ?? modes[0];
     return m('div', {style: STYLES.context}, [
-      m('div', {style: STYLES.name}, text('分析上下文', 'Analysis context')),
+      m('div', {style: STYLES.name}, text('源码使用方式', 'Source access mode')),
       m('div', {style: STYLES.subtitle}, current.detail),
       m('div', {style: STYLES.modeRow}, modes.map((mode) =>
         m('button', {
@@ -1341,6 +1424,37 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     ]);
   }
 
+  private completeCodebaseRegistration(
+    codebase: CodebaseSummary,
+    useForAnalysis: boolean,
+    identityEpoch: number,
+    boundaryRevision: number,
+    selectionAtRegistration: AnalysisContextSelection,
+  ): void {
+    if (identityEpoch !== this.identityEpoch) return;
+    // Retain the returned identity before refreshing, including refresh failure.
+    this.codebases = [
+      ...this.codebases.filter(candidate => candidate.codebaseId !== codebase.codebaseId),
+      codebase,
+    ];
+    const canSelect = useForAnalysis && !this.readOnly && this.featureEnabled &&
+      boundaryRevision === this.registrationBoundaryRevision &&
+      sameAnalysisContext(selectionAtRegistration, this.selection);
+    if (canSelect) {
+      this.emitSelection(analysisContextAfterCodebaseRegistration(
+        this.selection, codebase, this.codebases,
+      ));
+    }
+    const selected = canSelect && this.selection.codebaseIds.includes(codebase.codebaseId);
+    this.success = selected
+      ? this.selection.codeAwareMode === 'metadata_only'
+        ? text(`已添加 ${codebase.displayName}，用于源码定位。`, `Added ${codebase.displayName} for locate-only analysis.`)
+        : text(`已添加 ${codebase.displayName}，下一次分析可按需读取。`, `Added ${codebase.displayName}; the next analysis can read it on demand.`)
+      : text(`已添加 ${codebase.displayName}，尚未用于分析。`, `Added ${codebase.displayName} without selecting it for analysis.`);
+    this.viewMode = 'list';
+    void this.load();
+  }
+
   view(_vnode: m.Vnode<CodebasePanelAttrs>): m.Children {
     if (this.viewMode === 'add-knowledge') return this.renderKnowledgeSourceForm();
     if (this.viewMode === 'edit-codebase') {
@@ -1362,6 +1476,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
             backendUrl: this.backendUrl,
             apiKey: this.apiKey,
             scopeKey: this.scopeKey,
+            readOnly: this.readOnly,
             codebase,
             onRegistered: () => {},
             onUpdated: (updated) => {
@@ -1387,25 +1502,24 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       }
     }
     if (this.viewMode === 'add-codebase') {
+      const identityEpoch = this.identityEpoch;
+      const boundaryRevision = this.registrationBoundaryRevision;
+      const selection = normalizeAnalysisContext(this.selection);
       return m('div', {style: STYLES.shell}, [
         m('div', {style: STYLES.header}, [
           m('div', [
-            m('h4', {style: STYLES.title}, text('注册源码库', 'Register codebase')),
-            m('div', {style: STYLES.subtitle}, text(
-              '注册前会由后端先执行安全预览。',
-              'The backend runs a security preview before registration.',
-            )),
+            m('h4', {style: STYLES.title}, text('添加源码', 'Add source')),
           ]),
         ]),
         m(CodebaseForm, {
           backendUrl: this.backendUrl,
           apiKey: this.apiKey,
           scopeKey: this.scopeKey,
-          onRegistered: (codebase) => {
-            this.success = text(`已注册 ${codebase.displayName}`, `Registered ${codebase.displayName}`);
-            this.viewMode = 'list';
-            this.load();
-          },
+          readOnly: this.readOnly,
+          codeAwareMode: selection.codeAwareMode,
+          onRegistered: (codebase, useForAnalysis) => this.completeCodebaseRegistration(
+            codebase, useForAnalysis, identityEpoch, boundaryRevision, selection,
+          ),
           onCancel: () => {
             this.viewMode = 'list';
           },

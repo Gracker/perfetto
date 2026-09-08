@@ -95,6 +95,13 @@ type AnalysisCompletedPayload = {
   rounds?: number;
   reportError?: string;
   terminalRunStatus?: AnalysisCompletedEvent['data']['terminalRunStatus'];
+  completionStatus?: NonNullable<AnalysisCompletedEvent['data']['completion']>['status'];
+  deliveryIncomplete?: boolean;
+  deliveryCompletionPassed?: boolean;
+  sourceVerificationFailed?: boolean;
+  /** Local projection fields, never accepted from SSE JSON. */
+  hasResultContent?: boolean;
+  effectiveResultStatus?: StreamingFlowState['lastTerminalStatus'];
   partial?: boolean;
   terminationReason?: string;
   terminationMessage?: string;
@@ -154,7 +161,7 @@ function toAnalysisCompletedPayload(
   const conclusionContract = source.conclusionContract;
   if (isRecord(conclusionContract)) {
     payload.conclusionContract = conclusionContract;
-    payload.sourceUseReceipt = parseSourceUseReceipt(conclusionContract);
+    payload.sourceUseReceipt = parseSourceUseReceipt(conclusionContract, source.sourceClaimVerificationResult);
   }
   if (Array.isArray(source.claimSupport)) {
     payload.claimSupport = source.claimSupport;
@@ -202,6 +209,21 @@ function toAnalysisCompletedPayload(
   if (reportError) payload.reportError = reportError;
 
   if (source.partial === true) payload.partial = true;
+  if (isRecord(source.completion) && source.completion.schemaVersion === 1) {
+    const status = source.completion.status;
+    payload.completionStatus = status === 'completed' || status === 'incomplete' || status === 'failed' ||
+      status === 'cancelled' ? status : 'unknown';
+  }
+  if (isRecord(source.deliveryAssurance) && source.deliveryAssurance.schemaVersion === 1) {
+    const assurance = source.deliveryAssurance;
+    payload.deliveryIncomplete = ['completion', 'claims', 'source', 'identity', 'report']
+      .some(key => assurance[key] === 'failed' || assurance[key] === 'coverage_incomplete');
+    payload.deliveryCompletionPassed = assurance.completion === 'passed';
+  }
+  if (isRecord(source.sourceClaimVerificationResult) &&
+      source.sourceClaimVerificationResult.schemaVersion === 'source_claim_verifier@1') {
+    payload.sourceVerificationFailed = source.sourceClaimVerificationResult.status === 'failed';
+  }
 
   if (isRecord(source.quickRun)) {
     payload.quickRun = source.quickRun as unknown as QuickRunReceipt;
@@ -259,15 +281,57 @@ function analysisCompletedRunStatus(
     (payload?.success === false ? 'failed' : 'completed');
 }
 
+/** Transport completion does not establish that the delivered answer is complete. */
+function analysisCompletedResultStatus(
+  payload: AnalysisCompletedPayload | undefined,
+  flow?: StreamingFlowState,
+): NonNullable<AnalysisCompletedPayload['terminalRunStatus']> | 'partial' {
+  if (payload?.effectiveResultStatus) return payload.effectiveResultStatus;
+  const claimVerification = payload?.claimVerificationResult;
+  const knownVerification = claimVerification?.schemaVersion === 'claim_verifier@1' ||
+    claimVerification?.schemaVersion === 'claim_verifier@2';
+  const verificationFailed = knownVerification &&
+    (claimVerification?.status === 'failed' ||
+      (Array.isArray(claimVerification?.issues) && claimVerification.issues.some(issue =>
+        isRecord(issue) && issue.severity === 'error')));
+  const bindingIneligible = payload?.conclusionContract?.bindingEligibility === 'ineligible' ||
+    payload?.claimSupport?.some(claim => isRecord(claim) && claim.bindingEligibility === 'ineligible');
+  const explicitVerdict = payload?.terminalRunStatus !== undefined ||
+    payload?.success !== undefined || payload?.completionStatus !== undefined ||
+    payload?.partial === true || payload?.deliveryIncomplete || payload?.deliveryCompletionPassed ||
+    payload?.sourceVerificationFailed || verificationFailed || bindingIneligible ||
+    (knownVerification && claimVerification?.status === 'passed');
+  if (!explicitVerdict) {
+    if (flow?.lastTerminalStatus) return flow.lastTerminalStatus;
+    if (flow?.status === 'partial' || flow?.status === 'failed' || flow?.status === 'cancelled') {
+      return flow.status;
+    }
+    // Legacy full-result events may have no status fields. Report metadata or
+    // an empty duplicate is never evidence that an answer completed.
+    return payload?.hasResultContent ? 'completed' : 'partial';
+  }
+  const runStatus = analysisCompletedRunStatus(payload);
+  if (runStatus !== 'completed') return runStatus;
+  if (payload?.completionStatus === 'failed' || payload?.completionStatus === 'cancelled') {
+    return payload.completionStatus;
+  }
+  return payload?.partial === true || payload?.success === false ||
+    payload?.completionStatus === 'incomplete' || payload?.completionStatus === 'unknown' ||
+    payload?.deliveryIncomplete || payload?.sourceVerificationFailed || verificationFailed ||
+    bindingIneligible
+    ? 'partial' : 'completed';
+}
+
 function settleAnalysisCompletedStreams(
   ctx: SSEHandlerContext,
   payload: AnalysisCompletedPayload | undefined,
 ): void {
-  const status = analysisCompletedRunStatus(payload);
+  const status = analysisCompletedResultStatus(payload, ctx.streamingFlow);
+  ctx.streamingFlow.lastTerminalStatus = status;
   if (status === 'failed') {
     failStreamingFlow(
       ctx,
-      payload?.terminationMessage ??
+      payload?.terminationMessage ?? ctx.streamingFlow.error ??
         uiText('分析未完成', 'Analysis did not complete'),
     );
     // The authoritative body was already projected. Changing run state must
@@ -275,6 +339,12 @@ function settleAnalysisCompletedStreams(
     ctx.streamingAnswer.status = 'failed';
   } else if (status === 'cancelled') {
     cancelStreamingFlow(ctx);
+  } else if (status === 'partial' || status === 'quota_exceeded') {
+    partialStreamingFlow(ctx, payload?.terminationMessage ?? ctx.streamingFlow.error ?? (status === 'quota_exceeded'
+      ? uiText('达到使用额度，未完成全部分析。', 'The usage quota was reached before analysis completed.')
+      : uiText('结果仍不完整或尚未通过核验。', 'The result is incomplete or has not passed verification.')));
+  } else {
+    completeStreamingFlow(ctx);
   }
 }
 
@@ -671,6 +741,12 @@ function flowStatusHint(flow: StreamingFlowState): string {
     return uiText(
       '_流程完成，结论已生成。_',
       '_Flow complete; the conclusion is ready._',
+    );
+  }
+  if (flow.status === 'partial') {
+    return uiText(
+      `_流程已结束：${flow.error || '结果仍不完整或尚未通过核验。'}_`,
+      `_Flow ended: ${flow.error || 'the result is incomplete or has not passed verification.'}_`,
     );
   }
   if (flow.status === 'cancelled') {
@@ -1207,19 +1283,22 @@ function persistSettledStreamingFlow(ctx: SSEHandlerContext): void {
 }
 
 function completeStreamingFlow(ctx: SSEHandlerContext): void {
-  if (
-    ctx.streamingFlow.status !== 'running' &&
-    ctx.streamingFlow.status !== 'idle'
-  ) {
-    return;
-  }
+  // Called only after the authoritative analysis_completed verdict. A replay
+  // may settle a provisional partial state left by an interrupted stream.
   ctx.streamingFlow.status = 'completed';
+  ctx.streamingFlow.error = null;
   persistSettledStreamingFlow(ctx);
 }
 
 function failStreamingFlow(ctx: SSEHandlerContext, error?: string): void {
   ctx.streamingFlow.status = 'failed';
   ctx.streamingFlow.error = normalizeFlowLine(error || 'unknown_error');
+  persistSettledStreamingFlow(ctx);
+}
+
+function partialStreamingFlow(ctx: SSEHandlerContext, reason: string): void {
+  ctx.streamingFlow.status = 'partial';
+  ctx.streamingFlow.error = normalizeFlowLine(reason);
   persistSettledStreamingFlow(ctx);
 }
 
@@ -4117,13 +4196,14 @@ function appendClaimVerificationSummary(
 function buildPartialResultWarning(
   payload: AnalysisCompletedPayload | undefined,
 ): string | undefined {
-  if (payload?.partial !== true) return undefined;
+  if (!payload) return undefined;
+  if (payload?.partial !== true && analysisCompletedResultStatus(payload) !== 'partial') return undefined;
   const reason =
-    payload.terminationMessage ||
-    payload.terminationReason ||
+    payload?.terminationMessage ||
+    payload?.terminationReason ||
     uiText(
-      '本次分析结果已标记为 partial，结论可能不完整。',
-      'This analysis is marked partial, so the conclusion may be incomplete.',
+      '本次输出仍不完整或尚未通过核验，请结合证据与限制阅读。',
+      'This output is incomplete or has not passed verification; review it with its evidence and limitations.',
     );
   return [
     uiText('> **结果完整性提示**', '> **Result completeness notice**'),
@@ -4389,7 +4469,7 @@ function renderConclusionContract(
       ),
     );
   } else {
-    conclusions.slice(0, 3).forEach((item, idx: number) => {
+    conclusions.forEach((item, idx: number) => {
       const statement = toText(
         readAliasedValue(item, CONTRACT_ALIASES.conclusion.statement),
       );
@@ -4515,7 +4595,7 @@ function renderConclusionContract(
       uiText('- 证据链信息缺失', '- Evidence-chain information is missing'),
     );
   } else {
-    evidenceChain.slice(0, 12).forEach((item, idx: number) => {
+    evidenceChain.forEach((item, idx: number) => {
       const cid = toText(
         readAliasedValue(item, CONTRACT_ALIASES.evidence.conclusionId) ||
           `C${idx + 1}`,
@@ -4554,7 +4634,7 @@ function renderConclusionContract(
   if (uncertainties.length === 0) {
     lines.push(uiText('- 暂无', '- None'));
   } else {
-    uncertainties.slice(0, 6).forEach((item: unknown) => {
+    uncertainties.forEach((item: unknown) => {
       const text = toText(item);
       if (text) lines.push(`- ${text}`);
     });
@@ -4570,7 +4650,7 @@ function renderConclusionContract(
   if (nextSteps.length === 0) {
     lines.push(uiText('- 暂无', '- None'));
   } else {
-    nextSteps.slice(0, 6).forEach((item: unknown) => {
+    nextSteps.forEach((item: unknown) => {
       const text = toText(item);
       if (text) lines.push(`- ${text}`);
     });
@@ -4640,6 +4720,11 @@ export function handleAnalysisCompletedEvent(
   const conclusionContract =
     payload?.conclusionContract ??
     (isRecord(rawConclusionContract) ? rawConclusionContract : undefined);
+  const contractContent = renderConclusionContract(conclusionContract, ctx);
+  if (payload) {
+    payload.hasResultContent = Boolean(payload.answer || payload.conclusion || contractContent);
+    payload.effectiveResultStatus = analysisCompletedResultStatus(payload, ctx.streamingFlow);
+  }
   if (DEBUG_SSE) {
     console.log(
       '[SSEHandlers] analysis_completed received, architecture:',
@@ -4729,6 +4814,7 @@ export function handleAnalysisCompletedEvent(
             role: 'assistant',
             content: canonicalContent,
             timestamp: Date.now(),
+            flowTag: 'answer_stream',
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.smartScenePreview
               ? {smartScenePreview: payload.smartScenePreview}
@@ -4792,7 +4878,6 @@ export function handleAnalysisCompletedEvent(
 
   // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
   // and fall back to structured conclusionContract when narrative text is absent.
-  const contractContent = renderConclusionContract(conclusionContract, ctx);
   const narrativeContent = payload?.answer || payload?.conclusion;
   const answerContent = narrativeContent || contractContent;
 
@@ -4803,9 +4888,10 @@ export function handleAnalysisCompletedEvent(
     ctx.completionHandled = true;
     pushStreamingOutput(
       ctx,
-      uiText('最终结论已生成', 'Final conclusion generated'),
+      analysisCompletedResultStatus(payload) === 'completed'
+        ? uiText('最终结论已生成', 'Final conclusion generated')
+        : uiText('本轮输出已保留，完整性与核验状态见提示', 'Run output retained; see completeness and verification notices'),
     );
-    completeStreamingFlow(ctx);
 
     // Build content with agent-driven metadata if available
     const content = buildVisibleConclusionContentWithReportAppendix(
@@ -4878,6 +4964,7 @@ export function handleAnalysisCompletedEvent(
           role: 'assistant',
           content: content,
           timestamp: Date.now(),
+          flowTag: 'answer_stream',
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
           ...(payload?.smartScenePreview
             ? {smartScenePreview: payload.smartScenePreview}
@@ -4938,7 +5025,6 @@ export function handleAnalysisCompletedEvent(
         );
       }
     }
-    completeStreamingFlow(ctx);
   }
 
   // Show error summary if there were any non-fatal errors
@@ -4946,9 +5032,6 @@ export function handleAnalysisCompletedEvent(
     showErrorSummary(ctx);
   }
 
-  if (ctx.streamingFlow.status === 'running') {
-    completeStreamingFlow(ctx);
-  }
   if (ctx.streamingAnswer.status === 'streaming') {
     completeStreamingAnswer(ctx);
   }
@@ -6322,6 +6405,7 @@ export function handleSSEEvent(
   const eventData = asRecord(data);
   if (DEBUG_SSE) console.log('[SSEHandlers] SSE event:', eventType, eventData);
 
+  const flowStatusBeforeEvent = ctx.streamingFlow.status;
   const result = handleSSEEventInner(eventType, eventData, ctx);
 
   // ── Cross-component shared state updates (F3: Status Bar, etc.) ───
@@ -6339,7 +6423,7 @@ export function handleSSEEvent(
     });
   } else if (eventType === 'analysis_completed') {
     const payload = toAnalysisCompletedPayload(eventData.data);
-    const terminalStatus = analysisCompletedRunStatus(payload);
+    const terminalStatus = analysisCompletedResultStatus(payload, ctx.streamingFlow);
     updateAISharedState({
       status:
         terminalStatus === 'failed'
@@ -6348,11 +6432,14 @@ export function handleSSEEvent(
             ? 'cancelled'
             : terminalStatus === 'quota_exceeded'
               ? 'quota_exceeded'
-              : payload?.partial === true
+              : terminalStatus === 'partial'
                 ? 'partial'
                 : 'completed',
       lastAnalysisTime: Date.now(),
     });
+  } else if (eventType === 'end' && flowStatusBeforeEvent === 'running' &&
+      ctx.streamingFlow.status === 'partial') {
+    updateAISharedState({status: 'partial', lastAnalysisTime: Date.now()});
   }
 
   return result;
@@ -6519,10 +6606,8 @@ function handleSSEEventInner(
       const conclusionText = readStringField(conclusionPayload, 'conclusion');
       if (DEBUG_SSE) console.log('[SSEHandlers] CONCLUSION event received');
 
-      // Complete streaming state so UI doesn't stay loading
-      if (ctx.streamingFlow.status === 'running') {
-        completeStreamingFlow(ctx);
-      }
+      // The answer is ready to read, but analysis_completed still owns the
+      // final completeness and verification verdict for the process view.
       if (ctx.streamingAnswer.status === 'streaming') {
         completeStreamingAnswer(ctx);
       }
@@ -6558,6 +6643,7 @@ function handleSSEEventInner(
             role: 'assistant',
             content,
             timestamp: Date.now(),
+            flowTag: 'answer_stream',
           });
           ctx.streamingAnswer.messageId = messageId;
           ctx.streamingAnswer.content = content;
@@ -6689,7 +6775,10 @@ function handleSSEEventInner(
 
     case 'end':
       if (ctx.streamingFlow.status === 'running') {
-        completeStreamingFlow(ctx);
+        partialStreamingFlow(ctx, uiText(
+          '未收到最终完成与核验状态，请保留当前结果并重试。',
+          'Final completion and verification status was not received. Retain this output and retry.',
+        ));
       }
       if (ctx.streamingAnswer.status === 'streaming') {
         completeStreamingAnswer(ctx);

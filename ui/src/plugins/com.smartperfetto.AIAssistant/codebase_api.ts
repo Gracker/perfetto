@@ -246,6 +246,18 @@ function buildHeaders(apiKey?: string): Record<string, string> {
   return buildSmartPerfettoContextHeaders(headers);
 }
 
+export class CodebaseApiError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+    readonly onDemandAvailable?: boolean,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'CodebaseApiError';
+  }
+}
+
 async function readJsonOrThrow<T>(res: Response): Promise<T> {
   let body: any = null;
   try {
@@ -257,7 +269,12 @@ async function readJsonOrThrow<T>(res: Response): Promise<T> {
     const guidance = [body?.message, body?.hint]
       .filter((value): value is string => typeof value === 'string' && value.length > 0)
       .join(' ');
-    throw new Error(guidance || body?.error || `Codebase API failed: ${res.status}`);
+    throw new CodebaseApiError(
+      guidance || body?.error || `Codebase API failed: ${res.status}`,
+      typeof body?.code === 'string' ? body.code : undefined,
+      typeof body?.onDemandAvailable === 'boolean' ? body.onDemandAvailable : undefined,
+      res.status,
+    );
   }
   return body as T;
 }
