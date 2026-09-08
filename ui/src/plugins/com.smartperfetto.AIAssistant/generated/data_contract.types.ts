@@ -48,13 +48,12 @@ export interface CaseKnowledgeReportRecommendation {
   };
 }
 
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2024-2026 Gracker (Chris)
-// This file is part of SmartPerfetto. See LICENSE for details.
-
 export type ConclusionOutputMode = 'initial_report' | 'focused_answer' | 'need_input';
+
 export type ConclusionClusterOutputMode = 'required' | 'optional' | 'none';
+
 export type ConclusionClusterFrameListMode = 'none' | 'top' | 'full';
+
 export type ConclusionClaimKind =
   | 'numeric'
   | 'categorical'
@@ -64,6 +63,7 @@ export type ConclusionClaimKind =
   | 'comparison'
   | 'inference'
   | 'recommendation';
+
 export type ConclusionClaimSupportLevel = 'verified' | 'partial' | 'inference' | 'unsupported';
 
 export interface ConclusionContractConclusionItem {
@@ -119,6 +119,57 @@ export interface ConclusionContractClaimItem {
   relationRefs?: string[];
   /** Model-produced hint only; visible verdicts come from verifier output. */
   supportLevel?: ConclusionClaimSupportLevel;
+  semantics?: ClaimSemanticsV1;
+  /** Original invalid model declaration; never a verified interpretation. */
+  rawSemantics?: unknown;
+  /** Malformed references remain available for diagnosis and lossless reparse. */
+  rawReferences?: unknown;
+  /** Parser-owned diagnostics, not accepted from model JSON. */
+  semanticsParseIssues?: ConclusionContractParseIssue[];
+}
+
+export interface ClaimSemanticsV1 {
+  schemaVersion: 'claim_semantics@1';
+  /** Unknown rule IDs are valid declarations but supply no proof. */
+  predicate: string;
+  polarity: 'affirmed' | 'negated' | 'undetermined';
+  discourse: 'asserted' | 'hypothetical' | 'quoted' | 'rejected_quote';
+  quantifier: 'one' | 'some' | 'all' | 'only';
+  modality: 'certain' | 'possible' | 'undetermined';
+  conditions?: string[];
+  scope: {
+    subjectRefs?: ConclusionContractClaimReference[];
+    objectRefs?: ConclusionContractClaimReference[];
+    population: 'cited_rows' | 'selected_interval' | 'process_instance' | 'trace' | 'codebase';
+    timeRangeNs?: {start: string; end: string};
+  };
+  /** The proposition value is distinct from a cited cell's value. */
+  numeric?: {operator: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte'; value: number | string; unit: string};
+}
+
+export interface ConclusionContractParseIssue {
+  code: 'invalid_framing' | 'duplicate_marker' | 'invalid_json' | 'invalid_contract' |
+    'invalid_claim' | 'invalid_reference' | 'invalid_semantics' | 'duplicate_claim_id' |
+    'invalid_relation_proposal' | 'duplicate_proposal_id' | 'untrusted_parser_metadata';
+  path: string;
+}
+
+export type ConclusionBindingEligibility = 'eligible' | 'ineligible' | 'legacy_unchecked';
+
+export interface ConclusionContractDeclarationParseResult {
+  status: 'absent' | 'valid' | 'invalid';
+  raw: string;
+  rawPayload?: unknown;
+  contract?: ConclusionContract;
+  issues: ConclusionContractParseIssue[];
+  bindingEligibility: ConclusionBindingEligibility;
+}
+
+export interface ConclusionContractSidecarParseResult extends ConclusionContractDeclarationParseResult {
+  /** Exact narrative outside the accepted marker. */
+  narrative: string;
+  /** Half-open UTF-16 offsets; retain raw separately before removing these from chat. */
+  machineSegments: Array<{start: number; end: number}>;
 }
 
 export interface ConclusionContractMetadata {
@@ -143,6 +194,16 @@ export interface ConclusionContract {
   clusters: ConclusionContractClusterItem[];
   evidenceChain: ConclusionContractEvidenceItem[];
   claims?: ConclusionContractClaimItem[];
+  rawClaims?: unknown;
+  /** Parser-owned original root when rejected metadata cannot be omitted losslessly. */
+  rawDeclaration?: unknown;
+  /** Model proposals only; proof is produced independently by the backend. */
+  relationProposals?: EvidenceRelationCandidateV1[];
+  /** Preserve malformed proposals without treating them as typed candidates. */
+  rawRelationProposals?: unknown;
+  /** Parser-owned binding state. JSON with these fields cannot supply authority. */
+  parseIssues?: ConclusionContractParseIssue[];
+  bindingEligibility?: ConclusionBindingEligibility;
   sourceUseDecision?: Record<string, unknown>;
   sourceReferences?: Record<string, unknown>[];
   sourceClaimBindings?: Record<string, unknown>[];
@@ -157,15 +218,20 @@ export interface ConclusionContract {
   metadata?: ConclusionContractMetadata;
 }
 
+export interface ConclusionSidecarMachineSegment {
+  start: number;
+  end: number;
+  startLine: number;
+  /** -1 means the explicit machine segment was interrupted. */
+  endLine: number;
+}
+
 // =============================================================================
 // Evidence / Verifier / Identity Contract Types
 // =============================================================================
 
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2024-2026 Gracker (Chris)
-// This file is part of SmartPerfetto. See LICENSE for details.
-
 export type EvidenceContractVersion = 'evidence_contract@1';
+
 export type TraceTimestampNs = string | number;
 
 export type EvidenceProducerKind =
@@ -178,6 +244,7 @@ export type EvidenceProducerKind =
   | 'manual';
 
 export type EvidenceTraceSide = 'current' | 'reference' | 'unknown';
+
 export type EvidencePaneSide = 'left' | 'right' | 'top' | 'bottom';
 
 export type EvidenceIdentityRole =
@@ -190,8 +257,11 @@ export type EvidenceIdentityRole =
   | 'unknown';
 
 export type EvidenceSupportLevel = 'verified' | 'partial' | 'inference' | 'unsupported';
+
 export type EvidenceRelationSchemaVersion = 'evidence_relation@1';
+
 export type EvidenceRelationCandidateSchemaVersion = 'evidence_relation_candidate@1';
+
 export type EvidenceRelationKindV1 =
   | 'overlap'
   | 'wakeup'
@@ -200,9 +270,13 @@ export type EvidenceRelationKindV1 =
   | 'lock_owner'
   | 'comparison_delta'
   | 'derived';
+
 export type EvidenceRelationDirectionV1 = 'subject_to_object' | 'object_to_subject' | 'symmetric';
+
 export type EvidenceRelationVerificationStatusV1 = 'verified' | 'candidate' | 'rejected';
+
 export type EvidenceRelationEvaluationV1 = 'not_configured' | 'verified' | 'candidate' | 'rejected' | 'missing';
+
 export type EvidenceRelationReasonCodeV1 =
   | 'relation_anchor_missing'
   | 'relation_endpoint_value_mismatch'
@@ -283,9 +357,9 @@ export interface EvidenceCellV1 {
   rowSelector?: Record<string, string | number | boolean>;
   column: string;
   /** Expected value stated by the claim reference, when the claim is value-bearing. */
-  value?: string | number | boolean;
+  value?: string | number | boolean | null;
   /** Actual primitive value read from the cited evidence row. */
-  actualValue?: string | number | boolean;
+  actualValue?: string | number | boolean | null;
   isSqlNull?: boolean;
   displayValue?: string;
   unit?: string;
@@ -299,6 +373,8 @@ export interface EvidenceAnchorV1 {
   cells?: EvidenceCellV1[];
   timeRange?: EvidenceTimeRangeV1;
   identity?: EvidenceIdentityV1;
+  /** Scope of the cited fields; relativeTo is context, never subject identity. */
+  scopeProvenance?: EvidenceScopeProvenanceV1;
   confidence?: number;
   /**
    * Qualifiers the evidence row declares about itself, verbatim from the
@@ -384,6 +460,8 @@ export interface ClaimSupportV1 {
   claimId: string;
   kind: ClaimKindV1;
   text: string;
+  semantics?: ClaimSemanticsV1;
+  bindingEligibility?: ConclusionBindingEligibility;
   anchors: EvidenceAnchorV1[];
   relationAnchors?: EvidenceAnchorV1[];
   relations?: EvidenceRelationV1[];
@@ -405,10 +483,13 @@ export interface EvidenceContractV1 {
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-export type ClaimVerificationSchemaVersion = 'claim_verifier@1';
+/** Version 1 remains readable in persisted results; new verification emits version 2. */
+export type ClaimVerificationSchemaVersion = 'claim_verifier@1' | 'claim_verifier@2';
 
 export type ClaimVerificationStatus = 'passed' | 'failed' | 'partial' | 'not_checked';
+
 export type ClaimVerificationPolicy = 'block' | 'retry' | 'warn_only' | 'record_only';
+
 export type ClaimVerificationClaimStatus =
   | 'verified'
   | 'partial'
@@ -421,6 +502,7 @@ export type ClaimReferenceVerificationStatus =
   | 'missing'
   | 'ambiguous'
   | 'value_mismatch'
+  | 'ineligible'
   | 'not_checked';
 
 export interface ClaimReferenceVerificationResult {
@@ -428,14 +510,51 @@ export interface ClaimReferenceVerificationResult {
   sourceRef?: string;
   artifactId?: string;
   sourceToolCallId?: string;
+  anchorId?: string;
+  column?: string;
   status: ClaimReferenceVerificationStatus;
   message?: string;
+}
+
+export type DeterministicClaimProofKind =
+  | 'numeric_cell'
+  | 'interval_overlap'
+  | 'comparison_delta'
+  | 'none';
+
+export interface DeterministicClaimProof {
+  kind: DeterministicClaimProofKind;
+  status: 'proved' | 'candidate' | 'rejected' | 'not_checked';
+  /** Stable machine-readable explanation; never inferred from the claim body. */
+  reason: string;
+  anchorIds: string[];
+  evidenceRefIds: string[];
+}
+
+export interface ClaimPropositionCoverage {
+  status: 'complete' | 'partial' | 'none';
+  covered: string[];
+  uncovered: string[];
+  reason: string;
 }
 
 export interface ClaimVerificationClaimResult {
   claimId: string;
   status: ClaimVerificationClaimStatus;
+  /** Compatibility alias. A matched cell alone never verifies a proposition in v2. */
   referenceResults?: ClaimReferenceVerificationResult[];
+  referenceCells?: ClaimReferenceVerificationResult[];
+  deterministicProof?: DeterministicClaimProof;
+  propositionCoverage?: ClaimPropositionCoverage;
+}
+
+export interface ClaimVerificationClaimResultV2 extends ClaimVerificationClaimResult {
+  /** Cell matching is independent of typed proof and prose/semantics agreement. */
+  referenceCells: ClaimReferenceVerificationResult[];
+  /** A proved typed declaration still requires the shared semantic assessment. */
+  deterministicProof: DeterministicClaimProof;
+  /** Complete means the typed declaration, never the surrounding prose, is covered. */
+  propositionCoverage: ClaimPropositionCoverage;
 }
 
 export interface ClaimVerificationIssue {
@@ -459,12 +578,55 @@ export interface ClaimVerificationResult {
   issues: ClaimVerificationIssue[];
 }
 
+export interface ClaimVerificationResultV2 extends ClaimVerificationResult {
+  schemaVersion: 'claim_verifier@2';
+  claimResults: ClaimVerificationClaimResultV2[];
+}
+
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 export type IdentityContractVersion = 'identity_contract@1';
+
 export type IdentityTraceSide = 'current' | 'reference' | 'unknown';
+
+/** Serializable evidence only. This record never grants execution authority. */
+export interface ProcessScopeEvidenceV1 {
+  mode: 'exact_upid' | 'named' | 'unscoped';
+  traceId: string;
+  traceSide: IdentityTraceSide;
+  upid?: number;
+  requestedName?: string;
+  identityRefId?: string;
+}
+
+export type EvidenceScopeRole = 'target' | 'global_context' | 'peer_context' | 'identity_metadata';
+
+export interface EvidenceScopeEntryV1 {
+  role: EvidenceScopeRole;
+  scope: ProcessScopeEvidenceV1;
+  sourceStepId?: string;
+  fields?: string[];
+  availability?: 'available' | 'unavailable';
+  reason?: string;
+  /** A peer or global observation may be measured relative to this target. */
+  relativeTo?: ProcessScopeEvidenceV1;
+}
+
+export interface EvidenceScopeProvenanceV1 {
+  version: 'process_scope_evidence@1';
+  entries: EvidenceScopeEntryV1[];
+  /** Present malformed metadata remains explicit and cannot fall back to legacy identity. */
+  invalid?: true;
+}
+
+export interface EvidenceScopeMetadata {
+  scopeProvenance?: EvidenceScopeProvenanceV1;
+  /** Compatibility projection, derived exclusively from scopeProvenance. */
+  appliedProcessScope?: ProcessScopeEvidenceV1;
+  evidenceRole?: EvidenceScopeRole | 'mixed';
+}
 
 export type IdentityRole =
   | 'app_main'
@@ -1429,6 +1591,168 @@ export type UiActionProposalV1 =
   | UiActionProposalBase<'open_evidence_table', UiOpenEvidenceTablePayload>
   | UiActionProposalBase<'pin_evidence', UiPinEvidencePayload>;
 
+export type AnalysisTurnIntent = Readonly<AnalysisTurnIntentDecision & {
+    status: 'resolved' | 'unavailable';
+    source: 'semantic' | 'fallback';
+    registryFingerprint: string;
+    unavailableReason?: IntentTransportUnavailableReason | 'prompt_unavailable' | 'context_limit';
+    actualModel?: string;
+    finishReason?: string;
+}>;
+
+export interface AnalysisCompletion extends AnalysisCandidateIdentity {
+    schemaVersion: 1;
+    runtimeKind: AgentRuntimeKind;
+    status: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'unknown';
+    reason?: 'output_limit' | 'turn_limit' | 'timeout' | 'budget_limit' | 'provider_error' | 'cancelled';
+    sdkFinishReason?: string;
+}
+
+export type AnalysisOutputOrigin = 'sdk_final' | 'assistant_stream' | 'evidence_rendered' | 'runtime_fallback';
+
+/** Never concatenate this into the body whose claims and completion were checked. */
+export interface AnalysisRuntimeAppendix {
+    schemaVersion: 1;
+    origin: 'runtime_fallback';
+    sourceCandidate: AnalysisCandidateIdentity;
+    text: string;
+    reason?: AnalysisCompletion['reason'];
+}
+
+/** Produced by the shared final semantic review, never by a section regex. */
+export interface FinalReportAssessment {
+    schemaVersion: 1;
+    binding: AnalysisReportBinding;
+    status: 'not_checked' | 'unavailable' | 'coverage_incomplete' | 'checked';
+    requirements: readonly AnalysisReportRequirementAssessment[];
+}
+
+export interface AnalysisDeliveryAssurance {
+    schemaVersion: 1;
+    entry: AnalysisDeliveryEntry;
+    completion: AnalysisAssuranceStatus;
+    claims: AnalysisAssuranceStatus;
+    source: AnalysisAssuranceStatus;
+    identity: AnalysisAssuranceStatus;
+    report: AnalysisAssuranceStatus;
+}
+
+export interface SourceUseDecisionV1 {
+    schemaVersion: "source_use_decision@1";
+    codeAwareMode: 'metadata_only' | 'provider_send';
+    selectedCodebaseIds: string[];
+    status: SourceUseStatus;
+    reasonCode?: Exclude<SourceUseStatus, 'pending' | 'attempted' | 'located' | 'corroborated'>;
+    attemptedTools: string[];
+    queriedCodebaseIds: string[];
+    usedCodebaseIds: string[];
+    coverageComplete?: boolean;
+    incompleteReasons?: string[];
+    references: SourceReferenceV1[];
+}
+
+export interface SourceClaimVerificationResult {
+    schemaVersion: 'source_claim_verifier@1';
+    status: SourceClaimVerificationStatus;
+    bindings: SourceClaimBindingV1[];
+    issues: SourceClaimVerificationIssue[];
+}
+
+/** The model supplies a decision, never the authority or status of that decision. */
+export interface AnalysisTurnIntentDecision {
+    schemaVersion: 1;
+    taskKind: "acknowledgement" | "fact" | "investigation" | "comparison";
+    sceneId: string;
+    scope: "bounded_question" | "scene_wide";
+    recommendedComplexity: QueryComplexity;
+    deliverable: "answer" | "report";
+    evidenceAccess: "existing_only" | "read_new";
+    reason?: string;
+}
+
+export type IntentTransportUnavailableReason = 'timeout' | 'provider_error' | 'invalid_configuration' | 'invalid_response' | 'tool_use' | 'incomplete_output' | 'output_limit';
+
+/** The server binds a terminal receipt to the exact candidate it accepted. */
+export interface AnalysisCandidateIdentity {
+    candidateRef: string;
+    runId: string;
+    attemptId: string;
+    conclusionFingerprint: string;
+}
+
+export type AgentRuntimeKind = "claude-agent-sdk" | "openai-agents-sdk" | "pi-agent-core" | "opencode" | "qoder-agent-sdk";
+
+export interface AnalysisReportBinding extends AnalysisCandidateIdentity {
+    conclusionContractFingerprint: string;
+    evidenceFingerprint: string;
+    requirementsFingerprint: string;
+    registryFingerprint: string;
+    intentFingerprint: string;
+    caseRetrievalFingerprint?: string;
+}
+
+export interface AnalysisReportRequirementAssessment {
+    requirementId: string;
+    applicability: 'applicable' | 'not_applicable' | 'unknown';
+    coverage: 'covered' | 'missing' | 'unknown';
+    /** Offsets in the exact accepted body, not a preview or a rewritten report. */
+    contentLocations?: ReadonlyArray<{
+        start: number;
+        end: number;
+    }>;
+    claimIds?: readonly string[];
+}
+
+export type AnalysisDeliveryEntry = 'runtime_draft' | 'new_finalization' | 'historical_restore';
+
+export type AnalysisAssuranceStatus = 'not_applicable' | 'not_checked' | 'unavailable' | 'coverage_incomplete' | 'passed' | 'failed';
+
+export type SourceUseStatus = 'pending' | 'not_needed' | 'disallowed' | 'no_queryable_anchor' | 'attempted' | 'located' | 'corroborated' | 'ambiguous_candidates' | 'not_found_complete' | 'search_incomplete' | 'unverified';
+
+export interface SourceReferenceV1 {
+    id: string;
+    chunkId?: string;
+    referenceId?: string;
+    codebaseId: string;
+    filePath: string;
+    lineRange?: {
+        start: number;
+        end: number;
+    };
+    symbol?: string;
+    buildId?: string;
+    commitHash?: string;
+    sourceGeneration?: string;
+    lookupKind: 'metadata' | 'body' | 'indexed' | 'graph';
+}
+
+export type SourceClaimVerificationStatus = 'passed' | 'failed' | 'partial' | 'not_checked';
+
+export interface SourceClaimBindingV1 {
+    claimId: string;
+    mechanismStatus: SourceMechanismStatus;
+    sourceReferenceIds: string[];
+    traceEvidenceRefIds: string[];
+    reason?: string;
+}
+
+export interface SourceClaimVerificationIssue {
+    claimId?: string;
+    severity: 'error' | 'warning';
+    code: 'source_claim_missing' | 'source_reference_not_returned' | 'source_reference_outside_selection' | 'source_binding_trace_support_missing' | 'source_binding_trace_cross_claim' | 'source_binding_trace_occurrence_not_verified' | 'source_absence_requires_complete_search' | 'source_claim_semantics_unchecked' | 'source_binding_mechanism_unverified' | 'source_binding_strength_downgraded';
+    message: string;
+    sourceReferenceId?: string;
+    traceEvidenceRefId?: string;
+}
+
+// =============================================================================
+// Query Complexity Classification
+// =============================================================================
+/** Query complexity level — determines which analysis pipeline to use. */
+export type QueryComplexity = 'quick' | 'full';
+
+export type SourceMechanismStatus = 'corroborated' | 'compatible' | 'ambiguous' | 'unverified';
+
 export interface AnalysisCompletedFinding {
   id: string;
   category?: string;
@@ -1478,6 +1802,16 @@ export interface AnalysisCompletedEvent {
     summary?: string;
     answer?: string;
     privateProjectionVersion?: number;
+    /** Finalized server metadata is optional on historical events. */
+    success?: boolean;
+    turnIntent?: AnalysisTurnIntent;
+    completion?: AnalysisCompletion;
+    outputOrigin?: AnalysisOutputOrigin;
+    runtimeAppendix?: AnalysisRuntimeAppendix;
+    reportAssessment?: FinalReportAssessment;
+    deliveryAssurance?: AnalysisDeliveryAssurance;
+    sourceUseDecision?: SourceUseDecisionV1;
+    sourceClaimVerificationResult?: SourceClaimVerificationResult;
     conclusion?: string;
     conclusionContract?: ConclusionContract;
     claimSupport?: ClaimSupportV1[];
@@ -1497,7 +1831,7 @@ export interface AnalysisCompletedEvent {
     smartScenePreview?: Record<string, unknown>;
     /** Primary result is terminal, but a separate source supplement is still running. */
     sourceEnrichmentPending?: boolean;
-    terminalRunStatus?: 'completed' | 'quota_exceeded';
+    terminalRunStatus?: 'completed' | 'failed' | 'cancelled' | 'quota_exceeded';
     findings: AnalysisCompletedFinding[];
     resultContract?: Record<string, unknown>;
     hypotheses?: AnalysisCompletedHypothesis[];

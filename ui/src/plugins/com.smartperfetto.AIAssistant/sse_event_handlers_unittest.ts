@@ -3857,6 +3857,54 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[1].content).toContain('## 不确定性与反例');
   });
 
+  it.each([
+    {layout: 'horizontal', currentPane: 'left', referencePane: 'right'},
+    {layout: 'vertical', currentPane: 'top', referencePane: 'bottom'},
+    {layout: 'no pane', currentPane: undefined, referencePane: undefined},
+  ] as const)(
+    'keeps separately emitted same-title tables distinct through replay: $layout',
+    ({currentPane, referencePane}) => {
+      const sources = [
+        {traceSide: 'current', paneSide: currentPane, traceId: 'trace-a'},
+        {traceSide: 'reference', paneSide: referencePane, traceId: 'trace-b'},
+      ];
+      const events = sources.map((source, index) => ({
+        id: `data-separate-${index}`,
+        envelope: {
+          meta: {
+            type: 'sql_result',
+            version: '2.0',
+            source: 'execute_sql',
+            ...source,
+            evidenceRefId: `data:sql_table:${source.traceSide}:${source.traceId}:same-query`,
+            sourceToolCallId: `execute_sql:${index}:same-query`,
+          },
+          data: {columns: ['dur_ms'], rows: [[45.6]]},
+          display: {layer: 'list', format: 'table', title: '掉帧帧列表'},
+        },
+      }));
+
+      for (const event of events) handleSSEEvent('data', event, ctx);
+      const messageIds = ctx.messages.map((message) => message.id);
+      for (const event of events) handleSSEEvent('data', event, ctx);
+
+      expect(ctx.messages.map((message) => message.id)).toEqual(messageIds);
+      expect(ctx.messages).toHaveLength(2);
+      sources.forEach((source, index) => {
+        const context = ctx.messages[index].sqlResult?.sourceContext;
+        expect(context).toMatchObject({
+          ref: `表 ${index + 1}`,
+          title: '掉帧帧列表',
+          traceId: source.traceId,
+          traceSide: source.traceSide,
+          evidenceRefId: events[index].envelope.meta.evidenceRefId,
+          sourceToolCallId: events[index].envelope.meta.sourceToolCallId,
+        });
+        expect(context?.paneSide).toBe(source.paneSide);
+      });
+    },
+  );
+
   it('keeps current/reference DataEnvelope tables separate by evidence ref and trace side', () => {
     handleDataEvent(
       {
@@ -4399,6 +4447,58 @@ describe('handleSSEEvent', () => {
 
     expect(getAISharedState().status).toBe('quota_exceeded');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
+  });
+
+  it.each([
+    {terminalRunStatus: 'failed', success: true, partial: true, expected: 'error', flow: 'failed'},
+    {terminalRunStatus: 'cancelled', success: false, partial: true, expected: 'cancelled', flow: 'cancelled'},
+    {terminalRunStatus: 'quota_exceeded', success: false, partial: true, expected: 'quota_exceeded', flow: 'completed'},
+    {terminalRunStatus: 'completed', success: false, partial: false, expected: 'completed', flow: 'completed'},
+    {success: false, expected: 'error', flow: 'failed'},
+    {success: true, partial: true, expected: 'partial', flow: 'completed'},
+    {expected: 'completed', flow: 'completed'},
+  ])('preserves terminal precedence and final body for %j', ({expected, flow, ...metadata}) => {
+    const payload = {
+      ...metadata, conclusion: 'Retained final answer', findings: [],
+    };
+    const originalPayload = structuredClone(payload);
+    const result = handleSSEEvent('analysis_completed', {data: payload}, ctx);
+
+    expect(result.isTerminal).toBe(true);
+    expect(result.stopLoading).toBe(true);
+    expect(getAISharedState().status).toBe(expected);
+    expect(ctx.streamingFlow.status).toBe(flow);
+    // Partial results retain the existing completeness notice before the exact
+    // model body. Run-status projection must preserve both surfaces.
+    if ('partial' in metadata && metadata.partial === true) {
+      expect(ctx.messages[0].content.endsWith(`\n\n${payload.conclusion}`)).toBe(true);
+    } else {
+      expect(ctx.messages[0].content).toBe(payload.conclusion);
+    }
+    expect(payload).toEqual(originalPayload);
+    if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('failed');
+  });
+
+  it('retains an authoritative failed body when completion metadata follows earlier tokens and conclusion', () => {
+    handleSSEEvent('answer_token', {data: {token: 'Earlier tokens'}}, ctx);
+    handleSSEEvent('conclusion', {data: {conclusion: 'Earlier conclusion'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: 'Final failed body', success: false, terminalRunStatus: 'failed',
+    }}, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].content).toBe('Final failed body');
+    expect(ctx.streamingAnswer.status).toBe('failed');
+    expect(ctx.streamingFlow.status).toBe('failed');
+    expect(getAISharedState().status).toBe('error');
+  });
+
+  it('uses success:false when a stored event has no recognized terminal status', () => {
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: 'Legacy retained answer', success: false, terminalRunStatus: 'unknown',
+    }}, ctx);
+    expect(getAISharedState().status).toBe('error');
+    expect(ctx.messages[0].content).toBe('Legacy retained answer');
   });
 
   it('routes analysis_cancelled as a non-error terminal event', () => {

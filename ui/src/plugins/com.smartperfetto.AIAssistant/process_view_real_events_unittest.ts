@@ -209,3 +209,35 @@ describe('process view on a real run: failures stay visible', () => {
     expect(rendered).toContain('失败');
   });
 });
+
+describe('process view source-labelled conversation replay', () => {
+  it.each([
+    ['horizontal', '左侧/基线 Trace', '右侧/对比 Trace'],
+    ['vertical', '上方/基线 Trace', '下方/对比 Trace'],
+    ['no pane', '基线 Trace', '对比 Trace'],
+  ])('preserves backend source text without duplicating labels: %s', (_layout, baseline, comparison) => {
+    const events = [baseline, comparison].map((label, index) => ({
+      event: 'conversation_step',
+      data: {
+        eventId: `conversation-data-${index}`,
+        ordinal: index + 1,
+        phase: 'result',
+        role: 'system',
+        source: {eventType: 'data'},
+        content: {text: `${label}：已获得掉帧帧列表`},
+      },
+    }));
+    const rendered = replay({
+      note: 'Separate backend data steps followed by SSE replay',
+      stepCount: 2,
+      events: [...events, ...events],
+    });
+    const lines = rendered.split('\n').filter((line) => line.startsWith('- '));
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(`${baseline}：已获得掉帧帧列表`);
+    expect(lines[1]).toContain(`${comparison}：已获得掉帧帧列表`);
+    expect(rendered.split(baseline)).toHaveLength(2);
+    expect(rendered.split(comparison)).toHaveLength(2);
+  });
+});

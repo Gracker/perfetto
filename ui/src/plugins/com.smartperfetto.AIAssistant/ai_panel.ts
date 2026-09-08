@@ -271,7 +271,7 @@ import {providerRuntimeLabel} from './provider_types';
 import {setUiLanguagePreference, uiOutputLanguage, uiText} from './ui_language';
 import {
   analysisContextAfterBackendError,
-  analysisContextRequiresFullMode,
+  analysisContextRequiresFullMode as hasPrivateAnalysisContext,
   bumpAnalysisContextAuthorizationEpoch,
   EMPTY_ANALYSIS_CONTEXT,
   loadAnalysisContext,
@@ -688,6 +688,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   // SSE Connection Management
   private sseAbortController: AbortController | null = null;
   private analysisRequestCoordinator = new AnalysisRequestCoordinator();
+  private activeAgentRequest?: AnalysisRequestToken;
   private analysisCancellationPending = false;
   /** Set by "stop and redirect"; consumed when the run reaches a terminal state. */
   private redirectAfterCancellation = false;
@@ -3537,6 +3538,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       : engineInRpcMode || hasBackendTrace || hasUploadInProgress;
     const canSendFromCurrentSurface =
       isInRpcMode || this.state.analysisMode === 'conversation';
+    const analysisInputLocked = this.isAnalysisInputLocked();
     const analysisSourceEnrichmentRunning = hasRunningAnalysisSourceEnrichment(
       this.state.messages,
     );
@@ -4894,7 +4896,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     m('div.ai-input-wrapper', [
                       m('textarea#ai-input.ai-input', {
                         'class':
-                          (this.state.isLoading && this.state.analysisMode !== 'conversation') ||
+                          analysisInputLocked ||
                           !canSendFromCurrentSurface
                             ? 'disabled'
                             : '',
@@ -4942,7 +4944,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           this.isInputComposing = false;
                         },
                         'disabled':
-                          (this.state.isLoading && this.state.analysisMode !== 'conversation') ||
+                          analysisInputLocked ||
                           !canSendFromCurrentSurface,
                       }),
                       m('div.ai-input-controls', [
@@ -4958,7 +4960,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           onActivate: () => this.onProviderSelectionChange(),
                         }),
                         m('div.ai-input-divider'),
-                        this.state.isLoading && this.state.analysisMode !== 'conversation'
+                        analysisInputLocked
                           ? [
                               m(
                                 'button.ai-send-btn.ai-redirect-btn',
@@ -6649,11 +6651,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   /** Render the analysis mode selector inside the input bar. */
   private renderAnalysisModeSelector(): m.Vnode {
     const current = this.state.analysisMode;
-    const privateContextRequiresFull = analysisContextRequiresFullMode(
-      this.state.analysisContext,
-    );
-    const fastDisabled =
-      !!this.state.referenceTraceId || privateContextRequiresFull;
+    const disabled = this.isAnalysisIdentityLocked();
     const modes = [
       {
         id: 'conversation',
@@ -6669,8 +6667,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         icon: '⚡',
         label: uiText('快速', 'Fast'),
         title: uiText(
-          '目标 5 turns，最多 50 turns 保护；适合局部事实和选区问题',
-          'Targets 5 turns with a 50-turn guard; suited to local facts and selection questions.',
+          '使用较紧凑的分析预算；问题范围和已授权能力保持不变',
+          'Use a smaller analysis budget while preserving the question scope and authorized capabilities.',
         ),
       },
       {
@@ -6678,8 +6676,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         icon: '🔍',
         label: uiText('完整', 'Full'),
         title: uiText(
-          '完整多轮分析流水线',
-          'Full multi-turn analysis pipeline.',
+          '使用更充足的分析预算；问题范围和已授权能力保持不变',
+          'Use a larger analysis budget while preserving the question scope and authorized capabilities.',
         ),
       },
       {
@@ -6687,8 +6685,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         icon: '🤖',
         label: uiText('智能', 'Auto'),
         title: uiText(
-          '按查询复杂度自动选择',
-          'Select automatically based on query complexity.',
+          '按本轮问题自动选择分析预算',
+          'Choose the analysis budget automatically for the current question.',
         ),
       },
     ] as const;
@@ -6714,7 +6712,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         ? m(
             'div.ai-mode-menu',
             modes.map((mode) => {
-              const disabled = mode.id === 'fast' && fastDisabled;
               const active = current === mode.id;
               return m(
                 'button.ai-mode-menu-item',
@@ -6722,17 +6719,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   class: [active ? 'active' : '', disabled ? 'disabled' : '']
                     .filter(Boolean)
                     .join(' '),
-                  title: disabled
-                    ? privateContextRequiresFull
-                      ? uiText(
-                          '源码或外部知识需要完整分析，以执行证据校验和权限边界检查',
-                          'Source code or external knowledge requires full analysis for evidence and authorization checks.',
-                        )
-                      : uiText(
-                          '对比模式下需完整分析才能利用两侧 Trace 上下文',
-                          'Comparison mode requires full analysis to use both trace contexts.',
-                        )
-                    : mode.title,
+                  title: mode.title,
                   disabled,
                   onclick: (e: MouseEvent) => {
                     e.preventDefault();
@@ -6755,43 +6742,38 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
-  /**
-   * Switch analysis mode. Changing mode mid-session clears agentSessionId so the backend
-   *  starts a fresh SDK session and avoids context mix between quick and full paths.
-   */
+  /** Budget preferences apply per turn; Chat uses a separate session path. */
   private onAnalysisModeChange(
     newMode: 'conversation' | 'fast' | 'full' | 'auto',
   ): void {
     if (this.isAnalysisIdentityLocked()) return;
     if (newMode === this.state.analysisMode) return;
     const previousMode = this.state.analysisMode;
-    const hadAgentSession = !!this.state.agentSessionId;
-    const hadSession = hadAgentSession || Boolean(
-      loadConversationStore(this.state.settings.backendUrl).sessionId,
-    );
     this.state.analysisMode = newMode;
     sessionManager.saveAnalysisMode(newMode);
-    if (hadAgentSession) {
-      this.retireBackendAgentSession();
-    }
-    if (hadSession) {
-      const label = {
-        conversation: uiText('对话', 'Chat'),
-        fast: uiText('快速', 'Fast'),
-        full: uiText('完整', 'Full'),
-        auto: uiText('智能', 'Auto'),
-      }[newMode];
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: uiText(
-          `已切换到「${label}」模式，将开始新会话。`,
-          `Switched to “${label}” mode. A new session will start.`,
-        ),
-        timestamp: Date.now(),
-      });
-    }
     if (previousMode === 'conversation' || newMode === 'conversation') {
+      const hadAgentSession = !!this.state.agentSessionId;
+      const hadSession = hadAgentSession || Boolean(
+        loadConversationStore(this.state.settings.backendUrl).sessionId,
+      );
+      if (hadAgentSession) this.retireBackendAgentSession();
+      if (hadSession) {
+        const label = {
+          conversation: uiText('对话', 'Chat'),
+          fast: uiText('快速', 'Fast'),
+          full: uiText('完整', 'Full'),
+          auto: uiText('智能', 'Auto'),
+        }[newMode];
+        this.addMessage({
+          id: this.generateId(),
+          role: 'system',
+          content: uiText(
+            `已切换到「${label}」模式，将开始新会话。`,
+            `Switched to “${label}” mode. A new session will start.`,
+          ),
+          timestamp: Date.now(),
+        });
+      }
       this.resetConversationSession(true);
     }
     m.redraw();
@@ -7072,13 +7054,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.settings.backendUrl,
       getSmartPerfettoRequestContext(),
     );
-    if (
-      analysisContextRequiresFullMode(this.state.analysisContext) &&
-      this.state.analysisMode === 'fast'
-    ) {
-      this.state.analysisMode = 'full';
-      sessionManager.saveAnalysisMode('full');
-    }
     this.ensureAnalysisContextCodebaseLabels();
   }
 
@@ -7217,24 +7192,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.isAnalysisIdentityLocked()) return;
     const normalized = normalizeAnalysisContext(selection);
     if (sameAnalysisContext(normalized, this.state.analysisContext)) return;
+    this.applyAnalysisContextSelection(normalized);
+  }
+
+  private applyAnalysisContextSelection(normalized: AnalysisContextSelection): void {
     const hadAgentSession = !!this.state.agentSessionId;
     const hadSession = hadAgentSession || Boolean(
       loadConversationStore(this.state.settings.backendUrl).sessionId,
     );
     this.state.analysisContext = normalized;
-    const promotedToFull =
-      analysisContextRequiresFullMode(normalized) &&
-      this.state.analysisMode === 'fast';
-    if (promotedToFull) {
-      this.state.analysisMode = 'full';
-      sessionManager.saveAnalysisMode('full');
-    }
     saveAnalysisContext(
       this.state.settings.backendUrl,
       getSmartPerfettoRequestContext(),
       normalized,
     );
-    this.resetConversationSession();
+    this.resetConversationSession(false);
     this.ensureAnalysisContextCodebaseLabels();
     if (hadSession) {
       if (hadAgentSession) this.retireBackendAgentSession();
@@ -7244,16 +7216,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         content: uiText(
           '分析上下文已变更；为避免混用旧的源码或知识权限，下一次分析将开始新会话。',
           'The analysis context changed. The next analysis will start a new session so source and knowledge permissions are not mixed.',
-        ),
-        timestamp: Date.now(),
-      });
-    } else if (promotedToFull) {
-      this.addMessage({
-        id: this.generateId(),
-        role: 'system',
-        content: uiText(
-          '已切换到完整分析：源码或外部知识需要证据校验和权限边界检查。',
-          'Switched to full analysis because source code or external knowledge requires evidence and authorization checks.',
         ),
         timestamp: Date.now(),
       });
@@ -7292,15 +7254,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private async retryWhileSessionIsSettling(
     initial: Response,
     dispatch: () => Promise<Response>,
+    isCurrent: () => boolean,
   ): Promise<Response> {
     let response = initial;
     const deadline = Date.now() + RUN_CONFLICT_WAIT_MS;
     while (Date.now() < deadline) {
       const payload = await response.clone().json().catch(() => null);
-      if (!isTransientRunConflict(response.status, payload)) return response;
+      if (!isTransientRunConflict(response.status, payload) || !isCurrent()) {
+        return response;
+      }
       await new Promise((resolve) =>
         setTimeout(resolve, RUN_CONFLICT_RETRY_INTERVAL_MS),
       );
+      if (!isCurrent()) return response;
       response = await dispatch();
     }
     return response;
@@ -7309,7 +7275,18 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private async postAnalysisRequestWithContextFallback(
     apiUrl: string,
     requestBody: Record<string, any>,
+    analysisRequest: AnalysisRequestToken,
   ): Promise<Response> {
+    const originalContext = normalizeAnalysisContext(this.state.analysisContext);
+    const originalScope = this.analysisContextCodebaseScopeKey();
+    const originalAuthority = this.currentOidcAuthorityKey();
+    const originalCredential = this.state.settings.backendApiKey;
+    const isCurrent = () =>
+      this.analysisRequestCoordinator.disposition(analysisRequest) === 'active' &&
+      this.analysisContextCodebaseScopeKey() === originalScope &&
+      this.currentOidcAuthorityKey() === originalAuthority &&
+      this.state.settings.backendApiKey === originalCredential &&
+      sameAnalysisContext(this.state.analysisContext, originalContext);
     const dispatch = () =>
       this.fetchBackend(apiUrl, {
         method: 'POST',
@@ -7317,7 +7294,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         body: JSON.stringify(requestBody),
       });
     let response = await dispatch();
-    response = await this.retryWhileSessionIsSettling(response, dispatch);
+    response = await this.retryWhileSessionIsSettling(response, dispatch, isCurrent);
     if (response.status !== 409) return response;
 
     const errorData = await response
@@ -7325,12 +7302,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       .json()
       .catch(() => ({}));
     const fallback = analysisContextAfterBackendError(
-      this.state.analysisContext,
+      originalContext,
       errorData?.code,
     );
-    if (!fallback) return response;
+    if (!fallback || !isCurrent()) return response;
 
-    this.onAnalysisContextChange(fallback);
+    this.applyAnalysisContextSelection(fallback);
     delete requestBody.sessionId;
     requestBody.options = {
       ...(requestBody.options || {}),
@@ -8241,7 +8218,7 @@ Click ⚙️ to configure backend connection.`,
 
     if (
       !input ||
-      (this.state.isLoading && this.state.analysisMode !== 'conversation')
+      this.isAnalysisInputLocked()
     ) return;
     if (this.shouldBlockModelBackedRequest(input)) {
       this.addAiDisabledMessage(
@@ -8286,7 +8263,7 @@ Click ⚙️ to configure backend connection.`,
       content: input,
       timestamp: Date.now(),
       model: this.serverStatus.model,
-      ...(analysisContextRequiresFullMode(this.state.analysisContext)
+      ...(hasPrivateAnalysisContext(this.state.analysisContext)
         ? {privateContent: true}
         : {}),
     });
@@ -10144,6 +10121,9 @@ Click ⚙️ to configure backend connection.`,
       });
       store = loadConversationStore(config.backendUrl);
     }
+    // A new primary conversation owns Stop even while an older Agent's
+    // detached source supplement is still finishing its SSE stream.
+    this.activeAgentRequest = undefined;
     const ordinal = ++this.conversationRequestOrdinal;
     const controller = new AbortController();
     this.conversationAbortController?.abort();
@@ -10157,7 +10137,7 @@ Click ⚙️ to configure backend connection.`,
       content: message,
       timestamp: userMessage?.timestamp ?? Date.now(),
       privateContent: userMessage?.privateContent ??
-        analysisContextRequiresFullMode(this.state.analysisContext),
+        hasPrivateAnalysisContext(this.state.analysisContext),
     }, store.sessionId);
     this.setLoadingState(true);
     this.state.loadingPhase = uiText('正在理解问题…', 'Understanding the question…');
@@ -10336,6 +10316,8 @@ Click ⚙️ to configure backend connection.`,
 
     const analysisRequest: AnalysisRequestToken =
       this.analysisRequestCoordinator.begin();
+    this.activeAgentRequest = analysisRequest;
+    const analysisModeForTurn = this.state.analysisMode;
 
     this.setLoadingState(true);
     this.state.completionHandled = false; // Reset completion flag for new analysis
@@ -10372,9 +10354,6 @@ Click ⚙️ to configure backend connection.`,
       }
 
       // Build request body, include sessionId for multi-turn dialogue
-      const analysisModeForTurn = this.state.agentSessionId
-        ? 'auto'
-        : this.state.analysisMode;
       const requestBody: Record<string, any> = {
         query: message,
         traceId: this.state.backendTraceId,
@@ -10434,6 +10413,7 @@ Click ⚙️ to configure backend connection.`,
       const response = await this.postAnalysisRequestWithContextFallback(
         apiUrl,
         requestBody,
+        analysisRequest,
       );
 
       if (DEBUG_AI_PANEL) {
@@ -10590,6 +10570,9 @@ Click ⚙️ to configure backend connection.`,
         });
       }
     } finally {
+      if (this.activeAgentRequest === analysisRequest) {
+        this.activeAgentRequest = undefined;
+      }
       const requestDisposition =
         this.analysisRequestCoordinator.disposition(analysisRequest);
       this.analysisRequestCoordinator.finish(analysisRequest);
@@ -10603,6 +10586,7 @@ Click ⚙️ to configure backend connection.`,
   private async handleSmartAnalysisCommand(
     selection?: SmartSceneSelectionRequest,
   ) {
+    if (this.isAnalysisIdentityLocked()) return;
     if (this.isAiDisabled()) {
       this.addAiDisabledMessage(uiText('智能分析', 'Smart Analysis'));
       m.redraw();
@@ -10637,6 +10621,10 @@ Click ⚙️ to configure backend connection.`,
 
     const analysisRequest: AnalysisRequestToken =
       this.analysisRequestCoordinator.begin();
+    this.activeAgentRequest = analysisRequest;
+    const analysisModeForTurn = this.state.analysisMode === 'conversation'
+      ? 'full'
+      : this.state.analysisMode;
 
     const smartAction = selection ? 'analyze' : 'preview';
     const previewPayload = selection
@@ -10709,7 +10697,7 @@ Click ⚙️ to configure backend connection.`,
           ? {sessionId: this.state.agentSessionId}
           : {}),
         options: {
-          analysisMode: this.state.analysisMode,
+          analysisMode: analysisModeForTurn,
           ...this.analysisContextRequestOptions(),
           preset: 'smart',
           smartAction,
@@ -10719,6 +10707,7 @@ Click ⚙️ to configure backend connection.`,
       const response = await this.postAnalysisRequestWithContextFallback(
         apiUrl,
         requestBody,
+        analysisRequest,
       );
 
       if (!response.ok) {
@@ -10808,6 +10797,9 @@ Click ⚙️ to configure backend connection.`,
         timestamp: Date.now(),
       });
     } finally {
+      if (this.activeAgentRequest === analysisRequest) {
+        this.activeAgentRequest = undefined;
+      }
       const requestDisposition =
         this.analysisRequestCoordinator.disposition(analysisRequest);
       this.analysisRequestCoordinator.finish(analysisRequest);
@@ -11052,8 +11044,17 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private cancelAnalysis(): Promise<void> {
-    if (this.state.analysisMode === 'conversation') {
+    if (this.isConversationExecutionActive()) {
       return this.cancelConversationAnalysis();
+    }
+    if (
+      !this.activeAgentRequest &&
+      !this.analysisCancellationPending &&
+      this.state.storyState.status === 'running' &&
+      this.state.storyState.analysisId &&
+      this.state.storyState.analysisId !== this.state.agentSessionId
+    ) {
+      return this.handleStoryCancel();
     }
     if (this.analysisCancellationRequest) {
       return this.analysisCancellationRequest;
@@ -11413,7 +11414,9 @@ Click ⚙️ to configure backend connection.`,
         ) {
           this.state.messages.pop();
         }
-        if (status === 'failed') {
+        const hasStoredResult = body.result && typeof body.result === 'object' &&
+          !Array.isArray(body.result);
+        if (status === 'failed' && !hasStoredResult) {
           this.addMessage({
             id: this.generateId(),
             role: 'assistant',
@@ -11423,7 +11426,7 @@ Click ⚙️ to configure backend connection.`,
             ),
             timestamp: Date.now(),
           });
-        } else if (status === 'cancelled') {
+        } else if (status === 'cancelled' && !hasStoredResult) {
           this.handleSSEEvent('analysis_cancelled', {
             type: 'analysis_cancelled',
             data: {
@@ -11434,14 +11437,13 @@ Click ⚙️ to configure backend connection.`,
             },
             timestamp: Date.now(),
           });
-        } else if (body.result && typeof body.result === 'object') {
+        } else if (hasStoredResult) {
           this.handleSSEEvent('analysis_completed', {
             type: 'analysis_completed',
             architecture: 'agent-driven',
             data: {
               ...body.result,
-              terminalRunStatus:
-                status === 'quota_exceeded' ? 'quota_exceeded' : 'completed',
+              terminalRunStatus: status,
             },
             timestamp: Date.now(),
           });
@@ -12181,6 +12183,13 @@ Click ⚙️ to configure backend connection.`,
    * Cancel an in-flight pipeline run.
    */
   private async handleStoryCancel() {
+    if (
+      this.activeAgentRequest &&
+      this.analysisRequestCoordinator.disposition(this.activeAgentRequest) !== 'stale'
+    ) {
+      await this.cancelAnalysis();
+      return;
+    }
     const analysisId = this.state.storyState.analysisId;
     if (!analysisId) return;
     if (analysisId === this.state.agentSessionId) {
@@ -13970,6 +13979,15 @@ Click ⚙️ to configure backend connection.`,
 
   private isAnalysisIdentityLocked(): boolean {
     return this.state.isLoading || this.analysisCancellationPending;
+  }
+
+  private isConversationExecutionActive(): boolean {
+    return !this.activeAgentRequest && !this.analysisCancellationPending &&
+      Boolean(this.conversationAbortController || this.activeConversationRun);
+  }
+
+  private isAnalysisInputLocked(): boolean {
+    return this.isAnalysisIdentityLocked() && !this.isConversationExecutionActive();
   }
 
   /**

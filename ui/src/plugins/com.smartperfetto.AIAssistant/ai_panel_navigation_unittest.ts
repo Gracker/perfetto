@@ -20,7 +20,7 @@ import {afterEach, beforeEach, describe, it, expect, vi} from 'vitest';
 import type {Mock} from 'vitest';
 
 import {AIPanel} from './ai_panel';
-import {getAISharedState} from './ai_shared_state';
+import {getAISharedState, resetAISharedState} from './ai_shared_state';
 import {getFloatingState, updateFloatingState} from './ai_floating_state';
 import {
   switchFloatingMode,
@@ -32,7 +32,7 @@ import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import type {TracePairWorkspaceScope} from './trace_pair_workspace_state_model';
 import type {AIPanelState} from './types';
 import {setUiLanguagePreference, uiText} from './ui_language';
-import {saveAnalysisContext} from './analysis_context';
+import {loadAnalysisContext, saveAnalysisContext} from './analysis_context';
 import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
 import {
   backendUploadSourceKey,
@@ -41,6 +41,7 @@ import {
 import {setBackendUploadState} from '../../core/backend_upload_state';
 import {persistTracePairWorkspace} from './trace_pair_workspace_persistence';
 import {TracePairWorkspaceController as ConcreteTracePairWorkspaceController} from './trace_pair_workspace_state';
+import {RUN_CONFLICT_RETRY_INTERVAL_MS} from './analysis_run_conflict';
 
 beforeEach(() => {
   setUiLanguagePreference('zh-CN');
@@ -99,6 +100,42 @@ type MutableTestAIPanel = TestAIPanel & {
 function createMutableTestPanel(): MutableTestAIPanel {
   return new AIPanel() as unknown as MutableTestAIPanel;
 }
+
+describe('AIPanel finalized result recovery', () => {
+  afterEach(() => resetAISharedState());
+  it.each(['failed', 'cancelled', 'quota_exceeded', 'completed'])(
+    'preserves a stored %s result and its explicit terminal status while reconnecting', async status => {
+      const panel = new AIPanel() as any;
+      const result = {success: status === 'completed', conclusion: 'Stored original body', findings: [],
+        completion: {status, runId: 'stored-run'}};
+      panel.fetchBackend = vi.fn(async () => ({ok: true, json: async () => ({status, result})}));
+      panel.handleSSEEvent = vi.fn();
+      panel.setLoadingState = vi.fn();
+      panel.flushSessionSave = vi.fn();
+      panel.addMessage = vi.fn();
+
+      expect(await panel.checkSessionStatus('stored-session', new AbortController().signal)).toBe(true);
+      expect(panel.handleSSEEvent).toHaveBeenCalledWith('analysis_completed', expect.objectContaining({
+        data: {...result, terminalRunStatus: status},
+      }));
+      expect(panel.addMessage).not.toHaveBeenCalled();
+      expect(panel.state.sseConnectionState).toBe('disconnected');
+    },
+  );
+
+  it('keeps the existing failure notice when the server has no stored result', async () => {
+    const panel = new AIPanel() as any;
+    panel.fetchBackend = vi.fn(async () => ({ok: true, json: async () => ({status: 'failed'})}));
+    panel.handleSSEEvent = vi.fn();
+    panel.setLoadingState = vi.fn();
+    panel.flushSessionSave = vi.fn();
+    panel.addMessage = vi.fn();
+    expect(await panel.checkSessionStatus('stored-session', new AbortController().signal)).toBe(true);
+    expect(panel.handleSSEEvent).not.toHaveBeenCalled();
+    expect(panel.addMessage).toHaveBeenCalledOnce();
+    expect(getAISharedState().status).toBe('error');
+  });
+});
 
 function collectVNodeText(node: any): string {
   if (node === null || node === undefined || node === false) return '';
@@ -510,6 +547,656 @@ describe('AIPanel analysis mode menu', () => {
     outside.click();
 
     expect(panel.state.showAnalysisModeMenu).toBe(false);
+  });
+});
+
+describe('AIPanel per-turn analysis mode', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    window.__SMARTPERFETTO_CONFIG__ = undefined;
+    window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function createModePanel() {
+    const panel = new AIPanel() as any;
+    panel.state.analysisMode = 'full';
+    panel.state.backendTraceId = 'trace-current';
+    panel.trace = {
+      traceInfo: {traceTitle: 'current.trace', start: 0n, end: 10n},
+      selection: {selection: {kind: 'empty'}},
+      notes: {removeNote: vi.fn()},
+    };
+    panel.ensureAgentSessionReady = vi.fn(async () => {});
+    panel.captureSelectionContext = vi.fn(async () => null);
+    panel.listenToAgentSSE = vi.fn(async () => panel.setLoadingState(false));
+    panel.saveCurrentSession = vi.fn();
+    panel.fetchBackend = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      sessionId: 'agent-mode-session',
+      runId: 'run-mode',
+    }), {status: 200}));
+    return panel;
+  }
+
+  it.each(['fast', 'full', 'auto'] as const)(
+    'sends preferred %s for both the first turn and its continuation',
+    async (mode) => {
+      const panel = createModePanel();
+      panel.onAnalysisModeChange(mode);
+      const previousMessage = {
+        id: 'prior-answer', role: 'assistant', content: '已有结论', timestamp: 1,
+      };
+      panel.state.messages.push(previousMessage);
+
+      await panel.handleChatMessage('第一轮');
+      await panel.handleChatMessage('接着分析');
+
+      const bodies = panel.fetchBackend.mock.calls.map(
+        (call: [string, RequestInit]) => JSON.parse(String(call[1].body)),
+      );
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]).not.toHaveProperty('sessionId');
+      expect(bodies[1].sessionId).toBe('agent-mode-session');
+      expect(bodies.map((body: any) => body.options.analysisMode))
+        .toEqual([mode, mode]);
+      expect(panel.state.messages).toContain(previousMessage);
+    },
+  );
+
+  it('keeps the session and messages while switching Full to Fast to Auto', async () => {
+    const panel = createModePanel();
+    panel.state.agentSessionId = 'agent-mode-session';
+    panel.state.agentRunId = 'previous-run';
+    const messages = [...panel.state.messages];
+    const retire = vi.spyOn(panel, 'retireBackendAgentSession');
+    const resetConversation = vi.spyOn(panel, 'resetConversationSession');
+
+    for (const mode of ['full', 'fast', 'auto'] as const) {
+      panel.onAnalysisModeChange(mode);
+      expect(panel.state.agentSessionId).toBe('agent-mode-session');
+      expect(panel.state.messages).toEqual(messages);
+      await panel.handleChatMessage(`使用 ${mode} 继续`);
+      const body = JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body));
+      expect(body).toMatchObject({
+        sessionId: 'agent-mode-session',
+        options: {analysisMode: mode},
+      });
+    }
+
+    expect(sessionManager.loadAnalysisMode()).toBe('auto');
+    expect(retire).not.toHaveBeenCalled();
+    expect(resetConversation).not.toHaveBeenCalled();
+    expect(panel.state.messages).toEqual(messages);
+  });
+
+  it('does nothing when the preferred mode is selected again', () => {
+    const panel = createModePanel();
+    panel.state.agentSessionId = 'agent-mode-session';
+    const messages = panel.state.messages;
+    const saveMode = vi.spyOn(sessionManager, 'saveAnalysisMode');
+    const retire = vi.spyOn(panel, 'retireBackendAgentSession');
+    const resetConversation = vi.spyOn(panel, 'resetConversationSession');
+
+    panel.onAnalysisModeChange('full');
+
+    expect(panel.state.messages).toBe(messages);
+    expect(panel.state.agentSessionId).toBe('agent-mode-session');
+    expect(saveMode).not.toHaveBeenCalled();
+    expect(retire).not.toHaveBeenCalled();
+    expect(resetConversation).not.toHaveBeenCalled();
+    expect(panel.saveCurrentSession).not.toHaveBeenCalled();
+    expect(panel.fetchBackend).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['conversation', 'full'],
+    ['fast', 'conversation'],
+  ] as const)('keeps the session boundary from %s to %s', (from, to) => {
+    const panel = createModePanel();
+    panel.state.analysisMode = from;
+    panel.state.agentSessionId = 'agent-mode-session';
+    const retire = vi.spyOn(panel, 'retireBackendAgentSession')
+      .mockImplementation(() => {});
+    const resetConversation = vi.spyOn(panel, 'resetConversationSession')
+      .mockImplementation(() => {});
+
+    panel.onAnalysisModeChange(to);
+
+    expect(retire).toHaveBeenCalledOnce();
+    expect(resetConversation).toHaveBeenCalledWith(true);
+    expect(sessionManager.loadAnalysisMode()).toBe(to);
+  });
+
+  it('captures the mode before restoring session state and locks user changes', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'fast';
+    panel.state.agentSessionId = 'agent-mode-session';
+    let finishRestore!: () => void;
+    panel.ensureAgentSessionReady = vi.fn(() => new Promise<void>((resolve) => {
+      finishRestore = resolve;
+    }));
+    const request = panel.handleChatMessage('保留本轮预算');
+    expect(panel.ensureAgentSessionReady).toHaveBeenCalledOnce();
+    panel.onAnalysisModeChange('full');
+    expect(panel.state.analysisMode).toBe('fast');
+
+    // A restored UI snapshot must not change the already captured request.
+    panel.state.analysisMode = 'auto';
+    finishRestore();
+    await request;
+
+    const body = JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body));
+    expect(body.options.analysisMode).toBe('fast');
+    expect(body.sessionId).toBe('agent-mode-session');
+  });
+
+  it('cancels during session preparation without dispatching a new turn', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'fast';
+    panel.state.agentSessionId = 'agent-mode-session';
+    panel.state.agentRunId = 'previous-run';
+    let finishRestore!: () => void;
+    panel.ensureAgentSessionReady = vi.fn(() => new Promise<void>((resolve) => {
+      finishRestore = resolve;
+    }));
+    const request = panel.handleChatMessage('不要发送这一轮');
+    // Restored UI preference does not change the preparing Agent execution.
+    panel.state.analysisMode = 'conversation';
+    await panel.cancelAnalysis();
+    panel.onAnalysisModeChange('auto');
+    expect(panel.state.analysisMode).toBe('conversation');
+    finishRestore();
+    await request;
+
+    expect(panel.fetchBackend.mock.calls.every(
+      (call: [string, RequestInit]) => call[1].method === 'DELETE',
+    )).toBe(true);
+    expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
+    expect(panel.state.isLoading).toBe(false);
+  });
+
+  it('keeps the captured budget when retrying without unavailable source context', async () => {
+    const panel = createModePanel();
+    panel.onAnalysisModeChange('fast');
+    panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+    panel.onAnalysisContextChange({
+      codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: [],
+    });
+    let finishStream!: () => void;
+    panel.listenToAgentSSE = vi.fn(() => new Promise<void>((resolve) => {
+      finishStream = () => {
+        panel.setLoadingState(false);
+        resolve();
+      };
+    }));
+    panel.fetchBackend.mockResolvedValueOnce(new Response(
+      JSON.stringify({code: 'FEATURE_DISABLED'}), {status: 409},
+    ));
+
+    const request = panel.handleChatMessage('使用当前上下文');
+    await vi.waitFor(() => expect(panel.listenToAgentSSE).toHaveBeenCalledOnce());
+
+    const bodies = panel.fetchBackend.mock.calls.map(
+      (call: [string, RequestInit]) => JSON.parse(String(call[1].body)),
+    );
+    expect(bodies.map((body: any) => body.options.analysisMode))
+      .toEqual(['fast', 'fast']);
+    expect(bodies[1].options.codeAwareMode).toBe('off');
+    expect(bodies[1].options).not.toHaveProperty('codebaseIds');
+    expect(panel.state.isLoading).toBe(true);
+    const clearedContext = {
+      codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: [],
+    };
+    expect(panel.state.analysisContext).toEqual(clearedContext);
+    expect(loadAnalysisContext(
+      panel.state.settings.backendUrl, getSmartPerfettoRequestContext(),
+    )).toEqual(clearedContext);
+    expect(sessionManager.loadAnalysisMode()).toBe('fast');
+    finishStream();
+    await request;
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).toContain('快速');
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).not.toContain('临时');
+  });
+
+  it.each(['superseded', 'cancelled', 'context changed', 'backend changed'])(
+    'does not commit or retry an obsolete source fallback: %s',
+    async (change) => {
+      const panel = createModePanel();
+      panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+      panel.onAnalysisModeChange('fast');
+      panel.onAnalysisContextChange({
+        codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: [],
+      });
+      let rejectSource!: (response: Response) => void;
+      panel.fetchBackend = vi.fn(() => new Promise<Response>((resolve) => {
+        rejectSource = resolve;
+      }));
+      const token = panel.analysisRequestCoordinator.begin();
+      const request = panel.postAnalysisRequestWithContextFallback('/analyze', {
+        options: panel.analysisContextRequestOptions(),
+      }, token);
+      if (change === 'superseded') panel.analysisRequestCoordinator.begin();
+      if (change === 'cancelled') panel.analysisRequestCoordinator.requestCancel();
+      if (change === 'context changed') {
+        panel.onAnalysisContextChange({
+          codeAwareMode: 'provider_send', codebaseIds: ['source-new'],
+          knowledgeSourceIds: ['knowledge-new'],
+        });
+      }
+      if (change === 'backend changed') {
+        panel.state.settings.backendUrl = 'http://new-backend';
+      }
+      const context = panel.state.analysisContext;
+      const persisted = loadAnalysisContext(
+        panel.state.settings.backendUrl, getSmartPerfettoRequestContext(),
+      );
+      rejectSource(new Response(JSON.stringify({code: 'FEATURE_DISABLED'}), {status: 409}));
+
+      expect((await request).status).toBe(409);
+      expect(panel.fetchBackend).toHaveBeenCalledOnce();
+      expect(panel.state.analysisContext).toBe(context);
+      expect(loadAnalysisContext(
+        panel.state.settings.backendUrl, getSmartPerfettoRequestContext(),
+      )).toEqual(persisted);
+      expect(sessionManager.loadAnalysisMode()).toBe('fast');
+    },
+  );
+
+  it('keeps authorized knowledge while retiring the old source session for retry', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+    panel.onAnalysisContextChange({
+      codeAwareMode: 'provider_send', codebaseIds: ['source-a'],
+      knowledgeSourceIds: ['knowledge-a'], authorizationEpoch: 3,
+    });
+    panel.state.agentSessionId = 'old-source-session';
+    panel.state.isLoading = true;
+    const token = panel.analysisRequestCoordinator.begin();
+    panel.fetchBackend.mockResolvedValueOnce(new Response(
+      JSON.stringify({code: 'FEATURE_DISABLED'}), {status: 409},
+    ));
+
+    await panel.postAnalysisRequestWithContextFallback('/analyze', {
+      sessionId: 'old-source-session',
+      options: {analysisMode: 'auto', ...panel.analysisContextRequestOptions()},
+    }, token);
+
+    expect(panel.fetchBackend.mock.calls[1][1].method).toBe('DELETE');
+    expect(panel.fetchBackend.mock.calls[1][0]).toContain('/old-source-session');
+    const retry = JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body));
+    expect(retry).not.toHaveProperty('sessionId');
+    expect(retry.options.knowledgeSourceIds).toEqual(['knowledge-a']);
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(panel.state.analysisContext).toEqual({
+      codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['knowledge-a'],
+      authorizationEpoch: 3,
+    });
+    expect(panel.state.analysisMode).toBe('conversation');
+    expect(panel.state.isLoading).toBe(true);
+    expect(panel.analysisRequestCoordinator.disposition(token)).toBe('active');
+  });
+
+  it.each(['cancelled', 'backend changed'])(
+    'stops a settling-session retry after its wait when %s',
+    async (change) => {
+      vi.useFakeTimers();
+      const panel = createModePanel();
+      const token = panel.analysisRequestCoordinator.begin();
+      const conflict = new Response(
+        JSON.stringify({code: 'CANCELLATION_IN_PROGRESS'}), {status: 409},
+      );
+      panel.fetchBackend.mockResolvedValue(conflict);
+      const timeout = vi.spyOn(globalThis, 'setTimeout');
+      const request = panel.postAnalysisRequestWithContextFallback('/analyze', {
+        options: {analysisMode: 'fast'},
+      }, token);
+      await vi.waitFor(() => expect(timeout).toHaveBeenCalledWith(
+        expect.any(Function), RUN_CONFLICT_RETRY_INTERVAL_MS,
+      ));
+
+      if (change === 'cancelled') panel.analysisRequestCoordinator.requestCancel();
+      else panel.state.settings.backendUrl = 'http://different-backend';
+      await vi.advanceTimersByTimeAsync(RUN_CONFLICT_RETRY_INTERVAL_MS);
+
+      expect(await request).toBe(conflict);
+      expect(panel.fetchBackend).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each((['fast', 'full', 'auto'] as const).flatMap(mode => [
+    {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['knowledge-a']},
+    {codeAwareMode: 'metadata_only', codebaseIds: ['source-a'], knowledgeSourceIds: []},
+    {codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: []},
+    {codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: ['knowledge-a']},
+  ].map(selection => ({mode, selection}))))('preserves budget across context selection, restore and removal: %j', async ({mode, selection}) => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.onAnalysisModeChange(mode);
+    panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+    panel.onAnalysisContextChange(selection);
+    panel.loadAnalysisContextSelection();
+
+    expect(panel.state.analysisMode).toBe(mode);
+    expect(sessionManager.loadAnalysisMode()).toBe(mode);
+    const label = {fast: '快速', full: '完整', auto: '智能'}[mode];
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).toContain(label);
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).not.toContain('临时');
+    await panel.handleChatMessage('使用已授权上下文');
+    const firstBody = JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body));
+    expect(firstBody.options).toMatchObject({analysisMode: mode, codeAwareMode: selection.codeAwareMode});
+    expect(firstBody.options.codebaseIds ?? []).toEqual(selection.codebaseIds);
+    expect(firstBody.options.knowledgeSourceIds ?? []).toEqual(selection.knowledgeSourceIds);
+    await panel.handleChatMessage('继续使用相同上下文');
+    const continuedBody = JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body));
+    expect(continuedBody).toMatchObject({sessionId: 'agent-mode-session', options: firstBody.options});
+
+    const retire = vi.spyOn(panel, 'retireBackendAgentSession');
+    panel.onAnalysisContextChange({
+      codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: [],
+    });
+    expect(retire).toHaveBeenCalledOnce();
+    expect(panel.state.agentSessionId).toBeNull();
+    expect(sessionManager.loadAnalysisMode()).toBe(mode);
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).toContain(label);
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).not.toContain('临时');
+    await panel.handleChatMessage('继续普通分析');
+    expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)).options
+      .analysisMode).toBe(mode);
+  });
+
+  it.each(['fast', 'full', 'auto'] as const)('keeps %s with a trace pair and private context through comparison exit', async (mode) => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.onAnalysisModeChange(mode);
+    panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+    panel.onAnalysisContextChange({
+      codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: ['knowledge-a'],
+    });
+    panel.tracePairWorkspaceController.open({
+      scope: panel.getTracePairWorkspaceScope(),
+      currentTrace: {id: 'trace-current', filename: 'current.trace'},
+    });
+    panel.tracePairWorkspaceController.setCatalog([
+      {id: 'trace-reference', filename: 'reference.trace'},
+    ]);
+    panel.tracePairWorkspaceController.selectTrace({
+      pane: 'second', traceId: 'trace-reference',
+    });
+    panel.syncTracePairStateFromController();
+    expect(collectVNodeText(panel.renderAnalysisModeSelector())).not.toContain('临时');
+    await panel.handleChatMessage('对比 Trace');
+    expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)))
+      .toMatchObject({referenceTraceId: 'trace-reference', options: {analysisMode: mode,
+        codebaseIds: ['source-a'], knowledgeSourceIds: ['knowledge-a']}});
+    expect(sessionManager.loadAnalysisMode()).toBe(mode);
+
+    panel.exitComparisonMode();
+    expect(panel.state.agentSessionId).toBeNull();
+    await panel.handleChatMessage('继续单 Trace 分析');
+    expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)).options
+      .analysisMode).toBe(mode);
+  });
+
+  it('allows Fast menu selection with comparison and private capabilities while keeping the active session', async () => {
+    const panel = createModePanel();
+    panel.state.analysisContext = {
+      codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: ['knowledge-a'],
+    };
+    panel.state.referenceTraceId = 'trace-reference';
+    panel.state.agentSessionId = 'agent-mode-session';
+    panel.state.showAnalysisModeMenu = true;
+    const retire = vi.spyOn(panel, 'retireBackendAgentSession');
+    const selector = panel.renderAnalysisModeSelector();
+    const items = selector.children[1].children;
+    expect(items.every((item: any) => item.attrs.disabled === false)).toBe(true);
+    const fast = items.find((item: any) => collectVNodeText(item).includes('快速'));
+    fast.attrs.onclick(new MouseEvent('click'));
+
+    expect(panel.state.analysisMode).toBe('fast');
+    expect(sessionManager.loadAnalysisMode()).toBe('fast');
+    expect(panel.state.agentSessionId).toBe('agent-mode-session');
+    expect(retire).not.toHaveBeenCalled();
+    await panel.handleChatMessage('使用已选预算');
+    expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)).options.analysisMode).toBe('fast');
+  });
+
+  it('disables every menu option and its click handler during an active execution', () => {
+    const panel = createModePanel();
+    panel.state.showAnalysisModeMenu = true;
+    panel.setLoadingState(true);
+    const change = vi.spyOn(panel, 'onAnalysisModeChange');
+    const items = panel.renderAnalysisModeSelector().children[1].children;
+    for (const item of items) {
+      expect(item.attrs.disabled).toBe(true);
+      item.attrs.onclick(new MouseEvent('click'));
+    }
+    expect(change).not.toHaveBeenCalled();
+    expect(panel.state.analysisMode).toBe('full');
+  });
+
+  it('keeps private user-content marking when Fast uses authorized sources', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'fast';
+    panel.state.analysisContext = {
+      codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: ['knowledge-a'],
+    };
+    panel.state.input = '使用已授权资料';
+    panel.shouldBlockModelBackedRequest = vi.fn(() => false);
+    panel.tryStartNaturalLanguageResultComparison = vi.fn(async () => false);
+    panel.handleChatMessage = vi.fn(async () => {});
+
+    await panel.sendMessage();
+
+    expect(panel.state.messages.find((message: any) => message.content === '使用已授权资料'))
+      .toMatchObject({role: 'user', privateContent: true});
+    expect(panel.handleChatMessage).toHaveBeenCalledWith('使用已授权资料');
+  });
+
+  it.each(['conversation', 'fast', 'full', 'auto'] as const)(
+    'sends an analysis budget for /smart with %s preferred',
+    async (mode) => {
+      const panel = createModePanel();
+      panel.state.analysisMode = mode;
+      panel.state.analysisContext = {
+        codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: ['knowledge-a'],
+      };
+      panel.isAiDisabled = vi.fn(() => false);
+      await panel.handleSmartAnalysisCommand();
+
+      const body = JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body));
+      expect(body.query).toBe('/smart');
+      expect(body.options.analysisMode).toBe(mode === 'conversation' ? 'full' : mode);
+      expect(body.options.codebaseIds).toEqual(['source-a']);
+      expect(body.options.knowledgeSourceIds).toEqual(['knowledge-a']);
+      expect(panel.state.analysisMode).toBe(mode);
+    },
+  );
+
+  it.each(['composer', 'story'])(
+    'cancels a preparing /smart Agent request from %s with Chat preferred',
+    async (control) => {
+      const panel = createModePanel();
+      panel.onAnalysisModeChange('conversation');
+      panel.isAiDisabled = vi.fn(() => false);
+      panel.updateSliceCard = vi.fn();
+      let resolveAnalyze!: (response: Response) => void;
+      panel.fetchBackend = vi.fn(async (url: string) => {
+        if (url.endsWith('/analyze')) return new Promise<Response>((resolve) => {
+          resolveAnalyze = resolve;
+        });
+        return new Response(JSON.stringify({
+          success: true, sessionId: 'smart-agent', runId: 'smart-run', status: 'cancelled',
+        }), {status: 200});
+      });
+      const request = panel.handleSmartAnalysisCommand();
+      const tree = panel.view({attrs: {}});
+      const stop = findVNodeByTitle(tree, '停止分析');
+      expect(stop).toBeDefined();
+      expect(findVNodeById(tree, 'ai-input').attrs.disabled).toBe(true);
+      panel.state.input = '等待当前分析停止';
+      await panel.sendMessage();
+      expect(panel.state.input).toBe('等待当前分析停止');
+      expect(panel.fetchBackend).toHaveBeenCalledOnce();
+
+      if (control === 'story') await panel.handleStoryCancel();
+      else await stop.attrs.onclick();
+      expect(panel.analysisRequestCoordinator.disposition(panel.activeAgentRequest))
+        .toBe('cancelled');
+      resolveAnalyze(new Response(JSON.stringify({
+        success: true, sessionId: 'smart-agent', runId: 'smart-run',
+      }), {status: 200}));
+      await request;
+
+      expect(panel.fetchBackend.mock.calls[1][0]).toContain('/smart-agent/cancel');
+      expect(JSON.parse(String(panel.fetchBackend.mock.calls[1][1].body)))
+        .toEqual({runId: 'smart-run'});
+      expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
+      expect(panel.state.analysisMode).toBe('conversation');
+      expect(panel.state.isLoading).toBe(false);
+      expect(panel.activeAgentRequest).toBeUndefined();
+    },
+  );
+
+  it.each(['composer', 'story'])(
+    'cancels a running /smart Agent from %s after its receipt with Chat preferred',
+    async (control) => {
+      const panel = createModePanel();
+      panel.onAnalysisModeChange('conversation');
+      panel.isAiDisabled = vi.fn(() => false);
+      panel.fetchBackend = vi.fn(async () => new Response(JSON.stringify({
+        success: true, sessionId: 'smart-agent', runId: 'smart-run', status: 'cancelled',
+      }), {status: 200}));
+      let finishStream!: () => void;
+      panel.listenToAgentSSE = vi.fn(() => new Promise<void>((resolve) => {
+        finishStream = resolve;
+      }));
+      const request = panel.handleSmartAnalysisCommand();
+      await vi.waitFor(() => expect(panel.listenToAgentSSE).toHaveBeenCalledOnce());
+      expect(panel.analysisRequestCoordinator.disposition(panel.activeAgentRequest))
+        .toBe('stale');
+      expect(panel.isAnalysisInputLocked()).toBe(true);
+
+      if (control === 'story') await panel.handleStoryCancel();
+      else await panel.cancelAnalysis();
+      expect(panel.fetchBackend.mock.calls[1][0]).toContain('/smart-agent/cancel');
+      expect(JSON.parse(String(panel.fetchBackend.mock.calls[1][1].body)))
+        .toEqual({runId: 'smart-run'});
+      expect(panel.state.analysisMode).toBe('conversation');
+      expect(panel.state.isLoading).toBe(false);
+      finishStream();
+      await request;
+    },
+  );
+
+  it('restores Agent Stop and cancellation routing independently of Chat preference', async () => {
+    const previous = createModePanel();
+    previous.state.isLoading = true;
+    previous.state.agentSessionId = 'restored-agent';
+    previous.state.agentRunId = 'restored-run';
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.updateSliceCard = vi.fn();
+    panel.listenToAgentSSE = vi.fn(async () => {});
+    panel.fetchBackend = vi.fn(async () => new Response(JSON.stringify({
+      success: true, runId: 'restored-run', status: 'cancelled',
+    }), {status: 200}));
+    panel.restoreTransientState(previous.snapshotTransientState());
+    const tree = panel.view({attrs: {}});
+
+    expect(panel.listenToAgentSSE).toHaveBeenCalledWith('restored-agent', true);
+    expect(findVNodeById(tree, 'ai-input').attrs.disabled).toBe(true);
+    await findVNodeByTitle(tree, '停止分析').attrs.onclick();
+
+    expect(panel.fetchBackend.mock.calls[0][0]).toContain('/restored-agent/cancel');
+    expect(JSON.parse(String(panel.fetchBackend.mock.calls[0][1].body)))
+      .toEqual({runId: 'restored-run'});
+    expect(panel.state.isLoading).toBe(false);
+    expect(panel.state.analysisMode).toBe('conversation');
+  });
+
+  it('routes composer Stop to a running legacy Story instead of an old Agent session', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.state.isLoading = true;
+    panel.state.agentSessionId = 'previous-agent';
+    panel.state.agentRunId = 'previous-agent-run';
+    panel.state.storyState.status = 'running';
+    panel.state.storyState.analysisId = 'legacy-scene';
+    panel.updateSliceCard = vi.fn();
+    const tree = panel.view({attrs: {}});
+
+    await findVNodeByTitle(tree, '停止分析').attrs.onclick();
+
+    expect(panel.fetchBackend).toHaveBeenCalledOnce();
+    expect(panel.fetchBackend.mock.calls[0][0])
+      .toContain('/scene-reconstruct/legacy-scene/cancel');
+    expect(panel.fetchBackend.mock.calls[0][1].method).toBe('POST');
+    expect(panel.analysisCancellationPending).toBe(false);
+    expect(panel.state.analysisMode).toBe('conversation');
+  });
+
+  it('hands Stop to a new Conversation while an older Agent supplement is finishing', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.state.agentSessionId = 'supplement-agent';
+    panel.state.agentRunId = 'supplement-run';
+    const oldRequest = panel.analysisRequestCoordinator.begin();
+    panel.activeAgentRequest = oldRequest;
+    panel.analysisRequestCoordinator.finish(oldRequest);
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { streamController = controller; },
+    });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (init?.method === 'POST') return new Response(JSON.stringify({
+        sessionId: 'new-chat', runId: 'new-chat-run',
+        isNewSession: true, traceContextAttached: true,
+      }), {status: 200});
+      return new Response(stream, {status: 200});
+    });
+    const request = panel.handleConversationMessage('继续对话');
+    await vi.waitFor(() => expect(panel.activeConversationRun?.runId).toBe('new-chat-run'));
+
+    expect(panel.activeAgentRequest).toBeUndefined();
+    expect(panel.isConversationExecutionActive()).toBe(true);
+    await panel.cancelAnalysis();
+
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/conversation/new-chat/cancel')))
+      .toBe(true);
+    expect(panel.fetchBackend).not.toHaveBeenCalled();
+    streamController.close();
+    await request;
+    expect(panel.state.isLoading).toBe(false);
+  });
+
+  it('keeps ordinary Conversation cancellation on its own API despite an old Agent session', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.state.isLoading = true;
+    panel.state.agentSessionId = 'previous-agent';
+    panel.state.agentRunId = 'previous-agent-run';
+    panel.conversationAbortController = new AbortController();
+    panel.activeConversationRun = {sessionId: 'chat-session', runId: 'chat-run'};
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', {status: 200}));
+
+    expect(panel.isAnalysisInputLocked()).toBe(false);
+    await panel.cancelAnalysis();
+
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/conversation/chat-session/cancel'),
+      expect.objectContaining({method: 'POST', body: JSON.stringify({runId: 'chat-run'})}),
+    );
+    expect(panel.fetchBackend).not.toHaveBeenCalled();
+    expect(panel.state.analysisMode).toBe('conversation');
+    expect(panel.state.isLoading).toBe(false);
   });
 });
 
@@ -2182,7 +2869,7 @@ describe('AIPanel trace-pair session restore', () => {
     await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(1));
     const continuationBody = JSON.parse(String(fetchBackend.mock.calls[0][1]?.body));
     expect(continuationBody.sessionId).toBe('agent-existing');
-    expect(continuationBody.options.analysisMode).toBe('auto');
+    expect(continuationBody.options.analysisMode).toBe('full');
 
     const cancellationPromise = panel.cancelAnalysis();
     expect(fetchBackend).toHaveBeenCalledTimes(1);

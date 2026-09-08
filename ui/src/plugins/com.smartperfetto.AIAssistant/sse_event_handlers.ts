@@ -52,6 +52,7 @@ import {
 } from './data_formatter';
 import {
   type ConclusionContract,
+  type AnalysisCompletedEvent,
   type DataEnvelope,
   type DataPayload,
   isDataEnvelope,
@@ -78,6 +79,7 @@ type AnalysisHypothesisItem = {
 };
 
 type AnalysisCompletedPayload = {
+  success?: boolean;
   summary?: string;
   conclusionContract?: ConclusionContract | Record<string, unknown>;
   claimSupport?: unknown[];
@@ -92,7 +94,7 @@ type AnalysisCompletedPayload = {
   confidence?: number;
   rounds?: number;
   reportError?: string;
-  terminalRunStatus?: 'completed' | 'cancelled' | 'quota_exceeded';
+  terminalRunStatus?: AnalysisCompletedEvent['data']['terminalRunStatus'];
   partial?: boolean;
   terminationReason?: string;
   terminationMessage?: string;
@@ -144,6 +146,7 @@ function toAnalysisCompletedPayload(
   if (Object.keys(source).length === 0) return undefined;
 
   const payload: AnalysisCompletedPayload = {};
+  if (typeof source.success === 'boolean') payload.success = source.success;
 
   const summary = readStringField(source, 'summary');
   if (summary) payload.summary = summary;
@@ -224,6 +227,7 @@ function toAnalysisCompletedPayload(
   const terminalRunStatus = readStringField(source, 'terminalRunStatus');
   if (
     terminalRunStatus === 'completed' ||
+    terminalRunStatus === 'failed' ||
     terminalRunStatus === 'cancelled' ||
     terminalRunStatus === 'quota_exceeded'
   ) {
@@ -246,6 +250,32 @@ function toAnalysisCompletedPayload(
   }
 
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function analysisCompletedRunStatus(
+  payload: AnalysisCompletedPayload | undefined,
+): NonNullable<AnalysisCompletedPayload['terminalRunStatus']> {
+  return payload?.terminalRunStatus ??
+    (payload?.success === false ? 'failed' : 'completed');
+}
+
+function settleAnalysisCompletedStreams(
+  ctx: SSEHandlerContext,
+  payload: AnalysisCompletedPayload | undefined,
+): void {
+  const status = analysisCompletedRunStatus(payload);
+  if (status === 'failed') {
+    failStreamingFlow(
+      ctx,
+      payload?.terminationMessage ??
+        uiText('分析未完成', 'Analysis did not complete'),
+    );
+    // The authoritative body was already projected. Changing run state must
+    // not flush an earlier incremental buffer over that final body.
+    ctx.streamingAnswer.status = 'failed';
+  } else if (status === 'cancelled') {
+    cancelStreamingFlow(ctx);
+  }
 }
 
 function uiActionProposalMessageUpdate(
@@ -4756,6 +4786,7 @@ export function handleAnalysisCompletedEvent(
     if (sourceEnrichmentPending) {
       updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
     }
+    settleAnalysisCompletedStreams(ctx, payload);
     return {isTerminal: !sourceEnrichmentPending, stopLoading: true};
   }
 
@@ -4925,6 +4956,7 @@ export function handleAnalysisCompletedEvent(
   if (sourceEnrichmentPending) {
     updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
   }
+  settleAnalysisCompletedStreams(ctx, payload);
   return {isTerminal: !sourceEnrichmentPending, stopLoading: true};
 }
 
@@ -6307,13 +6339,18 @@ export function handleSSEEvent(
     });
   } else if (eventType === 'analysis_completed') {
     const payload = toAnalysisCompletedPayload(eventData.data);
+    const terminalStatus = analysisCompletedRunStatus(payload);
     updateAISharedState({
       status:
-        payload?.terminalRunStatus === 'quota_exceeded'
-          ? 'quota_exceeded'
-          : payload?.partial === true
-            ? 'partial'
-            : 'completed',
+        terminalStatus === 'failed'
+          ? 'error'
+          : terminalStatus === 'cancelled'
+            ? 'cancelled'
+            : terminalStatus === 'quota_exceeded'
+              ? 'quota_exceeded'
+              : payload?.partial === true
+                ? 'partial'
+                : 'completed',
       lastAnalysisTime: Date.now(),
     });
   }

@@ -483,11 +483,14 @@ describe('SessionManager analysis mode', () => {
     expect(new SessionManager().loadAnalysisMode()).toBe('conversation');
   });
 
-  it('persists and restores the last explicitly selected mode', () => {
-    const manager = new SessionManager();
-    manager.saveAnalysisMode('full');
-    expect(new SessionManager().loadAnalysisMode()).toBe('full');
-  });
+  it.each(['conversation', 'fast', 'full', 'auto'] as const)(
+    'persists and restores the explicitly selected %s mode',
+    (mode) => {
+      const manager = new SessionManager();
+      manager.saveAnalysisMode(mode);
+      expect(new SessionManager().loadAnalysisMode()).toBe(mode);
+    },
+  );
 });
 
 describe('SessionManager private message persistence', () => {
