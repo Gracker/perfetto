@@ -255,6 +255,15 @@ describe('CodebaseForm', () => {
     )?.attrs.disabled).toBe(false);
   });
 
+  it('discloses source transmission, retained quotations, and extra analysis time', () => {
+    const rendered = collectText(formHarness().view());
+    expect(rendered).toContain('configured AI service');
+    expect(rendered).toContain('internal company service');
+    expect(rendered).toContain('local history and exported reports');
+    expect(rendered).toContain('configuration and policy');
+    expect(rendered).toContain('increase analysis time');
+  });
+
   it('clears picker authorization when the path or backend binding changes', () => {
     const {form, attrs, view} = formHarness();
     form.rootPath = '/selected/source';

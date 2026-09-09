@@ -35,6 +35,7 @@ import {
   updateCodebaseSelection,
 } from './codebase_api';
 import {uiText as text} from './ui_language';
+import {sourceAnalysisDisclosure} from './source_analysis_disclosure';
 import type {CodeAwareAnalysisMode} from './types';
 
 export interface CodebaseFormAttrs {
@@ -1170,6 +1171,12 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             '点击“添加并用于分析”，即允许分析时使用的模型按需接收此文件夹中未排除的脱敏源码片段。可随时取消选择或撤销授权。',
             '“Add and use for analysis” allows the model used for analysis to receive redacted snippets from this folder on demand, excluding the paths above. You can deselect it or revoke access at any time.',
           )),
+      m('div', {style: STYLES.intro}, locateOnly
+        ? text(
+            '源码定位会增加检索步骤，分析耗时可能增加。',
+            'Locating source adds search steps and may increase analysis time.',
+          )
+        : sourceAnalysisDisclosure()),
       this.scopeApplicationNotice
         ? m('div', {style: STYLES.hint, role: 'status'}, this.scopeApplicationNotice)
         : null,

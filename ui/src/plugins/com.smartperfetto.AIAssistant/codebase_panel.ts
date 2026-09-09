@@ -50,6 +50,7 @@ import {CodebaseAuditView} from './codebase_audit_view';
 import {CodebaseForm} from './codebase_form';
 import {codebaseExcerptCache} from './codebase_excerpt_cache';
 import {uiText as text} from './ui_language';
+import {sourceAnalysisDisclosure} from './source_analysis_disclosure';
 
 export interface CodebasePanelAttrs {
   backendUrl: string;
@@ -1239,12 +1240,12 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       {
         id: 'metadata_only',
         label: text('仅定位', 'Locate only'),
-        detail: text('只提供文件、符号与行号引用，不发送源码正文。', 'Use file, symbol, and line references without source text.'),
+        detail: text('只提供文件、符号与行号引用，不发送源码正文。源码定位会增加检索步骤，分析耗时可能增加。', 'Use file, symbol, and line references without source text. Locating source adds search steps and may increase analysis time.'),
       },
       {
         id: 'provider_send',
         label: text('按需读取源码', 'Read source on demand'),
-        detail: text('仅对已明确授权的源码发送脱敏片段。', 'Send redacted snippets only from explicitly consented codebases.'),
+        detail: sourceAnalysisDisclosure(),
       },
     ];
     const current = modes.find((mode) => mode.id === this.selection.codeAwareMode) ?? modes[0];
