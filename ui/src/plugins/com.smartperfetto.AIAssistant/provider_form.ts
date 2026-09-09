@@ -17,7 +17,6 @@ import {
   apiUrl,
   createEmptyForm,
 } from './provider_types';
-import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 import {uiText as text} from './ui_language';
 
@@ -30,8 +29,6 @@ export interface ProviderFormAttrs {
   onSaved: () => void;
   onCancel: () => void;
 }
-
-type AccordionSection = 'name' | 'connection' | 'models' | 'tuning';
 
 const DUAL_SURFACE_PROVIDER_TYPES: ProviderType[] = [
   'deepseek',
@@ -56,7 +53,7 @@ function isDualSurfaceProviderType(type: ProviderType): boolean {
   return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
 }
 
-const CONNECTION_FIELD_HINTS: Record<string, [string, string]> = {
+const CONNECTION_FIELD_HINTS: Partial<Record<string, [string, string]>> = {
   apiKey: [
     '通常只需要此凭据。除非设置了下方的可选覆盖项，预设提供商会将它用于所选 SDK 运行时。',
     'Usually this is the only credential you need. Preset providers reuse it for the selected SDK runtime unless an optional override below is set.',
@@ -137,7 +134,7 @@ function connectionFieldQualifier(field: string): string | undefined {
 
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private form: FormState = createEmptyForm();
-  private expandedSection: AccordionSection = 'name';
+  private generatedName: string | undefined;
   private error: string | null = null;
   private saving = false;
   private isEdit = false;
@@ -182,19 +179,24 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.editingId = null;
       this.form = createEmptyForm();
       const firstTemplate = templates[0];
-      if (firstTemplate) {
+      if (templates.length > 0) {
+        this.form.name = firstTemplate.displayName;
+        this.generatedName = firstTemplate.displayName;
         this.form.type = firstTemplate.type;
         this.form.models = {...firstTemplate.defaultModels};
         this.form.connection = {...(firstTemplate.defaultConnection || {})};
       }
     }
-    this.expandedSection = 'name';
   }
 
   private onTypeChange(type: ProviderType, templates: ProviderTemplate[]) {
+    const useGeneratedName =
+      !this.form.name.trim() || this.form.name === this.generatedName;
     this.form.type = type;
     const template = templates.find((t) => t.type === type);
     if (template) {
+      if (useGeneratedName) this.form.name = template.displayName;
+      this.generatedName = template.displayName;
       this.form.models = {...template.defaultModels};
       this.form.connection = {...(template.defaultConnection || {})};
     }
@@ -202,7 +204,6 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.form.useBedrock = true;
       this.form.bedrockAuthMethod = 'accessKey';
     }
-    this.expandedSection = 'name';
   }
 
   private inferAuthMethod(conn: {
@@ -258,78 +259,6 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     return conn;
   }
 
-  private toggleSection(section: AccordionSection) {
-    if (this.isEdit) {
-      this.expandedSection = section;
-    } else {
-      this.expandedSection =
-        this.expandedSection === section ? ('' as AccordionSection) : section;
-    }
-  }
-
-  private isSectionComplete(
-    section: AccordionSection,
-    template?: ProviderTemplate,
-  ): boolean {
-    switch (section) {
-      case 'name':
-        return this.form.name.trim().length > 0;
-      case 'connection': {
-        if (!template) return false;
-        const conn = this.form.connection;
-        if (this.form.type === 'anthropic') {
-          return !!(conn.claudeApiKey || conn.claudeAuthToken || conn.apiKey);
-        }
-        if (isDualSurfaceProviderType(this.form.type)) {
-          return !!(
-            conn.apiKey ||
-            conn.claudeApiKey ||
-            conn.claudeAuthToken ||
-            conn.openaiApiKey
-          );
-        }
-        if (this.form.type === 'openai') {
-          return !!(conn.openaiApiKey || conn.apiKey);
-        }
-        if (this.form.type === 'ollama') {
-          return !!(conn.openaiBaseUrl || conn.baseUrl);
-        }
-        if (this.form.type === 'custom') {
-          if (this.currentRuntime() === 'openai-agents-sdk') {
-            return !!(conn.openaiBaseUrl || conn.baseUrl);
-          }
-          if (this.currentRuntime() === 'pi-agent-core') {
-            return !!conn.piAgentCoreModelJson;
-          }
-          if (this.currentRuntime() === 'opencode') {
-            return !!(
-              conn.openCodeModelJson ||
-              conn.openaiBaseUrl ||
-              conn.baseUrl
-            );
-          }
-          if (this.currentRuntime() === 'qoder-agent-sdk') {
-            return !!(conn.qoderAccessToken || conn.qoderCliPath);
-          }
-          return !!(conn.claudeBaseUrl || conn.baseUrl);
-        }
-        const requiredFields = (template.requiredFields || []).map((f) =>
-          f.replace(/^connection\./, ''),
-        );
-        return requiredFields.every((f) => {
-          const val = (this.form.connection as Record<string, string>)[f];
-          return val && val.trim().length > 0;
-        });
-      }
-      case 'models':
-        return !!(
-          this.form.models.primary?.trim() && this.form.models.light?.trim()
-        );
-      case 'tuning':
-        return true;
-    }
-  }
-
   private async saveProvider(attrs: ProviderFormAttrs) {
     const {templates, backendUrl, apiKey, onSaved} = attrs;
     const template = templates.find((tmpl) => tmpl.type === this.form.type);
@@ -337,22 +266,29 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     if (this.form.type === 'bedrock') {
       connection.useBedrock = this.form.useBedrock;
     }
+    const primary =
+      this.form.models.primary.trim() || template?.defaultModels.primary || '';
+    if (!primary) {
+      this.error = text('请输入主模型 ID。', 'Enter a primary model ID.');
+      return;
+    }
+    const source = attrs.editingProvider || attrs.cloneSource;
     const body: Record<string, unknown> = {
-      name: this.form.name,
+      name: this.form.name.trim() || template?.displayName || this.form.type,
       category: this.form.type === 'custom' ? 'custom' : 'official',
       type: this.form.type,
       models: {
-        primary:
-          this.form.models.primary || template?.defaultModels.primary || '',
-        light: this.form.models.light || template?.defaultModels.light || '',
-        ...(this.form.models.subAgent
-          ? {subAgent: this.form.models.subAgent}
+        primary,
+        light: this.form.models.light.trim() || primary,
+        ...(this.form.models.subAgent?.trim()
+          ? {subAgent: this.form.models.subAgent.trim()}
           : {}),
       },
       connection,
+      ...(source?.custom ? {custom: source.custom} : {}),
     };
 
-    if (this.form.showTuning && Object.keys(this.form.tuning).length > 0) {
+    if (Object.keys(this.form.tuning).length > 0) {
       body.tuning = this.form.tuning;
     }
 
@@ -459,11 +395,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           'div',
           {style: {flex: 1, overflowY: 'auto' as const, paddingBottom: '8px'}},
           [
-            this.renderTypeGrid(t, s, templates),
+            this.renderTypeSelector(s, templates),
             m(
               'div',
               {style: {marginTop: '16px'}},
-              this.renderAccordion(t, s, template, vnode.attrs),
+              this.renderFields(t, s, template),
             ),
           ],
         ),
@@ -485,20 +421,12 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             m(
               'button',
               {
-                style: {...s.btn, ...s.btnSecondary},
-                onclick: () => onCancel(),
-              },
-              text('关闭', 'Close'),
-            ),
-            m(
-              'button',
-              {
                 style: {
                   ...s.btn,
                   ...s.btnPrimary,
-                  ...(!this.form.name || this.saving ? s.btnDisabled : {}),
+                  ...(this.saving ? s.btnDisabled : {}),
                 },
-                disabled: !this.form.name || this.saving,
+                disabled: this.saving,
                 onclick: () => this.saveProvider(vnode.attrs),
               },
               this.saving
@@ -513,129 +441,137 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     );
   }
 
-  private renderTypeGrid(
-    _t: ReturnType<typeof getTokens>,
+  private renderTypeSelector(
     s: ReturnType<typeof getStyles>,
     templates: ProviderTemplate[],
   ): m.Children {
-    return m(
-      'div',
-      {style: s.typeGrid},
-      templates.map((tmpl) => {
-        const isSelected = this.form.type === tmpl.type;
-        const isDisabled = this.isEdit;
-        const cardStyle = {
-          ...s.typeCard,
-          ...(isSelected ? s.typeCardSelected : {}),
-          ...(isDisabled ? s.typeCardDisabled : {}),
-        };
-        return m(
-          'div',
-          {
-            key: tmpl.type,
-            style: cardStyle,
-            onclick: isDisabled
-              ? undefined
-              : () => {
-                  this.onTypeChange(tmpl.type, templates);
-                  m.redraw();
-                },
-          },
-          [
-            m(
-              'div',
-              {style: s.typeCardIcon},
-              renderProviderIcon(tmpl.type, 24),
+    return m('div', {style: s.formField}, [
+      this.renderFieldLabel(
+        s,
+        text('供应商', 'Provider'),
+        undefined,
+        'provider-type',
+      ),
+      m(
+        'select',
+        {
+          id: 'provider-type',
+          name: 'provider-type',
+          style: s.formSelect,
+          value: this.form.type,
+          disabled: this.isEdit,
+          onchange: (e: Event) =>
+            this.onTypeChange(
+              (e.target as HTMLSelectElement).value as ProviderType,
+              templates,
             ),
-            m('div', {style: s.typeCardLabel}, tmpl.displayName),
-          ],
-        );
-      }),
-    );
-  }
-
-  private renderAccordion(
-    t: ReturnType<typeof getTokens>,
-    s: ReturnType<typeof getStyles>,
-    template: ProviderTemplate | undefined,
-    attrs: ProviderFormAttrs,
-  ): m.Children {
-    const sections: Array<{key: AccordionSection; title: string}> = [
-      {key: 'name', title: text('名称与身份', 'Name & Identity')},
-      {key: 'connection', title: text('连接', 'Connection')},
-      {key: 'models', title: text('模型', 'Models')},
-      {key: 'tuning', title: text('高级调优', 'Advanced Tuning')},
-    ];
-
-    return m('div', [
-      ...sections.map(({key, title}) => {
-        const isOpen = this.isEdit ? true : this.expandedSection === key;
-        const isComplete = this.isSectionComplete(key, template);
-
-        return m('div', {key, style: s.accordionSection}, [
-          m(
-            'div',
-            {
-              style: s.accordionHeader,
-              onclick: () => {
-                this.toggleSection(key);
-                m.redraw();
-              },
-            },
-            [
-              m('div', {style: s.accordionHeaderLeft}, [
-                m('div', {
-                  style: {
-                    ...s.accordionDot,
-                    ...(isComplete
-                      ? s.accordionDotComplete
-                      : s.accordionDotPending),
-                  },
-                }),
-                m('span', {style: s.accordionTitle}, title),
-              ]),
-              m(
-                'span',
-                {
-                  style: {
-                    ...s.accordionChevron,
-                    transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                  },
-                },
-                '▼',
-              ),
-            ],
-          ),
-
-          isOpen
-            ? m(
-                'div',
-                {style: s.accordionBody},
-                this.renderSectionContent(key, t, s, template, attrs),
-              )
-            : null,
-        ]);
-      }),
+        },
+        templates.map((template) =>
+          m('option', {value: template.type}, template.displayName),
+        ),
+      ),
     ]);
   }
 
-  private renderSectionContent(
-    section: AccordionSection,
-    _t: ReturnType<typeof getTokens>,
-    s: ReturnType<typeof getStyles>,
-    template: ProviderTemplate | undefined,
-    _attrs: ProviderFormAttrs,
-  ): m.Children {
-    switch (section) {
-      case 'name':
-        return this.renderNameSection(s, template);
-      case 'connection':
-        return this.renderConnectionSection(s, template);
-      case 'models':
-        return this.renderModelsSection(s, template);
-      case 'tuning':
-        return this.renderTuningSection(_t, s);
+  private primaryCredentialField(): string {
+    const conn = this.form.connection;
+    if (this.currentRuntime() === 'openai-agents-sdk') {
+      return conn.openaiApiKey ||
+        this.form.type === 'openai' ||
+        this.form.type === 'ollama'
+        ? 'openaiApiKey'
+        : 'apiKey';
     }
+    if (conn.claudeAuthToken) return 'claudeAuthToken';
+    return conn.claudeApiKey || this.form.type === 'anthropic'
+      ? 'claudeApiKey'
+      : 'apiKey';
+  }
+
+  private renderFields(
+    t: ReturnType<typeof getTokens>,
+    s: ReturnType<typeof getStyles>,
+    template?: ProviderTemplate,
+  ): m.Children {
+    const special =
+      this.form.type === 'custom' ||
+      this.form.type === 'bedrock' ||
+      this.form.type === 'vertex';
+    return m('div', [
+      special
+        ? this.renderConnectionSection(s, template)
+        : this.renderConnectionInput(
+            s,
+            this.primaryCredentialField(),
+            text('API 密钥', 'API Key'),
+            undefined,
+            false,
+          ),
+      this.renderModelField(s, 'primary', text('模型', 'Model'), template),
+      m(
+        'div',
+        {style: s.formHint},
+        text(
+          '可选择已有模型，也可直接输入新模型 ID。',
+          'Choose a listed model or enter any new model ID.',
+        ),
+      ),
+      m('details', {style: {marginTop: '20px'}}, [
+        m(
+          'summary',
+          {
+            style: {
+              cursor: 'pointer',
+              padding: '12px 0',
+              color: t.textSecondary,
+            },
+          },
+          text('高级设置', 'Advanced settings'),
+        ),
+        this.renderNameSection(s, template),
+        this.renderModelField(
+          s,
+          'light',
+          text('轻量模型', 'Light Model'),
+          template,
+        ),
+        this.renderModelField(
+          s,
+          'subAgent',
+          text('子 Agent 模型', 'Sub-agent Model'),
+          template,
+        ),
+        this.form.type === 'custom'
+          ? this.renderCustomConnection(s, true)
+          : this.form.type === 'bedrock'
+            ? this.renderBedrockConnection(s, true)
+            : !special
+              ? this.renderAdvancedConnection(s)
+              : null,
+        this.renderTuningSection(t, s),
+      ]),
+    ]);
+  }
+
+  private renderAdvancedConnection(
+    s: ReturnType<typeof getStyles>,
+  ): m.Children {
+    const dual = isDualSurfaceProviderType(this.form.type);
+    const mainField = this.primaryCredentialField();
+    const openai = this.currentRuntime() === 'openai-agents-sdk';
+    const fields = openai
+      ? ['openaiApiKey', 'openaiBaseUrl']
+      : ['claudeApiKey', 'claudeAuthToken', 'claudeBaseUrl'];
+    return m('div', [
+      dual ? this.renderRuntimeSelector(s) : null,
+      dual && mainField !== 'apiKey'
+        ? this.renderConnectionInput(s, 'apiKey')
+        : null,
+      ...fields
+        .filter((field) => field !== mainField)
+        .map((field) => this.renderConnectionInput(s, field)),
+      openai ? this.renderOpenAIProtocolSelect(s) : null,
+    ]);
   }
 
   private renderNameSection(
@@ -643,9 +579,16 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     template?: ProviderTemplate,
   ): m.Children {
     return m('div', {style: s.formField}, [
-      this.renderFieldLabel(s, text('显示名称', 'Display Name')),
+      this.renderFieldLabel(
+        s,
+        text('显示名称', 'Display Name'),
+        undefined,
+        'provider-name',
+      ),
       m('input[type=text]', {
         style: s.formInput,
+        id: 'provider-name',
+        name: 'provider-name',
         value: this.form.name,
         oninput: (e: Event) => {
           this.form.name = (e.target as HTMLInputElement).value;
@@ -670,9 +613,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     s: ReturnType<typeof getStyles>,
     label: string,
     qualifier?: string,
+    id?: string,
   ): m.Children {
     const t = getTokens();
-    return m('label', {style: s.formLabel}, [
+    return m('label', {style: s.formLabel, for: id}, [
       label,
       qualifier
         ? m(
@@ -718,22 +662,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       return this.renderCustomConnection(s);
     }
 
-    if (
-      this.supportsClaudeSurface(this.form.type) &&
-      this.supportsOpenAISurface(this.form.type)
-    ) {
-      return this.renderDualSdkConnection(s);
-    }
-
-    if (this.supportsClaudeSurface(this.form.type)) {
-      return this.renderClaudeConnectionFields(s, {includeApiKey: true});
-    }
-
-    if (this.supportsOpenAISurface(this.form.type)) {
-      return this.renderOpenAIConnectionFields(s, {includeApiKey: true});
-    }
-
-    const requiredFields = (template.requiredFields || []).map((f) =>
+    const requiredFields = template.requiredFields.map((f) =>
       f.replace(/^connection\./, ''),
     );
 
@@ -754,9 +683,16 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       {},
       requiredFields.map((field) => {
         const meta = connectionFieldMetadata(field);
-        return m('div', {key: field, style: s.formField}, [
-          this.renderFieldLabel(s, meta.label, connectionFieldQualifier(field)),
+        return m('div', {style: s.formField}, [
+          this.renderFieldLabel(
+            s,
+            meta.label,
+            connectionFieldQualifier(field),
+            `provider-${field}`,
+          ),
           m(`input[type=${meta.type}]`, {
+            id: `provider-${field}`,
+            name: field,
             style: s.formInput,
             value:
               (this.form.connection as Record<string, string>)[field] || '',
@@ -772,23 +708,6 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             : null,
         ]);
       }),
-    );
-  }
-
-  private supportsClaudeSurface(type: ProviderType): boolean {
-    return (
-      type === 'anthropic' ||
-      isDualSurfaceProviderType(type) ||
-      type === 'custom'
-    );
-  }
-
-  private supportsOpenAISurface(type: ProviderType): boolean {
-    return (
-      type === 'openai' ||
-      type === 'ollama' ||
-      isDualSurfaceProviderType(type) ||
-      type === 'custom'
     );
   }
 
@@ -809,102 +728,47 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     return 'claude-agent-sdk';
   }
 
-  private renderCustomConnection(s: ReturnType<typeof getStyles>): m.Children {
+  private renderCustomConnection(
+    s: ReturnType<typeof getStyles>,
+    advanced = false,
+  ): m.Children {
     const runtime = this.currentRuntime();
+    let fields: string[];
+    switch (runtime) {
+      case 'pi-agent-core':
+        fields = advanced
+          ? ['piAgentCoreModulePath', 'piAgentCoreSystemPrompt']
+          : ['piAgentCoreModelJson'];
+        break;
+      case 'qoder-agent-sdk':
+        fields = advanced
+          ? ['qoderModel', 'qoderSystemPrompt']
+          : ['qoderAccessToken', 'qoderCliPath'];
+        break;
+      case 'opencode':
+        fields = advanced
+          ? ['openCodeSdkModulePath', 'openCodeSystemPrompt']
+          : ['openaiApiKey', 'openaiBaseUrl', 'openCodeModelJson'];
+        break;
+      case 'openai-agents-sdk':
+        fields = advanced ? [] : ['openaiApiKey', 'openaiBaseUrl'];
+        break;
+      default:
+        fields = advanced
+          ? ['claudeAuthToken']
+          : ['claudeApiKey', 'claudeBaseUrl'];
+    }
     return m('div', [
-      this.renderRuntimeSelector(s),
-      runtime === 'pi-agent-core'
-        ? this.renderPiAgentCoreConnectionFields(s)
-        : runtime === 'opencode'
-          ? this.renderOpenCodeConnectionFields(s)
-          : runtime === 'qoder-agent-sdk'
-            ? this.renderQoderConnectionFields(s)
-            : runtime === 'openai-agents-sdk'
-              ? this.renderOpenAIConnectionFields(s, {includeApiKey: true})
-              : this.renderClaudeConnectionFields(s, {includeApiKey: true}),
-    ]);
-  }
-
-  private renderDualSdkConnection(s: ReturnType<typeof getStyles>): m.Children {
-    const t = getTokens();
-    const runtime = this.currentRuntime();
-    return m('div', [
-      this.renderRuntimeSelector(s),
-      m('div', {style: s.formField}, [
-        this.renderFieldLabel(s, text('提供商 API 密钥', 'Provider API Key')),
-        m('input[type=password]', {
-          style: s.formInput,
-          value: this.form.connection.apiKey || '',
-          oninput: (e: Event) => {
-            this.form.connection.apiKey = (e.target as HTMLInputElement).value;
-          },
-          placeholder: 'sk-...',
-        }),
-        m('div', {style: s.formHint}, connectionFieldHint('apiKey')),
-      ]),
-      this.renderPresetConnectionSummary(),
-      m(
-        'div',
-        {
-          style: {
-            marginTop: '14px',
-            paddingTop: '12px',
-            borderTop: `1px solid ${t.border}`,
-          },
-        },
-        [
-          this.renderConnectionGroupTitle(
-            runtime === 'openai-agents-sdk'
-              ? text('OpenAI SDK 可选字段', 'OpenAI SDK optional fields')
-              : text('Claude SDK 可选字段', 'Claude SDK optional fields'),
-          ),
-          runtime === 'openai-agents-sdk'
-            ? this.renderOpenAIConnectionFields(s, {includeApiKey: false})
-            : this.renderClaudeConnectionFields(s, {includeApiKey: false}),
-        ],
+      !advanced ? this.renderRuntimeSelector(s) : null,
+      ...fields.map((field) =>
+        field.endsWith('Json') || field.endsWith('SystemPrompt')
+          ? this.renderConnectionTextarea(s, field)
+          : this.renderConnectionInput(s, field),
       ),
+      advanced && (runtime === 'openai-agents-sdk' || runtime === 'opencode')
+        ? this.renderOpenAIProtocolSelect(s)
+        : null,
     ]);
-  }
-
-  private renderPresetConnectionSummary(): m.Children {
-    const t = getTokens();
-    const conn = this.form.connection;
-    const url =
-      this.currentRuntime() === 'openai-agents-sdk'
-        ? conn.openaiBaseUrl || conn.baseUrl
-        : conn.claudeBaseUrl || conn.baseUrl;
-    const protocol =
-      this.currentRuntime() === 'openai-agents-sdk'
-        ? conn.openaiProtocol || 'chat_completions'
-        : undefined;
-    const details = [url ? `URL: ${url}` : undefined, protocol]
-      .filter(Boolean)
-      .join(' · ');
-
-    return m(
-      'div',
-      {
-        style: {
-          margin: '10px 0 2px',
-          padding: '8px 10px',
-          borderRadius: '6px',
-          backgroundColor: t.surface,
-          border: `1px solid ${t.border}`,
-          color: t.textSecondary,
-          fontSize: '12px',
-          lineHeight: '1.45',
-        },
-      },
-      details
-        ? text(
-            `模板已预填运行时默认值（${details}）。`,
-            `Template already filled the runtime defaults (${details}).`,
-          )
-        : text(
-            '模板已预填运行时默认值。',
-            'Template already filled the runtime defaults.',
-          ),
-    );
   }
 
   private renderRuntimeSelector(s: ReturnType<typeof getStyles>): m.Children {
@@ -977,147 +841,13 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     ]);
   }
 
-  private renderPiAgentCoreConnectionFields(
-    s: ReturnType<typeof getStyles>,
-  ): m.Children {
-    return m('div', [
-      this.renderConnectionInput(s, 'piAgentCoreModulePath'),
-      this.renderConnectionTextarea(s, 'piAgentCoreModelJson'),
-      this.renderConnectionTextarea(s, 'piAgentCoreSystemPrompt'),
-      m(
-        'div',
-        {key: 'piAgentCoreCapabilityHint', style: s.formHint},
-        text(
-          'Pi Agent Core 能力受限：它是可选的动态加载运行时，不会启用 Shell/文件工具或 .pi 项目发现。',
-          'Pi Agent Core is capability-limited: it is optional, dynamically loaded, and does not enable shell/file tools or .pi project discovery.',
-        ),
-      ),
-    ]);
-  }
-
-  private renderOpenCodeConnectionFields(
-    s: ReturnType<typeof getStyles>,
-  ): m.Children {
-    return m('div', [
-      m(
-        'div',
-        {key: 'openCodeOpenAIFields'},
-        this.renderOpenAIConnectionFields(s, {includeApiKey: true}),
-      ),
-      this.renderConnectionInput(s, 'openCodeSdkModulePath'),
-      this.renderConnectionTextarea(s, 'openCodeModelJson'),
-      this.renderConnectionTextarea(s, 'openCodeSystemPrompt'),
-      m(
-        'div',
-        {key: 'openCodeCapabilityHint', style: s.formHint},
-        text(
-          'OpenCode 通过隔离服务器运行，只使用请求范围内的 SmartPerfetto MCP 工具；内置 Shell、文件和项目发现工具仍保持禁用。',
-          'OpenCode runs through an isolated server with request-scoped SmartPerfetto MCP tools. Built-in shell/file/project discovery tools remain disabled.',
-        ),
-      ),
-    ]);
-  }
-
-  private renderQoderConnectionFields(
-    s: ReturnType<typeof getStyles>,
-  ): m.Children {
-    return m('div', [
-      this.renderConnectionInput(s, 'qoderAccessToken'),
-      this.renderConnectionInput(s, 'qoderCliPath'),
-      this.renderConnectionInput(s, 'qoderModel'),
-      this.renderConnectionTextarea(s, 'qoderSystemPrompt'),
-      m(
-        'div',
-        {key: 'qoderCapabilityHint', style: s.formHint},
-        text(
-          'Qoder SDK 通过隔离进程运行，只使用请求范围内的 SmartPerfetto MCP 工具；内置 Shell、文件、编辑和 Web 工具全部禁用。需要 Personal Access Token 或本地 CLI 路径。',
-          'Qoder SDK runs through an isolated process with request-scoped SmartPerfetto MCP tools. Built-in shell/file/edit/web tools are all disabled. Requires a Personal Access Token or local CLI path.',
-        ),
-      ),
-    ]);
-  }
-
-  private renderConnectionGroupTitle(title: string): m.Children {
-    const t = getTokens();
-    return m(
-      'div',
-      {
-        style: {
-          fontSize: '11px',
-          color: t.textSecondary,
-          fontWeight: 700,
-          textTransform: 'uppercase' as const,
-          marginBottom: '10px',
-        },
-      },
-      title,
-    );
-  }
-
-  private renderClaudeConnectionFields(
-    s: ReturnType<typeof getStyles>,
-    options: {includeApiKey: boolean},
-  ): m.Children {
-    return m('div', [
-      options.includeApiKey
-        ? this.renderConnectionInput(s, 'claudeApiKey')
-        : this.renderConnectionInput(
-            s,
-            'claudeApiKey',
-            text(
-              'Claude 兼容 API 密钥覆盖',
-              'Claude-compatible API Key Override',
-            ),
-            text('可选', 'Optional'),
-          ),
-      this.renderConnectionInput(
-        s,
-        'claudeAuthToken',
-        undefined,
-        text('可选', 'Optional'),
-      ),
-      this.renderConnectionInput(
-        s,
-        'claudeBaseUrl',
-        undefined,
-        text('预设', 'Preset'),
-      ),
-    ]);
-  }
-
-  private renderOpenAIConnectionFields(
-    s: ReturnType<typeof getStyles>,
-    options: {includeApiKey: boolean},
-  ): m.Children {
-    return m('div', [
-      options.includeApiKey
-        ? this.renderConnectionInput(s, 'openaiApiKey')
-        : this.renderConnectionInput(
-            s,
-            'openaiApiKey',
-            text(
-              'OpenAI 兼容 API 密钥覆盖',
-              'OpenAI-compatible API Key Override',
-            ),
-            text('可选', 'Optional'),
-          ),
-      this.renderConnectionInput(
-        s,
-        'openaiBaseUrl',
-        undefined,
-        text('预设', 'Preset'),
-      ),
-      this.renderOpenAIProtocolSelect(s),
-    ]);
-  }
-
   private renderOpenAIProtocolSelect(
     s: ReturnType<typeof getStyles>,
   ): m.Children {
     const protocol =
       this.form.connection.openaiProtocol ||
       (this.form.type === 'openai' ? 'responses' : 'chat_completions');
-    return m('div', {key: 'openaiProtocol', style: s.formField}, [
+    return m('div', {style: s.formField}, [
       this.renderFieldLabel(
         s,
         text('OpenAI 协议', 'OpenAI Protocol'),
@@ -1159,16 +889,20 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     field: string,
     labelOverride?: string,
     qualifierOverride?: string,
+    showHint = true,
   ): m.Children {
     const meta = connectionFieldMetadata(field);
     const conn = this.form.connection as Record<string, string>;
-    return m('div', {key: field, style: s.formField}, [
+    return m('div', {style: s.formField}, [
       this.renderFieldLabel(
         s,
         labelOverride || meta.label,
         qualifierOverride ?? connectionFieldQualifier(field),
+        `provider-${field}`,
       ),
       m(`input[type=${meta.type}]`, {
+        id: `provider-${field}`,
+        name: field,
         style: s.formInput,
         value: conn[field] || '',
         oninput: (e: Event) => {
@@ -1176,7 +910,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         },
         placeholder: meta.placeholder,
       }),
-      connectionFieldHint(field)
+      showHint && connectionFieldHint(field)
         ? m('div', {style: s.formHint}, connectionFieldHint(field))
         : null,
     ]);
@@ -1188,9 +922,16 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   ): m.Children {
     const meta = connectionFieldMetadata(field);
     const conn = this.form.connection as Record<string, string>;
-    return m('div', {key: field, style: s.formField}, [
-      this.renderFieldLabel(s, meta.label, connectionFieldQualifier(field)),
+    return m('div', {style: s.formField}, [
+      this.renderFieldLabel(
+        s,
+        meta.label,
+        connectionFieldQualifier(field),
+        `provider-${field}`,
+      ),
       m('textarea', {
+        id: `provider-${field}`,
+        name: field,
         style: {
           ...s.formInput,
           minHeight: field === 'piAgentCoreModelJson' ? '96px' : '72px',
@@ -1209,336 +950,109 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     ]);
   }
 
-  private renderBedrockConnection(s: ReturnType<typeof getStyles>): m.Children {
-    const t = getTokens();
-    const conn = this.form.connection as Record<string, string>;
-
-    const authFields: Record<
-      BedrockAuthMethod,
-      Array<{key: string; label: string; type: string; placeholder: string}>
-    > = {
-      bearer: [
-        {
-          key: 'awsBearerToken',
-          label: text('AWS Bearer 令牌', 'AWS Bearer Token'),
-          type: 'password',
-          placeholder: text(
-            '用于访问 Bedrock 的 Bearer 令牌',
-            'Bearer token for Bedrock access',
-          ),
-        },
-      ],
-      accessKey: [
-        {
-          key: 'awsAccessKeyId',
-          label: text('AWS 访问密钥 ID', 'AWS Access Key ID'),
-          type: 'text',
-          placeholder: 'AKIA...',
-        },
-        {
-          key: 'awsSecretAccessKey',
-          label: text('AWS 私密访问密钥', 'AWS Secret Access Key'),
-          type: 'password',
-          placeholder: text('私密密钥……', 'Secret key...'),
-        },
-        {
-          key: 'awsSessionToken',
-          label: text('会话令牌（可选）', 'Session Token (optional)'),
-          type: 'password',
-          placeholder: text('临时会话令牌……', 'Temporary session token...'),
-        },
-      ],
-      profile: [
-        {
-          key: 'awsProfile',
-          label: text('AWS 配置文件名称', 'AWS Profile Name'),
-          type: 'text',
-          placeholder: 'default',
-        },
-      ],
+  private renderBedrockConnection(
+    s: ReturnType<typeof getStyles>,
+    advanced = false,
+  ): m.Children {
+    if (advanced) {
+      return m('div', [
+        this.renderConnectionInput(s, 'apiKey'),
+        this.renderConnectionInput(s, 'awsSessionToken'),
+        this.renderConnectionInput(
+          s,
+          'baseUrl',
+          text('Bedrock 基础 URL', 'Bedrock Base URL'),
+        ),
+        m('label', {style: s.formField}, [
+          m('input[type=checkbox]', {
+            checked: this.form.useBedrock,
+            onchange: (e: Event) => {
+              this.form.useBedrock = (e.target as HTMLInputElement).checked;
+            },
+          }),
+          text('使用 Bedrock', 'Use Bedrock'),
+        ]),
+      ]);
+    }
+    const authFields: Record<BedrockAuthMethod, string[]> = {
+      bearer: ['awsBearerToken'],
+      accessKey: ['awsAccessKeyId', 'awsSecretAccessKey'],
+      profile: ['awsProfile'],
     };
-
     return m('div', [
+      this.renderConnectionInput(s, 'awsRegion'),
       m('div', {style: s.formField}, [
-        m('label', {style: s.formLabel}, text('AWS 区域', 'AWS Region')),
-        m('input[type=text]', {
-          style: s.formInput,
-          value: conn['awsRegion'] || '',
-          oninput: (e: Event) => {
-            conn['awsRegion'] = (e.target as HTMLInputElement).value;
-          },
-          placeholder: text(
-            'us-east-1（留空则使用 AWS_REGION 环境变量）',
-            'us-east-1 (leave empty to use AWS_REGION env)',
-          ),
-        }),
+        this.renderFieldLabel(
+          s,
+          text('认证方式', 'Authentication Method'),
+          undefined,
+          'provider-bedrock-auth',
+        ),
         m(
-          'div',
-          {style: s.formHint},
-          text(
-            '留空则继承 AWS_REGION 环境变量。',
-            'Leave empty to inherit from AWS_REGION environment variable',
-          ),
+          'select',
+          {
+            id: 'provider-bedrock-auth',
+            name: 'bedrockAuthMethod',
+            style: s.formSelect,
+            value: this.form.bedrockAuthMethod,
+            onchange: (e: Event) => {
+              this.form.bedrockAuthMethod = (e.target as HTMLSelectElement)
+                .value as BedrockAuthMethod;
+            },
+          },
+          [
+            m(
+              'option',
+              {value: 'accessKey'},
+              text('AWS 访问密钥', 'AWS Access Key'),
+            ),
+            m('option', {value: 'bearer'}, text('Bearer 令牌', 'Bearer Token')),
+            m(
+              'option',
+              {value: 'profile'},
+              text('AWS 配置文件', 'AWS Profile'),
+            ),
+          ],
         ),
       ]),
-
-      m('div', {style: s.formField}, [
-        m(
-          'label',
-          {style: s.formLabel},
-          text('API 密钥（可选）', 'API Key (optional)'),
-        ),
-        m('input[type=password]', {
-          style: s.formInput,
-          value: conn['apiKey'] || '',
-          oninput: (e: Event) => {
-            conn['apiKey'] = (e.target as HTMLInputElement).value;
-          },
-          placeholder: text(
-            'sk-ant-…（适用于 Anthropic 代理）',
-            'sk-ant-... (for Anthropic proxy, if applicable)',
-          ),
-        }),
-        m(
-          'div',
-          {style: s.formHint},
-          text(
-            '仅在 Bedrock 前使用 Anthropic API 代理时需要。',
-            'Only needed if using an Anthropic API proxy in front of Bedrock',
-          ),
-        ),
-      ]),
-
-      m(
-        'div',
-        {
-          style: {
-            marginTop: '16px',
-            paddingTop: '12px',
-            borderTop: `1px solid ${t.border}`,
-          },
-        },
-        [
-          m(
-            'div',
-            {
-              key: 'adv-title',
-              style: {
-                ...s.formLabel,
-                fontSize: '12px',
-                color: t.textSecondary,
-                textTransform: 'uppercase' as const,
-                letterSpacing: '0.5px',
-                marginBottom: '12px',
-              },
-            },
-            text('高级配置', 'Advanced Configuration'),
-          ),
-
-          m(
-            'div',
-            {
-              key: 'adv-usebedrock',
-              style: {
-                ...s.formField,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-              },
-            },
-            [
-              m('input[type=checkbox]', {
-                checked: this.form.useBedrock,
-                onchange: (e: Event) => {
-                  this.form.useBedrock = (e.target as HTMLInputElement).checked;
-                },
-              }),
-              m(
-                'label',
-                {style: {...s.formLabel, margin: 0}},
-                text('使用 Bedrock', 'Use Bedrock'),
-              ),
-              m(
-                'span',
-                {style: {fontSize: '11px', color: t.textMuted}},
-                '(CLAUDE_CODE_USE_BEDROCK=1)',
-              ),
-            ],
-          ),
-
-          m('div', {key: 'adv-authmethod', style: s.formField}, [
-            m(
-              'label',
-              {style: s.formLabel},
-              text('认证方式', 'Authentication Method'),
-            ),
-            m(
-              'select',
-              {
-                style: s.formSelect,
-                value: this.form.bedrockAuthMethod,
-                onchange: (e: Event) => {
-                  this.form.bedrockAuthMethod = (e.target as HTMLSelectElement)
-                    .value as BedrockAuthMethod;
-                },
-              },
-              [
-                m(
-                  'option',
-                  {value: 'accessKey'},
-                  text(
-                    '访问密钥（AWS_ACCESS_KEY_ID + Secret）',
-                    'Access Key (AWS_ACCESS_KEY_ID + Secret)',
-                  ),
-                ),
-                m(
-                  'option',
-                  {value: 'bearer'},
-                  text(
-                    'Bearer 令牌（AWS_BEARER_TOKEN_BEDROCK）',
-                    'Bearer Token (AWS_BEARER_TOKEN_BEDROCK)',
-                  ),
-                ),
-                m(
-                  'option',
-                  {value: 'profile'},
-                  text(
-                    'AWS 配置文件（AWS_PROFILE）',
-                    'AWS Profile (AWS_PROFILE)',
-                  ),
-                ),
-              ],
-            ),
-          ]),
-
-          ...authFields[this.form.bedrockAuthMethod].map((field) =>
-            m('div', {key: field.key, style: s.formField}, [
-              m('label', {style: s.formLabel}, field.label),
-              m(`input[type=${field.type}]`, {
-                style: s.formInput,
-                value: conn[field.key] || '',
-                oninput: (e: Event) => {
-                  conn[field.key] = (e.target as HTMLInputElement).value;
-                },
-                placeholder: field.placeholder,
-              }),
-            ]),
-          ),
-
-          m('div', {key: 'adv-baseurl', style: s.formField}, [
-            m(
-              'label',
-              {style: s.formLabel},
-              text('Bedrock 基础 URL（可选）', 'Bedrock Base URL (optional)'),
-            ),
-            m('input[type=text]', {
-              style: s.formInput,
-              value: conn['baseUrl'] || '',
-              oninput: (e: Event) => {
-                conn['baseUrl'] = (e.target as HTMLInputElement).value;
-              },
-              placeholder: 'https://bedrock-runtime.us-east-1.amazonaws.com',
-            }),
-            m(
-              'div',
-              {style: s.formHint},
-              text(
-                '对应 ANTHROPIC_BEDROCK_BASE_URL；留空则使用默认值。',
-                'Maps to ANTHROPIC_BEDROCK_BASE_URL. Leave empty for default.',
-              ),
-            ),
-          ]),
-        ],
+      ...authFields[this.form.bedrockAuthMethod].map((field) =>
+        this.renderConnectionInput(s, field),
       ),
     ]);
   }
 
-  private renderModelsSection(
+  private renderModelField(
     s: ReturnType<typeof getStyles>,
+    key: 'primary' | 'light' | 'subAgent',
+    label: string,
     template?: ProviderTemplate,
   ): m.Children {
-    const hasAvailableModels = !!(
-      template?.availableModels && template.availableModels.length > 0
-    );
-
-    const modelField = (
-      label: string,
-      key: 'primary' | 'light',
-      defaultVal?: string,
-    ) =>
-      m('div', {style: s.formField}, [
-        this.renderFieldLabel(
-          s,
-          label,
-          defaultVal ? text('预设', 'Preset') : undefined,
+    const id = `provider-model-${key}`;
+    return m('div', {style: s.formField}, [
+      this.renderFieldLabel(s, label, undefined, id),
+      m('input[type=text]', {
+        id,
+        name: key,
+        list: `${id}-options`,
+        style: s.formInput,
+        value: this.form.models[key] || '',
+        autocomplete: 'off',
+        spellcheck: false,
+        placeholder:
+          key === 'primary'
+            ? text('模型 ID', 'Model ID')
+            : text('留空则继承主模型', 'Leave empty to inherit primary'),
+        oninput: (e: Event) => {
+          this.form.models[key] = (e.target as HTMLInputElement).value;
+        },
+      }),
+      m(
+        'datalist',
+        {id: `${id}-options`},
+        (template?.availableModels || []).map((model) =>
+          m('option', {value: model.id}, model.name),
         ),
-        hasAvailableModels
-          ? m(
-              'select',
-              {
-                style: s.formSelect,
-                value: this.form.models[key] || '',
-                onchange: (e: Event) => {
-                  this.form.models[key] = (e.target as HTMLSelectElement).value;
-                },
-              },
-              [
-                m('option', {value: ''}, text('-- 请选择 --', '-- Select --')),
-                ...(template?.availableModels || []).map((mdl) =>
-                  m('option', {value: mdl.id}, `${mdl.name} (${mdl.tier})`),
-                ),
-              ],
-            )
-          : m('input[type=text]', {
-              style: s.formInput,
-              value: this.form.models[key] || '',
-              oninput: (e: Event) => {
-                this.form.models[key] = (e.target as HTMLInputElement).value;
-              },
-              placeholder: defaultVal || text('模型 ID', 'Model ID'),
-            }),
-        defaultVal
-          ? m(
-              'div',
-              {style: s.formHint},
-              text(
-                `已预填：${defaultVal}。仅在提供商套餐使用其他模型 ID 时修改。`,
-                `Prefilled: ${defaultVal}. Change only if your provider plan uses another model ID.`,
-              ),
-            )
-          : null,
-      ]);
-
-    return m('div', [
-      modelField(
-        text('主模型', 'Primary Model'),
-        'primary',
-        template?.defaultModels.primary,
       ),
-      modelField(
-        text('轻量模型', 'Light Model'),
-        'light',
-        template?.defaultModels.light,
-      ),
-      m('div', {style: s.formField}, [
-        this.renderFieldLabel(
-          s,
-          text('子 Agent 模型', 'Sub-agent Model'),
-          text('可选', 'Optional'),
-        ),
-        m('input[type=text]', {
-          style: s.formInput,
-          value: this.form.models.subAgent || '',
-          oninput: (e: Event) => {
-            this.form.models.subAgent =
-              (e.target as HTMLInputElement).value || undefined;
-          },
-          placeholder: text(
-            '留空则继承主模型',
-            'Leave empty to inherit primary',
-          ),
-        }),
-      ]),
     ]);
   }
 
