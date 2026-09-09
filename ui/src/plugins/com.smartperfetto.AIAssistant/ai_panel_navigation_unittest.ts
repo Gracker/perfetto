@@ -27,6 +27,7 @@ import {
   toggleSidebarCollapsedWithTransientState,
 } from './ai_transient_state';
 import {sessionManager} from './session_manager';
+import {clearConversationRuntimeIdentities, loadConversationStore, loadConversationStoreForUpdate, saveConversationStore} from './conversation_store';
 import {SettingsModal} from './settings_modal';
 import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import type {TracePairWorkspaceScope} from './trace_pair_workspace_state_model';
@@ -3150,4 +3151,166 @@ describe('AIPanel authority-aware disposal', () => {
 
     expect(flush).not.toHaveBeenCalled();
   });
+});
+
+describe('AIPanel conversation restoration', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    clearConversationRuntimeIdentities();
+    saveConversationStore({backendUrl: 'http://restoration-backend', sessionId: 'saved-chat',
+      updatedAt: 1, messages: [{id: 'old-local-answer', role: 'assistant', content: 'cached private answer', timestamp: 1, privateContent: true}]});
+    clearConversationRuntimeIdentities();
+  });
+
+  afterEach(() => {
+    clearConversationRuntimeIdentities();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  function restoredSnapshot(overrides: Record<string, unknown> = {}): Response {
+    return new Response(JSON.stringify({success: true, sessionId: 'saved-chat', status: 'idle',
+      traceContext: {kind: 'none'}, historyOmittedMessages: 0,
+      history: [{role: 'assistant', content: 'authorized restored answer', sourceDerived: true, turnId: 'old-run',
+        turn: {id: 'old-run', turnIndex: 0, partial: true, completionStatus: 'incomplete',
+          terminationReason: 'turn_limit', uncertainties: ['missing scheduler evidence'], nextSteps: [], evidence: []}}],
+      ...overrides,
+    }), {status: 200});
+  }
+
+  function panelForRestore(): any {
+    const panel = new AIPanel() as any;
+    panel.state.settings.backendUrl = 'http://restoration-backend';
+    panel.state.analysisMode = 'conversation';
+    panel.state.backendTraceId = null;
+    panel.addMessage = vi.fn((message: any) => { panel.state.messages.push(message); });
+    return panel;
+  }
+
+  it('hydrates an authorized partial answer with its completeness notice', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(restoredSnapshot());
+    const panel = panelForRestore();
+    await panel.hydrateConversationHistory();
+    const answer = panel.state.messages.find((message: any) => message.content.includes('authorized restored answer'));
+    expect(answer).toMatchObject({privateContent: true});
+    expect(answer.content).toContain('结果完整性提示');
+    expect(answer.content).toContain('missing scheduler evidence');
+    expect(loadConversationStore('http://restoration-backend').sessionId).toBe('saved-chat');
+  });
+
+  it('rejects a late restoration after the panel switches backend', async () => {
+    let resolve!: (response: Response) => void;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(done => { resolve = done; }));
+    const panel = panelForRestore();
+    const restore = panel.hydrateConversationHistory();
+    panel.state.settings.backendUrl = 'http://other-backend';
+    resolve(restoredSnapshot());
+    await expect(restore).rejects.toThrow('invalidated');
+    expect(panel.state.messages.some((message: any) => message.content.includes('authorized restored answer'))).toBe(false);
+    expect(loadConversationStore('http://other-backend').conversationId).toBeUndefined();
+  });
+
+  it.each(['credential', 'trace'])('reauthorizes and sends after %s changes during a pending GET', async (change) => {
+    let finishOld!: (response: Response) => void;
+    let finishNew!: (response: Response) => void;
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(() => new Promise<Response>(done => { finishOld = done; }))
+      .mockImplementationOnce(() => new Promise<Response>(done => { finishNew = done; }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({sessionId: 'saved-chat', runId: 'next-run',
+        isNewSession: false, traceContextAttached: change === 'trace'}), {status: 202}))
+      .mockResolvedValueOnce(new Response('event: run_completed\ndata: {"outcome":{"kind":"answered","message":"next answer"}}\n\n', {status: 200}));
+    const panel = panelForRestore();
+    panel.state.settings.backendApiKey = 'old-test-key';
+    const oldRestore = panel.hydrateConversationHistory();
+    if (change === 'credential') {
+      vi.spyOn(panel, 'flushSessionSave').mockImplementation(() => {});
+      vi.spyOn(panel, 'retireBackendAgentSession').mockImplementation(() => {});
+      vi.spyOn(panel, 'initBackendStatus').mockImplementation(() => {});
+      vi.spyOn(panel, 'refreshApplicationUpdateStatus').mockImplementation(() => {});
+      panel.saveSettings({...panel.state.settings, backendApiKey: 'new-test-key'});
+    } else {
+      panel.state.backendTraceId = 'current-trace';
+    }
+    const newRestore = panel.hydrateConversationHistory();
+    expect(newRestore).not.toBe(oldRestore);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    finishOld(restoredSnapshot());
+    await expect(oldRestore).rejects.toThrow('invalidated');
+    expect(panel.conversationRestorePromise).toBe(newRestore);
+    finishNew(restoredSnapshot({traceContext: change === 'trace'
+      ? {kind: 'attached', traceId: 'current-trace'} : {kind: 'none'}}));
+    await newRestore;
+    await panel.handleConversationMessage('continue the restored question');
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(new Headers(fetch.mock.calls[1][1]?.headers).get('x-api-key'))
+      .toBe(change === 'credential' ? 'new-test-key' : 'old-test-key');
+    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body))).toMatchObject({sessionId: 'saved-chat'});
+    expect(loadConversationStoreForUpdate('http://restoration-backend').messages.some(message =>
+      message.content === 'authorized restored answer' && message.turn?.partial === true)).toBe(true);
+    expect(loadConversationStore('http://restoration-backend').messages.some(message =>
+      message.content === 'authorized restored answer')).toBe(false);
+  });
+
+  it('resubscribes an authorized active run without posting a replacement turn', async () => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(new ReadableStream<Uint8Array>({start(controller) { stream = controller; }}), {status: 200});
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(restoredSnapshot({activeRunId: 'active-run', history: [
+        {role: 'user', content: 'active question', turnId: 'active-run'},
+      ]}))
+      .mockResolvedValueOnce(response);
+    const panel = panelForRestore();
+    await panel.hydrateConversationHistory();
+    expect(panel.activeConversationRun?.runId).toBe('active-run');
+    expect(panel.state.isLoading).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[1][0])).toContain('/conversation/saved-chat/stream?runId=active-run');
+    expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+    stream.enqueue(new TextEncoder().encode('event: run_completed\ndata: {"outcome":{"kind":"answered","message":"resumed answer"}}\n\n'));
+    stream.close();
+    await vi.waitFor(() => expect(panel.activeConversationRun).toBeUndefined());
+    expect(panel.state.messages.some((message: any) => message.content === 'resumed answer')).toBe(true);
+    expect(panel.state.isLoading).toBe(false);
+  });
+
+  it.each(['rejected', 'late-terminal'])('keeps the replacement stream and Stop/loading after an old stream is %s', async (oldExit) => {
+    let oldStream!: ReadableStreamDefaultController<Uint8Array>;
+    let newStream!: ReadableStreamDefaultController<Uint8Array>;
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { oldStream = controller; }})))
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { newStream = controller; }})))
+      .mockResolvedValueOnce(new Response('{}', {status: 200}));
+    const panel = panelForRestore();
+    const store = {...loadConversationStore('http://restoration-backend'), sessionId: 'saved-chat', activeRunId: 'active-run'};
+    const config = {backendUrl: 'http://restoration-backend'};
+    const oldRun = panel.resumeConversationRun(store, config, () => true);
+    const oldController = panel.conversationAbortController;
+    const newRun = panel.resumeConversationRun(store, config, () => true);
+    const replacementController = panel.conversationAbortController;
+    const replacementReceipt = panel.activeConversationRun;
+    expect(oldController.signal.aborted).toBe(true);
+    if (oldExit === 'rejected') oldStream.error(new Error('old stream failed'));
+    else {
+      oldStream.enqueue(new TextEncoder().encode(
+        'event: runtime_update\ndata: {"update":{"content":"stale-phase"}}\n\n' +
+        'event: run_completed\ndata: {"enrichmentPending":true,"outcome":{"kind":"answered","message":"stale-answer"}}\n\n' +
+        'event: source_enrichment_completed\ndata: {"message":"stale-source","evidence":[],"metrics":{"searchCalls":1,"readCalls":1,"durationMs":1}}\n\n'));
+      oldStream.close();
+    }
+    await oldRun;
+    expect(panel.activeConversationRun).toBe(replacementReceipt);
+    expect(panel.conversationAbortController).toBe(replacementController);
+    expect(replacementController.signal.aborted).toBe(false);
+    expect(panel.state.isLoading).toBe(true);
+    expect(panel.isConversationExecutionActive()).toBe(true);
+    expect(panel.state.loadingPhase).not.toBe('stale-phase');
+    expect(panel.state.messages.some((message: any) => /stale-answer|stale-source|old stream failed/.test(message.content))).toBe(false);
+    await panel.cancelConversationAnalysis();
+    expect(String(fetch.mock.calls[2][0])).toContain('/conversation/saved-chat/cancel');
+    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body))).toEqual({runId: 'active-run'});
+    newStream.close();
+    await newRun;
+  });
+
 });

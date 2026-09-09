@@ -24,11 +24,52 @@ export interface ConversationFullHandoff {
   evidence: ConversationEvidenceRef[];
 }
 
-export type ConversationOutcome =
+export interface ConversationHistoryTurn {
+  id: string;
+  turnIndex: number;
+  partial: boolean;
+  completionStatus: 'completed' | 'incomplete' | 'unknown';
+  terminationReason?: string;
+  terminationMessage?: string;
+  uncertainties: string[];
+  nextSteps: string[];
+  evidence: Array<{artifactId?: string; evidenceRefId?: string; sourceToolCallId?: string}>;
+}
+
+export interface ConversationSnapshot {
+  success: true;
+  sessionId: string;
+  status: string;
+  traceContext: {kind: 'none'} | {kind: 'attached'; traceId: string};
+  history: Array<{
+    role: 'user' | 'assistant'; content: string;
+    turnId?: string; sourceDerived?: boolean; turn?: ConversationHistoryTurn;
+  }>;
+  historyOmittedMessages: number;
+  historyUnavailableMessages?: number;
+  recoveryStatus?: 'available' | 'unavailable' | 'interrupted';
+  pendingQuestion?: string;
+  recommendedFullAnalysis?: boolean;
+  fullHandoff?: ConversationFullHandoff;
+  activeRunId?: string;
+}
+
+export type ConversationOutcome = (
   | {kind: 'answered'; message: string; evidence?: ConversationEvidenceRef[]}
   | {kind: 'needs_user_input'; message: string; question: string; evidence?: ConversationEvidenceRef[]}
   | {kind: 'recommend_full'; message: string; handoff: ConversationFullHandoff; evidence?: ConversationEvidenceRef[]}
-  | {kind: 'cancelled'; message: string; evidence?: ConversationEvidenceRef[]};
+  | {kind: 'cancelled'; message: string; evidence?: ConversationEvidenceRef[]}
+) & {
+  recoveryStatus?: 'unavailable';
+  finalResult?: {
+    partial?: boolean;
+    completion?: {status: string; reason?: string};
+    terminationReason?: string;
+    terminationMessage?: string;
+    uncertainties?: string[];
+    nextSteps?: string[];
+  };
+};
 
 export interface ConversationRunReceipt {
   sessionId: string;
@@ -127,6 +168,25 @@ export async function startConversationTurn(
   });
   if (!response.ok) throw await readError(response);
   return await response.json() as ConversationRunReceipt;
+}
+
+/** GET is the authority boundary for a saved logical conversation locator. */
+export async function getConversation(
+  config: ConversationClientConfig,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ConversationSnapshot> {
+  const response = await smartPerfettoFetch(buildAssistantApiV1Url(
+    config.backendUrl, `/conversation/${encodeURIComponent(sessionId)}`,
+  ), {headers: requestHeaders(config), signal});
+  if (!response.ok) throw await readError(response);
+  const snapshot = await response.json() as ConversationSnapshot;
+  if (snapshot.success !== true || snapshot.sessionId !== sessionId ||
+      !Array.isArray(snapshot.history) || !snapshot.traceContext ||
+      (snapshot.traceContext.kind !== 'none' && snapshot.traceContext.kind !== 'attached')) {
+    throw new Error('Invalid conversation restoration response');
+  }
+  return snapshot;
 }
 
 export function parseConversationSseFrames(buffer: string): {

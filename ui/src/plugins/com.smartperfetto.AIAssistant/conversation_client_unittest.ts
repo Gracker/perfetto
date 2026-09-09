@@ -6,6 +6,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
   conversationTraceContextChanged,
+  getConversation,
   parseConversationSseFrames,
   startConversationTurn,
   streamConversationRun,
@@ -128,5 +129,26 @@ describe('streamConversationRun source enrichment', () => {
       'source:running',
       'source:completed',
     ]);
+  });
+});
+
+describe('getConversation', () => {
+  it.each([401, 404, 409])('preserves HTTP %s without retrying or starting a new session', async (status) => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'Cannot restore', code: 'CONVERSATION_NOT_FOUND',
+    }), {status}));
+    vi.stubGlobal('fetch', fetch);
+    await expect(getConversation({backendUrl: 'http://backend', apiKey: 'test-key'}, 'logical-id'))
+      .rejects.toMatchObject({status});
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0][1].headers).toMatchObject({'x-api-key': 'test-key'});
+  });
+
+  it('rejects a response for a different logical conversation', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: true, sessionId: 'other', history: [], traceContext: {kind: 'none'},
+    }), {status: 200})));
+    await expect(getConversation({backendUrl: 'http://backend'}, 'requested'))
+      .rejects.toThrow('Invalid conversation restoration response');
   });
 });

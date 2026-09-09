@@ -9,9 +9,12 @@ import {
   type SmartPerfettoAuthSession,
 } from '../../core/smartperfetto_auth';
 import {ConversationPage} from './conversation_page';
+import {clearConversationRuntimeIdentities, loadConversationStore, saveConversationStore} from './conversation_store';
 import {sessionManager} from './session_manager';
 import {DEFAULT_SETTINGS} from './types';
 import {loadPersistedTracePairWorkspace} from './trace_pair_workspace_persistence';
+import {saveAnalysisContext} from './analysis_context';
+import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
 
 function installOidcSession(
   userId = 'user-a',
@@ -114,6 +117,7 @@ function createPage(): any {
 }
 
 beforeEach(() => {
+  clearConversationRuntimeIdentities();
   installOidcSession();
   localStorage.clear();
   sessionStorage.clear();
@@ -354,4 +358,194 @@ describe('ConversationPage OIDC lifecycle', () => {
     )).toBe(false);
     page.onremove();
   });
+});
+
+function seedSavedPageConversation(): void {
+  saveConversationStore({backendUrl: 'http://backend', sessionId: 'saved-conversation', updatedAt: 1,
+    messages: [{id: 'cached-answer', role: 'assistant', content: 'cached answer must await authorization', timestamp: 1}]});
+  clearConversationRuntimeIdentities();
+}
+
+function restoredPageConversation(): Response {
+  return new Response(JSON.stringify({success: true, sessionId: 'saved-conversation', status: 'idle',
+    traceContext: {kind: 'none'}, historyOmittedMessages: 0, recoveryStatus: 'interrupted',
+    history: [{role: 'assistant', content: 'restored answer', turnId: 'old-run', turn: {
+      id: 'old-run', turnIndex: 0, partial: true, completionStatus: 'incomplete',
+      terminationReason: 'turn_limit', uncertainties: ['missing evidence'], nextSteps: ['check old evidence'], evidence: [],
+    }}],
+  }), {status: 200});
+}
+
+describe('ConversationPage authorized restoration', () => {
+  it('waits for the same restoration before sending a follow-up in the saved session', async () => {
+    seedSavedPageConversation();
+    const restore = deferredResponse();
+    const fetch = vi.fn().mockReturnValueOnce(restore.promise)
+      .mockResolvedValueOnce(startResponse('saved-conversation', 'follow-up-run'))
+      .mockResolvedValueOnce(streamResponse('follow-up answer'));
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    expect(page.store.messages).toEqual([]);
+    page.input = 'follow up on missing evidence';
+    const send = page.send();
+    await Promise.resolve();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    restore.resolve(restoredPageConversation());
+    await send;
+    expect(JSON.parse(String(fetch.mock.calls[1][1].body))).toMatchObject({sessionId: 'saved-conversation'});
+    expect(page.store.messages[0]).toMatchObject({content: 'restored answer', turn: {partial: true}});
+    page.onremove();
+  });
+
+  it('New Chat cancels a pending restore without later overwriting the new conversation', async () => {
+    seedSavedPageConversation();
+    const restore = deferredResponse();
+    const fetch = vi.fn().mockReturnValueOnce(restore.promise)
+      .mockResolvedValueOnce(startResponse('new-conversation', 'new-run'))
+      .mockResolvedValueOnce(streamResponse('new answer'));
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    await page.startNewConversation();
+    page.input = 'new question';
+    await page.send();
+    restore.resolve(restoredPageConversation());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(page.store.sessionId).toBe('new-conversation');
+    expect(page.store.messages.some((message: any) => message.content === 'restored answer')).toBe(false);
+    expect(JSON.parse(String(fetch.mock.calls[1][1].body)).sessionId).toBeUndefined();
+    page.onremove();
+  });
+
+  it.each([404, 409])('keeps HTTP %s visible and prevents sending into an automatic replacement', async (status) => {
+    seedSavedPageConversation();
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({error: 'Recovery blocked'}), {status}));
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    page.input = 'continue this saved conversation';
+    await page.send();
+    expect(page.error).toContain('Recovery blocked');
+    expect(page.store.messages).toEqual([]);
+    expect(page.input).toBe('continue this saved conversation');
+    expect(loadConversationStore('http://backend').conversationId).toBe('saved-conversation');
+    expect(fetch).toHaveBeenCalledOnce();
+    page.onremove();
+  });
+
+  it('never hydrates an old owner response after the user/workspace changes', async () => {
+    seedSavedPageConversation();
+    const restore = deferredResponse();
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(restore.promise));
+    const page = createPage();
+    installOidcSession('user-b', 'workspace-b');
+    window.dispatchEvent(new Event('smartperfetto-auth-session-changed'));
+    restore.resolve(restoredPageConversation());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(page.store.messages).toEqual([]);
+    expect(loadConversationStore('http://backend').conversationId).toBeUndefined();
+    page.onremove();
+  });
+
+  it('reconnects to the authorized active run and keeps a private restored answer during follow-up', async () => {
+    seedSavedPageConversation();
+    const snapshot = await restoredPageConversation().json();
+    snapshot.activeRunId = 'old-run';
+    snapshot.history[0].sourceDerived = true;
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(snapshot), {status: 200}))
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { stream = controller; }}), {status: 200}))
+      .mockResolvedValueOnce(startResponse('saved-conversation', 'follow-up'))
+      .mockResolvedValueOnce(streamResponse('follow-up answer'));
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    await vi.waitFor(() => expect(page.activeReceipt?.runId).toBe('old-run'));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[1][0])).toContain('/stream?runId=old-run');
+    stream.enqueue(new TextEncoder().encode('event: run_completed\ndata: {"outcome":{"kind":"answered","message":"restored answer"}}\n\n'));
+    stream.close();
+    await vi.waitFor(() => expect(page.activeReceipt).toBeUndefined());
+    expect(page.store.messages.filter((message: any) => message.content === 'restored answer')).toHaveLength(1);
+    page.input = 'continue the private answer';
+    await page.send();
+    expect(page.store.messages.some((message: any) => message.content === 'restored answer' && message.turn?.partial === true)).toBe(true);
+    expect(loadConversationStore('http://backend').messages.some(message => message.content === 'restored answer')).toBe(false);
+    page.onremove();
+  });
+
+  it.each(['rejected', 'late-terminal'])('keeps the replacement receipt after an old resumed stream is %s', async (oldExit) => {
+    let oldStream!: ReadableStreamDefaultController<Uint8Array>;
+    let newStream!: ReadableStreamDefaultController<Uint8Array>;
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { oldStream = controller; }})))
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { newStream = controller; }})))
+      .mockResolvedValueOnce(new Response('{}', {status: 200}));
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    await page.ensureConversationRestored();
+    const authority = page.authLifecycle.capture();
+    const store = {backendUrl: 'http://backend', sessionId: 'saved-chat', activeRunId: 'active-run', messages: [], updatedAt: 1};
+    const oldRun = page.resumeConversationRun(store, authority);
+    const oldController = page.activeController;
+    const newRun = page.resumeConversationRun(store, authority);
+    const replacementController = page.activeController;
+    const replacementReceipt = page.activeReceipt;
+    expect(oldController.signal.aborted).toBe(true);
+    if (oldExit === 'rejected') oldStream.error(new Error('old stream failed'));
+    else {
+      oldStream.enqueue(new TextEncoder().encode(
+        'event: run_completed\ndata: {"enrichmentPending":true,"outcome":{"kind":"answered","message":"stale-answer"}}\n\n' +
+        'event: source_enrichment_completed\ndata: {"message":"stale-source","evidence":[],"metrics":{"searchCalls":1,"readCalls":1,"durationMs":1}}\n\n'));
+      oldStream.close();
+    }
+    await oldRun;
+    expect(page.activeReceipt).toBe(replacementReceipt);
+    expect(page.activeController).toBe(replacementController);
+    expect(replacementController.signal.aborted).toBe(false);
+    expect(page.primaryConversationOutcomeReady).toBe(false);
+    expect(page.error).toBe('');
+    expect(page.store.messages).toEqual([]);
+    await page.startNewConversation();
+    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body))).toEqual({runId: 'active-run'});
+    newStream.close();
+    await newRun;
+    page.onremove();
+  });
+
+  it('blocks old source enrichment immediately while reauthorizing a changed source context', async () => {
+    let oldStream!: ReadableStreamDefaultController<Uint8Array>;
+    const pendingRestore = deferredResponse();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { oldStream = controller; }})))
+      .mockReturnValueOnce(pendingRestore.promise);
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    await page.ensureConversationRestored();
+    const store = {backendUrl: 'http://backend', sessionId: 'saved-conversation', activeRunId: 'active-run', messages: [], updatedAt: 1};
+    saveConversationStore(store);
+    const oldRun = page.resumeConversationRun(store, page.authLifecycle.capture());
+    const oldController = page.activeController;
+    oldStream.enqueue(new TextEncoder().encode(
+      'event: run_completed\ndata: {"enrichmentPending":true,"outcome":{"kind":"answered","message":"old primary"}}\n\n'));
+    await vi.waitFor(() => expect(page.primaryConversationOutcomeReady).toBe(true));
+    saveAnalysisContext('http://backend', getSmartPerfettoRequestContext(), {
+      codeAwareMode: 'metadata_only', codebaseIds: ['new-source'], knowledgeSourceIds: [],
+    });
+    const restore = page.ensureConversationRestored();
+    expect(oldController.signal.aborted).toBe(true);
+    oldStream.enqueue(new TextEncoder().encode(
+      'event: source_enrichment_completed\ndata: {"message":"stale-source","evidence":[],"metrics":{"searchCalls":1,"readCalls":1,"durationMs":1}}\n\n'));
+    oldStream.close();
+    await oldRun;
+    expect(page.store.messages).toEqual([]);
+    expect(page.primaryConversationOutcomeReady).toBe(false);
+    expect(page.restorePromise).toBe(restore);
+    const snapshot = await restoredPageConversation().json();
+    snapshot.history = [];
+    pendingRestore.resolve(new Response(JSON.stringify(snapshot), {status: 200}));
+    await restore;
+    expect(page.store.messages).toEqual([]);
+    page.onremove();
+  });
+
 });

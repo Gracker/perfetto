@@ -1661,6 +1661,19 @@ export interface FinalReportAssessment {
     requirements: readonly AnalysisReportRequirementAssessment[];
 }
 
+export interface FinalInvestigationAssessment {
+    schemaVersion: 1;
+    binding: AnalysisReportBinding & {
+        ledgerFingerprint: string;
+        evidenceRecordsFingerprint?: string;
+    };
+    status: 'not_checked' | 'unavailable' | 'coverage_incomplete' | 'checked';
+    requirements: readonly InvestigationRequirementAssessment[];
+    /** Full retained producer records, including dimensions not used by final claims.
+     * This serialized projection cannot recreate a live execution witness. */
+    evidenceRecords?: readonly InvestigationEvidenceRecord[];
+}
+
 export interface AnalysisDeliveryAssurance {
     schemaVersion: 1;
     entry: AnalysisDeliveryEntry;
@@ -1669,6 +1682,9 @@ export interface AnalysisDeliveryAssurance {
     source: AnalysisAssuranceStatus;
     identity: AnalysisAssuranceStatus;
     report: AnalysisAssuranceStatus;
+    /** Independent of native completion, report formatting and claim truth. */
+    investigation?: AnalysisAssuranceStatus;
+    investigationEvidence?: AnalysisAssuranceStatus;
 }
 
 export interface SourceUseDecisionV1 {
@@ -1737,6 +1753,47 @@ export interface AnalysisReportRequirementAssessment {
     claimIds?: readonly string[];
 }
 
+export interface InvestigationRequirementAssessment extends InvestigationContentAssessment {
+    domain: string;
+    acquisition: InvestigationAcquisitionStatus;
+}
+
+export interface InvestigationEvidenceRecord {
+    readonly recordId: string;
+    readonly captureId: string;
+    readonly rowIndex: number;
+    readonly evidenceRefId?: string;
+    readonly artifactId?: string;
+    readonly sourceToolCallId?: string;
+    readonly skillId: string;
+    readonly stepId: string;
+    readonly definitionFingerprint: string;
+    readonly selectedSqlHash: string;
+    readonly traceId: string;
+    readonly traceSide: 'current' | 'reference';
+    readonly originRunId?: string;
+    readonly origin: 'current_run' | 'reused' | 'unknown';
+    readonly domain: string;
+    readonly metricId: string;
+    readonly status: 'observed' | 'partial' | 'unavailable' | 'unknown';
+    readonly window: {
+        readonly start: number | string;
+        readonly end: number | string;
+    };
+    readonly upid?: number;
+    readonly utid?: number;
+    readonly cpu?: number | null;
+    readonly ucpu?: number | null;
+    readonly machineId?: number | null;
+    readonly windowId?: number | string | null;
+    readonly role?: string | null;
+    readonly aggregation?: string;
+    readonly value: EvidenceScalar;
+    readonly unit?: string;
+    readonly coverage?: number | string;
+    readonly denominator?: number | string;
+}
+
 export type AnalysisDeliveryEntry = 'runtime_draft' | 'new_finalization' | 'historical_restore';
 
 export type AnalysisAssuranceStatus = 'not_applicable' | 'not_checked' | 'unavailable' | 'coverage_incomplete' | 'passed' | 'failed';
@@ -1784,6 +1841,25 @@ export interface SourceClaimVerificationIssue {
 // =============================================================================
 /** Query complexity level — determines which analysis pipeline to use. */
 export type QueryComplexity = 'quick' | 'full';
+
+/** Content interpretation is separate from the producer's acquisition record. */
+export interface InvestigationContentAssessment {
+    requirementId: string;
+    applicability: 'applicable' | 'not_applicable' | 'unknown';
+    coverage: 'covered' | 'missing' | 'unknown';
+    contentLocations: readonly {
+        start: number;
+        end: number;
+    }[];
+    evidenceRecordIds: readonly string[];
+    scopeMatch: 'matched' | 'mismatched' | 'unknown';
+    /** What the answer says about the evidence; the gate checks it against capture. */
+    evidenceStatus: InvestigationAcquisitionStatus;
+}
+
+export type InvestigationAcquisitionStatus = 'observed' | 'insufficient' | 'not_checked' | 'failed' | 'not_applicable' | 'unknown';
+
+export type EvidenceScalar = string | number | boolean | null;
 
 export type SourceMechanismStatus = 'corroborated' | 'compatible' | 'ambiguous' | 'unverified';
 
@@ -1843,6 +1919,7 @@ export interface AnalysisCompletedEvent {
     outputOrigin?: AnalysisOutputOrigin;
     runtimeAppendix?: AnalysisRuntimeAppendix;
     reportAssessment?: FinalReportAssessment;
+    investigationAssessment?: FinalInvestigationAssessment;
     deliveryAssurance?: AnalysisDeliveryAssurance;
     sourceUseDecision?: SourceUseDecisionV1;
     sourceClaimVerificationResult?: SourceClaimVerificationResult;

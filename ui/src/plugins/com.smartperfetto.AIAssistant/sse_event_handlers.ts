@@ -4734,6 +4734,31 @@ export function handleAnalysisCompletedEvent(
 
   mergeConversationTimelineFromAnalysisCompleted(rawPayload, ctx);
 
+  // Investigation coverage does not change the runtime's completion status or
+  // the signed answer. Old results remain explicitly unassessed.
+  if (payload?.hasResultContent) {
+    const assurance = asRecord(rawPayload.deliveryAssurance);
+    const label = (status: unknown): string => {
+      switch (status) {
+        case 'passed': return uiText('已核验', 'Checked');
+        case 'not_applicable': return uiText('本轮不适用', 'Not applicable to this turn');
+        case 'coverage_incomplete': return uiText('仍有必需维度缺失', 'Required dimensions remain incomplete');
+        case 'unavailable': return uiText('核验不可用', 'Assessment unavailable');
+        case 'failed': return uiText('未通过核验', 'Assessment failed');
+        default: return uiText('尚未核验', 'Not checked');
+      }
+    };
+    const notice = `${uiText('系统调查覆盖', 'System investigation coverage')}: ${label(assurance.investigation)}; ` +
+      `${uiText('系统证据覆盖', 'System evidence coverage')}: ${label(assurance.investigationEvidence)}`;
+    if (isConversationTimelineEnabled(ctx)) {
+      if (!ctx.streamingFlow.conversationSteps.some(step => step.text === notice)) {
+        pushConversationStep(ctx, 'result', 'agent', notice);
+      }
+    } else if (!ctx.streamingFlow.phases.includes(notice)) {
+      pushStreamingPhase(ctx, notice);
+    }
+  }
+
   // Guard against duplicate conclusion handling — but still extract reportUrl
   // (agentv3 sends 'conclusion' first, then 'analysis_completed' carries reportUrl)
   if (ctx.completionHandled) {

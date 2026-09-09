@@ -4743,6 +4743,29 @@ describe('handleSSEEvent', () => {
     expect(ctx.messages[0].content).not.toContain('结果完整性提示');
   });
 
+  it('shows investigation deficits after an early conclusion without downgrading native completion', () => {
+    handleSSEEvent('progress', {data: {message: '检查系统证据'}}, ctx);
+    handleSSEEvent('conclusion', {data: {conclusion: '保留已生成的结论'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '保留已生成的结论', success: true, terminalRunStatus: 'completed',
+      completion: {schemaVersion: 1, status: 'completed'},
+      deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'passed',
+        investigation: 'coverage_incomplete', investigationEvidence: 'unavailable'},
+    }}, ctx);
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(ctx.messages[0].content).toBe('保留已生成的结论');
+    const flow = ctx.flowMessages.map(message => message.content).join('\n');
+    expect(flow).toContain('系统调查覆盖: 仍有必需维度缺失');
+    expect(flow).toContain('系统证据覆盖: 核验不可用');
+  });
+
+  it('presents legacy investigation coverage as not checked', () => {
+    handleSSEEvent('progress', {data: {message: '恢复历史结论'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {conclusion: '历史结论', success: true}}, ctx);
+    expect(ctx.flowMessages.map(message => message.content).join('\n')).toContain('系统调查覆盖: 尚未核验');
+    expect(ctx.streamingFlow.status).toBe('completed');
+  });
+
   it('retains an authoritative failed body when completion metadata follows earlier tokens and conclusion', () => {
     handleSSEEvent('answer_token', {data: {token: 'Earlier tokens'}}, ctx);
     handleSSEEvent('conclusion', {data: {conclusion: 'Earlier conclusion'}}, ctx);

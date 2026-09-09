@@ -3,7 +3,6 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {
-  isConversationNotFoundError,
   startConversationTurn,
   type ConversationClientConfig,
   type ConversationRunReceipt,
@@ -37,6 +36,7 @@ export class ConversationStartQueue {
     private readonly readSessionId: () => string | undefined,
     private readonly writeSessionId: (sessionId: string | undefined) => void,
     private readonly start: typeof startConversationTurn = startConversationTurn,
+    private readonly beforeStart?: () => Promise<void>,
   ) {}
 
   enqueue(
@@ -48,17 +48,16 @@ export class ConversationStartQueue {
       if (generation !== this.generation) {
         throw new ConversationStartInvalidatedError();
       }
-      const sessionId = this.readSessionId();
-      let receipt: ConversationRunReceipt;
-      try {
-        receipt = await this.start(config, {
-          ...input,
-          ...(sessionId ? {sessionId} : {}),
-        });
-      } catch (error) {
-        if (!sessionId || !isConversationNotFoundError(error)) throw error;
-        receipt = await this.start(config, input);
+      if (this.beforeStart) await this.beforeStart();
+      if (generation !== this.generation) {
+        throw new ConversationStartInvalidatedError();
       }
+      const sessionId = this.readSessionId();
+      // A missing or incompatible saved session requires an explicit New Chat.
+      const receipt = await this.start(config, {
+        ...input,
+        ...(sessionId ? {sessionId} : {}),
+      });
       if (generation === this.generation) {
         this.writeSessionId(receipt.sessionId);
       }

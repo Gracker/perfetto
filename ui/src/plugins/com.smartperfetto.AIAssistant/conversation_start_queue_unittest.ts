@@ -136,33 +136,45 @@ describe('ConversationStartQueue', () => {
   });
 
 
-  it('starts a fresh backend session when the persisted session no longer exists', async () => {
-    let sessionId: string | undefined = 'expired-session';
-    const start = vi.fn()
-      .mockRejectedValueOnce(new ConversationClientError(
-        'Conversation not found',
-        404,
-        'CONVERSATION_NOT_FOUND',
-      ))
-      .mockResolvedValueOnce(receipt('replacement-session', 'run-1'));
+  it.each([401, 404, 409])('never replaces a saved session after HTTP %s', async (status) => {
+    let sessionId: string | undefined = 'saved-session';
+    const error = new ConversationClientError('Saved conversation unavailable', status, 'CONVERSATION_NOT_FOUND');
+    const start = vi.fn().mockRejectedValue(error);
     const queue = new ConversationStartQueue(
-      () => sessionId,
-      (value) => { sessionId = value; },
-      start,
+      () => sessionId, value => { sessionId = value; }, start,
     );
+    await expect(queue.enqueue({backendUrl: 'http://backend'}, {query: 'continue'})).rejects.toBe(error);
+    expect(start).toHaveBeenCalledOnce();
+    expect(sessionId).toBe('saved-session');
+  });
 
-    await expect(queue.enqueue(
-      {backendUrl: 'http://backend'},
-      {query: 'continue'},
-    )).resolves.toEqual(receipt('replacement-session', 'run-1'));
+  it('waits for restored identity before starting and rejects pending work after reset', async () => {
+    let sessionId: string | undefined;
+    let finishRestore!: () => void;
+    const restoration = new Promise<void>(done => { finishRestore = done; });
+    const start = vi.fn().mockResolvedValue(receipt('restored-session', 'run-1'));
+    const queue = new ConversationStartQueue(
+      () => sessionId, value => { sessionId = value; }, start, () => restoration,
+    );
+    const operation = queue.enqueue({backendUrl: 'http://backend'}, {query: 'continue'});
+    await Promise.resolve();
+    expect(start).not.toHaveBeenCalled();
+    sessionId = 'restored-session';
+    finishRestore();
+    await operation;
+    expect(start).toHaveBeenCalledWith({backendUrl: 'http://backend'}, {query: 'continue', sessionId: 'restored-session'});
+  });
 
-    expect(start).toHaveBeenNthCalledWith(1, {backendUrl: 'http://backend'}, {
-      query: 'continue',
-      sessionId: 'expired-session',
-    });
-    expect(start).toHaveBeenNthCalledWith(2, {backendUrl: 'http://backend'}, {
-      query: 'continue',
-    });
-    expect(sessionId).toBe('replacement-session');
+  it('cancels a send queued behind restoration when New Chat invalidates it', async () => {
+    let finishRestore!: () => void;
+    const restoration = new Promise<void>(done => { finishRestore = done; });
+    const start = vi.fn();
+    const queue = new ConversationStartQueue(() => undefined, () => {}, start, () => restoration);
+    const operation = queue.enqueue({backendUrl: 'http://backend'}, {query: 'old question'});
+    await Promise.resolve();
+    queue.reset();
+    finishRestore();
+    await expect(operation).rejects.toBeInstanceOf(ConversationStartInvalidatedError);
+    expect(start).not.toHaveBeenCalled();
   });
 });

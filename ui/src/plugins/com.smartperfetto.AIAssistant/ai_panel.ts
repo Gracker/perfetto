@@ -122,6 +122,7 @@ import {
   cancelConversationRun,
   conversationTraceContextChanged,
   streamConversationRun,
+  type ConversationClientConfig,
   type ConversationFullHandoff,
   type ConversationRunReceipt,
 } from './conversation_client';
@@ -129,7 +130,17 @@ import {
   appendConversationMessage,
   clearConversationRuntimeIdentities,
   clearConversationStore,
+  conversationAuthorityKey,
+  conversationMessageContent,
+  conversationOutcomeTurn,
+  conversationRecoveryNotice,
+  conversationRestoreErrorMessage,
+  ConversationRestoreInvalidatedError,
+  invalidateConversationRestore,
+  restoreConversationStore,
   loadConversationStore,
+  loadConversationStoreForUpdate,
+  type StoredConversation,
   saveConversationStore,
   updateConversationMessageSourceEnrichment,
 } from './conversation_store';
@@ -717,6 +728,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     null;
   private isInputComposing = false;
   private conversationHistoryHydrated = false;
+  private conversationRestorePromise?: Promise<void>;
+  private conversationRestoreAuthority = '';
+  private conversationRestoreCredential?: string;
+  private conversationRestoreTraceId: string | null = null;
+  private conversationRestoreContextKey = '';
+  private conversationRestoreOrdinal = 0;
+  private readonly conversationMessageIds = new Set<string>();
   private conversationRequestOrdinal = 0;
   private activeConversationRun?: ConversationRunReceipt;
   private conversationAbortController?: AbortController;
@@ -2682,7 +2700,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 重置状态，准备迎接新 Trace
    */
   private resetStateForNewTrace(): void {
+    ++this.conversationRestoreOrdinal;
+    invalidateConversationRestore(this.state.settings.backendUrl);
+    this.conversationRestorePromise = undefined;
     this.conversationHistoryHydrated = false;
+    this.conversationMessageIds.clear();
     this.state.messages = [];
     this.state.commandHistory = [];
     this.state.historyIndex = -1;
@@ -2832,6 +2854,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     );
     this.analysisRequestCoordinator.invalidate();
     ++this.conversationRequestOrdinal;
+    ++this.conversationRestoreOrdinal;
+    invalidateConversationRestore(this.state.settings.backendUrl);
     this.conversationStartQueue?.reset({persist: false});
     this.conversationAbortController?.abort();
     this.conversationAbortController = undefined;
@@ -3499,7 +3523,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   view(vnode: m.Vnode<AIPanelAttrs>) {
     if (this.state.analysisMode === 'conversation') {
-      this.hydrateConversationHistory();
+      void this.hydrateConversationHistory().catch(() => undefined);
     }
     // Detect selection changes and update slice card state.
     this.updateSliceCard();
@@ -6889,6 +6913,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       return;
     }
     if (backendIdentityChanged) {
+      ++this.conversationRequestOrdinal;
+      ++this.conversationRestoreOrdinal;
+      invalidateConversationRestore(this.state.settings.backendUrl);
+      this.conversationRestorePromise = undefined;
+      this.conversationHistoryHydrated = false;
+      this.conversationStartQueue?.reset({persist: false});
+      this.conversationStartQueue = undefined;
+      this.pendingFullAnalysisHandoff = undefined;
+      this.state.messages = this.state.messages.filter(message => !this.conversationMessageIds.has(message.id));
+      this.conversationMessageIds.clear();
+      // Retain the logical locator; the new credential must GET-authorize it.
+      const savedConversation = loadConversationStore(this.state.settings.backendUrl);
+      saveConversationStore({...savedConversation, sessionId: undefined, traceId: undefined});
       this.applicationUpdateStatus = undefined;
       this.applicationUpdatePollAttempts = 0;
       if (this.applicationUpdatePollTimer) {
@@ -9941,44 +9978,115 @@ Click ⚙️ to configure backend connection.`,
     }
   }
 
-  private hydrateConversationHistory(): void {
-    if (this.conversationHistoryHydrated) return;
-    this.conversationHistoryHydrated = true;
-    const store = loadConversationStore(this.state.settings.backendUrl);
-    const knownIds = new Set(this.state.messages.map((message) => message.id));
-    for (const message of store.messages) {
-      if (knownIds.has(message.id)) continue;
-      this.state.messages.push({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        timestamp: message.timestamp,
-        privateContent: message.privateContent,
-        conversationEvidence: message.evidence,
-        conversationSourceEnrichment: message.sourceEnrichment,
-      });
-      knownIds.add(message.id);
+  private hydrateConversationHistory(): Promise<void> {
+    const config = {
+      backendUrl: this.state.settings.backendUrl,
+      apiKey: this.state.settings.backendApiKey,
+    };
+    let authority: string;
+    try {
+      authority = conversationAuthorityKey(config.backendUrl);
+    } catch {
+      return Promise.reject(new ConversationRestoreInvalidatedError());
     }
-    this.pendingFullAnalysisHandoff = [...store.messages].reverse().find(
-      (message) => message.fullHandoff,
-    )?.fullHandoff;
+    const traceId = this.state.backendTraceId;
+    const contextKey = JSON.stringify(this.state.analysisContext);
+    if (authority !== this.conversationRestoreAuthority ||
+        config.apiKey !== this.conversationRestoreCredential ||
+        traceId !== this.conversationRestoreTraceId ||
+        contextKey !== this.conversationRestoreContextKey) {
+      invalidateConversationRestore(config.backendUrl);
+      ++this.conversationRestoreOrdinal;
+      const hadConversationStream = Boolean(this.conversationAbortController || this.activeConversationRun);
+      this.conversationAbortController?.abort();
+      this.conversationAbortController = undefined;
+      this.activeConversationRun = undefined;
+      if (hadConversationStream) this.setLoadingState(false);
+      this.conversationRestoreAuthority = authority;
+      this.conversationRestoreCredential = config.apiKey;
+      this.conversationRestoreTraceId = traceId;
+      this.conversationRestoreContextKey = contextKey;
+      this.conversationRestorePromise = undefined;
+      this.conversationHistoryHydrated = false;
+      this.state.messages = this.state.messages.filter(message => !this.conversationMessageIds.has(message.id));
+      this.conversationMessageIds.clear();
+    }
+    if (this.conversationRestorePromise) return this.conversationRestorePromise;
+    if (this.conversationHistoryHydrated) return Promise.resolve();
+    const cached = loadConversationStore(config.backendUrl);
+    if (cached.conversationId) {
+      const cachedIds = new Set(cached.messages.map(message => message.id));
+      this.state.messages = this.state.messages.filter(message => !cachedIds.has(message.id));
+    }
+    const ordinal = this.conversationRestoreOrdinal;
+    const isCurrent = () => ordinal === this.conversationRestoreOrdinal &&
+      conversationAuthorityKey(this.state.settings.backendUrl) === authority &&
+      this.state.settings.backendApiKey === config.apiKey &&
+      this.state.backendTraceId === traceId &&
+      JSON.stringify(this.state.analysisContext) === contextKey;
+    const promise = restoreConversationStore(config, isCurrent).then(store => {
+      if (!isCurrent()) throw new ConversationRestoreInvalidatedError();
+      this.conversationHistoryHydrated = true;
+      const knownIds = new Set(this.state.messages.map(message => message.id));
+      for (const message of store.messages) {
+        if (knownIds.has(message.id)) continue;
+        this.state.messages.push({
+          id: message.id, role: message.role,
+          content: conversationMessageContent(message),
+          timestamp: message.timestamp, privateContent: message.privateContent,
+          conversationEvidence: message.evidence,
+          conversationSourceEnrichment: message.sourceEnrichment,
+        });
+        knownIds.add(message.id);
+        this.conversationMessageIds.add(message.id);
+      }
+      this.pendingFullAnalysisHandoff = [...store.messages].reverse().find(
+        message => message.fullHandoff,
+      )?.fullHandoff;
+      const notice = conversationRecoveryNotice(store.recoveryStatus, store.historyUnavailableMessages);
+      if (store.activeRunId) void this.resumeConversationRun(store, config, isCurrent);
+      if (notice) this.addMessage({id: this.generateId(), role: 'system', content: notice, timestamp: Date.now()});
+      m.redraw();
+    }).catch((error: unknown) => {
+      if (ordinal === this.conversationRestoreOrdinal && error instanceof ConversationRestoreInvalidatedError &&
+          this.conversationRestorePromise === promise) {
+        this.conversationRestorePromise = undefined;
+        this.conversationHistoryHydrated = false;
+        m.redraw();
+      }
+      if (ordinal === this.conversationRestoreOrdinal && !(error instanceof ConversationRestoreInvalidatedError)) {
+        this.addMessage({
+          id: this.generateId(), role: 'system',
+          content: conversationRestoreErrorMessage(error), timestamp: Date.now(),
+        });
+        m.redraw();
+      }
+      throw error;
+    });
+    this.conversationRestorePromise = promise;
+    return promise;
   }
 
   private getConversationStartQueue(): ConversationStartQueue {
     const backendUrl = this.state.settings.backendUrl;
+    const authority = conversationAuthorityKey(backendUrl);
     if (
       this.conversationStartQueue &&
-      this.conversationStartQueueBackendUrl === backendUrl
+      this.conversationStartQueueBackendUrl === authority
     ) {
       return this.conversationStartQueue;
     }
-    this.conversationStartQueueBackendUrl = backendUrl;
+    this.conversationStartQueue?.reset({persist: false});
+    this.conversationStartQueueBackendUrl = authority;
     this.conversationStartQueue = new ConversationStartQueue(
-      () => loadConversationStore(backendUrl).sessionId,
+      () => loadConversationStoreForUpdate(backendUrl).sessionId,
       (sessionId) => {
-        const store = loadConversationStore(backendUrl);
-        saveConversationStore({...store, sessionId});
+        const store = loadConversationStoreForUpdate(backendUrl);
+        if (conversationAuthorityKey(this.state.settings.backendUrl) !== authority) return;
+        saveConversationStore({...store, sessionId, conversationId: sessionId});
       },
+      undefined,
+      () => this.hydrateConversationHistory(),
     );
     return this.conversationStartQueue;
   }
@@ -9987,11 +10095,19 @@ Click ⚙️ to configure backend connection.`,
     clearLoading = this.state.analysisMode === 'conversation',
   ): void {
     ++this.conversationRequestOrdinal;
+    ++this.conversationRestoreOrdinal;
+    invalidateConversationRestore(this.state.settings.backendUrl);
+    this.conversationRestorePromise = undefined;
+    this.conversationHistoryHydrated = true;
+    this.conversationRestoreAuthority = conversationAuthorityKey(this.state.settings.backendUrl);
+    this.conversationRestoreCredential = this.state.settings.backendApiKey;
+    this.conversationRestoreTraceId = this.state.backendTraceId;
+    this.conversationRestoreContextKey = JSON.stringify(this.state.analysisContext);
     this.conversationAbortController?.abort();
     this.conversationAbortController = undefined;
     this.getConversationStartQueue().reset();
-    const store = loadConversationStore(this.state.settings.backendUrl);
-    saveConversationStore({...store, sessionId: undefined, traceId: undefined});
+    const store = loadConversationStoreForUpdate(this.state.settings.backendUrl);
+    saveConversationStore({...store, sessionId: undefined, conversationId: undefined, traceId: undefined});
     this.pendingFullAnalysisHandoff = undefined;
     const active = this.activeConversationRun;
     this.activeConversationRun = undefined;
@@ -10018,7 +10134,25 @@ Click ⚙️ to configure backend connection.`,
       backendUrl: this.state.settings.backendUrl,
       apiKey: this.state.settings.backendApiKey,
     };
-    let store = loadConversationStore(config.backendUrl);
+    const requestAuthority = conversationAuthorityKey(config.backendUrl);
+    const contextKey = JSON.stringify(this.state.analysisContext);
+    const requestIsCurrent = () => {
+      try {
+        return conversationAuthorityKey(this.state.settings.backendUrl) === requestAuthority &&
+          this.state.settings.backendApiKey === config.apiKey &&
+          JSON.stringify(this.state.analysisContext) === contextKey;
+      } catch {
+        return false;
+      }
+    };
+    const restoreOrdinal = this.conversationRequestOrdinal;
+    try {
+      await this.hydrateConversationHistory();
+    } catch {
+      return; // Recovery is fail-closed; the hydration path shows the notice.
+    }
+    if (restoreOrdinal !== this.conversationRequestOrdinal || !requestIsCurrent()) return;
+    let store = loadConversationStoreForUpdate(config.backendUrl);
     if (
       store.sessionId &&
       conversationTraceContextChanged(
@@ -10033,7 +10167,7 @@ Click ⚙️ to configure backend connection.`,
         content: conversationTraceContextResetNotice(),
         timestamp: Date.now(),
       });
-      store = loadConversationStore(config.backendUrl);
+      store = loadConversationStoreForUpdate(config.backendUrl);
     }
     // A new primary conversation owns Stop even while an older Agent's
     // detached source supplement is still finishing its SSE stream.
@@ -10064,86 +10198,22 @@ Click ⚙️ to configure backend connection.`,
         analysisContext: this.state.analysisContext,
         ...(selectionContext ? {selectionContext} : {}),
       });
-      if (ordinal !== this.conversationRequestOrdinal) {
+      if (ordinal !== this.conversationRequestOrdinal || !requestIsCurrent()) {
         await cancelConversationRun(config, receipt.sessionId, receipt.runId)
           .catch(() => undefined);
         return;
       }
       this.activeConversationRun = receipt;
-      store = loadConversationStore(config.backendUrl);
+      store = loadConversationStoreForUpdate(config.backendUrl);
       saveConversationStore({
         ...store,
         sessionId: receipt.sessionId,
         traceId: this.state.backendTraceId ?? undefined,
       });
-      let conversationAssistantMessage: Message | undefined;
-      const outcome = await streamConversationRun(config, receipt, {
-        signal: controller.signal,
-        onPrimaryOutcome: (primaryOutcome) => {
-          if (
-            ordinal !== this.conversationRequestOrdinal ||
-            primaryOutcome.kind === 'cancelled'
-          ) return;
-          const assistantMessage: Message = {
-            id: this.generateId(),
-            role: 'assistant' as const,
-            content: primaryOutcome.message,
-            timestamp: Date.now(),
-            conversationEvidence: primaryOutcome.evidence,
-          };
-          conversationAssistantMessage = assistantMessage;
-          this.addMessage(assistantMessage);
-          appendConversationMessage(config.backendUrl, {
-            id: assistantMessage.id,
-            role: 'assistant',
-            content: assistantMessage.content,
-            timestamp: assistantMessage.timestamp,
-            evidence: primaryOutcome.evidence,
-            outcomeKind: primaryOutcome.kind,
-            ...(primaryOutcome.kind === 'recommend_full'
-              ? {fullHandoff: primaryOutcome.handoff}
-              : {}),
-          }, receipt.sessionId);
-          this.pendingFullAnalysisHandoff = primaryOutcome.kind === 'recommend_full'
-            ? primaryOutcome.handoff
-            : undefined;
-          this.setLoadingState(false);
-          m.redraw();
-        },
-        onSourceEnrichment: (sourceEnrichment: ConversationSourceEnrichmentUpdate) => {
-          if (ordinal !== this.conversationRequestOrdinal) return;
-          const assistantMessage = conversationAssistantMessage;
-          if (!assistantMessage) return;
-          assistantMessage.conversationSourceEnrichment = sourceEnrichment;
-          updateConversationMessageSourceEnrichment(
-            config.backendUrl,
-            assistantMessage.id,
-            sourceEnrichment,
-          );
-          m.redraw();
-        },
-        onEvent: (event) => {
-          if (ordinal !== this.conversationRequestOrdinal) return;
-          if (event.type !== 'runtime_update' || !event.data || typeof event.data !== 'object') return;
-          const update = (event.data as {update?: unknown}).update;
-          const content = update && typeof update === 'object'
-            ? (update as {content?: unknown}).content
-            : undefined;
-          const phase = typeof content === 'string'
-            ? content
-            : content && typeof content === 'object' && typeof (content as {message?: unknown}).message === 'string'
-              ? String((content as {message: string}).message)
-              : '';
-          if (phase) {
-            this.state.loadingPhase = phase;
-            m.redraw();
-          }
-        },
-      });
-      if (ordinal !== this.conversationRequestOrdinal || outcome.kind === 'cancelled') return;
+      await this.consumeConversationRun(config, receipt, controller, ordinal, requestIsCurrent);
     } catch (error) {
       if (controller.signal.aborted) return;
-      if (ordinal !== this.conversationRequestOrdinal) return;
+      if (ordinal !== this.conversationRequestOrdinal || !requestIsCurrent()) return;
       this.addMessage({
         id: this.generateId(),
         role: 'assistant',
@@ -10154,11 +10224,137 @@ Click ⚙️ to configure backend connection.`,
         timestamp: Date.now(),
       });
     } finally {
-      if (ordinal === this.conversationRequestOrdinal) {
+      if (ordinal === this.conversationRequestOrdinal && this.conversationAbortController === controller) {
         this.activeConversationRun = undefined;
-        if (this.conversationAbortController === controller) {
-          this.conversationAbortController = undefined;
+        this.conversationAbortController = undefined;
+        this.setLoadingState(false);
+      }
+      m.redraw();
+    }
+  }
+
+  private async consumeConversationRun(
+    config: ConversationClientConfig,
+    receipt: ConversationRunReceipt,
+    controller: AbortController,
+    ordinal: number,
+    requestIsCurrent: () => boolean,
+    restored = false,
+  ): Promise<void> {
+    const restoreOrdinal = this.conversationRestoreOrdinal;
+    const isCurrentStream = () => !controller.signal.aborted &&
+      this.conversationAbortController === controller && this.activeConversationRun === receipt &&
+      ordinal === this.conversationRequestOrdinal && restoreOrdinal === this.conversationRestoreOrdinal &&
+      requestIsCurrent();
+    let conversationAssistantMessage: Message | undefined;
+    const outcome = await streamConversationRun(config, receipt, {
+      signal: controller.signal,
+      onPrimaryOutcome: (primaryOutcome) => {
+        if (
+          !isCurrentStream() ||
+          primaryOutcome.kind === 'cancelled'
+        ) return;
+        const messageId = restored ? `conversation-${receipt.sessionId}-${receipt.runId}-assistant` : this.generateId();
+        const existing = this.state.messages.find(message => message.id === messageId);
+        const assistantMessage: Message = {
+          id: messageId,
+          role: 'assistant' as const,
+          content: conversationMessageContent({
+            id: receipt.runId, role: 'assistant', content: primaryOutcome.message,
+            timestamp: Date.now(), turn: conversationOutcomeTurn(primaryOutcome, receipt.runId),
+            recoveryStatus: primaryOutcome.recoveryStatus,
+          }),
+          timestamp: Date.now(),
+          privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext),
+          conversationEvidence: primaryOutcome.evidence,
+        };
+        conversationAssistantMessage = existing ?? assistantMessage;
+        this.conversationMessageIds.add(assistantMessage.id);
+        if (existing) Object.assign(existing, assistantMessage);
+        else this.addMessage(assistantMessage);
+        appendConversationMessage(config.backendUrl, {
+          id: assistantMessage.id,
+          role: 'assistant',
+          content: primaryOutcome.message,
+          timestamp: assistantMessage.timestamp,
+          privateContent: assistantMessage.privateContent,
+          turn: conversationOutcomeTurn(primaryOutcome, receipt.runId),
+          recoveryStatus: primaryOutcome.recoveryStatus,
+          evidence: primaryOutcome.evidence,
+          outcomeKind: primaryOutcome.kind,
+          ...(primaryOutcome.kind === 'recommend_full'
+            ? {fullHandoff: primaryOutcome.handoff}
+            : {}),
+        }, receipt.sessionId);
+        this.pendingFullAnalysisHandoff = primaryOutcome.kind === 'recommend_full'
+          ? primaryOutcome.handoff
+          : undefined;
+        this.setLoadingState(false);
+        m.redraw();
+      },
+      onSourceEnrichment: (sourceEnrichment: ConversationSourceEnrichmentUpdate) => {
+        if (!isCurrentStream()) return;
+        const assistantMessage = conversationAssistantMessage;
+        if (!assistantMessage) return;
+        assistantMessage.conversationSourceEnrichment = sourceEnrichment;
+        updateConversationMessageSourceEnrichment(
+          config.backendUrl,
+          assistantMessage.id,
+          sourceEnrichment,
+        );
+        m.redraw();
+      },
+      onEvent: (event) => {
+        if (!isCurrentStream()) return;
+        if (event.type !== 'runtime_update' || !event.data || typeof event.data !== 'object') return;
+        const update = (event.data as {update?: unknown}).update;
+        const content = update && typeof update === 'object'
+          ? (update as {content?: unknown}).content
+          : undefined;
+        const phase = typeof content === 'string'
+          ? content
+          : content && typeof content === 'object' && typeof (content as {message?: unknown}).message === 'string'
+            ? String((content as {message: string}).message)
+            : '';
+        if (phase) {
+          this.state.loadingPhase = phase;
+          m.redraw();
         }
+      },
+    });
+    if (!isCurrentStream() || outcome.kind === 'cancelled') return;
+  }
+
+  private async resumeConversationRun(
+    store: StoredConversation,
+    config: ConversationClientConfig,
+    requestIsCurrent: () => boolean,
+  ): Promise<void> {
+    if (!store.sessionId || !store.activeRunId || !requestIsCurrent()) return;
+    const receipt: ConversationRunReceipt = {
+      sessionId: store.sessionId, runId: store.activeRunId,
+      isNewSession: false, traceContextAttached: Boolean(store.traceId),
+    };
+    const ordinal = this.conversationRequestOrdinal;
+    const controller = new AbortController();
+    this.conversationAbortController?.abort();
+    this.conversationAbortController = controller;
+    this.activeAgentRequest = undefined;
+    this.activeConversationRun = receipt;
+    const ownsStream = () => ordinal === this.conversationRequestOrdinal &&
+      this.conversationAbortController === controller && this.activeConversationRun === receipt;
+    this.setLoadingState(true);
+    try {
+      await this.consumeConversationRun(config, receipt, controller, ordinal, requestIsCurrent, true);
+    } catch (error) {
+      if (!controller.signal.aborted && ownsStream() && requestIsCurrent()) {
+        this.addMessage({id: this.generateId(), role: 'system',
+          content: conversationRestoreErrorMessage(error), timestamp: Date.now()});
+      }
+    } finally {
+      if (ownsStream()) {
+        this.activeConversationRun = undefined;
+        this.conversationAbortController = undefined;
         this.setLoadingState(false);
       }
       m.redraw();
