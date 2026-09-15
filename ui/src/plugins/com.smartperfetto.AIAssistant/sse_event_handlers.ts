@@ -61,7 +61,6 @@ import {
 import {CONTRACT_ALIASES} from './conclusion_contract_aliases';
 import {STEP_TO_OVERLAY} from './track_overlay';
 import {updateAISharedState} from './ai_shared_state';
-import {formatAnalysisResultRef} from './analysis_result_references';
 import {
   normalizePaneSide,
   normalizeTraceSide,
@@ -112,6 +111,7 @@ type AnalysisCompletedPayload = {
   sourceUseReceipt?: Message['sourceUseReceipt'];
   sourceEnrichmentPending?: boolean;
   uiActionProposals?: UiActionProposalV1[];
+  serverVerificationBinding?: Message['serverVerificationBinding'];
 };
 
 type DegradedPayload = {
@@ -210,9 +210,22 @@ function toAnalysisCompletedPayload(
 
   if (source.partial === true) payload.partial = true;
   if (isRecord(source.completion) && source.completion.schemaVersion === 1) {
-    const status = source.completion.status;
+    const completion = source.completion;
+    const status = completion.status;
     payload.completionStatus = status === 'completed' || status === 'incomplete' || status === 'failed' ||
       status === 'cancelled' ? status : 'unknown';
+    const candidateRef = readStringField(completion, 'candidateRef');
+    const runId = readStringField(completion, 'runId');
+    const attemptId = readStringField(completion, 'attemptId');
+    const conclusionFingerprint = readStringField(completion, 'conclusionFingerprint');
+    if (candidateRef && runId && attemptId && conclusionFingerprint) {
+      payload.serverVerificationBinding = {
+        candidateRef,
+        runId,
+        attemptId,
+        conclusionFingerprint,
+      };
+    }
   }
   if (isRecord(source.deliveryAssurance) && source.deliveryAssurance.schemaVersion === 1) {
     const assurance = source.deliveryAssurance;
@@ -370,28 +383,6 @@ function toDegradedPayload(value: unknown): DegradedPayload {
   if (terminationReason) payload.terminationReason = terminationReason;
   if (source.partial === true) payload.partial = true;
   return payload;
-}
-
-function appendAnalysisResultReference(
-  content: string,
-  resultSnapshotId: string | undefined,
-): string {
-  if (!resultSnapshotId) return content;
-  const ref = formatAnalysisResultRef(resultSnapshotId);
-  const hasResultIdLine = new RegExp(
-    `(?:^|\\n)Result ID:\\s*\`?${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\`?`,
-    'i',
-  ).test(content);
-  if (!ref || content.includes(resultSnapshotId) || hasResultIdLine) {
-    return content;
-  }
-  return [
-    content.trimEnd(),
-    '',
-    '---',
-    `Result ID: \`${ref}\``,
-    `Snapshot: \`${resultSnapshotId}\``,
-  ].join('\n');
 }
 
 function eventPayload(event: RawSSEEvent): Record<string, unknown> {
@@ -2117,141 +2108,6 @@ function registerDataSourceContext(
   return sourceContext;
 }
 
-function dataSourceLine(ref: DataSourceContext): string {
-  const count =
-    typeof ref.rowCount === 'number'
-      ? uiText(`，${ref.rowCount} 行`, `, ${ref.rowCount} rows`)
-      : '';
-  const phase = ref.phase ? `，${ref.phase}` : '';
-  const planPhase =
-    ref.planPhaseTitle || ref.planPhaseId
-      ? uiText(
-          `，阶段: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`,
-          `, phase: ${[ref.planPhaseId, ref.planPhaseTitle].filter(Boolean).join(' · ')}`,
-        )
-      : '';
-  const trace = traceLocationLabel(ref.traceSide, ref.paneSide);
-  const tracePrefix = trace ? `${trace} · ` : '';
-  const reason = ref.reason
-    ? uiText(`，用途: ${ref.reason}`, `, purpose: ${ref.reason}`)
-    : '';
-  return uiText(
-    `- ${ref.ref}: ${tracePrefix}${ref.title}${count}（来源: ${ref.source}${phase}${planPhase}${reason}）`,
-    `- ${ref.ref}: ${tracePrefix}${ref.title}${count} (source: ${ref.source}${phase}${planPhase}${reason})`,
-  );
-}
-
-function collectClaimReferencedSourceContexts(
-  contract: ConclusionContract | Record<string, unknown> | null | undefined,
-  refs: DataSourceContext[],
-): Set<DataSourceContext> {
-  const referenced = new Set<DataSourceContext>();
-  if (!contract || typeof contract !== 'object') return referenced;
-
-  const claims = readAliasedRecordArray(
-    asRecord(contract),
-    CONTRACT_ALIASES.root.claims,
-  );
-  for (const claim of claims) {
-    const references = readAliasedRecordArray(
-      claim,
-      CONTRACT_ALIASES.claim.references,
-    );
-    for (const ref of references) {
-      const evidenceRefId = conclusionText(
-        readAliasedValue(ref, CONTRACT_ALIASES.claimRef.evidenceRefId),
-      );
-      const sourceRef = conclusionText(
-        readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceRef),
-      );
-      const sourceToolCallId = conclusionText(
-        readAliasedValue(ref, CONTRACT_ALIASES.claimRef.sourceToolCallId),
-      );
-      if (!evidenceRefId && !sourceRef && !sourceToolCallId) continue;
-      for (const context of refs) {
-        if (
-          sourceContextMatchesClaim(
-            context,
-            evidenceRefId,
-            sourceRef,
-            sourceToolCallId,
-          )
-        ) {
-          referenced.add(context);
-        }
-      }
-    }
-  }
-  return referenced;
-}
-
-function renderDataSourceIndexSection(
-  ctx: SSEHandlerContext,
-  contract?: ConclusionContract | Record<string, unknown> | null,
-): string {
-  const refs = ctx.streamingFlow.dataSourceRefs;
-  if (refs.length === 0) return '';
-  const maxInlineRefs = 120;
-  const headCount = 100;
-  const tailCount = 20;
-  const referencedRefs = collectClaimReferencedSourceContexts(contract, refs);
-  const displayedRefs =
-    refs.length > maxInlineRefs
-      ? refs.filter(
-          (ref, index) =>
-            index < headCount ||
-            index >= refs.length - tailCount ||
-            referencedRefs.has(ref),
-        )
-      : refs;
-  const omittedCount = Math.max(0, refs.length - displayedRefs.length);
-  const pinnedReferencedCount = refs.filter(
-    (ref, index) =>
-      referencedRefs.has(ref) &&
-      index >= headCount &&
-      index < refs.length - tailCount,
-  ).length;
-
-  return [
-    '---',
-    uiText(
-      '## 数据来源索引（系统生成）',
-      '## Data source index (system generated)',
-    ),
-    uiText(
-      '以下是本轮结论可核对的数据输出；这里保留来源、阶段和用途，详细证据 ID 保留在结果快照中。',
-      'These outputs can be checked against this analysis. Source, phase, and purpose stay visible here; detailed evidence IDs remain in the result snapshot.',
-    ),
-    omittedCount > 0
-      ? uiText(
-          `本轮共有 ${refs.length} 个数据来源；为避免结论过长，这里列出前 ${headCount} 个和后 ${tailCount} 个${pinnedReferencedCount > 0 ? `，并额外保留 ${pinnedReferencedCount} 个被逐句引用命中的来源` : ''}，省略中间 ${omittedCount} 个。完整来源仍保留在本轮表格消息中；结果快照可能受快照上限裁剪。`,
-          `This analysis has ${refs.length} data sources. To keep the conclusion readable, this index shows the first ${headCount} and last ${tailCount}${pinnedReferencedCount > 0 ? `, plus ${pinnedReferencedCount} source references used by individual claims` : ''}, omitting ${omittedCount} in between. Full sources remain in table messages; snapshot limits may still truncate the saved snapshot.`,
-        )
-      : '',
-    ...displayedRefs.map(dataSourceLine),
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function appendDataSourceIndex(
-  content: string,
-  ctx: SSEHandlerContext,
-  contract?: ConclusionContract | Record<string, unknown> | null,
-): string {
-  const section = renderDataSourceIndexSection(ctx, contract);
-  if (!section) return content;
-
-  const existingSystemIndex =
-    /(?:\n---)?\n##\s*(?:数据来源索引（系统生成）|Data source index \(system generated\))[\s\S]*?(?=\n---\n|$)/;
-  if (existingSystemIndex.test(content)) {
-    if (!contract) return content;
-    return content.replace(existingSystemIndex, `\n\n${section}`);
-  }
-
-  return [content.trimEnd(), '', section].join('\n');
-}
-
 /**
  * Process a progress event - shows analysis phase updates.
  */
@@ -3923,21 +3779,140 @@ function renderConclusionClaimsSection(
   return lines.join('\n');
 }
 
-function appendConclusionClaims(
-  content: string,
-  contract: ConclusionContract | Record<string, unknown> | null | undefined,
-  ctx: SSEHandlerContext,
+function verificationInline(value: unknown): string {
+  if (value === undefined) return '';
+  if (value === null) return 'NULL';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); } catch { return '[unavailable]'; }
+  }
+  return String(value).replace(/\s+/g, ' ').trim();
+}
+
+function verificationFields(
+  item: Record<string, unknown>,
+  fields: readonly string[],
 ): string {
-  if (/(^|\n)##\s*逐句数据引用（系统核对结果）/.test(content)) return content;
-  const section = renderConclusionClaimsSection(contract, ctx);
-  if (!section) return content;
-  const withoutStructuredClaims = content
-    .replace(
-      /(?:\n---)?\n##\s*逐句数据引用（结构化来源）[\s\S]*?(?=\n##\s+|\n---\n|$)/,
-      '',
-    )
-    .trimEnd();
-  return [withoutStructuredClaims, '', '---', section].join('\n');
+  return fields.flatMap(key => item[key] === undefined
+    ? [] : [`${key}=${verificationInline(item[key])}`]).join(', ');
+}
+
+function groupByClaimId(items: unknown[]): Map<string, Record<string, unknown>[]> {
+  const grouped = new Map<string, Record<string, unknown>[]>();
+  for (const value of items) {
+    const item = asRecord(value);
+    const claimId = conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.id)) || 'unknown';
+    const group = grouped.get(claimId) ?? [];
+    group.push(item);
+    grouped.set(claimId, group);
+  }
+  return grouped;
+}
+
+function renderVerificationReference(
+  lines: string[],
+  label: string,
+  value: unknown,
+): void {
+  const item = asRecord(value);
+  const aliased = [
+    ['evidenceRefId', CONTRACT_ALIASES.claimRef.evidenceRefId],
+    ['sourceRef', CONTRACT_ALIASES.claimRef.sourceRef],
+    ['sourceToolCallId', CONTRACT_ALIASES.claimRef.sourceToolCallId],
+    ['rowIndex', CONTRACT_ALIASES.claimRef.rowIndex],
+    ['rowSelector', CONTRACT_ALIASES.claimRef.rowSelector],
+    ['column', CONTRACT_ALIASES.claimRef.column],
+    ['value', CONTRACT_ALIASES.claimRef.value],
+  ] as const;
+  const aliasDetail = aliased.flatMap(([key, aliases]) => {
+    const field = readAliasedValue(item, aliases);
+    return field === undefined ? [] : [`${key}=${verificationInline(field)}`];
+  });
+  const directDetail = verificationFields(item, [
+    'artifactId', 'sourceArtifactId', 'anchorId', 'actualValue', 'displayValue',
+    'unit', 'isSqlNull', 'status', 'message',
+  ]);
+  const detail = [...aliasDetail, ...(directDetail ? [directDetail] : [])].join(', ');
+  lines.push(`  - ${label}: ${detail || uiText('无已知定位字段', 'no known location fields')}`);
+}
+
+function renderVerificationAnchor(
+  lines: string[],
+  anchorValue: unknown,
+  label: string,
+): void {
+  const anchor = asRecord(anchorValue);
+  lines.push(`  - ${label}: ${verificationFields(anchor, [
+    'version', 'anchorId', 'evidenceRefId', 'missing', 'missingReason', 'confidence',
+    'claimBoundary', 'evidenceScope', 'rootCauseBoundary',
+  ])}`);
+  const context = asRecord(anchor.context);
+  const contextText = verificationFields(context, [
+    'captureId', 'traceId', 'traceSide', 'paneSide', 'toolCallId', 'sourceToolCallId',
+    'producerKind', 'skillId', 'stepId', 'queryHash', 'queryReviewId',
+    'sqlTextRef', 'paramsHash', 'artifactId', 'sourceArtifactId', 'planPhaseId',
+  ]);
+  if (contextText) lines.push(`    - context: ${contextText}`);
+  const timeRange = asRecord(anchor.timeRange);
+  const timeRangeText = verificationFields(timeRange, ['startTs', 'endTs', 'unit', 'source']);
+  if (timeRangeText) lines.push(`    - timeRange: ${timeRangeText}`);
+  const scope = asRecord(anchor.scopeProvenance);
+  if (Object.keys(scope).length > 0) {
+    lines.push(`    - scope: ${verificationFields(scope, ['version', 'invalid'])}`);
+    const entries = Array.isArray(scope.entries) ? scope.entries : [];
+    entries.forEach((entry, index) => {
+      const item = asRecord(entry);
+      lines.push(`      - entry ${index + 1}: ${verificationFields(item, [
+        'role', 'sourceStepId', 'fields', 'availability', 'reason',
+      ])}`);
+      for (const key of ['scope', 'relativeTo']) {
+        const processScope = asRecord(item[key]);
+        if (Object.keys(processScope).length > 0) lines.push(`        - ${key}: ${verificationFields(processScope, [
+          'mode', 'traceId', 'traceSide', 'upid', 'requestedName', 'identityRefId',
+        ])}`);
+      }
+    });
+  }
+  const identity = asRecord(anchor.identity);
+  const identityText = verificationFields(identity, [
+    'identityRefId', 'status', 'role', 'packageName', 'processName', 'threadName',
+    'upid', 'utid', 'pid', 'tid', 'confidence', 'warnings',
+  ]);
+  if (identityText) lines.push(`    - identity: ${identityText}`);
+  const cells = Array.isArray(anchor.cells) ? anchor.cells : [];
+  cells.forEach((cell, index) => renderVerificationReference(lines, `cell ${index + 1}`, cell));
+}
+
+function renderIdentityResolution(
+  lines: string[],
+  value: unknown,
+  index: number,
+): void {
+  const identity = asRecord(value);
+  const identityRefId = readStringField(identity, 'identityRefId') || String(index + 1);
+  lines.push('', `### identity ${identityRefId}`);
+  lines.push(`- ${verificationFields(identity, ['version', 'status', 'warnings', 'recommendedParams'])}`);
+
+  const target = asRecord(identity.target);
+  if (Object.keys(target).length > 0) {
+    lines.push(`  - target: ${verificationFields(target, [
+      'traceId', 'traceSide', 'packageName', 'processName', 'threadName',
+      'role', 'upid', 'utid', 'pid', 'tid', 'timeRange', 'source',
+    ])}`);
+  }
+  const processes = Array.isArray(identity.processes) ? identity.processes : [];
+  processes.forEach((process, processIndex) => lines.push(
+    `  - process ${processIndex + 1}: ${verificationFields(asRecord(process), [
+      'upid', 'pid', 'processName', 'packageName', 'startTs', 'endTs',
+      'matchSources', 'confidence',
+    ])}`,
+  ));
+  const threads = Array.isArray(identity.threads) ? identity.threads : [];
+  threads.forEach((thread, threadIndex) => lines.push(
+    `  - thread ${threadIndex + 1}: ${verificationFields(asRecord(thread), [
+      'utid', 'tid', 'threadName', 'role', 'owningUpid', 'processName',
+      'activeRange', 'matchSources', 'confidence',
+    ])}`,
+  ));
 }
 
 function readCodeAwareRecordArray(
@@ -3973,28 +3948,23 @@ function formatCodeLineRange(value: unknown): string {
   return String(Math.round(start ?? end ?? 0));
 }
 
-function renderCodeAwareReferencesSection(
-  contract: ConclusionContract | Record<string, unknown> | null | undefined,
-): string {
-  if (!contract || typeof contract !== 'object') return '';
-  const contractRecord = asRecord(contract);
-  const refs = readCodeAwareRecordArray(contractRecord, [
+function renderCodeAwareVerificationDetails(
+  contract: Record<string, unknown>,
+): string[] {
+  const refs = readCodeAwareRecordArray(contract, [
     'codeReferences',
     'code_refs',
     'codeRefs',
   ]);
-  const patches = readCodeAwareRecordArray(contractRecord, [
+  const patches = readCodeAwareRecordArray(contract, [
     'patchProposals',
     'patch_proposals',
     'patches',
   ]);
-  if (refs.length === 0 && patches.length === 0) return '';
-
-  const lines: string[] = [uiText('## 代码引用', '## Code references')];
-  if (refs.length === 0) {
-    lines.push(uiText('- 无', '- None'));
-  } else {
-    refs.slice(0, 12).forEach((ref, index) => {
+  const lines: string[] = [];
+  if (refs.length > 0) {
+    lines.push('', uiText('## 代码引用', '## Code references'));
+    refs.forEach((ref, index) => {
       const chunkId = conclusionText(
         ref.chunkId || ref.chunk_id || `ref-${index + 1}`,
       );
@@ -4016,318 +3986,221 @@ function renderCodeAwareReferencesSection(
         `- \`${chunkId}\`${meta.length > 0 ? ` - ${meta.join('；')}` : ''}`,
       );
     });
-    if (refs.length > 12) {
-      lines.push(
-        uiText(
-          `- 结果快照中另有 ${refs.length - 12} 个代码引用。`,
-          `- ${refs.length - 12} more code references are available in the result snapshot.`,
-        ),
-      );
-    }
   }
-
   if (patches.length > 0) {
-    lines.push('');
-    lines.push(uiText('## 补丁建议', '## Patch proposals'));
-    patches.slice(0, 8).forEach((patch, index) => {
+    lines.push('', uiText('## 补丁建议', '## Patch proposals'));
+    patches.forEach((patch, index) => {
       const id = conclusionText(
         patch.id || patch.patchId || patch.patch_id || `patch-${index + 1}`,
       );
-      const status =
-        conclusionText(
-          patch.status || patch.patchStatus || patch.patch_status,
-        ) || 'unverified';
+      const status = conclusionText(
+        patch.status || patch.patchStatus || patch.patch_status,
+      ) || 'unverified';
       const rationale = conclusionText(
         patch.rationale || patch.reason || patch.summary,
       );
-      const copyHint =
-        status === 'verified'
-          ? uiText('已通过后端应用检查', 'verified by backend apply-check')
-          : status === 'sketch'
-            ? uiText(
-                '仅为草案；没有可复制的 diff',
-                'sketch only; no copyable diff',
-              )
-            : uiText(
-                '尚未验证；没有可复制的 diff',
-                'unverified; no copyable diff',
-              );
+      const copyHint = status === 'verified'
+        ? uiText('已通过后端应用检查', 'verified by backend apply-check')
+        : status === 'sketch'
+          ? uiText('仅为草案；没有可复制的 diff', 'sketch only; no copyable diff')
+          : uiText('尚未验证；没有可复制的 diff', 'unverified; no copyable diff');
       lines.push(
         `- \`${id}\` - ${status} (${copyHint})${rationale ? `: ${rationale}` : ''}`,
       );
     });
   }
-
-  return lines.join('\n');
+  return lines;
 }
 
-function appendCodeAwareReferences(
-  content: string,
-  contract: ConclusionContract | Record<string, unknown> | null | undefined,
-): string {
-  if (/(^|\n)##\s*(?:代码引用|Code references)/.test(content)) return content;
-  const section = renderCodeAwareReferencesSection(contract);
-  if (!section) return content;
-  return [content.trimEnd(), '', '---', section].join('\n');
-}
-
-function appendFinalEvidenceSections(
-  content: string,
-  contract: ConclusionContract | Record<string, unknown> | null | undefined,
-  ctx: SSEHandlerContext,
-  resultSnapshotId?: string,
-): string {
-  const withSources = appendDataSourceIndex(content, ctx, contract);
-  const withSnapshot = appendAnalysisResultReference(
-    withSources,
-    resultSnapshotId,
-  );
-  const withCodeRefs = appendCodeAwareReferences(withSnapshot, contract);
-  return appendConclusionClaims(withCodeRefs, contract, ctx);
-}
-
-function appendClaimVerificationSummary(
-  content: string,
-  payload: AnalysisCompletedPayload | undefined,
-): string {
-  if (!payload) return content;
-  if (/(^|\n)##\s*(?:断言验证结果|Claim verification results)/i.test(content))
-    {return content;}
-  const verifier = asRecord(payload.claimVerificationResult);
-  const hasVerifier = Object.keys(verifier).length > 0;
-  const claimSupportCount = payload.claimSupport?.length || 0;
-  const identityCount = payload.identityResolutions?.length || 0;
-  if (!hasVerifier && claimSupportCount === 0 && identityCount === 0) {
-    return content;
-  }
-
-  const status = readStringField(verifier, 'status', 'not_checked');
-  const checked = readOptionalNumberField(verifier, 'checkedClaimCount') ?? 0;
-  const unsupported =
-    readOptionalNumberField(verifier, 'unsupportedClaimCount') ?? 0;
-  const issues = Array.isArray(verifier.issues) ? verifier.issues : [];
-  const lines = [
-    uiText('## 断言验证结果', '## Claim verification results'),
-    uiText(`- 验证器: ${status}`, `- Verifier: ${status}`),
-    uiText(`- 已检查断言: ${checked}`, `- Checked claims: ${checked}`),
-    uiText(
-      `- 不受支持的断言: ${unsupported}`,
-      `- Unsupported claims: ${unsupported}`,
-    ),
-    uiText(
-      `- 断言支持记录: ${claimSupportCount}`,
-      `- Claim support entries: ${claimSupportCount}`,
-    ),
-    uiText(
-      `- 身份解析侧记录: ${identityCount}`,
-      `- Identity sidecars: ${identityCount}`,
-    ),
-  ];
-  issues.slice(0, 5).forEach((issue) => {
-    const item = asRecord(issue);
-    const code = readStringField(item, 'code', 'issue');
-    const claimId = readStringField(item, 'claimId', 'unknown');
-    const message = readStringField(item, 'message', '');
-    lines.push(`- ${claimId} \`${code}\`${message ? `: ${message}` : ''}`);
-  });
-  if (issues.length > 5) {
-    lines.push(
-      uiText(
-        `- HTML 报告/导出中另有 ${issues.length - 5} 个验证问题。`,
-        `- ${issues.length - 5} more verifier issues are available in the HTML report/export.`,
-      ),
-    );
-  }
-  payload.claimSupport?.slice(0, 5).forEach((support, index) => {
-    const item = asRecord(support);
-    const claimId = readStringField(item, 'claimId', `claim-${index + 1}`);
-    const level = readStringField(item, 'supportLevel', 'unknown');
-    const kind = readStringField(item, 'kind', 'claim');
-    lines.push(`- ${claimId}: ${level} (${kind})`);
-    const anchors = Array.isArray(item.anchors) ? item.anchors : [];
-    anchors.slice(0, 3).forEach((anchor, anchorIndex) => {
-      const anchorRecord = asRecord(anchor);
-      const context = asRecord(anchorRecord.context);
-      const cells = Array.isArray(anchorRecord.cells) ? anchorRecord.cells : [];
-      const cell = asRecord(cells[0]);
-      const refs = [
-        readStringField(anchorRecord, 'evidenceRefId'),
-        readStringField(context, 'artifactId'),
-        readStringField(context, 'sourceArtifactId'),
-        readStringField(context, 'sourceToolCallId'),
-      ]
-        .filter(Boolean)
-        .join(' / ');
-      const loc = [
-        traceLocationLabel(
-          normalizeTraceSide(readStringField(context, 'traceSide')),
-          normalizePaneSide(readStringField(context, 'paneSide')),
-        ),
-        cell.column ? `col=${String(cell.column)}` : '',
-        cell.rowIndex !== undefined ? `row=${String(cell.rowIndex)}` : '',
-        cell.actualValue !== undefined
-          ? `actual=${String(cell.actualValue)}`
-          : '',
-        cell.value !== undefined ? `expected=${String(cell.value)}` : '',
-      ]
-        .filter(Boolean)
-        .join(', ');
-      const identity = asRecord(anchorRecord.identity);
-      const identityText = readStringField(identity, 'identityRefId')
-        ? `, identity=${readStringField(identity, 'identityRefId')}(${readStringField(identity, 'status', 'unknown')})`
-        : '';
-      lines.push(
-        `  - anchor ${anchorIndex + 1}: ${refs || 'unreferenced'}${loc ? ` [${loc}]` : ''}${identityText}`,
-      );
-    });
-  });
-  payload.identityResolutions?.slice(0, 5).forEach((identity, index) => {
-    const item = asRecord(identity);
-    const warnings = Array.isArray(item.warnings)
-      ? item.warnings.map(String).filter(Boolean)
-      : [];
-    lines.push(
-      `- identity ${readStringField(item, 'identityRefId', String(index + 1))}: ${readStringField(item, 'status', 'unknown')}${warnings.length ? ` - ${warnings.slice(0, 2).join('; ')}` : ''}`,
-    );
-  });
-  return [content.trimEnd(), '', '---', lines.join('\n')].join('\n');
-}
-
-function buildPartialResultWarning(
+function renderServerVerificationDetails(
   payload: AnalysisCompletedPayload | undefined,
 ): string | undefined {
   if (!payload) return undefined;
-  if (payload?.partial !== true && analysisCompletedResultStatus(payload) !== 'partial') return undefined;
-  const reason =
-    payload?.terminationMessage ||
-    payload?.terminationReason ||
-    uiText(
-      '本次输出仍不完整或尚未通过核验，请结合证据与限制阅读。',
-      'This output is incomplete or has not passed verification; review it with its evidence and limitations.',
-    );
+  const supports = payload.claimSupport ?? [];
+  const verifier = asRecord(payload.claimVerificationResult);
+  const results = Array.isArray(verifier.claimResults) ? verifier.claimResults : [];
+  const issues = Array.isArray(verifier.issues) ? verifier.issues : [];
+  const identities = payload.identityResolutions ?? [];
+  const contract = asRecord(payload.conclusionContract);
+  const contractClaims = readAliasedRecordArray(contract, CONTRACT_ALIASES.root.claims);
+  const codeAwareDetails = renderCodeAwareVerificationDetails(contract);
+  if (supports.length === 0 && results.length === 0 && issues.length === 0 &&
+      Object.keys(verifier).length === 0 &&
+      contractClaims.length === 0 && identities.length === 0 &&
+      codeAwareDetails.length === 0 &&
+      !payload.partial && !payload.terminationMessage) return undefined;
+
+  const supportGroups = groupByClaimId(supports);
+  const resultGroups = groupByClaimId(results);
+  const contractGroups = groupByClaimId(contractClaims);
+  const issueGroups = groupByClaimId(issues);
+  const claimIds = [...new Set([
+    ...contractGroups.keys(), ...supportGroups.keys(), ...resultGroups.keys(), ...issueGroups.keys(),
+  ])];
+  const lines = [uiText('## 服务器核验详情', '## Server verification details')];
+  lines.push(`- ${uiText('结果状态', 'Result status')}: ${analysisCompletedResultStatus(payload)}`);
+  if (payload.terminationReason) lines.push(`- terminationReason: ${payload.terminationReason}`);
+  if (payload.terminationMessage) lines.push(`- terminationMessage: ${payload.terminationMessage}`);
+  if (Object.keys(verifier).length > 0) {
+    lines.push(`- verifier: ${verificationFields(verifier, [
+      'schemaVersion', 'status', 'policy', 'passed', 'notCheckedReason',
+      'checkedClaimCount', 'unsupportedClaimCount',
+    ])}`);
+  }
+
+  for (const claimId of claimIds) {
+    const claimSupports = supportGroups.get(claimId) ?? [];
+    const claimResults = resultGroups.get(claimId) ?? [];
+    const declaredClaims = contractGroups.get(claimId) ?? [];
+    const duplicate = claimSupports.length > 1 || claimResults.length > 1 || declaredClaims.length > 1;
+    const texts = [...new Set([...claimSupports, ...declaredClaims]
+      .map(item => conclusionText(readAliasedValue(item, CONTRACT_ALIASES.claim.text)))
+      .filter(Boolean))];
+    const conflicting = texts.length > 1;
+    lines.push('', `### ${claimId}`);
+    lines.push(`- ${uiText('结论文本', 'Claim text')}: ${texts.length === 1
+      ? texts[0] : uiText('服务器投影中不可唯一确定', 'not uniquely available from server projection')}`);
+    const status = duplicate || conflicting
+      ? 'unverified'
+      : claimResults.length === 1
+        ? readStringField(claimResults[0], 'status', 'not_checked')
+        : 'not_checked';
+    lines.push(`- status: ${status}`);
+    if (duplicate || conflicting) {
+      lines.push(`- integrity: duplicate_or_conflicting_claim_id; status=unverified`);
+    }
+    claimSupports.forEach((support, supportIndex) => {
+      lines.push(`- support ${supportIndex + 1}: ${verificationFields(support, [
+        'kind', 'supportLevel', 'bindingEligibility', 'relationEvaluation',
+        'inferenceReason',
+      ])}`);
+      const semantics = asRecord(support.semantics);
+      if (Object.keys(semantics).length > 0) {
+        lines.push(`  - semantics: ${verificationFields(semantics, [
+          'predicate', 'polarity', 'discourse', 'quantifier', 'modality', 'conditions',
+        ])}`);
+        const scope = asRecord(semantics.scope);
+        if (Object.keys(scope).length > 0) {
+          lines.push(`  - semantics scope: ${verificationFields(scope, ['population', 'timeRangeNs'])}`);
+          for (const role of ['subjectRefs', 'objectRefs'] as const) {
+            const refs = Array.isArray(scope[role]) ? scope[role] as unknown[] : [];
+            refs.forEach((ref, index) => renderVerificationReference(lines, `${role} ${index + 1}`, ref));
+          }
+        }
+        const source = asRecord(semantics.source);
+        if (Object.keys(source).length > 0) lines.push(`  - source location: ${verificationFields(source, ['sourceReferenceId', 'filePath', 'lineRange'])}`);
+        const numeric = asRecord(semantics.numeric);
+        if (Object.keys(numeric).length > 0) lines.push(`  - numeric proposition: ${verificationFields(numeric, ['operator', 'value', 'unit'])}`);
+      }
+      (Array.isArray(support.anchors) ? support.anchors : []).forEach((anchor, index) =>
+        renderVerificationAnchor(lines, anchor, `anchor ${index + 1}`));
+      (Array.isArray(support.relationAnchors) ? support.relationAnchors : []).forEach((anchor, index) =>
+        renderVerificationAnchor(lines, anchor, `relation anchor ${index + 1}`));
+      (Array.isArray(support.relations) ? support.relations : []).forEach((relation, index) => {
+        const item = asRecord(relation);
+        lines.push(`  - relation ${index + 1}: ${verificationFields(item, [
+          'id', 'kind', 'direction', 'verificationStatus', 'reasonCode',
+          'subjectAnchorId', 'objectAnchorId', 'proofAnchorId', 'relationAnchorId',
+          'directEvidenceAnchorIds', 'proofBindings', 'metricColumn', 'value',
+          'isSqlNull', 'unit', 'deltaDirection', 'supportLevel', 'reason',
+        ])}`);
+      });
+    });
+    declaredClaims.forEach((claim) => {
+      const declaration = [
+        ['conclusionId', CONTRACT_ALIASES.claim.conclusionId],
+        ['kind', ['kind']],
+        ['supportLevel', ['supportLevel']],
+      ] as const;
+      const declarationText = declaration.flatMap(([key, aliases]) => {
+        const value = readAliasedValue(claim, aliases);
+        return value === undefined ? [] : [`${key}=${verificationInline(value)}`];
+      }).join(', ');
+      if (declarationText) lines.push(`  - declaration: ${declarationText}`);
+      readAliasedRecordArray(claim, CONTRACT_ALIASES.claim.references).forEach((ref, index) =>
+        renderVerificationReference(lines, `declared reference ${index + 1}`, ref));
+      (Array.isArray(claim.artifactRefs) ? claim.artifactRefs : []).forEach((ref, index) =>
+        renderVerificationReference(lines, `artifact reference ${index + 1}`, ref));
+      (Array.isArray(claim.relationRefs) ? claim.relationRefs : []).forEach((ref, index) =>
+        lines.push(`  - relationRef ${index + 1}: ${verificationInline(ref)}`));
+      const semantics = asRecord(claim.semantics);
+      if (Object.keys(semantics).length > 0) {
+        lines.push(`  - declared semantics: ${verificationFields(semantics, [
+          'predicate', 'polarity', 'discourse', 'quantifier', 'modality', 'conditions',
+        ])}`);
+        const scope = asRecord(semantics.scope);
+        if (Object.keys(scope).length > 0) {
+          lines.push(`  - declared scope: ${verificationFields(scope, ['population', 'timeRangeNs'])}`);
+          for (const role of ['subjectRefs', 'objectRefs'] as const) {
+            const refs = Array.isArray(scope[role]) ? scope[role] as unknown[] : [];
+            refs.forEach((ref, index) => renderVerificationReference(lines, `declared ${role} ${index + 1}`, ref));
+          }
+        }
+        const source = asRecord(semantics.source);
+        if (Object.keys(source).length > 0) lines.push(`  - declared source location: ${verificationFields(source, ['sourceReferenceId', 'filePath', 'lineRange'])}`);
+        const numeric = asRecord(semantics.numeric);
+        if (Object.keys(numeric).length > 0) lines.push(`  - declared numeric proposition: ${verificationFields(numeric, ['operator', 'value', 'unit'])}`);
+      }
+    });
+    claimResults.forEach((result, resultIndex) => {
+      lines.push(`- verifier result ${resultIndex + 1}: ${duplicate
+        ? 'unverified (duplicate claimId)' : verificationFields(result, ['status'])}`);
+      const referenceCells = Array.isArray(result.referenceCells) ? result.referenceCells : [];
+      referenceCells.forEach((ref, index) =>
+        renderVerificationReference(lines, `reference cell ${index + 1}`, ref));
+      const referenceResults = Array.isArray(result.referenceResults) ? result.referenceResults : [];
+      referenceResults.forEach((ref, index) =>
+        renderVerificationReference(lines, `reference result ${index + 1}`, ref));
+      const proof = asRecord(result.deterministicProof);
+      if (Object.keys(proof).length > 0) {
+        lines.push(`  - deterministic proof: ${verificationFields(proof, ['kind', 'status', 'reason', 'anchorIds', 'evidenceRefIds'])}`);
+        const nativeRows = Array.isArray(proof.nativeRows) ? proof.nativeRows : [];
+        nativeRows.forEach((row, index) => lines.push(`    - native row ${index + 1} (${uiText('仅身份元数据，不单独构成证明', 'identity metadata only; not proof by itself')}): ${verificationFields(asRecord(row), [
+          'anchorId', 'evidenceRefId', 'captureId', 'traceId', 'traceSide',
+          'relation', 'idColumn', 'id', 'schemaFingerprint',
+        ])}`));
+      }
+      const coverage = asRecord(result.propositionCoverage);
+      if (Object.keys(coverage).length > 0) lines.push(`  - proposition coverage: ${verificationFields(coverage, ['status', 'covered', 'uncovered', 'reason'])}`);
+    });
+    (issueGroups.get(claimId) ?? []).forEach((issue, index) =>
+      lines.push(`- issue ${index + 1}: ${verificationFields(issue, ['severity', 'code', 'message', 'evidenceRefId'])}`));
+  }
+  identities.forEach((identity, index) => renderIdentityResolution(lines, identity, index));
+  lines.push(...codeAwareDetails);
+  return lines.join('\n');
+}
+
+function renderServerVerificationNotice(
+  payload: AnalysisCompletedPayload | undefined,
+): string | undefined {
+  if (!payload) return undefined;
+  const status = analysisCompletedResultStatus(payload);
+  if (status !== 'partial' && status !== 'failed' && status !== 'quota_exceeded') {
+    return undefined;
+  }
+  const reason = payload.terminationMessage || payload.terminationReason ||
+    uiText('结果仍不完整或尚未通过核验。', 'The result is incomplete or has not passed verification.');
   return [
     uiText('> **结果完整性提示**', '> **Result completeness notice**'),
-    ...reason
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => `> ${line}`),
+    ...reason.split(/\r?\n/).filter(Boolean).map(line => `> ${line}`),
   ].join('\n');
 }
 
-function prependPartialResultWarning(
-  content: string,
-  payload: AnalysisCompletedPayload | undefined,
-): string {
-  const warning = buildPartialResultWarning(payload);
-  if (!warning || /结果完整性提示|Result Completeness Notice/i.test(content)) {
-    return content;
-  }
-  return [warning, '', content.trimStart()].join('\n');
-}
-
-function normalizeAppendixHeading(line: string): string {
-  return line
-    .trim()
-    .replace(/^#{1,6}\s+/, '')
-    .replace(/^>\s*/, '')
-    .replace(/^\*\*(.*?)\*\*$/, '$1')
-    .replace(/[：:]\s*$/, '')
-    .trim();
-}
-
-function isFrontendHiddenAppendixHeading(line: string): boolean {
-  const heading = normalizeAppendixHeading(line);
-  return (
-    /^(?:证据|证据来源|数据来源)索引(?:（.*?）|\(.*?\))?$/i.test(heading) ||
-    /^逐句数据引用(?:（.*?）|\(.*?\))?$/i.test(heading) ||
-    /^数据来源索引(?:（.*?）|\(.*?\))?$/i.test(heading) ||
-    /^断言验证结果$/i.test(heading) ||
-    /^分析元数据$/i.test(heading) ||
-    /^Evidence Index$/i.test(heading) ||
-    /^Evidence Sources$/i.test(heading) ||
-    /^Claim Verification Results$/i.test(heading) ||
-    /^Data Source Index/i.test(heading) ||
-    /^Analysis Metadata$/i.test(heading)
-  );
-}
-
-function isVisibleReportSectionHeading(line: string): boolean {
-  const trimmed = line.trim();
-  return /^#{1,2}\s+\S/.test(trimmed);
-}
-
-function isSectionSeparator(line: string): boolean {
-  return line.trim() === '---';
-}
-
-function isSnapshotReferenceLine(line: string): boolean {
-  return /^\s*(?:[-*]\s*)?(?:Result\s*ID|Snapshot(?:\s*ID)?|结果\s*ID|快照)\s*[:：]\s*/i.test(
-    line,
-  );
-}
-
-function removeTrailingAppendixSeparator(lines: string[]): void {
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-    lines.pop();
-  }
-  if (lines.length > 0 && isSectionSeparator(lines[lines.length - 1])) {
-    lines.pop();
-  }
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-    lines.pop();
-  }
-}
-
-function stripFrontendHiddenReportAppendix(content: string): string {
-  const lines = content.replace(/\r\n/g, '\n').split('\n');
-  const kept: string[] = [];
-  let skippingHiddenSection = false;
-
-  for (const line of lines) {
-    if (skippingHiddenSection) {
-      if (isFrontendHiddenAppendixHeading(line)) {
-        continue;
-      }
-      if (isSectionSeparator(line)) {
-        skippingHiddenSection = false;
-        continue;
-      }
-      if (isVisibleReportSectionHeading(line)) {
-        skippingHiddenSection = false;
-      } else {
-        continue;
-      }
-    }
-
-    if (isFrontendHiddenAppendixHeading(line)) {
-      removeTrailingAppendixSeparator(kept);
-      skippingHiddenSection = true;
-      continue;
-    }
-
-    if (isSnapshotReferenceLine(line)) {
-      removeTrailingAppendixSeparator(kept);
-      continue;
-    }
-
-    kept.push(line);
-  }
-
-  removeTrailingAppendixSeparator(kept);
-  return kept
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+function sameServerVerificationBinding(
+  left: Message['serverVerificationBinding'],
+  right: Message['serverVerificationBinding'],
+): boolean {
+  return Boolean(left && right && left.candidateRef === right.candidateRef &&
+    left.runId === right.runId && left.attemptId === right.attemptId &&
+    left.conclusionFingerprint === right.conclusionFingerprint);
 }
 
 function buildVisibleConclusionContent(
   content: string,
-  payload?: AnalysisCompletedPayload,
+  _payload?: AnalysisCompletedPayload,
 ): string {
-  return prependPartialResultWarning(
-    stripFrontendHiddenReportAppendix(content),
-    payload,
-  );
+  return content;
 }
 
 function buildVisibleConclusionContentWithReportAppendix(
@@ -4337,11 +4210,10 @@ function buildVisibleConclusionContentWithReportAppendix(
   resultSnapshotId?: string,
   payload?: AnalysisCompletedPayload,
 ): string {
-  const reportContent = appendClaimVerificationSummary(
-    appendFinalEvidenceSections(content, contract, ctx, resultSnapshotId),
-    payload,
-  );
-  return buildVisibleConclusionContent(reportContent, payload);
+  void contract;
+  void ctx;
+  void resultSnapshotId;
+  return buildVisibleConclusionContent(content, payload);
 }
 
 function renderConclusionContract(
@@ -4779,6 +4651,8 @@ export function handleAnalysisCompletedEvent(
           payload,
         )
       : undefined;
+    const serverVerificationDetails = renderServerVerificationDetails(payload);
+    const serverVerificationNotice = renderServerVerificationNotice(payload);
     if (
       reportUrl ||
       resultSnapshotId ||
@@ -4788,7 +4662,9 @@ export function handleAnalysisCompletedEvent(
       payload?.quickRun ||
       payload?.analysisReceipt ||
       payload?.sourceUseReceipt ||
-      payload?.uiActionProposals?.length
+      payload?.uiActionProposals?.length ||
+      serverVerificationDetails ||
+      serverVerificationNotice
     ) {
       // Attach reportUrl to the existing answer/conclusion message. If the
       // final payload includes narrative text, treat it as canonical and
@@ -4798,6 +4674,10 @@ export function handleAnalysisCompletedEvent(
         const existing = ctx
           .getMessages()
           .find((msg) => msg.id === answerMsgId);
+        const exactMetadataBackfill = !canonicalContent && sameServerVerificationBinding(
+          existing?.serverVerificationBinding,
+          payload?.serverVerificationBinding,
+        );
         ctx.updateMessage(
           answerMsgId,
           {
@@ -4814,7 +4694,12 @@ export function handleAnalysisCompletedEvent(
               : {}),
             ...uiActionProposalMessageUpdate(payload),
             ...(canonicalContent
-              ? {content: canonicalContent}
+              ? {
+                  content: canonicalContent,
+                  serverVerificationDetails,
+                  serverVerificationNotice,
+                  serverVerificationBinding: payload?.serverVerificationBinding,
+                }
               : existing
                 ? {
                     content: buildVisibleConclusionContentWithReportAppendix(
@@ -4824,6 +4709,13 @@ export function handleAnalysisCompletedEvent(
                       resultSnapshotId,
                       payload,
                     ),
+                    ...(exactMetadataBackfill &&
+                        (serverVerificationDetails || serverVerificationNotice)
+                      ? {
+                          serverVerificationDetails,
+                          serverVerificationNotice,
+                        }
+                      : {}),
                   }
                 : {}),
           },
@@ -4838,6 +4730,9 @@ export function handleAnalysisCompletedEvent(
             id: messageId,
             role: 'assistant',
             content: canonicalContent,
+            serverVerificationDetails,
+            serverVerificationNotice,
+            serverVerificationBinding: payload?.serverVerificationBinding,
             timestamp: Date.now(),
             flowTag: 'answer_stream',
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
@@ -4926,6 +4821,8 @@ export function handleAnalysisCompletedEvent(
       payload?.resultSnapshotId,
       payload,
     );
+    const serverVerificationDetails = renderServerVerificationDetails(payload);
+    const serverVerificationNotice = renderServerVerificationNotice(payload);
 
     const reportUrl = payload?.reportUrl;
     if (!reportUrl && payload?.reportError) {
@@ -4956,6 +4853,9 @@ export function handleAnalysisCompletedEvent(
         streamedAnswerMessageId,
         {
           content,
+          serverVerificationDetails,
+          serverVerificationNotice,
+          serverVerificationBinding: payload?.serverVerificationBinding,
           timestamp: Date.now(),
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
           flowTag: 'answer_stream',
@@ -4974,20 +4874,14 @@ export function handleAnalysisCompletedEvent(
         {persist: true},
       );
     } else {
-      // Check if conclusion was already shown
-      const messages = ctx.getMessages();
-      const hasConclusionAlready = messages.some(
-        (m) =>
-          m.role === 'assistant' &&
-          /🎯 (?:分析结论|Analysis conclusion)/.test(m.content),
-      );
-
-      if (!hasConclusionAlready) {
-        const messageId = ctx.generateId();
-        ctx.addMessage({
+      const messageId = ctx.generateId();
+      ctx.addMessage({
           id: messageId,
           role: 'assistant',
           content: content,
+          serverVerificationDetails,
+          serverVerificationNotice,
+          serverVerificationBinding: payload?.serverVerificationBinding,
           timestamp: Date.now(),
           flowTag: 'answer_stream',
           reportUrl: reportUrl ? `${ctx.backendUrl}${reportUrl}` : undefined,
@@ -5002,12 +4896,11 @@ export function handleAnalysisCompletedEvent(
             ? {sourceUseReceipt: payload.sourceUseReceipt}
             : {}),
           ...uiActionProposalMessageUpdate(payload),
-        });
-        ctx.streamingAnswer.messageId = messageId;
-        ctx.streamingAnswer.content = content;
-        ctx.streamingAnswer.pending = '';
-        ctx.streamingAnswer.status = 'completed';
-      }
+      });
+      ctx.streamingAnswer.messageId = messageId;
+      ctx.streamingAnswer.content = content;
+      ctx.streamingAnswer.pending = '';
+      ctx.streamingAnswer.status = 'completed';
     }
   }
 
@@ -5016,12 +4909,16 @@ export function handleAnalysisCompletedEvent(
   if (!answerContent) {
     const reportUrl = payload?.reportUrl;
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
+    const serverVerificationDetails = renderServerVerificationDetails(payload);
+    const serverVerificationNotice = renderServerVerificationNotice(payload);
     if (
       (reportUrl ||
         payload?.quickRun ||
         payload?.analysisReceipt ||
         payload?.sourceUseReceipt ||
-        payload?.uiActionProposals?.length) &&
+        payload?.uiActionProposals?.length ||
+        serverVerificationDetails ||
+        serverVerificationNotice) &&
       streamedAnswerMessageId
     ) {
       const streamedMsg = ctx
@@ -5033,6 +4930,10 @@ export function handleAnalysisCompletedEvent(
         );
       if (streamedMsg) {
         completeStreamingAnswer(ctx);
+        const exactMetadataBackfill = sameServerVerificationBinding(
+          streamedMsg.serverVerificationBinding,
+          payload?.serverVerificationBinding,
+        );
         ctx.updateMessage(
           streamedAnswerMessageId,
           {
@@ -5043,6 +4944,10 @@ export function handleAnalysisCompletedEvent(
               : {}),
             ...(payload?.sourceUseReceipt
               ? {sourceUseReceipt: payload.sourceUseReceipt}
+              : {}),
+            ...(exactMetadataBackfill &&
+                (serverVerificationDetails || serverVerificationNotice)
+              ? {serverVerificationDetails, serverVerificationNotice}
               : {}),
             ...uiActionProposalMessageUpdate(payload),
           },
@@ -6656,6 +6561,9 @@ function handleSSEEventInner(
             streamedAnswerMessageId,
             {
               content,
+              serverVerificationDetails: undefined,
+              serverVerificationNotice: undefined,
+              serverVerificationBinding: undefined,
               timestamp: Date.now(),
               flowTag: 'answer_stream',
             },
@@ -6667,6 +6575,9 @@ function handleSSEEventInner(
             id: messageId,
             role: 'assistant',
             content,
+            serverVerificationDetails: undefined,
+            serverVerificationNotice: undefined,
+            serverVerificationBinding: undefined,
             timestamp: Date.now(),
             flowTag: 'answer_stream',
           });

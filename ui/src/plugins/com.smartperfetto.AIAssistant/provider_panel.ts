@@ -535,8 +535,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
           text('Provider Manager 优先级：', 'Provider Manager priority: '),
         ),
         text(
-          '已保存的配置只有激活后才会影响分析。激活配置会覆盖 backend/.env 或 Docker .env；系统默认配置会回到环境变量或本地 Claude Code 配置。',
-          'a saved profile only affects analysis after it is active. Active profiles override backend/.env or Docker .env; System Default returns to env or local Claude Code config.',
+          '已保存的配置只有激活后才会影响分析。激活配置会覆盖 backend/.env 或 Docker .env；系统默认配置会回到环境变量。',
+          'a saved profile only affects analysis after it is active. Active profiles override backend/.env or Docker .env; System Default returns to environment variables.',
         ),
       ],
     );
@@ -556,8 +556,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         'p',
         {style: {margin: 0, fontSize: '14px'}},
         text(
-          '添加一个 UI 提供商配置，或使用系统默认配置读取 backend/.env、Docker .env 或本地 Claude Code 配置。',
-          'Add a UI provider profile, or use System Default for backend/.env, Docker .env, or local Claude Code config.',
+          '添加一个 UI 提供商配置，或使用系统默认配置读取对应运行方式的配置文件（如 backend/.env 或 Docker .env）。',
+          'Add a UI provider profile, or use System Default for the configuration file for your run mode (such as backend/.env or Docker .env).',
         ),
       ),
       m(
@@ -695,8 +695,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                     },
                   },
                   text(
-                    '使用本地 Claude Code、backend/.env 或 Docker .env。选择此项会忽略已激活的 UI 提供商。',
-                    'Uses local Claude Code, backend/.env, or Docker .env. Select this to ignore active UI providers.',
+                    '使用当前运行方式的环境变量或配置文件。选择此项会忽略已激活的 UI 提供商。',
+                    'Uses the environment or configuration file for the current run mode. Select this to ignore active UI providers.',
                   ),
                 ),
               ],

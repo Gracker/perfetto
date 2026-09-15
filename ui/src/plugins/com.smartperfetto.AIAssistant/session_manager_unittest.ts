@@ -502,6 +502,12 @@ describe('SessionManager private message persistence', () => {
       content: privateCanary,
       timestamp: Date.now(),
       privateContent: true,
+      serverVerificationNotice: 'private-notice-canary',
+      serverVerificationDetails: 'private-details-canary',
+      serverVerificationBinding: {
+        candidateRef: 'private-candidate', runId: 'private-run',
+        attemptId: 'private-attempt', conclusionFingerprint: 'private-fingerprint',
+      },
     };
     const manager = new SessionManager();
 
@@ -514,6 +520,12 @@ describe('SessionManager private message persistence', () => {
     const sessionsRaw = localStorage.getItem(getSessionsStorageKey()) || '';
     expect(legacyRaw).not.toContain(privateCanary);
     expect(sessionsRaw).not.toContain(privateCanary);
+    expect(legacyRaw).not.toContain('private-notice-canary');
+    expect(legacyRaw).not.toContain('private-details-canary');
+    expect(legacyRaw).not.toContain('private-candidate');
+    expect(sessionsRaw).not.toContain('private-notice-canary');
+    expect(sessionsRaw).not.toContain('private-details-canary');
+    expect(sessionsRaw).not.toContain('private-candidate');
     expect(legacyRaw).toContain('PRIVATE_QUERY_REFERENCE');
     expect(sessionsRaw).toContain('PRIVATE_QUERY_REFERENCE');
   });

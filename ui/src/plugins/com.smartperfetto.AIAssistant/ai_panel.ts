@@ -17,7 +17,7 @@
 // limitations under the License.
 
 import m from 'mithril';
-import {SettingsModal} from './settings_modal';
+import {SettingsModal, type SettingsTab} from './settings_modal';
 import {ProviderQuickSwitcher} from './provider_switcher';
 import {SqlResultTable} from './sql_result_table';
 import type {UserInteraction} from './sql_result_table';
@@ -829,7 +829,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   private async copyMessageContent(msg: Message): Promise<void> {
-    const ok = await this.copyTextToClipboard(msg.content);
+    const copyableContent = [
+      msg.serverVerificationNotice,
+      msg.content,
+      msg.serverVerificationDetails,
+    ]
+      .filter((part): part is string => Boolean(part?.trim()))
+      .join('\n\n');
+    const ok = await this.copyTextToClipboard(copyableContent);
     if (!ok) return;
 
     this.copiedMessageIds.add(msg.id);
@@ -3585,6 +3592,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         this.state.showSettings
           ? m(SettingsModal, {
               settings: this.state.settings,
+              initialTab: this.settingsInitialTab,
               analysisContext: this.state.analysisContext,
               workspaceContext,
               readOnly: this.isAnalysisIdentityLocked(),
@@ -3824,6 +3832,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             // Left: Main content area
             m('div.ai-main-content', [
               this.renderAiDisabledBanner(),
+              this.renderProviderConfigurationBanner(),
               this.renderApplicationUpdateBanner(),
 
               this.state.captureConfigSuggestion.visible
@@ -4050,6 +4059,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   class: bubbleClass,
                                 },
                                 [
+                                  msg.serverVerificationNotice
+                                    ? m('div.ai-message-content.ai-server-verification-notice', {
+                                        oncreate: ({dom}) => {
+                                          (dom as HTMLElement).innerHTML = formatMessage(
+                                            msg.serverVerificationNotice || '',
+                                          );
+                                        },
+                                        onupdate: ({dom}) => {
+                                          (dom as HTMLElement).innerHTML = formatMessage(
+                                            msg.serverVerificationNotice || '',
+                                          );
+                                        },
+                                      })
+                                    : null,
                                   msg.teachingPipeline
                                     ? this.renderTeachingPipelineView(
                                         msg.teachingPipeline,
@@ -4140,6 +4163,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                           );
                                         },
                                       }),
+
+                                  msg.serverVerificationDetails
+                                    ? m('div.ai-message-content.ai-server-verification-details', {
+                                        oncreate: ({dom}) => {
+                                          (dom as HTMLElement).innerHTML = formatMessage(
+                                            msg.serverVerificationDetails || '',
+                                          );
+                                        },
+                                        onupdate: ({dom}) => {
+                                          (dom as HTMLElement).innerHTML = formatMessage(
+                                            msg.serverVerificationDetails || '',
+                                          );
+                                        },
+                                      })
+                                    : null,
 
                                   this.renderTableSourceContext(
                                     msg.sourceContext,
@@ -7821,6 +7859,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   /** Server status cache — shared by header, settings modal, and welcome message. */
   private serverStatus: ServerStatus = {connected: false};
+  private settingsInitialTab: SettingsTab = 'connection';
 
   private isAiDisabled(): boolean {
     return this.serverStatus.connected && this.serverStatus.aiEnabled === false;
@@ -7874,6 +7913,27 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return m('div.ai-disabled-banner', [
       m('i.pf-icon', 'block'),
       m('span', this.aiDisabledReason()),
+    ]);
+  }
+
+  private renderProviderConfigurationAction(): m.Children {
+    return m('button.ai-provider-configuration-action', {
+      type: 'button',
+      disabled: this.isAnalysisIdentityLocked(),
+      onclick: () => this.openSettings('providers'),
+    }, uiText('配置 AI Provider', 'Configure AI Provider'));
+  }
+
+  private renderProviderConfigurationBanner(): m.Children {
+    if (this.isAiDisabled()) return null;
+    const unconfigured = this.serverStatus.connected &&
+      this.serverStatus.configured === false &&
+      this.serverStatus.runtime !== 'qoder-agent-sdk';
+    if (!unconfigured) return null;
+    return m('div.ai-provider-configuration-banner', {role: 'status'}, [
+      m('i.pf-icon', 'settings'),
+      m('span', uiText('AI Provider 尚未配置', 'AI Provider setup is incomplete')),
+      this.renderProviderConfigurationAction(),
     ]);
   }
 
@@ -13700,8 +13760,9 @@ Click ⚙️ to configure backend connection.`,
     }
   }
 
-  private openSettings() {
+  private openSettings(tab: SettingsTab = 'connection') {
     if (this.isAnalysisIdentityLocked()) return;
+    this.settingsInitialTab = tab;
     this.state.showSettings = true;
     m.redraw();
   }

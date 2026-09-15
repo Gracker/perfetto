@@ -944,14 +944,15 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('## Code references');
-    expect(ctx.messages[0].content).toContain('`chunk-main`');
-    expect(ctx.messages[0].content).toContain(
+    expect(ctx.messages[0].content).toBe('Analysis complete.');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('## Code references');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('`chunk-main`');
+    expect(ctx.messages[0].serverVerificationDetails).toContain(
       'app/src/main/MainActivity.kt:L10-18',
     );
-    expect(ctx.messages[0].content).toContain('## Patch proposals');
-    expect(ctx.messages[0].content).toContain('sketch only; no copyable diff');
-    expect(ctx.messages[0].content).not.toContain(
+    expect(ctx.messages[0].serverVerificationDetails).toContain('## Patch proposals');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('sketch only; no copyable diff');
+    expect(ctx.messages[0].serverVerificationDetails).not.toContain(
       'SECRET_RAW_DIFF_SHOULD_NOT_RENDER',
     );
   });
@@ -1257,7 +1258,7 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].content).toContain('帧: 111 / 222');
     expect(ctx.messages[0].content).toContain('其余 6 帧省略');
     expect(ctx.messages[0].content).toContain('置信度: 90%');
-    expect(ctx.messages[0].content).not.toContain('分析轮次: 4');
+    expect(ctx.messages[0].content).toContain('分析轮次: 4');
   });
 
   it('should apply snake_case cluster policy max_clusters', () => {
@@ -1285,7 +1286,7 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(ctx.messages[0].content).not.toContain('K2: 被裁剪簇');
   });
 
-  it('should strip metadata sections from the visible conclusion', () => {
+  it('should preserve metadata sections from the canonical visible conclusion', () => {
     const data = {
       architecture: 'v2-agent-driven',
       data: {
@@ -1298,11 +1299,12 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toBe('## 结论（按可能性排序）\n1. 示例');
-    expect(ctx.messages[0].content).not.toContain('分析元数据');
+    expect(ctx.messages[0].content).toBe(
+      '## 结论（按可能性排序）\n1. 示例\n\n## 分析元数据\n- 置信度: 90%\n- 分析轮次: 3',
+    );
   });
 
-  it('should not duplicate conclusion if already shown', () => {
+  it('should not suppress a new canonical conclusion based on earlier prose', () => {
     ctx.addMessage({
       id: 'existing',
       role: 'assistant',
@@ -1318,8 +1320,8 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    // Should still have only one message (the original)
-    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages).toHaveLength(2);
+    expect(ctx.messages[1].content).toBe('New conclusion.');
   });
 
   it('should prevent duplicate handling', () => {
@@ -2736,9 +2738,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[1].content).not.toContain('## 逐句数据引用');
-    expect(ctx.messages[1].content).not.toContain('Q1 / C1: 帧耗时 45.6ms');
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain('## 逐句数据引用');
+    expect(ctx.messages[1].content).toContain('Q1 / C1: 帧耗时 45.6ms');
+    expect(ctx.messages[1].content).toContain(
       '表 1，row 0，列 dur_ms，已核对',
     );
   });
@@ -2795,7 +2797,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '表1: 帧耗时表，row 0，列 dur_ms，已核对',
     );
   });
@@ -2853,7 +2855,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '表 1，row 0，列 帧耗时(ms)，已核对',
     );
   });
@@ -2910,7 +2912,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '表 1，row 0，列 dur_ms，已核对（含近似匹配）',
     );
   });
@@ -2967,7 +2969,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '未通过: 值不匹配，实际 45.6',
     );
   });
@@ -3023,7 +3025,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '表 1，row 0，列 dur_ms，未核验: 未提供期望值',
     );
     expect(ctx.messages[1].content).not.toContain(
@@ -3100,10 +3102,10 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[2].content).not.toContain(
+    expect(ctx.messages[2].content).toContain(
       '表 1，row 0，列 dur_ms，已核对',
     );
-    expect(ctx.messages[2].content).not.toContain(
+    expect(ctx.messages[2].content).toContain(
       'source_ref 已按系统来源校正',
     );
     expect(ctx.messages[2].content).not.toContain(
@@ -3163,7 +3165,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       'row -0.4，列 dur_ms，未通过: 行号无效',
     );
   });
@@ -3237,10 +3239,10 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[2].content).not.toContain('Q1: 帧耗时 45.6ms');
-    expect(ctx.messages[2].content).not.toContain('未核验: 来源不唯一');
-    expect(ctx.messages[2].content).not.toContain('Q2: 第二次帧耗时 99ms');
-    expect(ctx.messages[2].content).not.toContain(
+    expect(ctx.messages[2].content).toContain('Q1: 帧耗时 45.6ms');
+    expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
+    expect(ctx.messages[2].content).toContain('Q2: 第二次帧耗时 99ms');
+    expect(ctx.messages[2].content).toContain(
       '表 2，row 0，列 dur_ms，已核对',
     );
   });
@@ -3295,7 +3297,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[2].content).not.toContain('未核验: 来源不唯一');
+    expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
     expect(ctx.messages[2].content).not.toContain('值 45.6，已核对');
   });
 
@@ -3354,7 +3356,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       'rowSelector frame_id=123 -> row 0，列 dur_ms，已核对',
     );
   });
@@ -3414,7 +3416,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       'rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，已核对',
     );
   });
@@ -3544,15 +3546,15 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       'Q1: claim 1（表 1，row 0，列 value，已核对）',
     );
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '其余 1 条 claim 未展开；完整结构化引用仍保留在结果快照中。',
     );
   });
 
-  it('keeps system-generated evidence sections out of the visible conclusion', () => {
+  it('preserves evidence sections that are part of the canonical conclusion', () => {
     handleDataEvent(
       {
         id: 'claim-source',
@@ -3606,16 +3608,13 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
-      '## 数据来源索引（系统生成）',
-    );
-    expect(ctx.messages[1].content).not.toContain(
-      '## 逐句数据引用（系统核对结果）',
-    );
-    expect(ctx.messages[1].content).not.toContain('已核对');
+    expect(ctx.messages[1].content).toContain('## 数据来源索引');
+    expect(ctx.messages[1].content).toContain('模型写的来源');
+    expect(ctx.messages[1].content).toContain('## 逐句数据引用');
+    expect(ctx.messages[1].content).toContain('模型写的引用');
   });
 
-  it('does not fall back to showing appendix content when no visible conclusion remains', () => {
+  it('does not infer hidden metadata from canonical conclusion headings', () => {
     handleAnalysisCompletedEvent(
       {
         data: {
@@ -3635,13 +3634,12 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('');
-    expect(ctx.messages[0].content).not.toContain('关键数据来源');
-    expect(ctx.messages[0].content).not.toContain('Verifier');
-    expect(ctx.messages[0].content).not.toContain('Result ID');
+    expect(ctx.messages[0].content).toContain('关键数据来源');
+    expect(ctx.messages[0].content).toContain('Verifier');
+    expect(ctx.messages[0].content).toContain('Result ID');
   });
 
-  it('does not let appendix subheadings or bold lines leak hidden details', () => {
+  it('preserves canonical appendix subheadings and bold lines', () => {
     handleAnalysisCompletedEvent(
       {
         data: {
@@ -3668,12 +3666,12 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].content).toContain('真实结论正文。');
     expect(ctx.messages[0].content).toContain('## 后续行动');
     expect(ctx.messages[0].content).toContain('这段仍然应该展示。');
-    expect(ctx.messages[0].content).not.toContain('关键数据来源');
-    expect(ctx.messages[0].content).not.toContain('逐句明细');
-    expect(ctx.messages[0].content).not.toContain('隐藏引用');
+    expect(ctx.messages[0].content).toContain('关键数据来源');
+    expect(ctx.messages[0].content).toContain('逐句明细');
+    expect(ctx.messages[0].content).toContain('隐藏引用');
   });
 
-  it('removes snapshot reference lines with full-width colons and localized labels', () => {
+  it('preserves snapshot reference lines in the canonical body', () => {
     handleAnalysisCompletedEvent(
       {
         data: {
@@ -3692,10 +3690,10 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('最终结论正文。');
-    expect(ctx.messages[0].content).not.toContain('AR-hidden');
-    expect(ctx.messages[0].content).not.toContain('analysis-result-hidden');
-    expect(ctx.messages[0].content).not.toContain('快照');
+    expect(ctx.messages[0].content).toContain('最终结论正文。');
+    expect(ctx.messages[0].content).toContain('AR-hidden');
+    expect(ctx.messages[0].content).toContain('analysis-result-hidden');
+    expect(ctx.messages[0].content).toContain('快照');
   });
 
   it('keeps late conclusionContract claim refs when conclusion arrived first', () => {
@@ -3766,12 +3764,29 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[1].content).not.toContain('已核对');
   });
 
-  it('keeps verifier metadata out of the visible analysis_completed message', () => {
+  it('keeps canonical body intact and exposes server verification separately', () => {
     handleAnalysisCompletedEvent(
       {
         architecture: 'agent-driven',
         data: {
           conclusion: '最终结论',
+          conclusionContract: {
+            claims: [{
+              id: 'Q1', conclusion_id: 'C1', text: 'blocked_ms 为 120',
+              references: [{evidence_ref_id: 'evidence:blocked', row_index: 2, column: 'blocked_ms', value: 120}],
+              artifactRefs: [{artifactId: 'artifact:blocked', rowIndex: 2}],
+              relationRefs: ['relation:blocked-owner'],
+              semantics: {
+                predicate: 'numeric_compare', polarity: 'affirmed', discourse: 'asserted',
+                quantifier: 'one', modality: 'certain',
+                numeric: {operator: 'eq', value: 120, unit: 'ms'},
+                scope: {population: 'cited_rows', subjectRefs: [{artifactId: 'artifact:subject'}],
+                  objectRefs: [{sourceRef: 'object row'}]},
+                source: {sourceReferenceId: 'src:blocked', filePath: 'Blocked.java',
+                  lineRange: {start: 10, end: 12}},
+              },
+            }],
+          },
           claimSupport: [
             {
               claimId: 'Q1',
@@ -3779,6 +3794,7 @@ describe('handleDataEvent', () => {
               text: 'blocked_ms 为 120',
               anchors: [
                 {
+                  version: 'evidence_anchor@1',
                   evidenceRefId: 'evidence:blocked',
                   context: {
                     traceSide: 'current',
@@ -3791,6 +3807,9 @@ describe('handleDataEvent', () => {
                       column: 'blocked_ms',
                       value: 120,
                       actualValue: 90,
+                      displayValue: '90 ms',
+                      unit: 'ms',
+                      isSqlNull: false,
                     },
                   ],
                   identity: {
@@ -3800,6 +3819,7 @@ describe('handleDataEvent', () => {
                 },
               ],
               supportLevel: 'unsupported',
+              relationEvaluation: 'missing',
             },
           ],
           claimVerificationResult: {
@@ -3836,18 +3856,79 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('结果完整性提示');
-    expect(ctx.messages[0].content.endsWith('\n\n最终结论')).toBe(true);
+    expect(ctx.messages[0].content).toBe('最终结论');
     expect(ctx.streamingFlow.status).toBe('partial');
-    expect(ctx.messages[0].content).not.toContain('## 断言验证结果');
-    expect(ctx.messages[0].content).not.toContain('Verifier: failed');
-    expect(ctx.messages[0].content).not.toContain(
-      'claim_reference_value_mismatch',
-    );
-    expect(ctx.messages[0].content).not.toContain('Q1: unsupported (numeric)');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('## 服务器核验详情');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('blocked_ms 为 120');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('supportLevel=unsupported');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('- status: not_checked');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('relationEvaluation=missing');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('claim_reference_value_mismatch');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('column=blocked_ms');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('version=evidence_anchor@1');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('actualValue=90');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('displayValue=90 ms');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('unit=ms');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('isSqlNull=false');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('identity identity:test');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('traceId=trace-a');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('artifactId=artifact:blocked');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('relation:blocked-owner');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('artifactId=artifact:subject');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('sourceRef=object row');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('filePath=Blocked.java');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('operator=eq, value=120, unit=ms');
   });
 
-  it('removes structured claim refs from the visible conclusion while preserving later sections', () => {
+  it('keeps support status separate and renders both verifier reference families', () => {
+    handleAnalysisCompletedEvent({data: {
+      conclusion: 'Canonical body',
+      claimSupport: [{claimId: 'support-only', kind: 'categorical', text: 'Support only',
+        anchors: [], supportLevel: 'verified'}],
+      claimVerificationResult: {
+        schemaVersion: 'claim_verifier@2', status: 'partial', policy: 'record_only',
+        passed: false, checkedClaimCount: 1, unsupportedClaimCount: 0,
+        claimResults: [{claimId: 'with-results', status: 'partial',
+          referenceCells: [{evidenceRefId: 'cell-ref', column: 'dur', status: 'matched'}],
+          referenceResults: [{evidenceRefId: 'result-ref', column: 'state', status: 'missing'}]}],
+        issues: [],
+      },
+    }}, ctx);
+    const details = ctx.messages[0].serverVerificationDetails || '';
+    expect(details).toContain('### support-only\n- 结论文本: Support only\n- status: not_checked');
+    expect(details).toContain('supportLevel=verified');
+    expect(details).toContain('reference cell 1: evidenceRefId=cell-ref');
+    expect(details).toContain('reference result 1: evidenceRefId=result-ref');
+  });
+
+  it('does not cap late claim support or issues and rejects duplicate verifier identities', () => {
+    const claimSupport = Array.from({length: 7}, (_, index) => ({
+      claimId: `Q${index}`, kind: 'categorical', text: `Claim text ${index}`,
+      anchors: [], supportLevel: index === 6 ? 'unsupported' : 'partial',
+    }));
+    const issues = Array.from({length: 7}, (_, index) => ({
+      claimId: `Q${index}`, severity: index === 6 ? 'error' : 'warning',
+      code: `issue_${index}`, message: `Issue detail ${index}`,
+    }));
+    handleAnalysisCompletedEvent({data: {
+      conclusion: 'Canonical body', claimSupport,
+      claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'failed', policy: 'record_only',
+        passed: false, checkedClaimCount: 7, unsupportedClaimCount: 1,
+        claimResults: [
+          {claimId: 'Q6', status: 'verified'},
+          {claimId: 'Q6', status: 'verified'},
+        ], issues},
+    }}, ctx);
+    const details = ctx.messages[0].serverVerificationDetails || '';
+    expect(details).toContain('Claim text 6');
+    expect(details).toContain('Issue detail 6');
+    expect(details).toContain('duplicate_or_conflicting_claim_id');
+    expect(details).toContain('unverified (duplicate claimId)');
+    expect(details).not.toContain('verifier result 1: status=verified');
+  });
+
+  it('preserves structured claim refs in the canonical conclusion', () => {
     handleDataEvent(
       {
         id: 'claim-source',
@@ -3919,14 +4000,14 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ctx.messages[1].content).toContain(
       '## 逐句数据引用（结构化来源）',
     );
     expect(ctx.messages[1].content).not.toContain(
       '## 逐句数据引用（系统核对结果）',
     );
-    expect(ctx.messages[1].content).not.toContain(
-      '表 1，row 0，列 dur_ms，已核对',
+    expect(ctx.messages[1].content).toContain(
+      'source_ref=表 1; row_index=0; column=dur_ms; value=45.6',
     );
     expect(ctx.messages[1].content).toContain('## 不确定性与反例');
   });
@@ -4608,12 +4689,9 @@ describe('handleSSEEvent', () => {
     expect(result.stopLoading).toBe(true);
     expect(getAISharedState().status).toBe(expected);
     expect(ctx.streamingFlow.status).toBe(flow);
-    // Partial results retain the existing completeness notice before the exact
-    // model body. Run-status projection must preserve both surfaces.
-    if (expected === 'partial' || ('partial' in metadata && metadata.partial === true)) {
-      expect(ctx.messages[0].content.endsWith(`\n\n${payload.conclusion}`)).toBe(true);
-    } else {
-      expect(ctx.messages[0].content).toBe(payload.conclusion);
+    expect(ctx.messages[0].content).toBe(payload.conclusion);
+    if (expected === 'partial') {
+      expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
     }
     expect(payload).toEqual(originalPayload);
     if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('failed');
@@ -4644,8 +4722,8 @@ describe('handleSSEEvent', () => {
     expect(getAISharedState().status).toBe('partial');
     expect(rendered).toContain('流程已结束');
     expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
-    expect(ctx.messages[0].content).toContain('结果完整性提示');
-    expect(ctx.messages[0].content.endsWith('保留当前有依据的输出')).toBe(true);
+    expect(ctx.messages[0].content).toBe('保留当前有依据的输出');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
   });
 
   it('waits for final verification after conclusion and corrects a late incomplete verdict idempotently', () => {
@@ -4663,7 +4741,80 @@ describe('handleSSEEvent', () => {
     expect(getAISharedState().status).toBe('partial');
     expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content.match(/结果完整性提示/g)).toHaveLength(1);
+    expect(ctx.messages[0].content).toBe('先显示可读结论');
+    expect(ctx.messages[0].serverVerificationNotice?.match(/结果完整性提示/g)).toHaveLength(1);
+  });
+
+  it('binds verification to the exact candidate and clears it on body replacement', () => {
+    const completion = (suffix: string) => ({
+      schemaVersion: 1, runtimeKind: 'claude-agent-sdk', status: 'completed',
+      candidateRef: `candidate-${suffix}`, runId: `run-${suffix}`,
+      attemptId: `attempt-${suffix}`, conclusionFingerprint: `fingerprint-${suffix}`,
+    });
+    const verification = {
+      claimSupport: [{claimId: 'late', kind: 'categorical', text: 'Late claim', anchors: [], supportLevel: 'unsupported'}],
+      claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'failed', policy: 'record_only', passed: false,
+        checkedClaimCount: 1, unsupportedClaimCount: 1,
+        claimResults: [{claimId: 'late', status: 'unsupported', referenceCells: [],
+          deterministicProof: {kind: 'none', status: 'candidate', reason: 'unsupported_predicate', anchorIds: [], evidenceRefIds: []},
+          propositionCoverage: {status: 'none', covered: [], uncovered: ['typed_proposition'], reason: 'unsupported_predicate'}}],
+        issues: []},
+    };
+    handleSSEEvent('analysis_completed', {data: {conclusion: 'First body', completion: completion('one'), ...verification}}, ctx);
+    const messageId = ctx.streamingAnswer.messageId!;
+    expect(ctx.messages[0].serverVerificationDetails).toContain('Late claim');
+
+    handleSSEEvent('analysis_completed', {data: {conclusion: 'Second body', completion: completion('two')}}, ctx);
+    expect(ctx.streamingAnswer.messageId).toBe(messageId);
+    expect(ctx.messages[0]).toMatchObject({
+      content: 'Second body',
+      serverVerificationBinding: {
+        candidateRef: 'candidate-two', runId: 'run-two',
+        attemptId: 'attempt-two', conclusionFingerprint: 'fingerprint-two',
+      },
+    });
+    expect(ctx.messages[0].serverVerificationDetails).toBeUndefined();
+    expect(ctx.messages[0].serverVerificationNotice).toBeUndefined();
+
+    handleSSEEvent('analysis_completed', {data: {completion: completion('one'), ...verification}}, ctx);
+    expect(ctx.messages[0].serverVerificationDetails).toBeUndefined();
+    handleSSEEvent('analysis_completed', {data: {completion: completion('two'), ...verification}}, ctx);
+    const exactDetails = ctx.messages[0].serverVerificationDetails;
+    expect(exactDetails).toContain('Late claim');
+    handleSSEEvent('analysis_completed', {data: {completion: completion('two'), ...verification}}, ctx);
+    expect(ctx.messages[0].serverVerificationDetails).toBe(exactDetails);
+    handleSSEEvent('analysis_completed', {data: {completion: completion('two')}}, ctx);
+    expect(ctx.messages[0].serverVerificationDetails).toBe(exactDetails);
+  });
+
+  it('does not attach metadata-only verification without a current message identity', () => {
+    ctx.streamingAnswer.messageId = null;
+    ctx.messages.push({id: 'older', role: 'assistant', content: 'Older body', timestamp: 1});
+    handleSSEEvent('analysis_completed', {data: {
+      claimSupport: [{claimId: 'stale', kind: 'categorical', text: 'Stale claim', anchors: [], supportLevel: 'unsupported'}],
+    }}, ctx);
+    expect(ctx.messages[0]).toEqual({id: 'older', role: 'assistant', content: 'Older body', timestamp: 1});
+  });
+
+  it('does not clear exact-bound details in the no-answerContent path on an empty replay', () => {
+    const binding = {
+      candidateRef: 'candidate-current', runId: 'run-current',
+      attemptId: 'attempt-current', conclusionFingerprint: 'fingerprint-current',
+    };
+    ctx.messages.push({
+      id: 'streamed', role: 'assistant', content: 'Streamed canonical body', timestamp: 1,
+      serverVerificationBinding: binding,
+      serverVerificationNotice: 'Retained notice',
+      serverVerificationDetails: 'Retained details',
+    });
+    ctx.streamingAnswer.messageId = 'streamed';
+    ctx.streamingAnswer.content = 'Streamed canonical body';
+    ctx.completionHandled = false;
+    handleSSEEvent('analysis_completed', {data: {
+      completion: {schemaVersion: 1, status: 'completed', ...binding},
+    }}, ctx);
+    expect(ctx.messages[0].serverVerificationNotice).toBe('Retained notice');
+    expect(ctx.messages[0].serverVerificationDetails).toBe('Retained details');
   });
 
   it.each([
@@ -4740,7 +4891,7 @@ describe('handleSSEEvent', () => {
     expect(ctx.streamingFlow.status).toBe('completed');
     expect(getAISharedState().status).toBe('completed');
     expect(ctx.flowMessages.map(message => message.content).join('\n')).toContain('流程完成，结论已生成');
-    expect(ctx.messages[0].content).not.toContain('结果完整性提示');
+    expect(ctx.messages[0].serverVerificationNotice).toBeUndefined();
   });
 
   it('shows investigation deficits after an early conclusion without downgrading native completion', () => {
@@ -4913,8 +5064,9 @@ describe('handleSSEEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('结果完整性提示');
-    expect(ctx.messages[0].content).toContain('最终结果质量闸门');
+    expect(ctx.messages[0].content).toBe('## 综合结论\n\n降级结论');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('最终结果质量闸门');
     expect(getAISharedState().status).toBe('partial');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
   });

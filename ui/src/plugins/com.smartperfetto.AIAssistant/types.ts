@@ -101,6 +101,19 @@ export interface Message {
   conversationSourceEnrichment?: ConversationSourceEnrichmentUpdate;
   /** Deep source supplement for Fast/Auto/Full analysis. */
   analysisSourceEnrichment?: AnalysisSourceEnrichmentUpdate;
+  /** Server-owned verification text, rendered separately from the canonical answer. */
+  serverVerificationDetails?: string;
+  /** Server-owned partial/failure notice shown before the canonical answer. */
+  serverVerificationNotice?: string;
+  /** Exact finalized candidate identity that owns serverVerificationDetails. */
+  serverVerificationBinding?: ServerVerificationBinding;
+}
+
+export interface ServerVerificationBinding {
+  candidateRef: string;
+  runId: string;
+  attemptId: string;
+  conclusionFingerprint: string;
 }
 
 export type SourceUseStatus =

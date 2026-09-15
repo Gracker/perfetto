@@ -156,7 +156,29 @@ export interface ConclusionContractParseIssue {
   path: string;
   /** Fixed schema facts only; no raw values, user keys or source paths. */
   details?: ConclusionContractStructureDetail[];
+  /** Closed relation shape only; no raw proposal fields or values. */
+  relationProposalDiagnostic?: ConclusionRelationProposalDiagnostic;
 }
+
+export type ConclusionRelationProposalItemReason =
+  | 'item_not_object'
+  | 'unknown_field'
+  | 'invalid_schema_version'
+  | 'invalid_id'
+  | 'invalid_kind'
+  | 'invalid_direction'
+  | 'invalid_subject'
+  | 'invalid_object'
+  | 'invalid_proof'
+  | 'invalid_value'
+  | 'invalid_unit'
+  | 'invalid_metric_column'
+  | 'invalid_delta_direction'
+  | 'invalid_proof_bindings';
+
+export type ConclusionRelationProposalDiagnostic =
+  | {readonly scope: 'collection'; readonly reason: 'collection_not_array'}
+  | {readonly scope: 'item'; readonly ordinal: number; readonly reason: ConclusionRelationProposalItemReason};
 
 export type ConclusionBindingEligibility = 'eligible' | 'ineligible' | 'legacy_unchecked';
 

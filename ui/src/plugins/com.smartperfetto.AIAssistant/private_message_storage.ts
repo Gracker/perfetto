@@ -8,6 +8,9 @@ export interface PrivateMessageStorageMarker {
   content: string;
   privateContent?: boolean;
   analysisSourceEnrichment?: {status: string};
+  serverVerificationDetails?: string;
+  serverVerificationNotice?: string;
+  serverVerificationBinding?: unknown;
 }
 
 export function privateQueryStoragePlaceholder(): string {
@@ -22,7 +25,13 @@ export function projectMessageForStorage<T extends PrivateMessageStorageMarker>(
   message: T,
 ): T {
   const projected = message.privateContent
-    ? {...message, content: privateQueryStoragePlaceholder()}
+    ? {
+        ...message,
+        content: privateQueryStoragePlaceholder(),
+        serverVerificationDetails: undefined,
+        serverVerificationNotice: undefined,
+        serverVerificationBinding: undefined,
+      }
     : message;
   return projected.analysisSourceEnrichment?.status === 'running'
     ? {

@@ -20,7 +20,7 @@ import {afterEach, beforeEach, describe, it, expect, vi} from 'vitest';
 import type {Mock} from 'vitest';
 
 import {AIPanel} from './ai_panel';
-import {getAISharedState, resetAISharedState} from './ai_shared_state';
+import {getAISharedState, resetAISharedState, updateAISharedState} from './ai_shared_state';
 import {getFloatingState, updateFloatingState} from './ai_floating_state';
 import {
   switchFloatingMode,
@@ -101,6 +101,71 @@ type MutableTestAIPanel = TestAIPanel & {
 function createMutableTestPanel(): MutableTestAIPanel {
   return new AIPanel() as unknown as MutableTestAIPanel;
 }
+
+it('copies the server notice, canonical answer, and verification details in visible order', async () => {
+  const panel = new AIPanel() as any;
+  panel.copyTextToClipboard = vi.fn(async () => true);
+  const canonicalBody = `CANONICAL\n${'long body '.repeat(900)}`;
+  await panel.copyMessageContent({
+    id: 'verified-answer', role: 'assistant', timestamp: 1,
+    serverVerificationNotice: 'NOTICE', content: canonicalBody,
+    serverVerificationDetails: 'DETAILS',
+  });
+  const copied = panel.copyTextToClipboard.mock.calls[0][0] as string;
+  expect(copied).toBe(`NOTICE\n\n${canonicalBody}\n\nDETAILS`);
+  expect(copied.indexOf('NOTICE')).toBeLessThan(copied.indexOf('CANONICAL'));
+  expect(copied.indexOf('CANONICAL')).toBeLessThan(copied.indexOf('DETAILS'));
+});
+
+describe('AI Provider configuration shortcut', () => {
+  afterEach(() => resetAISharedState());
+
+  it.each(['claude-agent-sdk', 'openai-agents-sdk', 'pi-agent-core', 'opencode'])(
+    'opens Providers directly for an unconfigured %s runtime', (runtime) => {
+      const panel = new AIPanel() as any;
+      panel.serverStatus = {connected: true, configured: false, runtime};
+      const banner = panel.renderProviderConfigurationBanner();
+      const button = findVNodeByTag(banner, 'button');
+      expect(button).toBeDefined();
+      button.attrs.onclick();
+      expect(panel.state.showSettings).toBe(true);
+      expect(panel.settingsInitialTab).toBe('providers');
+      panel.closeSettings();
+      panel.openSettings();
+      expect(panel.settingsInitialTab).toBe('connection');
+    },
+  );
+
+  it('does not infer provider setup from generic analysis failures', () => {
+    const panel = new AIPanel() as any;
+    panel.serverStatus = {connected: true, configured: true};
+    updateAISharedState({status: 'error'});
+    expect(panel.renderProviderConfigurationBanner()).toBeNull();
+    updateAISharedState({status: 'analyzing'});
+    expect(panel.renderProviderConfigurationBanner()).toBeNull();
+    panel.state.streamingFlow.status = 'failed';
+    expect(panel.renderProviderConfigurationBanner()).toBeNull();
+    panel.resetStreamingFlow();
+    resetAISharedState();
+    expect(panel.renderProviderConfigurationBanner()).toBeNull();
+  });
+
+  it('does not treat Qoder CLI login as missing provider setup', () => {
+    const panel = new AIPanel() as any;
+    panel.serverStatus = {connected: true, configured: false, runtime: 'qoder-agent-sdk'};
+    expect(panel.renderProviderConfigurationBanner()).toBeNull();
+  });
+
+  it('preserves the analysis identity lock', () => {
+    const panel = new AIPanel() as any;
+    panel.serverStatus = {connected: true, configured: false};
+    panel.state.isLoading = true;
+    const button = findVNodeByTag(panel.renderProviderConfigurationBanner(), 'button');
+    expect(button.attrs.disabled).toBe(true);
+    button.attrs.onclick();
+    expect(panel.state.showSettings).toBe(false);
+  });
+});
 
 describe('AIPanel finalized result recovery', () => {
   afterEach(() => resetAISharedState());
@@ -1175,6 +1240,26 @@ describe('AIPanel per-turn analysis mode', () => {
     streamController.close();
     await request;
     expect(panel.state.isLoading).toBe(false);
+  });
+
+  it.each(['http-rejection', 'failed-result'])(
+    'does not mislabel a generic Chat %s as a provider setup failure', async (failure) => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.serverStatus = {connected: true, configured: true};
+    panel.ensureConversationHistoryHydrated = vi.fn(async () => true);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      if (failure === 'http-rejection') return new Response(JSON.stringify({error: 'Unauthorized'}), {status: 401});
+      if (init?.method === 'POST') return new Response(JSON.stringify({
+        sessionId: 'setup-chat', runId: 'setup-run', isNewSession: true, traceContextAttached: true,
+      }), {status: 200});
+      return new Response(`event: run_completed\ndata: ${JSON.stringify({outcome: {
+        kind: 'answered', message: '', finalResult: {success: false, completion: {status: 'incomplete'}},
+      }})}\n\n`, {status: 200, headers: {'Content-Type': 'text/event-stream'}});
+    });
+    await panel.handleConversationMessage('test configuration');
+    expect(panel.state.messages.length).toBeGreaterThan(0);
+    expect(panel.state.messages.every((message: any) => message.configurationAction === undefined)).toBe(true);
   });
 
   it('keeps ordinary Conversation cancellation on its own API despite an old Agent session', async () => {

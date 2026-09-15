@@ -868,7 +868,8 @@
   }
 }
 
-.ai-disabled-banner {
+.ai-disabled-banner,
+.ai-provider-configuration-banner {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -884,6 +885,15 @@
   .pf-icon {
     font-size: 15px !important;
     flex-shrink: 0;
+  }
+}
+
+.ai-provider-configuration-banner {
+  flex-wrap: wrap;
+
+  .ai-provider-configuration-action:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
   }
 }
 
@@ -926,6 +936,7 @@
 }
 
 .ai-application-update-action,
+.ai-provider-configuration-action,
 .ai-application-update-dismiss {
   border: 0;
   border-radius: 5px;
@@ -939,7 +950,8 @@
   }
 }
 
-.ai-application-update-action {
+.ai-application-update-action,
+.ai-provider-configuration-action {
   padding: 5px 7px;
   background: var(--chat-bg);
   font-size: 11px;

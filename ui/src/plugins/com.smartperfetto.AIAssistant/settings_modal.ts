@@ -49,6 +49,7 @@ export interface SettingsModalAttrs {
   onAnalysisContextChange?: (selection: AnalysisContextSelection) => void;
   onAnalysisAuthorizationChange?: () => void;
   initialStatus?: ServerStatus;
+  initialTab?: SettingsTab;
   applicationUpdateStatus?: ApplicationUpdateStatus;
   applicationUpdateChecking?: boolean;
   onCheckApplicationUpdate?: () => Promise<void>;
@@ -361,7 +362,7 @@ const TAB_STYLES = {
   },
 };
 
-type SettingsTab =
+export type SettingsTab =
   | 'connection'
   | 'providers'
   | 'codebases'
@@ -416,6 +417,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   private previouslyFocusedElement?: HTMLElement;
 
   oninit(vnode: m.Vnode<SettingsModalAttrs>) {
+    this.currentTab = vnode.attrs.readOnly ? 'connection' : vnode.attrs.initialTab ?? 'connection';
     this.settings = {...vnode.attrs.settings};
     this.onCheckStatus = vnode.attrs.onCheckStatus;
     this.serverStatus = vnode.attrs.initialStatus ?? null;
@@ -756,9 +758,11 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
     ]);
   }
 
-  private renderStatusCard(): m.Children {
+  private renderStatusCard(providersDisabled = false): m.Children {
     const status = this.serverStatus;
     if (!status) return null;
+    const qoderLocalAuth = status.runtime === 'qoder-agent-sdk' &&
+      status.configured === false;
 
     if (!status.connected) {
       return m('div', {style: MODAL_STYLES.statusCard}, [
@@ -866,14 +870,34 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
           {
             style: {
               ...MODAL_STYLES.statusValue,
-              color: status.configured ? COLORS.success : COLORS.error,
+              color: status.configured
+                ? COLORS.success
+                : qoderLocalAuth
+                  ? COLORS.warning
+                  : COLORS.error,
             },
           },
           status.configured
             ? uiText('是', 'Yes')
-            : uiText('否（缺少 API 密钥）', 'No (API key missing)'),
+            : qoderLocalAuth
+              ? uiText(
+                  '未显式配置（本地 CLI 登录将在分析时验证）',
+                  'Not explicitly configured (local CLI login is verified during analysis)',
+                )
+            : uiText('否（需完成 Provider 配置）', 'No (Provider setup required)'),
         ),
       ]),
+      status.configured === false && !qoderLocalAuth && status.aiEnabled !== false
+        ? m('button', {
+            'type': 'button',
+            'data-testid': 'configure-provider-from-status',
+            'style': {...MODAL_STYLES.btn, ...MODAL_STYLES.btnSecondary},
+            'disabled': providersDisabled,
+            'onclick': () => {
+              if (!providersDisabled) this.currentTab = 'providers';
+            },
+          }, uiText('配置 AI Provider', 'Configure AI Provider'))
+        : null,
       m('div', {style: MODAL_STYLES.statusRow}, [
         m(
           'span',
@@ -1703,7 +1727,7 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
                           ),
                         ],
                       ),
-                      this.renderStatusCard(),
+                      this.renderStatusCard(readOnly || backendBindingDirty),
                     ]),
 
                     this.renderApplicationUpdateCard(
