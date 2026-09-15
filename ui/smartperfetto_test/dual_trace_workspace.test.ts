@@ -132,11 +132,14 @@ test('keeps heavy/light analysis stable through window operations and confirms s
       heldAnalyze.value?.runId,
     );
     expect(await providerState(request)).toMatchObject({
-      opened: 0,
-      closed: 0,
+      opened: 2,
+      closed: 2,
       active: 0,
-      requests: [],
     });
+    expect((await providerState(request)).requests.map(({kind}) => kind)).toEqual([
+      'classification',
+      'analysis',
+    ]);
     await page.unroute(ANALYZE_ROUTE);
     routeInstalled = false;
 
@@ -187,11 +190,16 @@ test('keeps heavy/light analysis stable through window operations and confirms s
       .toBeGreaterThan(0);
     const runningProvider = await providerState(request);
     expect(runningProvider).toMatchObject({
-      opened: 1,
-      closed: 0,
+      opened: 4,
+      closed: 3,
       active: 1,
     });
-    expect(runningProvider.requests).toHaveLength(1);
+    expect(runningProvider.requests.map(({kind}) => kind)).toEqual([
+      'classification',
+      'analysis',
+      'classification',
+      'analysis',
+    ]);
     await assertRunningIdentity(request, analysis);
     await expectTraceSelectors(page, true);
     await expect(
@@ -286,11 +294,11 @@ test('keeps heavy/light analysis stable through window operations and confirms s
       .toBe(0);
     const stoppedProvider = await providerState(request);
     expect(stoppedProvider).toMatchObject({
-      opened: 1,
-      closed: 1,
+      opened: 4,
+      closed: 4,
       active: 0,
     });
-    expect(stoppedProvider.requests).toHaveLength(1);
+    expect(stoppedProvider.requests).toHaveLength(4);
     expect(scenario.ledger.cancelUrls).toHaveLength(2);
     expect(scenario.ledger.cancelRequests.map(({runId}) => runId)).toEqual([
       heldAnalyze.value?.runId,

@@ -22,6 +22,7 @@ const ProviderEnvironmentSchema = z.object({
 const ProviderRequestSchema = z
   .object({
     id: z.string().min(1),
+    kind: z.enum(['classification', 'analysis']),
     path: z.string().min(1),
     model: z.string().min(1),
     stream: z.boolean(),
