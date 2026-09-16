@@ -626,6 +626,8 @@ export interface ClaimVerificationResult {
   status: ClaimVerificationStatus;
   policy: ClaimVerificationPolicy;
   notCheckedReason?: string;
+  /** Closed-vocabulary triage detail for `notCheckedReason` (issue codes, transport facts). */
+  notCheckedDetail?: string;
   /** Compatibility boolean. Must equal status === 'passed'. */
   passed: boolean;
   checkedClaimCount: number;
@@ -1694,6 +1696,8 @@ export interface FinalInvestigationAssessment {
     /** Full retained producer records, including dimensions not used by final claims.
      * This serialized projection cannot recreate a live execution witness. */
     evidenceRecords?: readonly InvestigationEvidenceRecord[];
+    /** Ledger-only acquisition coverage. Present even when `status` is `unavailable`. */
+    ledgerAcquisition?: readonly InvestigationLedgerAcquisitionRow[];
 }
 
 export interface AnalysisDeliveryAssurance {
@@ -1814,6 +1818,32 @@ export interface InvestigationEvidenceRecord {
     readonly unit?: string;
     readonly coverage?: number | string;
     readonly denominator?: number | string;
+}
+
+/**
+ * Acquisition coverage derived from the producer ledger alone.
+ *
+ * Separate from `InvestigationRequirementAssessment` on purpose: that row
+ * needs the final semantic review, which is unavailable exactly when a run
+ * delivers a conclusion the product could not check. This row is still
+ * produced then, and answers only whether the declared evidence was acquired.
+ */
+export interface InvestigationLedgerAcquisitionRow {
+    requirementId: string;
+    domain: string;
+    applicability: 'applicable' | 'not_applicable' | 'unknown';
+    /** `not_declared`: the requirement declares no metrics, so there is nothing to acquire. */
+    status: 'observed' | 'partial' | 'evidence_absent' | 'not_applicable' | 'not_declared' | 'unknown';
+    declaredMetrics: readonly string[];
+    observedMetrics: readonly string[];
+    /** Present when an evidence condition decided applicability. */
+    condition?: {
+        metricId: string;
+        operator: string;
+        value: number;
+        observed: number | null;
+        met: boolean | null;
+    };
 }
 
 export type AnalysisDeliveryEntry = 'runtime_draft' | 'new_finalization' | 'historical_restore';

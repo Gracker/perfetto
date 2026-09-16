@@ -3902,6 +3902,20 @@ describe('handleDataEvent', () => {
     expect(details).toContain('reference result 1: evidenceRefId=result-ref');
   });
 
+  it('shows the not-checked reason together with its closed triage detail', () => {
+    handleAnalysisCompletedEvent({data: {
+      conclusion: 'Canonical body',
+      claimVerificationResult: {
+        schemaVersion: 'claim_verifier@2', status: 'not_checked', policy: 'record_only',
+        passed: false, checkedClaimCount: 0, unsupportedClaimCount: 0, claimResults: [], issues: [],
+        notCheckedReason: 'invalid_declarations',
+        notCheckedDetail: 'invalid_relation_proposal:invalid_kind,invalid_semantics',
+      },
+    }}, ctx);
+    expect(ctx.messages[0].serverVerificationDetails || '').toContain(
+      'notCheckedReason=invalid_declarations, notCheckedDetail=invalid_relation_proposal:invalid_kind,invalid_semantics');
+  });
+
   it('does not cap late claim support or issues and rejects duplicate verifier identities', () => {
     const claimSupport = Array.from({length: 7}, (_, index) => ({
       claimId: `Q${index}`, kind: 'categorical', text: `Claim text ${index}`,

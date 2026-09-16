@@ -4043,7 +4043,7 @@ function renderServerVerificationDetails(
   if (payload.terminationMessage) lines.push(`- terminationMessage: ${payload.terminationMessage}`);
   if (Object.keys(verifier).length > 0) {
     lines.push(`- verifier: ${verificationFields(verifier, [
-      'schemaVersion', 'status', 'policy', 'passed', 'notCheckedReason',
+      'schemaVersion', 'status', 'policy', 'passed', 'notCheckedReason', 'notCheckedDetail',
       'checkedClaimCount', 'unsupportedClaimCount',
     ])}`);
   }
