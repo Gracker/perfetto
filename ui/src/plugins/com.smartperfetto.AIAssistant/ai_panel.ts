@@ -40,6 +40,7 @@ import {
   getBackendUploader,
   setDefaultBackendCredential,
   setDefaultBackendUrl,
+  type BackendUploadResult,
 } from '../../core/backend_uploader';
 import {parseWorkspaceTraceLaunch} from '../../core/workspace_trace_launch';
 import {
@@ -2321,6 +2322,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       sourceKey,
     );
     const uploadToken = `manual-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let uploadErrorCode: BackendUploadResult['errorCode'] | undefined;
     try {
       const uploader = getBackendUploader(this.state.settings.backendUrl);
 
@@ -2379,6 +2381,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         !uploadResult.success ||
         (!uploadResult.rpcTarget && !uploadResult.port)
       ) {
+        uploadErrorCode = uploadResult.errorCode;
         throw new Error(
           uploadResult.error ||
             uiText('上传 Trace 失败', 'Failed to upload the trace'),
@@ -2450,6 +2453,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         sourceKey,
         state: 'failed',
         error: errorMsg,
+        errorCode: uploadErrorCode,
       });
       this.state.isRetryingBackend = false;
       m.redraw();
@@ -2536,10 +2540,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   /**
    * 后端不可用时的提示消息
    */
-  private addBackendUnavailableMessage(errorDetail?: string): void {
-    const errorSection = errorDetail
+  private backendUploadErrorSection(errorDetail?: string): string {
+    return errorDetail
       ? `\n\n${uiText('**错误详情：**', '**Error details:**')}\n- ${errorDetail}`
       : '';
+  }
+
+  private addBackendUnavailableMessage(errorDetail?: string): void {
+    const errorSection = this.backendUploadErrorSection(errorDetail);
     this.addMessage({
       id: this.generateId(),
       role: 'assistant',
@@ -2556,6 +2564,34 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private addBackendUploadFailureMessage(
     snapshot: BackendUploadSnapshot,
   ): void {
+    if (snapshot.errorCode === 'INSUFFICIENT_STORAGE') {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: uiText(
+          `⚠️ **AI 后端磁盘空间不足**\n\n后端服务正在运行，但其存储 Trace 的磁盘剩余空间不足，Trace 上传被后端拒绝（上传会预留约 2 倍 Trace 大小的可用空间）。${this.backendUploadErrorSection(snapshot.error)}\n\n请按错误详情中的目录清理对应磁盘，或将后端 UPLOAD_DIR 指向空间充足的磁盘，然后使用“重试连接”。这是磁盘空间问题，不是后端连接故障。`,
+          `⚠️ **AI backend is out of disk space**\n\nThe backend service is running, but the disk backing its trace storage ran low on space, so the upload was rejected (uploads reserve roughly 2x the trace size as free space).${this.backendUploadErrorSection(snapshot.error)}\n\nFree space on the disk shown in the error details (or point the backend UPLOAD_DIR at a disk with enough room), then use Retry connection. This is a disk space issue, not a backend connection failure.`,
+        ),
+        timestamp: Date.now(),
+        transient: isSmartPerfettoOidcMode(),
+      });
+      m.redraw();
+      return;
+    }
+    if (snapshot.errorCode === 'TRACE_TOO_LARGE') {
+      this.addMessage({
+        id: this.generateId(),
+        role: 'assistant',
+        content: uiText(
+          `⚠️ **Trace 超过后端上传大小上限**\n\n后端服务正在运行，但 Trace 大小超过后端允许的上传上限。${this.backendUploadErrorSection(snapshot.error)}\n\n请导出更小时间范围或更精简的 Trace 后，使用“重试连接”。这是大小限制，不是后端连接故障。`,
+          `⚠️ **Trace exceeds the backend upload size limit**\n\nThe backend service is running, but the trace is larger than the upload limit the backend allows.${this.backendUploadErrorSection(snapshot.error)}\n\nExport a smaller or trimmed trace, then use Retry connection. This is a size limit, not a backend connection failure.`,
+        ),
+        timestamp: Date.now(),
+        transient: isSmartPerfettoOidcMode(),
+      });
+      m.redraw();
+      return;
+    }
     if (
       snapshot.errorCode !== 'STREAM_SOURCE_UNSUPPORTED' &&
       snapshot.errorCode !== 'MULTIPLE_FILES_SOURCE_UNSUPPORTED'

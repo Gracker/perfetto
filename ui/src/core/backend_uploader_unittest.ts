@@ -253,6 +253,82 @@ describe('BackendUploader request context', () => {
     });
   });
 
+  it('classifies 507 upload rejections as insufficient storage with server details', async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 507,
+      ok: false,
+      statusText: 'Insufficient Storage',
+      text: async () =>
+        JSON.stringify({
+          error: 'Insufficient disk space',
+          details:
+            'Need 8.00 GiB (declared 4.00 GiB x 2 safety), only 1.00 GiB free on C:\\data\\uploads\\traces',
+        }),
+    } as Response);
+
+    const result = await new BackendUploader('http://backend').upload({
+      type: 'ARRAY_BUFFER',
+      buffer: new Uint8Array([1, 2, 3]).buffer,
+      fileName: 'trace.perfetto',
+    } as any);
+
+    expect(result).toEqual({
+      success: false,
+      errorCode: 'INSUFFICIENT_STORAGE',
+      error:
+        'Upload failed: 507 Insufficient Storage - Insufficient disk space: '
+        + 'Need 8.00 GiB (declared 4.00 GiB x 2 safety), only 1.00 GiB free on C:\\data\\uploads\\traces',
+    });
+  });
+
+  it('classifies 413 upload rejections as trace too large', async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 413,
+      ok: false,
+      statusText: 'Payload Too Large',
+      text: async () =>
+        JSON.stringify({
+          error: 'Trace file too large',
+          details: 'Trace file too large. Maximum allowed size is 5368709120 bytes',
+        }),
+    } as Response);
+
+    const result = await new BackendUploader('http://backend').upload({
+      type: 'ARRAY_BUFFER',
+      buffer: new Uint8Array([1, 2, 3]).buffer,
+      fileName: 'trace.perfetto',
+    } as any);
+
+    expect(result).toEqual({
+      success: false,
+      errorCode: 'TRACE_TOO_LARGE',
+      error:
+        'Upload failed: 413 Payload Too Large - Trace file too large: '
+        + 'Trace file too large. Maximum allowed size is 5368709120 bytes',
+    });
+  });
+
+  it('keeps the status summary when an upload rejection has no JSON body', async () => {
+    fetchMock.mockResolvedValueOnce({
+      status: 503,
+      ok: false,
+      statusText: 'Service Unavailable',
+      text: async () => 'backend exploded',
+    } as Response);
+
+    const result = await new BackendUploader('http://backend').upload({
+      type: 'ARRAY_BUFFER',
+      buffer: new Uint8Array([1, 2, 3]).buffer,
+      fileName: 'trace.perfetto',
+    } as any);
+
+    expect(result).toEqual({
+      success: false,
+      errorCode: 'UPLOAD_FAILED',
+      error: 'Upload failed: 503 Service Unavailable - backend exploded',
+    });
+  });
+
   it('sends X-Window-Id on URL uploads without dropping JSON content type', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({

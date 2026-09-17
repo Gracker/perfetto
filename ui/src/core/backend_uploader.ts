@@ -58,6 +58,52 @@ function opaqueSourceKey(parts: readonly unknown[]): string {
   return `source-${hash.toString(16).padStart(16, '0')}`;
 }
 
+interface HttpUploadFailure {
+  error: string;
+  errorCode: NonNullable<BackendUploadResult['errorCode']>;
+}
+
+/**
+ * A non-200 upload response still proves the backend is alive, so classify the
+ * status and keep the server-provided reason instead of letting callers assume
+ * a connection fault.
+ */
+async function classifyHttpUploadFailure(
+  prefix: string,
+  resp: Response,
+): Promise<HttpUploadFailure> {
+  let bodyText = '';
+  try {
+    bodyText = await resp.text();
+  } catch {
+    // Body read failures fall through to the status-only summary.
+  }
+  let serverError: string | undefined;
+  let serverDetails: string | undefined;
+  if (bodyText) {
+    try {
+      const parsed = JSON.parse(bodyText) as {error?: unknown; details?: unknown};
+      if (typeof parsed.error === 'string') serverError = parsed.error;
+      if (typeof parsed.details === 'string') serverDetails = parsed.details;
+    } catch {
+      serverDetails = bodyText.trim() || undefined;
+    }
+  }
+  const summary = [`${prefix}: ${resp.status}`, resp.statusText]
+    .filter((part) => part.trim().length > 0)
+    .join(' ');
+  const reason = [serverError, serverDetails].filter(Boolean).join(': ');
+  return {
+    error: reason ? `${summary} - ${reason}` : summary,
+    errorCode:
+      resp.status === 507
+        ? 'INSUFFICIENT_STORAGE'
+        : resp.status === 413
+          ? 'TRACE_TOO_LARGE'
+          : 'UPLOAD_FAILED',
+  };
+}
+
 /** Stable, opaque identity for one frontend trace source during its lifetime. */
 export function backendUploadSourceKey(traceSource: TraceSource): string {
   switch (traceSource.type) {
@@ -115,7 +161,9 @@ export interface BackendUploadResult {
     | 'STREAM_SOURCE_UNSUPPORTED'
     | 'MULTIPLE_FILES_SOURCE_UNSUPPORTED'
     | 'TRACE_SOURCE_CONVERSION_FAILED'
-    | 'UPLOAD_FAILED';
+    | 'UPLOAD_FAILED'
+    | 'INSUFFICIENT_STORAGE'
+    | 'TRACE_TOO_LARGE';
 }
 
 export class BackendUploader {
@@ -279,12 +327,9 @@ export class BackendUploader {
       handleSmartPerfettoAuthResponse(resp);
 
       if (resp.status !== 200) {
-        const errorText = await resp.text();
-        console.error('[BackendUploader] Upload failed:', resp.status, errorText);
-        return {
-          success: false,
-          error: `Upload failed: ${resp.status} ${resp.statusText}`,
-        };
+        const failure = await classifyHttpUploadFailure('Upload failed', resp);
+        console.error('[BackendUploader] Upload failed:', failure.error);
+        return {success: false, ...failure};
       }
 
       const data = await resp.json();
@@ -395,12 +440,12 @@ export class BackendUploader {
       handleSmartPerfettoAuthResponse(resp);
 
       if (resp.status !== 200) {
-        const errorText = await resp.text();
-        console.error('[BackendUploader] URL upload failed:', resp.status, errorText);
-        return {
-          success: false,
-          error: `URL upload failed: ${resp.status} ${resp.statusText}`,
-        };
+        const failure = await classifyHttpUploadFailure(
+          'URL upload failed',
+          resp,
+        );
+        console.error('[BackendUploader] URL upload failed:', failure.error);
+        return {success: false, ...failure};
       }
 
       const data = await resp.json();
