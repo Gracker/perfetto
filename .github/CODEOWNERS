@@ -33,6 +33,6 @@
 # ============================================================================
 /protos/third_party/chromium/ @google/chromium-stdlib-owners
 /contrib/rust-sdk/ @dreveman @jon-rv @zytyz @google/perfetto-team
-/src/trace_processor/perfetto_sql/stdlib/chrome/ @google/chromium-stdlib-owners
 /test/data/chrome/**.sha256 @google/chromium-stdlib-owners
 /test/trace_processor/diff_tests/stdlib/chrome/ @google/chromium-stdlib-owners
+/src/trace_processor/perfetto_sql/stdlib/chrome/ @google/chromium-stdlib-owners
