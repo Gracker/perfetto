@@ -133,6 +133,16 @@
   margin-bottom: 0;
 }
 
+.ai-server-verification-details {
+  margin-top: 10px;
+
+  > summary {
+    cursor: pointer;
+    color: var(--chat-text-secondary);
+    font-size: 12px;
+  }
+}
+
 .ai-conversation-sources {
   margin-top: 10px;
   color: var(--chat-text-secondary);

@@ -650,6 +650,29 @@ describe('AIPanel per-turn analysis mode', () => {
     return panel;
   }
 
+  it('collapses server verification details while retaining the answer and complete audit', () => {
+    const panel = createModePanel();
+    panel.updateSliceCard = vi.fn();
+    const audit = 'Source reference audit '.repeat(1000);
+    panel.state.messages = [{
+      id: 'verified-answer', role: 'assistant', timestamp: 1,
+      content: 'Canonical answer',
+      serverVerificationNotice: 'Verification warning',
+      serverVerificationDetails: audit,
+    }];
+    const tree = panel.view({attrs: {}});
+    const details = findVNodeByTag(tree, 'details');
+    expect(details.attrs.className).toContain('ai-server-verification-details');
+    expect(details.attrs.open).toBeUndefined();
+    expect(collectVNodeText(findVNodeByTag(details, 'summary'))).toContain('服务器核验详情');
+    const body = findVNodeByTag(details, 'div');
+    const dom = document.createElement('div');
+    body.attrs.oncreate({dom});
+    expect(dom.textContent).toContain(audit.trim());
+    expect(panel.state.messages[0].content).toBe('Canonical answer');
+    expect(panel.state.messages[0].serverVerificationNotice).toBe('Verification warning');
+  });
+
   it.each(['fast', 'full', 'auto'] as const)(
     'sends preferred %s for both the first turn and its continuation',
     async (mode) => {

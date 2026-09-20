@@ -4201,7 +4201,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                       }),
 
                                   msg.serverVerificationDetails
-                                    ? m('div.ai-message-content.ai-server-verification-details', {
+                                    ? m('details.ai-server-verification-details', [
+                                      m('summary', uiText('服务器核验详情', 'Server verification details')),
+                                      m('div.ai-message-content', {
                                         oncreate: ({dom}) => {
                                           (dom as HTMLElement).innerHTML = formatMessage(
                                             msg.serverVerificationDetails || '',
@@ -4212,7 +4214,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                             msg.serverVerificationDetails || '',
                                           );
                                         },
-                                      })
+                                      }),
+                                    ])
                                     : null,
 
                                   this.renderTableSourceContext(
