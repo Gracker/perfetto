@@ -1259,6 +1259,14 @@ export interface DataEnvelopeDisplay {
 
   /** Maximum number of visible rows before "show more" truncation. */
   maxVisibleRows?: number;
+
+  /** Chat transport preview only; original execution evidence remains unchanged. */
+  preview?: {
+    totalRows: number;
+    returnedRows: number;
+    reason: 'row_limit' | 'byte_limit';
+    detailsOmitted?: boolean;
+  };
 }
 
 /**
@@ -2048,6 +2056,7 @@ export interface SqlQueryResult {
   maxVisibleRows?: number;
   queryReview?: QueryReviewV1;
   // Summary report data
+  preview?: DataEnvelopeDisplay['preview'];
   summaryReport?: {
     title: string;
     content: string;
@@ -2249,7 +2258,8 @@ export function envelopeToSqlQueryResult(envelope: DataEnvelope): SqlQueryResult
   return {
     columns,
     rows: rows,
-    rowCount: rows.length,
+    rowCount: envelope.display.preview?.totalRows ?? rows.length,
+    preview: envelope.display.preview,
     columnDefinitions: envelope.display.columns,
     title: envelope.display.title,
     sectionTitle: envelope.display.title,

@@ -5,6 +5,7 @@ import m from 'mithril';
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import type {
   ProviderConfig,
+  ProviderModelOption,
   ProviderTemplate,
   ProviderPanelAttrs,
   HealthStatus,
@@ -31,6 +32,7 @@ export type {ProviderPanelAttrs};
 export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private providers: ProviderConfig[] = [];
   private templates: ProviderTemplate[] = [];
+  private modelOptionsByProvider = new Map<string, ProviderModelOption[]>();
   private loading = true;
   private error: string | null = null;
   private success: string | null = null;
@@ -141,6 +143,12 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
 
       this.providers = providersData.providers || [];
       this.templates = templatesData.templates || [];
+      const providerIds = new Set(this.providers.map(provider => provider.id));
+      for (const providerId of this.modelOptionsByProvider.keys()) {
+        if (!providerIds.has(providerId)) {
+          this.modelOptionsByProvider.delete(providerId);
+        }
+      }
 
       if (this.providers.some((p) => p.isActive)) {
         this.loadEffectiveConfig();
@@ -322,6 +330,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     this.error = null;
     this.success = null;
     this.testResult = null;
+    void this.loadProviderModelOptions(provider.id);
     m.redraw();
   }
 
@@ -342,7 +351,26 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     this.error = null;
     this.success = null;
     this.testResult = null;
+    void this.loadProviderModelOptions(provider.id);
     m.redraw();
+  }
+
+  private async loadProviderModelOptions(providerId: string): Promise<void> {
+    try {
+      const res = await smartPerfettoFetch(
+        apiUrl(this.backendUrl, `/${providerId}/models`),
+        {headers: buildHeaders(this.apiKey)},
+      );
+      if (!res.ok) return;
+      const data = await res.json() as {models?: ProviderModelOption[]};
+      if (Array.isArray(data.models)) {
+        this.modelOptionsByProvider.set(providerId, data.models);
+      }
+    } catch {
+      // Static template suggestions remain available when live discovery fails.
+    } finally {
+      m.redraw();
+    }
   }
 
   private clearSuccessAfterDelay() {
@@ -380,12 +408,16 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         this.view_mode === 'edit'
           ? this.providers.find((p) => p.id === this.editingId)
           : undefined;
+      const modelSource = editProvider ?? this.cloneSource ?? undefined;
       return m(ProviderForm, {
         backendUrl: this.backendUrl,
         apiKey: this.apiKey,
         editingProvider: editProvider,
         cloneSource: this.cloneSource || undefined,
         templates: this.templates,
+        availableModels: modelSource
+          ? this.modelOptionsByProvider.get(modelSource.id)
+          : undefined,
         onSaved: () => {
           const reason = this.view_mode === 'edit' ? 'updated' : 'created';
           const activeProviderWasEdited = editProvider?.isActive === true;

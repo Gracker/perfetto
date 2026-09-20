@@ -1391,6 +1391,13 @@ function describeEnvelopeOutput(envelope: DataEnvelope): string {
     readEnvelopePaneSide(envelope),
   );
   const tracePrefix = traceLabel ? `${traceLabel} · ` : '';
+  const preview = envelope.display.preview;
+  if (preview) {
+    return uiText(
+      `${tracePrefix}${title}（共 ${preview.totalRows} 行，预览 ${preview.returnedRows} 行）`,
+      `${tracePrefix}${title} (${preview.totalRows} rows, ${preview.returnedRows} in preview)`,
+    );
+  }
   if (typeof rowCount === 'number') {
     return uiText(
       `${tracePrefix}${title}（${rowCount} 行）`,
@@ -3520,6 +3527,9 @@ function resolveClaimRow(
       };
     }
     const row = sqlResult.rows[rowIndex];
+    if (!row && sqlResult.preview && rowIndex < sqlResult.preview.totalRows) {
+      return {rowLabel: `row ${rowIndex}`, status: '未核验: 预览数据不足'};
+    }
     return row
       ? {row, rowLabel: `row ${rowIndex}`}
       : {rowLabel: `row ${rowIndex}`, status: '未通过: 行不存在'};
@@ -3527,6 +3537,9 @@ function resolveClaimRow(
 
   const selectorEntries = Object.entries(rowSelector);
   if (selectorEntries.length === 0) return {};
+  if (sqlResult.preview && sqlResult.preview.totalRows > sqlResult.rows.length) {
+    return {status: '未核验: 预览数据不足，无法核对完整表格的 rowSelector'};
+  }
 
   const matches = sqlResult.rows
     .map((row, idx) => ({row, idx}))
@@ -5352,6 +5365,7 @@ export function handleDataEvent(
     // Trigger track overlay when overlay-eligible data arrives
     if (
       envelope.meta.stepId &&
+      !envelope.display.preview &&
       envelope.data.columns?.length &&
       envelope.data.rows?.length &&
       ctx.onOverlayDataReceived
@@ -5666,7 +5680,7 @@ function renderDataEnvelope(
           title,
           {
             kind: 'table',
-            rowCount: filteredRows.length,
+            rowCount: rawResult.rowCount,
             columns: filteredColumns,
             query: sql,
           },
@@ -5679,7 +5693,8 @@ function renderDataEnvelope(
           sqlResult: {
             columns: filteredColumns,
             rows: filteredRows,
-            rowCount: filteredRows.length,
+            rowCount: rawResult.rowCount,
+            preview: rawResult.preview,
             query: sql || undefined,
             hideQuery: Boolean(sql),
             columnDefinitions: filteredColumnDefs,

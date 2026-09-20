@@ -4447,8 +4447,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                                   },
                                                 },
                                                 uiText(
-                                                  `${sqlResult.sectionTitle}（${sqlResult.rowCount} 条）`,
-                                                  `${sqlResult.sectionTitle} (${sqlResult.rowCount} rows)`,
+                                                  `${sqlResult.sectionTitle}（${sqlResult.rowCount} 条）${sqlResult.preview ? ' · 预览' : ''}`,
+                                                  `${sqlResult.sectionTitle} (${sqlResult.rowCount} rows)${sqlResult.preview ? ' · Preview' : ''}`,
                                                 ),
                                               ),
                                             ],
@@ -4500,13 +4500,14 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                           : null,
                                         m(SqlResultTable, {
                                           columns: sqlResult.columns,
+                                          preview: sqlResult.preview,
                                           rows: sqlResult.maxVisibleRows
                                             ? sqlResult.rows.slice(
                                                 0,
                                                 sqlResult.maxVisibleRows,
                                               )
                                             : sqlResult.rows,
-                                          rowCount: sqlResult.maxVisibleRows
+                                          rowCount: sqlResult.maxVisibleRows && !sqlResult.preview
                                             ? Math.min(
                                                 sqlResult.rowCount,
                                                 sqlResult.maxVisibleRows,
@@ -4620,6 +4621,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         m(SqlResultTable, {
                                           columns: sqlResult.columns,
                                           rows: sqlResult.rows,
+                                          preview: sqlResult.preview,
                                           rowCount: sqlResult.rowCount,
                                           query: formattedSql?.text || query,
                                           trace: vnode.attrs.trace, // 传入 trace 对象以支持时间戳跳转

@@ -22,6 +22,7 @@ import {Time} from '../../base/time';
 import {ChartVisualizer, type ChartData} from './chart_visualizer';
 import {
   type ColumnDefinition,
+  type DataEnvelopeDisplay,
   buildColumnDefinitions,
 } from './generated/data_contract.types';
 import {getColumnClasses} from './renderers/formatters';
@@ -66,6 +67,7 @@ export interface SqlResultTableAttrs {
   columns: string[];
   rows: any[][];
   rowCount: number;
+  preview?: DataEnvelopeDisplay['preview'];
   query?: string;
   title?: string; // Optional title to display in header (e.g., section title)
   trace?: Trace; // 新增：用于跳转到时间线
@@ -183,6 +185,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       columns,
       rows,
       rowCount,
+      preview,
       query,
       onPin,
       trace,
@@ -233,23 +236,30 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ? columns.map((_, idx) => getColumnClasses(effectiveColumnDefs[idx]))
       : this.classifyColumns(columns);
 
-    const sortedRows = this.buildSortedRowsWithExpandableData(
-      rows,
-      columns,
-      expandableData,
-    );
-
     // Limit displayed rows: collapsed shows 10, expanded shows up to 50
     const displayLimit = this.expanded
       ? EXPANDED_ROW_LIMIT
       : COLLAPSED_ROW_LIMIT;
+    const sortedRows = this.buildSortedRowsWithExpandableData(
+      rows,
+      columns,
+      expandableData,
+      displayLimit,
+    );
     const displayRows = sortedRows.slice(0, displayLimit);
     const hasMore = rows.length > COLLAPSED_ROW_LIMIT;
 
     // Calculate statistics (only when needed)
-    const stats = this.showStats ? this.calculateStats(columns, rows) : {};
+    const stats = this.showStats && !preview ? this.calculateStats(columns, rows) : {};
 
     return m('div.sql-result.compact', [
+      preview ? m('div.sql-result-preview', {role: 'note'}, [
+        uiText(
+          `表格预览：保留 ${rows.length} / ${preview.totalRows} 行。排序、复制与收藏仅作用于预览，完整分析数据未被裁剪。`,
+          `Table preview: ${rows.length} of ${preview.totalRows} rows. Sorting, copying and saving apply only to the preview; full analysis data is unchanged.`,
+        ),
+        preview.detailsOmitted ? uiText(' 部分详情未加载。', ' Some details are not loaded.') : '',
+      ]) : null,
       // 汇总报告（如果有且有关键发现）
       // Use oncreate/onupdate to directly set innerHTML, bypassing Mithril's
       // reconciliation for formatted content (avoids removeChild errors)
@@ -308,7 +318,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             {
               class: this.copySuccess ? 'active' : '',
               onclick: () => this.copyResults(columns, rows),
-              title: uiText('复制到剪贴板', 'Copy to clipboard'),
+              title: preview ? uiText('复制预览', 'Copy preview') : uiText('复制到剪贴板', 'Copy to clipboard'),
             },
             m('span.pf-icon', this.copySuccess ? 'check' : 'content_copy'),
           ),
@@ -319,7 +329,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                 {
                   class: this.pinSuccess ? 'active' : '',
                   onclick: () => this.pinResults(query, columns, rows, onPin),
-                  title: uiText('收藏结果', 'Save results'),
+                  title: preview ? uiText('收藏预览', 'Save preview') : uiText('收藏结果', 'Save results'),
                 },
                 m(
                   'span.pf-icon',
@@ -332,6 +342,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             'button.sql-result-action.icon-only',
             {
               class: this.showStats ? 'active' : '',
+              disabled: Boolean(preview),
               onclick: () => {
                 this.showStats = !this.showStats;
                 m.redraw();
@@ -341,7 +352,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
             m('span.pf-icon', 'analytics'),
           ),
           // Chart button (icon only, if data is visualizable)
-          this.canVisualize(columns, rows)
+          !preview && this.canVisualize(columns, rows)
             ? m(
                 'button.sql-result-action.icon-only',
                 {
@@ -359,7 +370,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ]),
 
       // Statistics section (collapsible, compact)
-      this.showStats
+      this.showStats && !preview
         ? m('.sql-result-stats.compact-stats', [
             m(
               '.stats-grid',
@@ -565,7 +576,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
         : null,
 
       // Chart visualization (collapsible)
-      this.showChart && this.canVisualize(columns, rows)
+      this.showChart && !preview && this.canVisualize(columns, rows)
         ? m(ChartVisualizer, {
             chartData: this.generateChartData(columns, rows),
             width: 400,
@@ -582,8 +593,10 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     rows: any[][],
     columns: string[],
     expandableData?: SqlResultTableAttrs['expandableData'],
+    displayLimit = rows.length,
   ): DisplayRow[] {
-    const displayRows = rows.map((row, originalIndex) => ({
+    const sorting = this.sortColumnIdx !== null && this.sortColumnIdx < columns.length;
+    const displayRows = (sorting ? rows : rows.slice(0, displayLimit)).map((row, originalIndex) => ({
       row,
       originalIndex,
       expandableData: expandableData?.[originalIndex],
@@ -595,7 +608,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     const colIdx = this.sortColumnIdx;
     const dir = this.sortDirection;
-    return [...displayRows].sort((a, b) => {
+    return displayRows.sort((a, b) => {
       const valA = a.row[colIdx];
       const valB = b.row[colIdx];
       // Numeric comparison if both are numbers

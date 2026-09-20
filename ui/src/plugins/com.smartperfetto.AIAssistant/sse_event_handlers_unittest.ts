@@ -3301,6 +3301,30 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[2].content).not.toContain('值 45.6，已核对');
   });
 
+  it('preserves preview totals without claiming missing rows failed verification', () => {
+    handleDataEvent({id: 'preview-table', envelope: {
+      meta: {type: 'skill_result', version: '2.0', source: 'compare_skill', evidenceRefId: 'preview-evidence'},
+      data: {columns: ['frame_id', 'dur_ms'], rows: [[123, 45.6]]},
+      display: {layer: 'list', format: 'table', title: 'Preview',
+        preview: {totalRows: 1000, returnedRows: 1, reason: 'row_limit'}},
+    }}, ctx);
+    expect(ctx.messages[0].sqlResult?.rowCount).toBe(1000);
+    expect(ctx.messages[0].sqlResult?.rows).toHaveLength(1);
+    expect(ctx.streamingFlow.outputs.join('\n')).toContain('共 1000 行，预览 1 行');
+    handleAnalysisCompletedEvent({data: {conclusionContract: {
+      conclusion: [{rank: 1, statement: '核对完整证据'}],
+      claims: [
+        {id: 'outside', text: 'outside preview', references: [{evidence_ref_id: 'preview-evidence', row_index: 900, column: 'dur_ms', value: 45.6}]},
+        {id: 'selector', text: 'selector match', references: [{evidence_ref_id: 'preview-evidence', row_selector: {frame_id: 123}, column: 'dur_ms', value: 45.6}]},
+        {id: 'selector-missing', text: 'selector absent', references: [{evidence_ref_id: 'preview-evidence', row_selector: {frame_id: 456}, column: 'dur_ms', value: 45.6}]},
+      ],
+    }}}, ctx);
+    expect(ctx.messages[1].content).toContain('未核验: 预览数据不足');
+    expect(ctx.messages[1].content).not.toContain('行不存在');
+    expect(ctx.messages[1].content).not.toContain('rowSelector 未命中');
+    expect(ctx.messages[1].content).not.toContain('已核对');
+  });
+
   it('verifies claim rows by rowSelector when no row_index is provided', () => {
     handleDataEvent(
       {

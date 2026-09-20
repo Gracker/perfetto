@@ -198,6 +198,24 @@ describe('ProviderForm', () => {
       subAgent: 'new/subAgent-2027',
     });
   });
+  it('uses provider-scoped live choices without changing the saved model value', () => {
+    const provider = saved();
+    mount({
+      editingProvider: provider,
+      availableModels: [
+        {id: 'glm-account-model', name: 'GLM Account Model', tier: 'primary'},
+      ],
+    });
+
+    expect(
+      root
+        .querySelector('#provider-model-primary-options option')!
+        .getAttribute('value'),
+    ).toBe('glm-account-model');
+    expect(
+      root.querySelector<HTMLInputElement>('#provider-model-primary')!.value,
+    ).toBe(provider.models.primary);
+  });
   it('updates generated names on type changes but keeps user names', () => {
     mount();
     choose('openai');

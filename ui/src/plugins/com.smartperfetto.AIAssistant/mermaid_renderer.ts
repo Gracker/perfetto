@@ -276,6 +276,10 @@ function normalizeMermaidSource(code: string): string {
 export class MermaidRenderer {
   private mermaidInitialized = false;
   private mermaidLoadPromise: Promise<void> | null = null;
+  private readonly containerRenders = new WeakMap<
+    HTMLElement,
+    {pending: boolean; promise: Promise<void>}
+  >();
 
   /**
    * Check if Mermaid is available on the global object.
@@ -371,7 +375,45 @@ export class MermaidRenderer {
    *
    * @param container - The HTML element containing diagrams to render
    */
-  async renderMermaidInElement(container: HTMLElement): Promise<void> {
+  renderMermaidInElement(container: HTMLElement): Promise<void> {
+    const active = this.containerRenders.get(container);
+    if (active) {
+      active.pending = true;
+      return active.promise;
+    }
+
+    // Mermaid has a serial internal queue. Never enqueue a job per streaming
+    // token/redraw: retain one active pass and coalesce updates into a fresh
+    // scan of the latest DOM. The weak key must not retain old chat containers.
+    const state = {pending: true, promise: Promise.resolve()};
+    const wasConnected = container.isConnected;
+    const isContainerCurrent = () => !wasConnected || container.isConnected;
+    state.promise = Promise.resolve().then(async () => {
+      try {
+        while (state.pending && isContainerCurrent()) {
+          state.pending = false;
+          await this.renderCurrentDiagrams(container, isContainerCurrent);
+        }
+      } finally {
+        this.containerRenders.delete(container);
+      }
+    });
+    this.containerRenders.set(container, state);
+    return state.promise;
+  }
+
+  private async renderCurrentDiagrams(
+    container: HTMLElement,
+    isContainerCurrent: () => boolean,
+  ): Promise<void> {
+    if (!container.querySelector('[data-mermaid-b64]')) return;
+    await this.ensureMermaidInitialized();
+    if (!isContainerCurrent()) return;
+    const mermaid = this.getMermaid();
+    if (!mermaid) return;
+
+    // Scan after initialization: streaming may have replaced the entire body
+    // while the Mermaid script was loading.
     const diagramNodes = Array.from(
       container.querySelectorAll<HTMLElement>(
         '.ai-mermaid-diagram[data-mermaid-b64]',
@@ -384,10 +426,6 @@ export class MermaidRenderer {
     );
 
     if (diagramNodes.length === 0 && sourceNodes.length === 0) return;
-
-    await this.ensureMermaidInitialized();
-    const mermaid = this.getMermaid();
-    if (!mermaid) return;
 
     // Populate sources first (textContent, no HTML interpretation).
     for (const source of sourceNodes) {
@@ -407,6 +445,11 @@ export class MermaidRenderer {
       if (host.dataset.rendered === 'true') continue;
       const b64 = host.dataset.mermaidB64;
       if (!b64) continue;
+      const isCurrent = () =>
+        isContainerCurrent() &&
+        container.contains(host) &&
+        host.dataset.mermaidB64 === b64;
+      if (!isCurrent()) continue;
 
       let code = '';
       try {
@@ -430,6 +473,7 @@ export class MermaidRenderer {
         // The parsed SVG allowlist is a defense-in-depth backstop that preserves
         // Mermaid's generated theme CSS while rejecting active content.
         const result: any = await mermaid.render(renderId, code);
+        if (!isCurrent()) continue;
         const safeSvg = sanitizeMermaidSvg(result?.svg || '');
         if (!safeSvg) throw new Error('Mermaid returned invalid SVG');
         host.innerHTML = safeSvg;
@@ -438,6 +482,7 @@ export class MermaidRenderer {
         }
         host.dataset.rendered = 'true';
       } catch (e) {
+        if (!isCurrent()) continue;
         console.warn('[MermaidRenderer] Mermaid render failed:', e);
         host.innerHTML = `<div class="ai-mermaid-error">${uiText(
           'Mermaid 渲染失败（请展开查看源码）',

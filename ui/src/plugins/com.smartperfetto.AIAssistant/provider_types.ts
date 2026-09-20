@@ -107,12 +107,18 @@ export interface ProviderConfig {
   custom?: {envOverrides?: Record<string, string>};
 }
 
+export interface ProviderModelOption {
+  id: string;
+  name: string;
+  tier: string;
+}
+
 export interface ProviderTemplate {
   type: ProviderType;
   displayName: string;
   requiredFields: string[];
   defaultModels: ProviderModels;
-  availableModels: Array<{id: string; name: string; tier: string}>;
+  availableModels: ProviderModelOption[];
   defaultConnection?: Partial<ProviderConnection>;
 }
 

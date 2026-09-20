@@ -17,10 +17,37 @@
 // limitations under the License.
 
 import {describe, it, expect, vi} from 'vitest';
+import m from 'mithril';
 
 import {SqlResultTable, UserInteraction} from './sql_result_table';
 
 describe('SqlResultTable unit handling', () => {
+  it('only visits visible rows during an unsorted table redraw', () => {
+    const table = new SqlResultTable();
+    let accessedRows = 0;
+    const rows = new Proxy(Array.from({length: 50_000}, (_, i) => [i, i]), {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) accessedRows++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    table.view(m(SqlResultTable, {columns: ['id', 'value'], rows, rowCount: rows.length}));
+    expect(accessedRows).toBe(10);
+  });
+
+  it('labels preview rows and prevents full-table statistics on partial data', () => {
+    const root = document.createElement('div');
+    m.render(root, m(SqlResultTable, {
+      columns: ['id', 'value'], rows: [[1, 10]], rowCount: 50_000,
+      preview: {totalRows: 50_000, returnedRows: 1, reason: 'byte_limit'},
+    }));
+    expect(root.querySelector('.sql-result-preview')?.textContent).toContain('50000');
+    expect(root.querySelector<HTMLButtonElement>('button[title="Show statistics"]')?.disabled).toBe(true);
+    expect(root.querySelector('button[title="Show chart"]')).toBeNull();
+    expect(root.querySelector('button[title="Copy preview"]')).not.toBeNull();
+    m.render(root, null);
+  });
+
   it('keeps expandable row data aligned after sorting', () => {
     const table = new SqlResultTable() as any;
     table.sortColumnIdx = 1;

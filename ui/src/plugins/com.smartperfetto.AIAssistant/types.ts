@@ -31,6 +31,7 @@ import type {
   AnalysisReceipt,
   AnalysisReceiptV1,
   AnalysisReceiptV2,
+  DataEnvelopeDisplay,
   QueryReviewV1,
   UiActionProposalV1,
 } from './generated/data_contract.types';
@@ -679,6 +680,7 @@ export interface SqlQueryResult {
   collapsible?: boolean; // Whether this table can be collapsed
   defaultCollapsed?: boolean; // Whether this table starts collapsed
   maxVisibleRows?: number; // Max rows to show before "show more"
+  preview?: DataEnvelopeDisplay['preview'];
   queryReview?: QueryReviewV1;
   // Column definitions for schema-driven rendering (v2.0)
   columnDefinitions?: Array<{
@@ -1365,7 +1367,7 @@ export const DEFAULT_SETTINGS: AISettings = {
   openaiUrl: 'https://api.openai.com/v1',
   openaiModel: 'gpt-4o',
   openaiApiKey: '',
-  deepseekModel: 'deepseek-chat',
+  deepseekModel: 'deepseek-flash',
   deepseekApiKey: '',
   backendUrl: getDefaultSmartPerfettoBackendUrl(),
   backendApiKey: '',

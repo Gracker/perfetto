@@ -4,6 +4,7 @@
 
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
+import {defer} from '../../base/deferred';
 import {encodeBase64Unicode} from './data_formatter';
 import {MermaidRenderer} from './mermaid_renderer';
 
@@ -18,6 +19,117 @@ afterEach(() => {
 });
 
 describe('MermaidRenderer', () => {
+  function addDiagram(container: HTMLElement, code = 'flowchart LR\nA --> B') {
+    const host = document.createElement('div');
+    host.className = 'ai-mermaid-diagram';
+    host.dataset.mermaidB64 = encodeBase64Unicode(code);
+    container.appendChild(host);
+    return host;
+  }
+
+  function delayedRenderer() {
+    const first = defer<{svg: string}>();
+    const started = defer<void>();
+    const render = vi.fn().mockImplementationOnce(() => {
+      started.resolve();
+      return first;
+    }).mockResolvedValue({svg: '<svg xmlns="http://www.w3.org/2000/svg" />'});
+    (globalThis as {mermaid?: unknown}).mermaid = {initialize: vi.fn(), render};
+    return {renderer: new MermaidRenderer(), first, started, render};
+  }
+
+  it('coalesces streaming replacements and only renders the latest nodes', async () => {
+    const {renderer, first, started, render} = delayedRenderer();
+    const container = document.createElement('div');
+    const oldHost = addDiagram(container);
+    const pending = [renderer.renderMermaidInElement(container)];
+    await started;
+    let latestHost = oldHost;
+    for (let i = 0; i < 100; i++) {
+      container.replaceChildren();
+      latestHost = addDiagram(container, `flowchart LR\nA --> B${i}`);
+      pending.push(renderer.renderMermaidInElement(container));
+    }
+    await Promise.resolve();
+    const callsWhileBlocked = render.mock.calls.length;
+    first.resolve({svg: '<svg xmlns="http://www.w3.org/2000/svg" />'});
+    await Promise.all(pending);
+
+    expect(callsWhileBlocked).toBe(1);
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render.mock.calls[1][1]).toContain('B99');
+    expect(oldHost.innerHTML).toBe('');
+    expect(latestHost.querySelector('svg')).not.toBeNull();
+  });
+
+  it('deduplicates redraws of an in-flight diagram and completes every diagram', async () => {
+    const {renderer, first, started, render} = delayedRenderer();
+    const container = document.createElement('div');
+    const hosts = [addDiagram(container), addDiagram(container)];
+    const pending = [renderer.renderMermaidInElement(container)];
+    await started;
+    for (let i = 0; i < 10; i++) {
+      pending.push(renderer.renderMermaidInElement(container));
+    }
+    first.resolve({svg: '<svg xmlns="http://www.w3.org/2000/svg" />'});
+    await Promise.all(pending);
+
+    expect(render).toHaveBeenCalledTimes(2);
+    for (const host of hosts) expect(host.querySelector('svg')).not.toBeNull();
+  });
+
+  it('discards an obsolete failure and can render new content afterwards', async () => {
+    const {renderer, first, started, render} = delayedRenderer();
+    const container = document.createElement('div');
+    const oldHost = addDiagram(container);
+    const pending = renderer.renderMermaidInElement(container);
+    await started;
+    container.replaceChildren();
+    const latestHost = addDiagram(container);
+    const latest = renderer.renderMermaidInElement(container);
+    first.reject(new Error('Obsolete diagram failed'));
+    await Promise.all([pending, latest]);
+
+    expect(oldHost.innerHTML).toBe('');
+    expect(latestHost.querySelector('svg')).not.toBeNull();
+    container.replaceChildren();
+    const nextHost = addDiagram(container);
+    await renderer.renderMermaidInElement(container);
+    expect(nextHost.querySelector('svg')).not.toBeNull();
+    expect(render).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not write stale output when the same node source changes', async () => {
+    const {renderer, first, started, render} = delayedRenderer();
+    const container = document.createElement('div');
+    const host = addDiagram(container);
+    const pending = renderer.renderMermaidInElement(container);
+    await started;
+    host.dataset.mermaidB64 = encodeBase64Unicode('flowchart LR\nC --> D');
+    const latest = renderer.renderMermaidInElement(container);
+    first.resolve({svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>stale</text></svg>'});
+    await Promise.all([pending, latest]);
+
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render.mock.calls[1][1]).toContain('C --> D');
+    expect(host.textContent).not.toContain('stale');
+  });
+
+  it('stops processing a mounted container after it is removed', async () => {
+    const {renderer, first, started, render} = delayedRenderer();
+    const container = document.createElement('div');
+    const hosts = [addDiagram(container), addDiagram(container)];
+    document.body.appendChild(container);
+    const pending = renderer.renderMermaidInElement(container);
+    await started;
+    container.remove();
+    first.resolve({svg: '<svg xmlns="http://www.w3.org/2000/svg" />'});
+    await pending;
+
+    expect(render).toHaveBeenCalledTimes(1);
+    for (const host of hosts) expect(host.innerHTML).toBe('');
+  });
+
   it('renders real Mermaid flowcharts with multiline HTML labels', async () => {
     const svgPrototype = SVGElement.prototype as SVGElement & {
       getBBox?: () => DOMRect;

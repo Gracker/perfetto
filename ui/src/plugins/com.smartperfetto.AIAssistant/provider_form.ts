@@ -7,6 +7,7 @@ import {
   type ProviderType,
   type ProviderTuning,
   type ProviderConfig,
+  type ProviderModelOption,
   type ProviderTemplate,
   type FormState,
   type BedrockAuthMethod,
@@ -26,6 +27,7 @@ export interface ProviderFormAttrs {
   editingProvider?: ProviderConfig;
   cloneSource?: ProviderConfig;
   templates: ProviderTemplate[];
+  availableModels?: ProviderModelOption[];
   onSaved: () => void;
   onCancel: () => void;
 }
@@ -337,7 +339,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   view(vnode: m.Vnode<ProviderFormAttrs>): m.Children {
     const t = getTokens();
     const s = getStyles(t);
-    const {templates, onCancel} = vnode.attrs;
+    const {templates, availableModels, onCancel} = vnode.attrs;
     const template = templates.find((tmpl) => tmpl.type === this.form.type);
 
     return m(
@@ -399,7 +401,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             m(
               'div',
               {style: {marginTop: '16px'}},
-              this.renderFields(t, s, template),
+              this.renderFields(t, s, template, availableModels),
             ),
           ],
         ),
@@ -492,6 +494,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     t: ReturnType<typeof getTokens>,
     s: ReturnType<typeof getStyles>,
     template?: ProviderTemplate,
+    availableModels?: ProviderModelOption[],
   ): m.Children {
     const special =
       this.form.type === 'custom' ||
@@ -507,7 +510,13 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
             undefined,
             false,
           ),
-      this.renderModelField(s, 'primary', text('模型', 'Model'), template),
+      this.renderModelField(
+        s,
+        'primary',
+        text('模型', 'Model'),
+        template,
+        availableModels,
+      ),
       m(
         'div',
         {style: s.formHint},
@@ -534,12 +543,14 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           'light',
           text('轻量模型', 'Light Model'),
           template,
+          availableModels,
         ),
         this.renderModelField(
           s,
           'subAgent',
           text('子 Agent 模型', 'Sub-agent Model'),
           template,
+          availableModels,
         ),
         this.form.type === 'custom'
           ? this.renderCustomConnection(s, true)
@@ -1026,6 +1037,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     key: 'primary' | 'light' | 'subAgent',
     label: string,
     template?: ProviderTemplate,
+    availableModels?: ProviderModelOption[],
   ): m.Children {
     const id = `provider-model-${key}`;
     return m('div', {style: s.formField}, [
@@ -1049,7 +1061,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       m(
         'datalist',
         {id: `${id}-options`},
-        (template?.availableModels || []).map((model) =>
+        (availableModels || template?.availableModels || []).map((model) =>
           m('option', {value: model.id}, model.name),
         ),
       ),
