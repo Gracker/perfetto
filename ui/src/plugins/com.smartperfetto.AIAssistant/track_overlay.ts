@@ -48,6 +48,7 @@ import {uiText} from './ui_language';
 type OverlayId =
   | 'jank'
   | 'scene_timeline'
+  | 'scene_canonical'
   | 'pipeline_slices'
   | 'state_device'
   | 'state_input'
@@ -79,6 +80,8 @@ interface OverlayConfig {
   ) => string;
   /** Max rows to inject into SQL (safety limit). Default: 500 */
   maxRows?: number;
+  /** Canonical scene payload is already bounded by its run contract. */
+  preserveAllRows?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +136,17 @@ const OVERLAY_CONFIGS = new Map<OverlayId, OverlayConfig>([
             ? Number(row[idx('dur_ms')] || 0)
             : Number(row[idx('dur')] || 0) / 1e6,
         ),
+    },
+  ],
+  [
+    'scene_canonical',
+    {
+      id: 'scene_canonical',
+      trackTitle: () => uiText('场景还原（叙述未核验）', 'Scene reconstruction (narrative unverified)'),
+      columns: {ts: 'ts', dur: 'dur', name: 'event'},
+      pivotOn: 'dimension',
+      rawColumns: ['segment_id', 'object_key', 'user_action', 'device_state', 'app_response', 'evidence_status'],
+      preserveAllRows: true,
     },
   ],
   [
@@ -279,6 +293,7 @@ function persistOverlayData(
   columns: string[],
   rows: unknown[][],
 ): void {
+  if (overlayId === 'scene_canonical') return;
   try {
     if (isSmartPerfettoOidcMode()) {
       clearPersistedOverlays();
@@ -330,6 +345,7 @@ export async function restoreOverlayTracks(trace: Trace): Promise<void> {
 
     let restored = 0;
     for (const [overlayId, data] of Object.entries(store.overlays)) {
+      if (overlayId === 'scene_canonical') { delete store.overlays[overlayId]; continue; }
       // Skip if already created in this session
       if (activeTrackNodes.has(overlayId as OverlayId)) continue;
       try {
@@ -465,7 +481,7 @@ export async function createOverlayTrack(
   }
 
   // Safety: cap rows and filter out negative durations (Perfetto requires dur >= 0)
-  const maxRows = config.maxRows ?? DEFAULT_MAX_ROWS;
+  const maxRows = config.preserveAllRows ? rows.length : config.maxRows ?? DEFAULT_MAX_ROWS;
   const limitedRows = rows
     .filter((row) => {
       const dur = Number(row[durIdx]);

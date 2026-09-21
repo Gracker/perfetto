@@ -34,6 +34,8 @@ import type {
   DataEnvelopeDisplay,
   QueryReviewV1,
   UiActionProposalV1,
+  SceneTimelineView,
+  SceneReportReference,
 } from './generated/data_contract.types';
 import type {ServerRuntimeKind} from './provider_types';
 import type {UiLanguagePreference} from './ui_language';
@@ -742,6 +744,8 @@ export type StoryPanelStatus =
   | 'selection_ready' // Smart preview has listed scenes and waits for a deep-dive scope
   | 'running' // POST /scene-reconstruct in flight (user confirmed)
   | 'completed' // Report ready (fresh or cached)
+  | 'partial' // Run finished with an incomplete scene assessment
+  | 'cancelled'
   | 'failed'; // Pipeline or preview error
 
 export interface StoryPreviewEstimate {
@@ -768,6 +772,13 @@ export interface StoryPreviewResult {
 }
 
 export interface StoryPanelState {
+  traceId: string | null;
+  sessionId: string | null;
+  runId: string | null;
+  timeline: SceneTimelineView | null;
+  timelineTerminal: boolean;
+  reportUrl?: string;
+  reportReference?: SceneReportReference;
   status: StoryPanelStatus;
   lastError: string | null;
   /** Preview result from POST /scene-reconstruct/preview */
@@ -779,7 +790,7 @@ export interface StoryPanelState {
 }
 
 export function createStoryPanelState(): StoryPanelState {
-  return {
+  return {traceId: null, sessionId: null, runId: null, timeline: null, timelineTerminal: false,
     status: 'idle',
     lastError: null,
     preview: null,

@@ -256,8 +256,10 @@ import {getSceneDisplayName} from './scene_constants';
 import {
   StoryController,
   StoryControllerInvalidatedError,
+  StoryControllerCancelledError,
 } from './story_controller';
 import type {StoryControllerContext} from './story_controller';
+import {agentStreamEventMatchesScope, projectSceneTimeline, sceneTimelineNavigation, sceneTimelineOverlayRows, SCENE_TIMELINE_COLUMNS} from './scene_timeline_projection';
 // AI Everywhere: cross-component shared state + timeline notes
 import {
   updateAISharedState,
@@ -2795,8 +2797,16 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           const wasReady = this.analysisBackendSnapshot?.state === 'ready';
           this.analysisBackendSnapshot = snapshot;
           const presentation = this.getAnalysisBackendPresentation();
-          this.state.backendTraceId =
-            presentation.state === 'ready' ? presentation.traceId ?? null : null;
+          const nextTraceId = presentation.state === 'ready' ? presentation.traceId ?? null : null;
+          if (this.state.backendTraceId !== nextTraceId) {
+            this.storyGeneration++;
+            this.storyController?.dispose();
+            this.storyController = null;
+            this.storyStartFlight = null;
+            this.state.storyState = createStoryPanelState();
+            this.state.detectedScenes = [];
+          }
+          this.state.backendTraceId = nextTraceId;
           if (presentation.state !== 'ready') {
             this.analysisRequestCoordinator.invalidate();
             this.cancelSSEConnection();
@@ -2904,6 +2914,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.conversationAbortController = undefined;
     this.activeConversationRun = undefined;
     this.pendingFullAnalysisHandoff = undefined;
+    this.storyGeneration++;
     this.storyController?.dispose();
     this.storyController = null;
     if (authorityInvalidated) clearConversationRuntimeIdentities();
@@ -3107,8 +3118,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             : uiText('场景还原', 'Scene Story'),
           active: this.state.showStorySidebar,
           onclick: () => {
-            this.state.showStorySidebar = !this.state.showStorySidebar;
             if (this.state.showStorySidebar) {
+              this.state.showStorySidebar = false;
+            } else {
+              void this.handleSceneReconstructCommand();
               this.state.showSessionSidebar = false;
               this.state.showTracePicker = false;
               this.state.showResultPicker = false;
@@ -3889,7 +3902,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       }
                       this.analyzeScene(scene);
                     },
-                    onRefresh: () => this.detectScenesQuick(),
+                    onRefresh: () => this.state.storyState.timeline ? this.handleStoryConfirm({forceRefresh: true}) : this.detectScenesQuick(),
                   })
                 : null,
 
@@ -8651,10 +8664,15 @@ Click ⚙️ to configure backend connection.`,
       backendUrl: this.state.settings.backendUrl,
       streamingFlow: this.state.streamingFlow,
       streamingAnswer: this.state.streamingAnswer,
-      // Track overlay — create timeline tracks when overlay-eligible data arrives
+      onSceneTimelineReceived: (timeline, terminal) => this.applyCanonicalSceneTimeline(timeline, terminal),
+      // Canonical Story lanes are projected only from the accepted revision.
       onOverlayDataReceived: (overlayId, columns, rows) => {
+        if (this.state.storyState.traceId && (overlayId === 'scene_timeline' || overlayId.startsWith('state_'))) return;
+        const traceId = this.state.backendTraceId;
+        const runId = this.state.agentRunId;
         if (this.trace) {
-          createOverlayTrack(this.trace, overlayId, columns, rows).catch((e) =>
+          createOverlayTrack(this.trace, overlayId, columns, rows,
+            () => traceId === this.state.backendTraceId && runId === this.state.agentRunId).catch((e) =>
             console.error(`[AIPanel] Overlay ${overlayId} failed:`, e),
           );
         }
@@ -8698,11 +8716,69 @@ Click ⚙️ to configure backend connection.`,
     // Note: completionHandled is updated via setCompletionHandled() directly on this.state
     // Do NOT sync ctx.completionHandled back - it's the original value before handler ran
 
+    const story = this.state.storyState;
+    if (story.traceId === this.state.backendTraceId && story.runId === this.state.agentRunId &&
+        story.sessionId === this.state.agentSessionId &&
+        ['analysis_completed', 'analysis_cancelled', 'error'].includes(eventType)) {
+      const payload = data?.data ?? data ?? {};
+      const cancelled = eventType === 'analysis_cancelled' || payload.terminalRunStatus === 'cancelled' ||
+        payload.terminationReason === 'cancelled';
+      story.status = cancelled ? 'cancelled' : eventType === 'error' || payload.success === false ? 'failed' : 'partial';
+      if (eventType === 'error') story.lastError = payload.message || payload.error || uiText('分析失败', 'Analysis failed');
+      if (typeof payload.reportUrl === 'string') story.reportUrl = payload.reportUrl;
+      const reference = payload.sceneReport;
+      if (reference?.schemaVersion === 'scene_report_ref@1' && reference.traceId === story.traceId &&
+          reference.sessionId === story.sessionId && reference.runId === story.runId &&
+          reference.revision === story.timeline?.revision && typeof reference.reportId === 'string' &&
+          typeof reference.manifestSha256 === 'string' && /^[a-f0-9]{64}$/.test(reference.manifestSha256)) {
+        story.reportReference = reference;
+      }
+      if (story.runId) this.storyController?.markTerminal(story.runId);
+      this.consumeRedirectIntent();
+    }
     // Trigger redraw after handling each event
     m.redraw();
   }
 
+  private applyCanonicalSceneTimeline(value: unknown, terminal: boolean): void {
+    let story = this.state.storyState;
+    if (!terminal && ['completed', 'partial', 'cancelled', 'failed'].includes(story.status)) return;
+    const {agentRunId: runId, agentSessionId: sessionId, backendTraceId: traceId} = this.state;
+    if (!runId || !sessionId || !traceId) return;
+    if (!story.traceId) {
+      const restored = projectSceneTimeline(null, value, {runId, sessionId, traceId}, terminal);
+      if (!restored) return;
+      story = {...createStoryPanelState(), traceId, sessionId, runId, analysisId: sessionId, status: 'running'};
+      this.state.storyState = story;
+      this.state.showStorySidebar = true;
+    }
+    if (story.traceId !== traceId || story.runId !== runId || story.sessionId !== sessionId) return;
+    const current = story.timeline ? {timeline: story.timeline, terminal: story.timelineTerminal} : null;
+    const projected = projectSceneTimeline(current, value,
+      {runId, sessionId, traceId}, terminal);
+    if (!projected || projected === current) return;
+    story.timeline = projected.timeline;
+    story.timelineTerminal = projected.terminal;
+    this.state.detectedScenes = sceneTimelineNavigation(projected.timeline);
+    const generation = this.storyGeneration;
+    const isCurrent = () => generation === this.storyGeneration && story === this.state.storyState &&
+      story.timeline === projected.timeline && story.traceId === this.state.backendTraceId;
+    if (this.trace) {
+      void createOverlayTrack(this.trace, 'scene_canonical', SCENE_TIMELINE_COLUMNS,
+        sceneTimelineOverlayRows(projected.timeline, {userAction: uiText('用户操作', 'User action'),
+          deviceState: uiText('设备状态', 'Device state'), appResponse: uiText('应用响应', 'App response')}), isCurrent).catch(error => console.warn('Scene overlay failed', error));
+    }
+  }
+
   private applySmartStoryEvent(eventType: string, data?: any): void {
+    if (this.state.storyState.traceId || this.state.storyState.timeline) return;
+    const legacyGeneration = this.storyGeneration;
+    const legacyTraceId = this.state.backendTraceId;
+    const legacySessionId = this.state.agentSessionId;
+    const legacyRunId = this.state.agentRunId;
+    const legacyIsCurrent = () => legacyGeneration === this.storyGeneration && legacyRunId === this.state.agentRunId &&
+      legacyTraceId === this.state.backendTraceId && legacySessionId === this.state.agentSessionId &&
+      !this.state.storyState.traceId;
     const payload =
       data &&
       typeof data === 'object' &&
@@ -8808,6 +8884,7 @@ Click ⚙️ to configure backend connection.`,
         void this.getOrCreateStoryController()
           .loadReport(reportId)
           .then((report) => {
+            if (!legacyIsCurrent()) return;
             this.state.storyState = {
               ...this.state.storyState,
               status: 'completed',
@@ -8816,6 +8893,7 @@ Click ⚙️ to configure backend connection.`,
             m.redraw();
           })
           .catch(() => {
+            if (!legacyIsCurrent()) return;
             this.state.storyState = {
               ...this.state.storyState,
               status: 'completed',
@@ -9978,8 +10056,9 @@ Click ⚙️ to configure backend connection.`,
 
   private async tryRecoverMissingSseSession(
     sessionId: string,
+    isCurrent: () => boolean = () => true,
   ): Promise<'restored' | 'notRecoverable' | 'transientError'> {
-    if (!this.state.backendTraceId) {
+    if (!isCurrent() || !this.state.backendTraceId) {
       return 'notRecoverable';
     }
 
@@ -10006,6 +10085,9 @@ Click ⚙️ to configure backend connection.`,
 
       if (response.ok) {
         const resumeData = await response.json().catch(() => ({}) as any);
+        if (!isCurrent()) return 'notRecoverable';
+        if (!agentStreamEventMatchesScope(resumeData, {sessionId,
+          runId: this.state.agentRunId ?? '', traceId: this.state.backendTraceId ?? ''})) return 'notRecoverable';
         const requestIdFromHeader = response.headers.get('x-request-id') || '';
         this.state.agentSessionId = sessionId;
         this.state.sseLastEventId = null;
@@ -10038,6 +10120,7 @@ Click ⚙️ to configure backend connection.`,
       }
 
       const errorData = await response.json().catch(() => ({}) as any);
+      if (!isCurrent()) return 'notRecoverable';
       const code = String(errorData?.code || '');
       const errorText = String(errorData?.error || '');
       if (
@@ -10062,6 +10145,14 @@ Click ⚙️ to configure backend connection.`,
                 'The backend restarted and this analysis session could not be restored. Streaming stopped; start the analysis again.',
               );
         this.upsertSseStatusMessage(content);
+        if (this.state.storyState.sessionId === sessionId) {
+          const story = this.state.storyState;
+          story.status = story.timeline ? 'partial' : 'failed';
+          story.timelineTerminal = true;
+          story.lastError = content;
+          if (story.runId) this.storyController?.markTerminal(story.runId);
+          this.storyStartFlight = null;
+        }
         this.saveCurrentSession();
         m.redraw();
         return 'notRecoverable';
@@ -11255,6 +11346,8 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private cancelAnalysis(): Promise<void> {
+    if (this.state.storyState.traceId === this.state.backendTraceId &&
+        this.state.storyState.status === 'running' && this.storyController) return this.handleStoryCancel();
     if (this.isConversationExecutionActive()) {
       return this.cancelConversationAnalysis();
     }
@@ -11303,6 +11396,11 @@ Click ⚙️ to configure backend connection.`,
     sessionId: string,
     resumeFromLastEventId: boolean = false,
   ): Promise<void> {
+    if (this.state.agentSessionId !== sessionId) return;
+    const runId = this.state.agentRunId;
+    const traceId = this.state.backendTraceId;
+    if (!runId || !traceId) return;
+    const generation = this.storyGeneration;
     const apiUrl = buildAgentSseStreamUrl(
       this.state.settings.backendUrl,
       sessionId,
@@ -11313,7 +11411,11 @@ Click ⚙️ to configure backend connection.`,
 
     // Create new AbortController for this connection
     this.sseAbortController = new AbortController();
-    const signal = this.sseAbortController.signal;
+    const connection = this.sseAbortController;
+    const signal = connection.signal;
+    const isCurrent = () => this.sseAbortController === connection && !signal.aborted &&
+      this.state.agentSessionId === sessionId && this.state.agentRunId === runId &&
+      this.state.backendTraceId === traceId && this.storyGeneration === generation;
 
     // Mark as connecting
     this.state.sseConnectionState = 'connecting';
@@ -11328,7 +11430,7 @@ Click ⚙️ to configure backend connection.`,
     while (this.state.sseRetryCount <= this.state.sseMaxRetries) {
       try {
         // Check if aborted before attempting connection
-        if (signal.aborted) {
+        if (!isCurrent()) {
           if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE connection aborted');
           return;
         }
@@ -11337,10 +11439,12 @@ Click ⚙️ to configure backend connection.`,
           apiUrl,
           buildAgentSseStreamInit(signal, this.state.sseLastEventId),
         );
+        if (!isCurrent()) return;
         if (!response.ok) {
           if (response.status === 404 && !attemptedSessionRecovery) {
             attemptedSessionRecovery = true;
-            const recovery = await this.tryRecoverMissingSseSession(sessionId);
+            const recovery = await this.tryRecoverMissingSseSession(sessionId, isCurrent);
+            if (!isCurrent()) return;
             if (recovery === 'restored') {
               continue;
             }
@@ -11355,6 +11459,10 @@ Click ⚙️ to configure backend connection.`,
               `[AIPanel] SSE got ${response.status} — not retryable, giving up`,
             );
             this.state.sseConnectionState = 'disconnected';
+            if (this.state.storyState.runId === runId) {
+              this.state.storyState.status = 'failed';
+              this.state.storyState.lastError = `HTTP ${response.status}`;
+            }
             this.setLoadingState(false);
             this.upsertSseStatusMessage(
               uiText(
@@ -11375,9 +11483,9 @@ Click ⚙️ to configure backend connection.`,
           throw new Error('No response body');
         }
 
-        // Connection successful - update state
+        // A successful HTTP connection is not a recovered run: an immediate
+        // EOF must still consume retry budget rather than reconnect forever.
         this.state.sseConnectionState = 'connected';
-        this.state.sseRetryCount = 0;
         this.state.sseLastEventTime = Date.now();
         if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE connected successfully');
         m.redraw();
@@ -11387,26 +11495,27 @@ Click ⚙️ to configure backend connection.`,
         // Persist event type across read chunks to handle large payloads
         // that may span multiple reader.read() calls
         let currentEventType = '';
+        let pendingEventId: number | null = null;
 
         // Read loop
         while (true) {
           // Check if aborted
-          if (signal.aborted) {
+          if (!isCurrent()) {
             if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE reader aborted');
             reader.releaseLock();
             return;
           }
 
           const {done, value} = await reader.read();
+          if (!isCurrent()) { reader.releaseLock(); return; }
           if (done) {
             if (DEBUG_AI_PANEL) {
               console.log('[AIPanel] SSE stream ended normally');
             }
             reader.releaseLock();
-            // Stream ended normally (server closed), no need to reconnect
-            this.state.sseConnectionState = 'disconnected';
-            m.redraw();
-            return;
+            if (await this.checkSessionStatus(sessionId, signal, isCurrent)) return;
+            if (!isCurrent()) return;
+            throw new Error('Analysis stream ended before a confirmed terminal result');
           }
 
           buffer += decoder.decode(value, {stream: true});
@@ -11424,9 +11533,7 @@ Click ⚙️ to configure backend connection.`,
             if (line.startsWith('id:')) {
               // F3: Track last event sequence ID for replay on reconnect
               const id = parseInt(line.replace('id:', '').trim(), 10);
-              if (!isNaN(id)) {
-                this.state.sseLastEventId = id;
-              }
+              if (!isNaN(id)) pendingEventId = id;
             } else if (line.startsWith('event:')) {
               currentEventType = line.replace('event:', '').trim();
             } else if (line.startsWith('data:')) {
@@ -11435,12 +11542,25 @@ Click ⚙️ to configure backend connection.`,
                 try {
                   const data = JSON.parse(dataStr);
                   const eventType = currentEventType || data.type;
+                  if (!isCurrent()) return;
+                  if (!agentStreamEventMatchesScope({...data, type: eventType}, {sessionId, runId, traceId})) {
+                    currentEventType = '';
+                    pendingEventId = null;
+                    continue;
+                  }
+                  if (pendingEventId !== null) this.state.sseLastEventId = pendingEventId;
+                  pendingEventId = null;
                   if (!eventType) {
                     console.warn(
                       '[AIPanel] SSE event with no type, skipping:',
                       Object.keys(data),
                     );
                   } else {
+                    if (eventType === 'end') {
+                      if (await this.checkSessionStatus(sessionId, signal, isCurrent)) return;
+                      if (!isCurrent()) return;
+                      throw new Error('Terminal stream marker arrived without a terminal run result');
+                    }
                     const observabilityUpdated =
                       this.applyAgentObservability(data);
                     if (observabilityUpdated) {
@@ -11483,6 +11603,7 @@ Click ⚙️ to configure backend connection.`,
                     }
                   }
                 } catch (e) {
+                  if (!(e instanceof SyntaxError)) throw e;
                   console.error(
                     '[AIPanel] Failed to parse Agent SSE data:',
                     e,
@@ -11495,6 +11616,7 @@ Click ⚙️ to configure backend connection.`,
           }
         }
       } catch (e: any) {
+        if (!isCurrent()) return;
         // Check if this was an intentional abort
         if (signal.aborted || e.name === 'AbortError') {
           if (DEBUG_AI_PANEL) {
@@ -11516,6 +11638,10 @@ Click ⚙️ to configure backend connection.`,
           // Max retries exceeded - give up
           console.error('[AIPanel] SSE max retries exceeded, giving up');
           this.state.sseConnectionState = 'disconnected';
+          if (this.state.storyState.runId === runId) {
+            this.state.storyState.status = 'failed';
+            this.state.storyState.lastError = e.message || 'Analysis stream unavailable';
+          }
           this.setLoadingState(false);
           this.upsertSseStatusMessage(
             uiText(
@@ -11557,13 +11683,13 @@ Click ⚙️ to configure backend connection.`,
           signal.addEventListener('abort', abortHandler, {once: true});
         });
 
-        if (signal.aborted) {
+        if (!isCurrent()) {
           if (DEBUG_AI_PANEL) console.log('[AIPanel] SSE retry wait aborted');
           return;
         }
 
         // Check if analysis already completed while disconnected
-        if (await this.checkSessionStatus(sessionId, signal)) {
+        if (await this.checkSessionStatus(sessionId, signal, isCurrent)) {
           return;
         }
       }
@@ -11578,15 +11704,20 @@ Click ⚙️ to configure backend connection.`,
   private async checkSessionStatus(
     sessionId: string,
     signal: AbortSignal,
+    isCurrent: () => boolean = () => !signal.aborted,
   ): Promise<boolean> {
+    const scope = {sessionId, runId: this.state.agentRunId ?? '', traceId: this.state.backendTraceId ?? ''};
     try {
       const statusUrl = buildAssistantApiV1Url(
         this.state.settings.backendUrl,
         `/${sessionId}/status`,
       );
       const res = await this.fetchBackend(statusUrl, {signal});
+      if (!isCurrent()) return true;
       if (!res.ok) return false;
       const body = await res.json();
+      if (!isCurrent()) return true;
+      if (!agentStreamEventMatchesScope(body, scope)) return false;
       const status = body.status || body.state;
       if (
         status === 'completed' ||
@@ -11627,6 +11758,11 @@ Click ⚙️ to configure backend connection.`,
         }
         const hasStoredResult = body.result && typeof body.result === 'object' &&
           !Array.isArray(body.result);
+        if (!hasStoredResult && this.state.storyState.sessionId === sessionId) {
+          this.state.storyState.status = status === 'cancelled' ? 'cancelled' : status === 'failed' ? 'failed' : 'partial';
+          if (this.state.storyState.runId) this.storyController?.markTerminal(this.state.storyState.runId);
+          this.consumeRedirectIntent();
+        }
         if (status === 'failed' && !hasStoredResult) {
           this.addMessage({
             id: this.generateId(),
@@ -12259,25 +12395,15 @@ Click ⚙️ to configure backend connection.`,
   // thin command-dispatch wrapper below.
 
   private storyController: StoryController | null = null;
+  private storyStartFlight: Promise<void> | null = null;
+  private storyGeneration = 0;
 
   private getOrCreateStoryController(): StoryController {
     if (!this.storyController || this.storyController.isDisposed()) {
       const ctx: StoryControllerContext = {
         getBackendTraceId: () => this.state.backendTraceId,
         getBackendUrl: () => this.state.settings.backendUrl,
-        getTrace: () => this.trace,
-        addMessage: (msg) => this.addMessage(msg),
-        updateMessage: (id, updates) => this.updateMessage(id, updates),
-        generateId: () => this.generateId(),
-        setLoadingState: (loading) => this.setLoadingState(loading),
         fetchBackend: (url, opts) => this.fetchBackend(url, opts),
-        pinTracksFromInstructions: async (insts, procs, isCurrent) => {
-          await this.pinTracksFromInstructions(insts, procs, isCurrent);
-        },
-        setDetectedScenes: (scenes) => {
-          this.state.detectedScenes = scenes;
-        },
-        debug: DEBUG_AI_PANEL,
       };
       this.storyController = new StoryController(ctx);
     }
@@ -12292,7 +12418,11 @@ Click ⚙️ to configure backend connection.`,
    */
   private async handleStoryPreview() {
     const traceId = this.state.backendTraceId;
-    if (!traceId) return;
+    const generation = this.storyGeneration;
+    const runId = this.state.agentRunId;
+    const isCurrent = () => generation === this.storyGeneration && traceId === this.state.backendTraceId &&
+      runId === this.state.agentRunId && !this.state.storyState.traceId;
+    if (!traceId || !isCurrent()) return;
     if (this.state.storyState.status === 'previewing') return; // dedupe
 
     this.state.storyState.status = 'previewing';
@@ -12304,7 +12434,7 @@ Click ⚙️ to configure backend connection.`,
     try {
       const ctrl = this.getOrCreateStoryController();
       const preview = await ctrl.preview(traceId);
-      if (ctrl.isDisposed()) return;
+      if (ctrl.isDisposed() || !isCurrent()) return;
       this.state.storyState.preview = preview;
 
       if (preview.cached) {
@@ -12313,7 +12443,7 @@ Click ⚙️ to configure backend connection.`,
         m.redraw();
         try {
           const report = await ctrl.loadReport(preview.cached.reportId);
-          if (ctrl.isDisposed()) return;
+          if (ctrl.isDisposed() || !isCurrent()) return;
           this.state.storyState.cachedReport = report;
           this.state.storyState.status = 'completed';
 
@@ -12321,7 +12451,7 @@ Click ⚙️ to configure backend connection.`,
           // timeline looks the same as a fresh run.
           this.replayOverlaysFromReport(
             report,
-            () => !ctrl.isDisposed(),
+            () => !ctrl.isDisposed() && isCurrent(),
           );
 
           // Sync detected scenes for the navigation bar.
@@ -12338,6 +12468,7 @@ Click ⚙️ to configure backend connection.`,
             );
           }
         } catch (loadErr: any) {
+          if (!isCurrent()) return;
           if (loadErr instanceof StoryControllerInvalidatedError) throw loadErr;
           // Cached report failed to load (expired between preview and load?).
           // Degrade to cold path so the user can still run fresh.
@@ -12351,6 +12482,7 @@ Click ⚙️ to configure backend connection.`,
         this.state.storyState.status = 'preview_cold';
       }
     } catch (err: any) {
+      if (!isCurrent()) return;
       if (err instanceof StoryControllerInvalidatedError) return;
       this.state.storyState.status = 'failed';
       this.state.storyState.lastError =
@@ -12360,108 +12492,133 @@ Click ⚙️ to configure backend connection.`,
   }
 
   /**
-   * User confirmed the cold-path estimate — start the full pipeline.
-   * Pass forceRefresh=true to bypass the backend cache (used by "重新分析").
+   * One-click shared Agent run. Only explicit rerun replaces a completed Story.
    */
-  private async handleStoryConfirm(opts?: {forceRefresh?: boolean}) {
+  private handleStoryConfirm(opts?: {forceRefresh?: boolean}): Promise<void> {
+    if (this.storyStartFlight) return this.storyStartFlight;
+    const traceId = this.state.backendTraceId;
+    if (!traceId) return Promise.resolve();
     if (this.isAiDisabled()) {
       this.state.storyState.status = 'failed';
       this.state.storyState.lastError = this.aiDisabledReason();
-      this.addAiDisabledMessage(uiText('场景还原', 'Scene Story'));
       m.redraw();
-      return;
+      return Promise.resolve();
     }
-
-    this.state.storyState.status = 'running';
-    this.state.storyState.lastError = null;
+    if (this.state.storyState.traceId === traceId &&
+        this.state.storyState.status !== 'idle' && !opts?.forceRefresh) return Promise.resolve();
+    if (this.state.isLoading) return Promise.resolve();
+    const generation = ++this.storyGeneration;
+    const isCurrent = () => generation === this.storyGeneration && this.state.backendTraceId === traceId;
+    const request = this.analysisRequestCoordinator.begin();
+    this.activeAgentRequest = request;
+    const ctrl = this.getOrCreateStoryController();
+    const providerId = this.serverStatus.activeProvider?.id;
+    this.state.storyState = {...createStoryPanelState(), traceId, status: 'running'};
+    this.state.detectedScenes = [];
+    if (this.trace) cleanupOverlayTracks(this.trace, 'scene_canonical');
+    this.setLoadingState(true);
+    this.state.completionHandled = false;
+    this.state.displayedSkillProgress.clear();
+    this.resetStreamingFlow();
+    this.resetStreamingAnswer();
     m.redraw();
-
-    try {
-      const ctrl = this.getOrCreateStoryController();
-      await ctrl.start({forceRefresh: opts?.forceRefresh});
-      if (ctrl.isDisposed()) return;
-      this.state.storyState.status = 'completed';
-    } catch (err: any) {
-      if (err instanceof StoryControllerInvalidatedError) return;
-      this.state.storyState.status = 'failed';
-      this.state.storyState.lastError =
-        err?.message ?? uiText('场景还原失败', 'Scene reconstruction failed');
-    }
-    m.redraw();
+    const flight = (async () => {
+      try {
+        const receipt = await ctrl.start({providerId, forceRefresh: opts?.forceRefresh});
+        if (!isCurrent() || ctrl.isDisposed() || this.analysisRequestCoordinator.disposition(request) !== 'active') {
+          await ctrl.cancel().catch(() => {});
+          return;
+        }
+        this.state.storyState = {...this.state.storyState, ...receipt, status: 'running', lastError: receipt.cancellationError ?? null};
+        this.state.agentSessionId = receipt.sessionId;
+        this.state.agentRunId = receipt.runId;
+        this.analysisRequestCoordinator.finish(request);
+        this.saveCurrentSession();
+        await this.listenToAgentSSE(receipt.sessionId);
+      } catch (error) {
+        if (!isCurrent() || ctrl.isDisposed()) return;
+        if (error instanceof StoryControllerCancelledError) {
+          this.state.storyState.status = 'cancelled';
+          this.state.storyState.timelineTerminal = true;
+          this.consumeRedirectIntent();
+        } else if (!(error instanceof StoryControllerInvalidatedError)) {
+          this.state.storyState.status = 'failed';
+          this.state.storyState.lastError = error instanceof Error ? error.message : String(error);
+        }
+      } finally {
+        if (this.activeAgentRequest === request) this.activeAgentRequest = undefined;
+        this.analysisRequestCoordinator.finish(request);
+        if (isCurrent()) {
+          this.storyStartFlight = null;
+          if (this.state.storyState.status !== 'running') this.setLoadingState(false);
+          m.redraw();
+        }
+      }
+    })();
+    this.storyStartFlight = flight;
+    return flight;
   }
 
   /**
    * Cancel an in-flight pipeline run.
    */
-  private async handleStoryCancel() {
-    if (
-      this.activeAgentRequest &&
-      this.analysisRequestCoordinator.disposition(this.activeAgentRequest) !== 'stale'
-    ) {
-      await this.cancelAnalysis();
-      return;
-    }
-    const analysisId = this.state.storyState.analysisId;
-    if (!analysisId) return;
-    if (analysisId === this.state.agentSessionId) {
-      if (!this.state.agentRunId) {
-        this.addMessage({
-          id: this.generateId(),
-          role: 'assistant',
-          content: uiText(
-            '停止分析失败：当前分析缺少运行标识，请重试。',
-            'Failed to stop the analysis because its run identifier is missing. Try again.',
-          ),
-          timestamp: Date.now(),
-        });
+  private async handleStoryCancel(): Promise<void> {
+    const controller = this.storyController;
+    if (!this.state.storyState.traceId || !controller) {
+      if ((this.activeAgentRequest && this.analysisRequestCoordinator.disposition(this.activeAgentRequest) !== 'stale') ||
+          (this.state.storyState.analysisId === this.state.agentSessionId && this.state.agentRunId)) {
+        await this.cancelAnalysis();
+      } else {
+        this.state.storyState.lastError = uiText('无法停止：历史场景缺少匹配的运行标识。',
+          'Cannot stop: this historical scene is missing its matching run identity.');
         m.redraw();
-        return;
       }
-      await this.cancelAnalysis();
       return;
     }
+    const generation = this.storyGeneration;
+    const traceId = this.state.backendTraceId;
+    const runId = this.state.storyState.runId;
+    const sessionId = this.state.storyState.sessionId;
+    const isCurrent = () => generation === this.storyGeneration && traceId === this.state.backendTraceId &&
+      runId === this.state.storyState.runId && sessionId === this.state.storyState.sessionId &&
+      (!runId || runId === this.state.agentRunId);
+    this.state.loadingPhase = uiText('正在停止分析…', 'Stopping analysis…');
     try {
-      const response = await this.fetchBackend(
-        buildAssistantApiV1Url(
-          this.state.settings.backendUrl,
-          `/scene-reconstruct/${analysisId}/cancel`,
-        ),
-        {method: 'POST'},
-      );
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      const result = await controller.cancel();
+      if (!isCurrent()) return;
+      if (result?.status === 'cancelled') {
+        this.state.storyState.status = 'cancelled';
+        this.cancelSSEConnection();
+        this.setLoadingState(false);
+        this.consumeRedirectIntent();
+      } else if (result && this.state.storyState.sessionId) {
+        if (['completed', 'failed', 'quota_exceeded'].includes(result.status)) this.consumeRedirectIntent();
+        await this.listenToAgentSSE(this.state.storyState.sessionId, true);
       }
-    } catch (e) {
-      console.warn('[AIPanel] Cancel request failed:', e);
-      const detail = e instanceof Error ? e.message : String(e);
-      this.addMessage({
-        id: this.generateId(),
-        role: 'assistant',
-        content: uiText(
-          `停止分析失败：${detail}。请重试。`,
-          `Failed to stop analysis: ${detail}. Please retry.`,
-        ),
-        timestamp: Date.now(),
-      });
-      m.redraw();
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.state.storyState.lastError = error instanceof Error ? error.message : String(error);
     }
+    m.redraw();
   }
 
   /**
    * Handle /scene command — delegates to StoryController and mirrors the
    * lifecycle into storyState so the Story view can show running/completed.
    *
-   * StoryController.start() catches its own errors and pushes them to the
-   * chat message stream, so from this wrapper's perspective the call always
-   * resolves. A future iteration can thread a status callback through the
-   * controller context if we need richer progress reporting.
+   * The request receipt binds the same ordinary analysis stream used by Chat.
    */
   private async handleSceneReconstructCommand() {
-    // Open the Story drawer and trigger preview. Results render in the Story
-    // drawer while Chat keeps showing the ongoing conversation.
+    // Open and start once; reopening attaches to the existing run/result.
     this.state.showStorySidebar = true;
     this.state.showSessionSidebar = false;
-    void this.handleStoryPreview();
+    if (this.state.storyState.traceId !== this.state.backendTraceId) {
+      this.storyController?.dispose();
+      this.storyController = null;
+      this.state.storyState = createStoryPanelState();
+    }
+    void this.handleStoryConfirm();
+    m.redraw();
   }
 
   private renderStorySidebar(): m.Children {
@@ -12493,10 +12650,6 @@ Click ⚙️ to configure backend connection.`,
     const hasTrace = !!this.state.backendTraceId;
     const s = this.state.storyState;
 
-    // Auto-trigger preview when the Story tab opens with a loaded trace.
-    if (hasTrace && s.status === 'idle') {
-      setTimeout(() => this.handleStoryPreview(), 0);
-    }
 
     return m('div.ai-story-body', [
       m(
@@ -12508,8 +12661,8 @@ Click ⚙️ to configure backend connection.`,
         'p',
         {style: 'color: var(--chat-text-secondary); margin: 0 0 16px 0;'},
         uiText(
-          '从 Trace 中自动检测用户操作场景并分析性能问题。',
-          'Detect user-interaction scenes in the trace and analyze performance problems.',
+          '根据 Trace 证据还原每段用户操作、设备状态和应用响应；证据不足的部分保留为未知。',
+          'Reconstruct user actions, device states, and application responses for each interval from trace evidence; keep unsupported details unknown.',
         ),
       ),
 
@@ -12597,6 +12750,7 @@ Click ⚙️ to configure backend connection.`,
 
       s.status === 'running'
         ? m('div.ai-story-card.ai-story-card--info', [
+            s.lastError ? m('p', s.lastError) : null,
             m(
               'div',
               {style: 'margin-bottom: 8px;'},
@@ -12644,7 +12798,7 @@ Click ⚙️ to configure backend connection.`,
           ])
         : null,
 
-      s.status === 'completed' ? this.renderStoryCompleted() : null,
+      s.timeline || ['completed', 'partial', 'cancelled'].includes(s.status) ? this.renderStoryCompleted() : null,
 
       s.status === 'failed'
         ? m('div.ai-story-card.ai-story-card--error', [
@@ -12675,7 +12829,55 @@ Click ⚙️ to configure backend connection.`,
    * Render the completed state — either a cached report inline or a
    * "done, check Chat" banner.
    */
+  private renderCanonicalStory(): m.Children {
+    const story = this.state.storyState;
+    const timeline = story.timeline!;
+    const title = story.status === 'cancelled' ? uiText('已取消，保留已有结果', 'Cancelled; available results retained')
+      : story.status === 'failed' ? uiText('分析失败，保留已有结果', 'Analysis failed; available results retained')
+      : story.status === 'running' ? uiText('正在还原场景', 'Reconstructing scenes')
+      : uiText('部分场景还原', 'Partial scene reconstruction');
+    return m('section.ai-story-scenes-table', [
+      m('h3', title),
+      m('p', uiText('叙述尚未核验；事实检查通过不代表整段解释正确。',
+        'Narratives remain unverified; passing factual checks does not certify an interpretation.')),
+      m('small', `Revision ${timeline.revision}`),
+      m('table', [
+        m('thead', m('tr', [uiText('时间', 'Time'), uiText('用户操作', 'User action'),
+          uiText('设备状态', 'Device state'), uiText('应用响应', 'App response'), uiText('依据', 'Evidence')]
+          .map(label => m('th', label)))),
+        m('tbody', timeline.segments.map(item => {
+          const segment = item.segment;
+          const offsetSec = Number(BigInt(segment.startNs) - BigInt(this.trace?.traceInfo.start ?? 0n)) / 1e9;
+          const durationMs = Number(BigInt(segment.endNs) - BigInt(segment.startNs)) / 1e6;
+          return m('tr', {key: segment.id}, [
+            m('td', m('button.ai-story-btn-ghost-accent', {onclick: () => this.trace?.scrollTo({time: {
+              start: Time.fromRaw(BigInt(segment.startNs)), end: Time.fromRaw(BigInt(segment.endNs)), behavior: 'focus',
+            }})}, `${offsetSec.toFixed(3)}s · ${durationMs.toFixed(2)}ms`)),
+            m('td', segment.userAction), m('td', segment.deviceState), m('td', segment.appResponse),
+            m('td', m('details', [m('summary', item.checks.some(check => check.status === 'contradicted')
+              ? uiText('有矛盾', 'Contradiction') : uiText('未核验', 'Unverified')),
+              m('div', segment.object.key),
+              ...item.checks.map(check => m('div', `${check.predicate}: ${check.status}`)),
+              ...segment.evidenceRefs.map(ref => m('div',
+                `${ref.evidenceRefId ?? ref.artifactId ?? ref.sourceToolCallId} · row ${ref.rowIndex}${ref.column ? ` · ${ref.column}` : ''}`)),
+              ...item.diagnostics.map(diagnostic => m('div', diagnostic.detail || diagnostic.code)),
+            ])),
+          ]);
+        })),
+      ]),
+      ...timeline.unresolved.map(item => m('p', item)),
+      m('p', uiText('采集完整性未知。', 'Capture completeness is unknown.')),
+      story.reportUrl ? m('a', {href: story.reportUrl, target: '_blank', rel: 'noopener noreferrer'}, uiText('查看报告', 'Open report')) : null,
+      m('button.ai-story-btn-ghost-accent', {disabled: story.status === 'running',
+        onclick: () => this.handleStoryConfirm({forceRefresh: true})}, uiText('重新分析', 'Analyze again')),
+    ]);
+  }
+
   private renderStoryCompleted(): m.Children {
+    if (this.state.storyState.timeline) return this.renderCanonicalStory();
+    if (this.state.storyState.traceId) return m('p', this.state.storyState.status === 'cancelled'
+      ? uiText('已取消，尚无可显示的场景。', 'Cancelled; no scene timeline is available yet.')
+      : uiText('分析已结束，未提交有效场景时间线；还原不完整。', 'Analysis ended without a valid scene timeline; reconstruction is incomplete.'));
     const report = this.state.storyState.cachedReport;
     const scenes: any[] = report?.displayedScenes ?? [];
 
@@ -12815,6 +13017,7 @@ Click ⚙️ to configure backend connection.`,
     report: any,
     isCurrent: () => boolean = () => true,
   ): void {
+    if (this.state.storyState.timeline || report?.sceneTimeline) return;
     if (!Array.isArray(report?.cachedDataEnvelopes)) return;
     const trace = this.trace;
     if (!trace) return;
@@ -12872,6 +13075,11 @@ Click ⚙️ to configure backend connection.`,
    * Called automatically when trace loads and manually on refresh
    */
   private async detectScenesQuick() {
+    if (this.state.storyState.traceId || this.state.storyState.timeline) return;
+    const generation = this.storyGeneration;
+    const traceId = this.state.backendTraceId;
+    const isCurrent = () => generation === this.storyGeneration && traceId === this.state.backendTraceId &&
+      !this.state.storyState.traceId && !this.state.storyState.timeline;
     if (!this.state.backendTraceId) {
       if (DEBUG_AI_PANEL) {
         console.log(
@@ -12924,6 +13132,7 @@ Click ⚙️ to configure backend connection.`,
         throw new Error(data.error || 'Quick scene detection failed');
       }
 
+      if (!isCurrent()) return;
       this.state.detectedScenes = data.scenes || [];
       if (DEBUG_AI_PANEL) {
         console.log(
@@ -12933,11 +13142,13 @@ Click ⚙️ to configure backend connection.`,
         );
       }
     } catch (error: any) {
+      if (!isCurrent()) return;
       console.warn('[AIPanel] Quick scene detection failed:', error.message);
       this.state.scenesError = error.message;
       this.state.detectedScenes = [];
     }
 
+    if (!isCurrent()) return;
     this.state.scenesLoading = false;
     m.redraw();
   }

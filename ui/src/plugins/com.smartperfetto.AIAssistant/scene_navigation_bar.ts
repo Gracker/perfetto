@@ -26,6 +26,7 @@ import {uiText} from './ui_language';
  * Detected scene from trace analysis
  */
 export interface DetectedScene {
+  id?: string;
   type: string;
   startTs: string;
   endTs: string;
@@ -92,9 +93,15 @@ const PERF_THRESHOLDS: Record<string, { good: number; acceptable: number }> = {
  */
 export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAttrs> {
   private currentIndex: number = -1;
+  private currentId: string | undefined;
 
   view(vnode: m.Vnode<SceneNavigationBarAttrs>): m.Children {
     const {scenes, trace, isLoading, onSceneClick, onRefresh} = vnode.attrs;
+    if (this.currentId) {
+      const retainedIndex = scenes.findIndex(scene => scene.id === this.currentId);
+      this.currentIndex = retainedIndex >= 0 ? retainedIndex : 0;
+    }
+    this.currentIndex = Math.min(this.currentIndex, Math.max(0, scenes.length - 1));
 
     return m('div.scene-nav-bar', [
       m('div.scene-nav-header', [
@@ -150,7 +157,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
     trace: Trace,
     onSceneClick?: (scene: DetectedScene, index: number) => void
   ): m.Children {
-    const displayName = getSceneDisplayName(scene.type, scene.label);
+    const displayName = scene.metadata?.canonical ? scene.label || uiText('场景观察', 'Scene observation') : getSceneDisplayName(scene.type, scene.label);
     const icon = SCENE_ICONS[scene.type] || '📍';
     const rating = this.getPerformanceRating(scene);
     const isActive = index === this.currentIndex;
@@ -161,7 +168,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
       : `${scene.durationMs}ms`;
 
     return m('button.scene-chip', {
-      key: `scene-${index}`,
+      key: scene.id ?? `scene-${index}`,
       class: isActive ? 'active' : '',
       onclick: () => this.jumpTo(index, scenes, trace, onSceneClick),
       title: this.getSceneTooltip(scene),
@@ -174,6 +181,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
   }
 
   private getPerformanceRating(scene: DetectedScene): string {
+    if (scene.metadata?.canonical) return scene.metadata.contradicted ? '⚠' : '⚪';
     // For scroll, check FPS instead of duration
     if ((scene.type === 'scroll' || scene.type === 'inertial_scroll') && scene.metadata?.averageFps !== undefined) {
       const fps = scene.metadata.averageFps;
@@ -193,7 +201,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
   }
 
   private getSceneTooltip(scene: DetectedScene): string {
-    const displayName = getSceneDisplayName(scene.type, scene.label);
+    const displayName = scene.metadata?.canonical ? scene.label || uiText('场景观察', 'Scene observation') : getSceneDisplayName(scene.type, scene.label);
     const parts = [displayName];
 
     if (scene.appPackage) {
@@ -201,6 +209,11 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
     }
 
     parts.push(uiText(`时长: ${scene.durationMs}ms`, `Duration: ${scene.durationMs}ms`));
+    if (scene.metadata?.canonical) {
+      parts.push(String(scene.metadata.deviceState), String(scene.metadata.appResponse),
+        uiText('叙述未核验', 'Narrative unverified'));
+      return parts.join('\n');
+    }
 
     if ((scene.type === 'scroll' || scene.type === 'inertial_scroll') && scene.metadata?.averageFps !== undefined) {
       parts.push(`FPS: ${scene.metadata.averageFps}`);
@@ -224,6 +237,7 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
 
     this.currentIndex = index;
     const scene = scenes[index];
+    this.currentId = scene.id;
 
     // Navigate to scene time range
     try {

@@ -565,6 +565,8 @@ function readExpandableData(
  * Contains references to state and methods needed for event processing.
  */
 export interface SSEHandlerContext {
+  /** Canonical scene snapshots; raw data envelopes are never final stories. */
+  onSceneTimelineReceived?: (timeline: unknown, terminal: boolean) => void;
   /** Add a message to the conversation */
   addMessage: (msg: Message) => void;
   /** Update an existing message */
@@ -4599,6 +4601,7 @@ export function handleAnalysisCompletedEvent(
   const eventRecord = asRecord(data);
   const architecture = readStringField(eventRecord, 'architecture');
   const rawPayload = asRecord(eventRecord.data);
+  if (rawPayload.sceneTimeline) ctx.onSceneTimelineReceived?.(rawPayload.sceneTimeline, true);
   const payload = toAnalysisCompletedPayload(eventRecord.data);
   const sourceEnrichmentPending = payload?.sourceEnrichmentPending === true;
   const rawConclusionContract = rawPayload.conclusionContract;
@@ -6428,6 +6431,10 @@ function handleSSEEventInner(
 
     case 'skill_layered_result':
       return handleSkillLayeredResultEvent(eventData, ctx);
+
+    case 'scene_timeline_updated':
+      ctx.onSceneTimelineReceived?.(asRecord(eventData.data).sceneTimeline ?? eventData.data, false);
+      return {};
 
     case 'analysis_completed':
       return handleAnalysisCompletedEvent(eventData, ctx);

@@ -2,29 +2,11 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
-/**
- * Story Controller — orchestrates the scene reconstruction command for the
- * AI Assistant plugin.
- *
- * Transport note: uses fetch + a manual SSE parser so the backend API key
- * can travel in the `x-api-key` header. An EventSource-based implementation
- * would be forced to put the key in a query parameter, which the backend
- * auth middleware does not honor.
- */
+/** Scene request lifecycle. AIPanel owns the shared Agent SSE transport and UI projection. */
 
-import m from 'mithril';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
-import {
-  SCENE_PIN_MAPPING,
-  type ScenePinInstruction,
-  formatSceneTimestamp,
-  getSceneDisplayName,
-  getSceneResponseStatusLabel,
-  localizeScenePinInstruction,
-} from './scene_constants';
 import {uiOutputLanguage, uiText, uiTextForLanguage} from './ui_language';
-import {STEP_TO_OVERLAY, createOverlayTrack} from './track_overlay';
-import type {Message, StoryPreviewResult} from './types';
+import type {StoryPreviewResult} from './types';
 
 /**
  * StoryController context — injected by AIPanel.
@@ -32,32 +14,9 @@ import type {Message, StoryPreviewResult} from './types';
  * 所有访问 AIPanel 状态或方法的入口都通过这个接口,让 controller 不直接耦合 AIPanel 类。
  */
 export interface StoryControllerContext {
-  // ── State accessors ──
   getBackendTraceId(): string | null;
   getBackendUrl(): string;
-  getTrace(): any;
-
-  // ── Message management (delegates to AIPanel methods) ──
-  addMessage(msg: Message): void;
-  updateMessage(messageId: string, updates: Partial<Message>): void;
-  generateId(): string;
-  setLoadingState(loading: boolean): void;
-
-  // ── Network helper (delegates to AIPanel.fetchBackend — handles API key header) ──
   fetchBackend(url: string, opts?: RequestInit): Promise<Response>;
-
-  // ── Track pinning (delegates to AIPanel.pinTracksFromInstructions) ──
-  pinTracksFromInstructions(
-    instructions: ScenePinInstruction[],
-    activeProcesses: Array<{processName: string; frameCount: number}>,
-    isCurrent: () => boolean,
-  ): Promise<void>;
-
-  // ── Scene state sync (writes AIPanel.state.detectedScenes) ──
-  setDetectedScenes(scenes: any[]): void;
-
-  /** Optional debug flag — when true, verbose console.log() messages are emitted */
-  debug?: boolean;
 }
 
 export class StoryControllerInvalidatedError extends Error {
@@ -111,20 +70,29 @@ export function buildSceneProgressContent(input: {
   );
 }
 
-/**
- * Scene Reconstruction Controller
- *
- * 负责 /scene 命令的完整生命周期:
- *  1. 发起 POST /scene-reconstruct
- *  2. 打开 SSE 连接读取增量事件
- *  3. 渲染场景列表到聊天消息
- *  4. 自动 pin 相关 tracks 到 workspace
- */
+export class StoryControllerCancelledError extends Error {
+  constructor() { super('Scene analysis cancelled before stream attachment'); }
+}
+
+export interface SceneRunReceipt {
+  sessionId: string;
+  analysisId: string;
+  runId: string;
+  traceId: string;
+  cancellationError?: string;
+}
+
 export class StoryController {
   private ctx: StoryControllerContext;
   private generation = 0;
   private disposed = false;
   private activeControllers = new Set<AbortController>();
+  private startFlight: Promise<SceneRunReceipt> | null = null;
+  private receipt: SceneRunReceipt | null = null;
+  private runActive = false;
+  private pendingCancel = false;
+  private runBackendUrl = '';
+  private cancelFlight: Promise<{status: string} | undefined> | null = null;
 
   constructor(ctx: StoryControllerContext) {
     this.ctx = ctx;
@@ -132,6 +100,8 @@ export class StoryController {
 
   dispose(): void {
     if (this.disposed) return;
+    this.pendingCancel = true;
+    if (this.receipt && this.runActive) void this.cancel().catch(() => {});
     this.disposed = true;
     this.generation += 1;
     for (const controller of this.activeControllers) controller.abort();
@@ -161,10 +131,6 @@ export class StoryController {
 
   private isCurrent(generation: number): boolean {
     return !this.disposed && generation === this.generation;
-  }
-
-  private debugLog(...args: any[]): void {
-    if (this.ctx.debug) console.log('[StoryController]', ...args);
   }
 
   /**
@@ -262,699 +228,93 @@ export class StoryController {
     }
   }
 
-  /**
-   * Start scene reconstruction.
-   * Equivalent to the old AIPanel.handleSceneReconstructCommand().
-   */
-  async start(opts?: {forceRefresh?: boolean}): Promise<void> {
-    const {generation, controller} = this.beginOperation();
-    const backendTraceId = this.ctx.getBackendTraceId();
-    if (!backendTraceId) {
-      this.ctx.addMessage({
-        id: this.ctx.generateId(),
-        role: 'assistant',
-        content: uiText(
-          '⚠️ **无法执行场景还原**\n\n请先确保 Trace 已上传到后端。',
-          '⚠️ **Cannot reconstruct scenes**\n\nMake sure the trace has been uploaded to the backend.',
-        ),
-        timestamp: Date.now(),
-      });
-      this.finishOperation(controller);
-      return;
-    }
-
-    this.ctx.setLoadingState(true);
-    m.redraw();
-
-    const progressMessageId = this.ctx.generateId();
-    this.ctx.addMessage({
-      id: progressMessageId,
-      role: 'assistant',
-      content: uiText(
-        '🎬 **场景还原中...**\n\n正在回放 Trace 中的用户操作与设备响应...',
-        '🎬 **Reconstructing scenes...**\n\nReplaying user interactions and device responses from the trace...',
-      ),
-      timestamp: Date.now(),
+  /** Reserve synchronously. Hiding/reopening the drawer attaches to this same run. */
+  start(opts: {providerId?: string; forceRefresh?: boolean} = {}): Promise<SceneRunReceipt> {
+    if (this.disposed) return Promise.reject(new StoryControllerInvalidatedError());
+    if (this.startFlight) return this.startFlight;
+    if (this.receipt && (this.runActive || !opts.forceRefresh)) return Promise.resolve(this.receipt);
+    const traceId = this.ctx.getBackendTraceId();
+    if (!traceId) return Promise.reject(new Error('Trace is not available in the backend'));
+    const generation = this.generation;
+    this.pendingCancel = false;
+    this.runActive = true;
+    this.receipt = null;
+    this.runBackendUrl = this.ctx.getBackendUrl();
+    // Do not abort an admitted POST before its receipt arrives: cancellation
+    // must address the exact run even after this panel switches trace/disposes.
+    this.startFlight = this.startRequest(traceId, generation, opts).finally(() => {
+      this.startFlight = null;
     });
+    return this.startFlight;
+  }
 
-    this.debugLog('Scene reconstruction request with traceId:', backendTraceId);
-
+  private async startRequest(
+    traceId: string,
+    generation: number,
+    opts: {providerId?: string; forceRefresh?: boolean},
+  ): Promise<SceneRunReceipt> {
     try {
       const response = await this.ctx.fetchBackend(
-        buildAssistantApiV1Url(this.ctx.getBackendUrl(), '/scene-reconstruct'),
-        {
+        buildAssistantApiV1Url(this.runBackendUrl, '/scene-reconstruct'), {
           method: 'POST',
-          signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept-Language': uiOutputLanguage(),
-          },
-          body: JSON.stringify({
-            traceId: backendTraceId,
-            options: {
-              deepAnalysis: false,
-              generateTracks: true,
-              forceRefresh: opts?.forceRefresh ?? false,
-              outputLanguage: uiOutputLanguage(),
-            },
-          }),
-        },
-      );
-      this.assertCurrent(generation);
-
-      if (!response.ok) {
-        try {
-          const errorData = await response.json();
-          this.assertCurrent(generation);
-          console.error(
-            '[StoryController] Scene reconstruction error response:',
-            errorData,
-          );
-          throw new Error(
-            errorData.error ||
-              `HTTP ${response.status}: ${response.statusText}`,
-          );
-        } catch (parseErr) {
-          if (parseErr instanceof StoryControllerInvalidatedError) throw parseErr;
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-      }
-
+          headers: {'Content-Type': 'application/json', 'Accept-Language': uiOutputLanguage()},
+          body: JSON.stringify({traceId, providerId: opts.providerId,
+            options: {forceRefresh: opts.forceRefresh ?? false, outputLanguage: uiOutputLanguage()}}),
+        });
       const data = await response.json();
-      this.assertCurrent(generation);
-      if (!data.success || !data.analysisId) {
-        throw new Error(
-          data.error ||
-            uiText('启动场景还原失败', 'Failed to start scene reconstruction'),
-        );
+      if (!response.ok || data.success === false) throw new Error(data.error || `HTTP ${response.status}`);
+      const sessionId = typeof data.sessionId === 'string' ? data.sessionId : data.analysisId;
+      if (typeof sessionId !== 'string' || !sessionId || typeof data.runId !== 'string' || !data.runId) {
+        throw new Error('Scene analysis receipt is missing its session or run identity');
       }
-
-      const analysisId = data.analysisId;
-      this.debugLog(
-        'Scene reconstruction started with analysisId:',
-        analysisId,
-      );
-      await this.connectToSSE(
-        analysisId,
-        progressMessageId,
-        generation,
-        controller.signal,
-      );
-      this.assertCurrent(generation);
-      this.ctx.setLoadingState(false);
-      m.redraw();
-    } catch (error: any) {
-      if (!this.isCurrent(generation)) {
+      this.receipt = {sessionId, analysisId: sessionId, runId: data.runId, traceId};
+      if (!this.isCurrent(generation) || this.ctx.getBackendTraceId() !== traceId) {
+        await this.cancel().catch(() => {});
         throw new StoryControllerInvalidatedError();
       }
-      console.error('[StoryController] Scene reconstruction error:', error);
-      this.ctx.updateMessage(progressMessageId, {
-        content: uiText(
-          `❌ **场景还原失败**\n\n${error.message || '未知错误'}`,
-          `❌ **Scene reconstruction failed**\n\n${error.message || 'Unknown error'}`,
-        ),
-      });
-      this.ctx.setLoadingState(false);
-      m.redraw();
+      if (this.pendingCancel) {
+        try {
+          const result = await this.cancel();
+          if (result?.status === 'cancelled') throw new StoryControllerCancelledError();
+        } catch (error) {
+          if (error instanceof StoryControllerCancelledError) throw error;
+          // A rejected stop leaves a live run. Attach to its stream instead of
+          // dropping its receipt and presenting a failed-start state.
+          this.receipt.cancellationError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      return this.receipt;
+    } catch (error) {
+      if (!this.receipt) this.runActive = false;
       throw error;
-    } finally {
-      this.finishOperation(controller);
     }
   }
 
-  /**
-   * Connect to the backend scene-reconstruct SSE stream. See the file header
-   * for the reason this uses fetch + manual SSE parsing rather than EventSource.
-   */
-  private async connectToSSE(
-    analysisId: string,
-    progressMessageId: string,
-    generation: number,
-    operationSignal: AbortSignal,
-  ): Promise<void> {
-    const sceneSseUrl = buildAssistantApiV1Url(
-      this.ctx.getBackendUrl(),
-      `/scene-reconstruct/${analysisId}/stream`,
-    );
-
-    let scenes: any[] = [];
-    let trackEvents: any[] = [];
-    let narrative = '';
-    let findings: any[] = [];
-
-    const unwrapEventData = (raw: any): any => {
-      if (!raw || typeof raw !== 'object') return {};
-      // Agent-driven backend wraps payload as: { type, data, timestamp }.
-      if (raw.data && typeof raw.data === 'object') return raw.data;
-      return raw;
-    };
-
-    const applyScenePayload = (payload: any) => {
-      if (!payload || typeof payload !== 'object') return;
-      if (Array.isArray(payload.scenes)) scenes = payload.scenes;
-      if (Array.isArray(payload.trackEvents)) trackEvents = payload.trackEvents;
-      if (Array.isArray(payload.tracks) && trackEvents.length === 0)
-        {trackEvents = payload.tracks;}
-      if (typeof payload.narrative === 'string' && payload.narrative)
-        {narrative = payload.narrative;}
-      if (
-        typeof payload.conclusion === 'string' &&
-        payload.conclusion &&
-        !narrative
-      )
-        {narrative = payload.conclusion;}
-      if (Array.isArray(payload.findings)) findings = payload.findings;
-    };
-
-    // Use AbortController for timeout (5 minutes)
-    const abortController = new AbortController();
-    const abortForOperation = () => abortController.abort();
-    operationSignal.addEventListener('abort', abortForOperation, {once: true});
-    const timeoutId = setTimeout(
-      () => {
-        console.warn('[StoryController] Scene SSE timeout');
-        abortController.abort();
-      },
-      5 * 60 * 1000,
-    );
-
-    try {
-      // fetchBackend sends API key via x-api-key header (no URL exposure)
-      const response = await this.ctx.fetchBackend(sceneSseUrl, {
-        signal: abortController.signal,
-      });
-      this.assertCurrent(generation);
-
-      if (!response.ok) {
-        throw new Error(`Scene SSE connection failed: ${response.statusText}`);
+  /** Pending cancellation survives the POST and is sent once the receipt exists. */
+  cancel(): Promise<{status: string} | undefined> {
+    this.pendingCancel = true;
+    if (this.cancelFlight) return this.cancelFlight;
+    const receipt = this.receipt;
+    if (!receipt || !this.runActive) return Promise.resolve(undefined);
+    this.cancelFlight = this.ctx.fetchBackend(buildAssistantApiV1Url(this.runBackendUrl,
+      `/scene-reconstruct/${encodeURIComponent(receipt.sessionId)}/cancel`), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({runId: receipt.runId}),
+    }).then(async response => {
+      const result = await response.json();
+      const terminalConflict = response.status === 409 &&
+        ['RUN_NOT_CANCELLABLE', 'RUN_NOT_ACTIVE'].includes(result.code);
+      if ((!response.ok && !terminalConflict) || result.runId !== receipt.runId ||
+          !['cancelled', 'completed', 'failed', 'quota_exceeded'].includes(result.status)) {
+        throw new Error(result.error || 'Cancellation did not return the matching run terminal state');
       }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body for scene SSE');
-      }
-
-      this.debugLog('Scene SSE connected');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let currentEventType = '';
-
-      while (true) {
-        if (abortController.signal.aborted) break;
-
-        const {done, value} = await reader.read();
-        this.assertCurrent(generation);
-        if (done) {
-          this.debugLog('Scene SSE stream ended normally');
-          reader.releaseLock();
-          break;
-        }
-
-        buffer += decoder.decode(value, {stream: true});
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          if (line.startsWith(':')) continue; // Skip keep-alive comments
-
-          if (line.startsWith('event:')) {
-            currentEventType = line.replace('event:', '').trim();
-          } else if (line.startsWith('data:')) {
-            const dataStr = line.replace('data:', '').trim();
-            if (!dataStr) {
-              currentEventType = '';
-              continue;
-            }
-            try {
-              const rawData = JSON.parse(dataStr);
-              const eventType = currentEventType || rawData.type || '';
-
-              const isTerminal =
-                eventType === 'end' ||
-                eventType === 'error' ||
-                eventType === 'scene_story_report_ready';
-              console.log(
-                '[StoryController] Scene SSE event:',
-                eventType,
-                'terminal?',
-                isTerminal,
-              );
-
-              this.handleSSEEvent(
-                eventType,
-                rawData,
-                unwrapEventData,
-                applyScenePayload,
-                progressMessageId,
-                scenes,
-                findings,
-                trackEvents,
-                generation,
-              );
-
-              // Terminal events
-              if (isTerminal) {
-                reader.releaseLock();
-                clearTimeout(timeoutId);
-                if (eventType === 'error') {
-                  const errData = unwrapEventData(rawData);
-                  console.error(
-                    '[StoryController] Scene SSE error event:',
-                    errData,
-                  );
-                  // Backend sends {content: {message: "..."}} but legacy paths
-                  // use {error: "..."}. Check all variants.
-                  const errMsg =
-                    errData.message ||
-                    errData.error ||
-                    rawData.content?.message ||
-                    rawData.error ||
-                    'Scene reconstruction failed';
-                  throw new Error(errMsg);
-                }
-                // Terminal event ('end' or 'scene_story_report_ready') — render
-                // whatever scenes/narrative we've collected and tear down.
-                this.debugLog('Scene SSE: terminal event received:', eventType);
-                this.renderResult(
-                  progressMessageId,
-                  scenes,
-                  trackEvents,
-                  narrative,
-                  findings,
-                  generation,
-                );
-                await this.autoPinTracks(scenes, generation);
-                this.assertCurrent(generation);
-                this.ctx.setDetectedScenes(scenes);
-                m.redraw();
-                return;
-              }
-            } catch (e) {
-              // Re-throw everything except JSON parse failures (SyntaxError).
-              // The old check `e.message.includes('Scene reconstruction')`
-              // silently swallowed errors whose message didn't match that
-              // exact casing/wording (e.g. `scene_reconstruction skill
-              // failed: ...`), causing the reader to be used after release.
-              if (!(e instanceof SyntaxError)) throw e;
-              console.warn(
-                '[StoryController] Failed to parse scene SSE data:',
-                e,
-              );
-            }
-            currentEventType = '';
-          }
-        }
-      }
-
-      // Stream ended without explicit 'end' event - render what we have
-      this.renderResult(
-        progressMessageId,
-        scenes,
-        trackEvents,
-        narrative,
-        findings,
-        generation,
-      );
-      await this.autoPinTracks(scenes, generation);
-      this.assertCurrent(generation);
-      this.ctx.setDetectedScenes(scenes);
-      m.redraw();
-    } catch (e: any) {
-      if (!this.isCurrent(generation)) {
-        throw new StoryControllerInvalidatedError();
-      }
-      if (
-        abortController.signal.aborted &&
-        this.isCurrent(generation) &&
-        !e.message?.includes('Scene reconstruction')
-      ) {
-        throw new Error('Scene reconstruction timeout');
-      }
-      throw e;
-    } finally {
-      clearTimeout(timeoutId);
-      operationSignal.removeEventListener('abort', abortForOperation);
-    }
+      this.runActive = false;
+      return {status: result.status};
+    }).finally(() => { this.cancelFlight = null; });
+    return this.cancelFlight;
   }
 
-  /**
-   * Dispatch a single scene SSE event to the appropriate sub-handler.
-   * Extracted to keep connectToSSE() readable.
-   */
-  private handleSSEEvent(
-    eventType: string,
-    rawData: any,
-    unwrapEventData: (raw: any) => any,
-    applyScenePayload: (payload: any) => void,
-    progressMessageId: string,
-    scenes: any[],
-    findings: any[],
-    trackEvents: any[],
-    generation: number,
-  ): void {
-    this.assertCurrent(generation);
-    const data = unwrapEventData(rawData);
-
-    switch (eventType) {
-      case 'connected':
-        this.debugLog('Scene SSE: connected event received');
-        break;
-
-      case 'progress': {
-        const content = buildSceneProgressContent({
-          eventType: 'progress',
-          data,
-          rawData,
-          language: uiOutputLanguage(),
-        });
-        if (!content) break;
-        this.debugLog('Scene progress:', data.message ?? data.phase, data);
-        this.ctx.updateMessage(progressMessageId, {
-          content,
-        });
-        m.redraw();
-        break;
-      }
-
-      case 'phase_start':
-        this.debugLog('Scene phase start:', data);
-        this.ctx.updateMessage(progressMessageId, {
-          content: buildSceneProgressContent({
-            eventType: 'phase_start',
-            data,
-            rawData,
-            language: uiOutputLanguage(),
-          }),
-        });
-        m.redraw();
-        break;
-
-      case 'scene_detected':
-        this.debugLog('Scene detected:', data);
-        if (data.scene) {
-          scenes.push(data.scene);
-        }
-        this.ctx.updateMessage(progressMessageId, {
-          content: uiText(
-            `🎬 **场景还原中...**\n\n已检测到 ${scenes.length} 个场景...`,
-            `🎬 **Reconstructing scenes...**\n\nDetected ${scenes.length} scenes...`,
-          ),
-        });
-        m.redraw();
-        break;
-
-      case 'finding':
-        this.debugLog('Scene finding:', data);
-        if (data.finding) {
-          findings.push(data.finding);
-        }
-        break;
-
-      case 'track_events':
-        this.debugLog('Track events:', data);
-        if (Array.isArray(data.events)) {
-          trackEvents.length = 0;
-          trackEvents.push(...data.events);
-        } else if (Array.isArray(data.trackEvents)) {
-          trackEvents.length = 0;
-          trackEvents.push(...data.trackEvents);
-        }
-        break;
-
-      case 'track_data':
-        this.debugLog('Track data:', data);
-        if (Array.isArray(data.scenes)) {
-          scenes.length = 0;
-          scenes.push(...data.scenes);
-        }
-        if (Array.isArray(data.tracks)) {
-          trackEvents.length = 0;
-          trackEvents.push(...data.tracks);
-        }
-        if (Array.isArray(data.trackEvents)) {
-          trackEvents.length = 0;
-          trackEvents.push(...data.trackEvents);
-        }
-        break;
-
-      // DataEnvelope events — route to track overlay for state timeline lanes
-      case 'data': {
-        const envelopes = Array.isArray(rawData.envelope)
-          ? rawData.envelope
-          : rawData.envelope
-            ? [rawData.envelope]
-            : [];
-        const trace = this.ctx.getTrace();
-        for (const envelope of envelopes) {
-          if (
-            !envelope?.meta?.stepId ||
-            !envelope?.data?.columns ||
-            !envelope?.data?.rows
-          )
-            {continue;}
-          const overlayId = STEP_TO_OVERLAY.get(envelope.meta.stepId);
-          if (overlayId && trace) {
-            this.debugLog('Creating overlay track:', overlayId);
-            createOverlayTrack(
-              trace,
-              overlayId,
-              envelope.data.columns,
-              envelope.data.rows,
-              () => this.isCurrent(generation),
-            ).catch((err: Error) =>
-              console.warn(
-                '[StoryController] Overlay track creation failed:',
-                err,
-              ),
-            );
-          }
-        }
-        break;
-      }
-
-      case 'result':
-        this.debugLog('Scene result:', data);
-        applyScenePayload(data);
-        break;
-
-      case 'analysis_completed':
-        this.debugLog('Analysis completed:', data);
-        applyScenePayload(data);
-        break;
-
-      case 'scene_reconstruction_completed':
-        this.debugLog('Scene reconstruction completed:', data);
-        applyScenePayload(data);
-        break;
-
-      // ── Scene Story Pipeline events ────────────────────────────────────
-      // Until the dedicated Story Panel UI lands, these lifecycle events
-      // are routed into the existing chat-message progress flow so users
-      // still see something while the scene_story_* protocol stabilises.
-
-      case 'scene_story_detected': {
-        const sceneCount = Array.isArray(data.scenes) ? data.scenes.length : 0;
-        const queuedCount = Number(data.analysisIntervals ?? 0);
-        this.debugLog(
-          'Story scenes detected:',
-          sceneCount,
-          'queued:',
-          queuedCount,
-        );
-        this.ctx.updateMessage(progressMessageId, {
-          content: uiText(
-            `🎬 **场景还原中...**\n\n已检测到 ${sceneCount} 个场景，排队深度分析 ${queuedCount} 个`,
-            `🎬 **Reconstructing scenes...**\n\nDetected ${sceneCount} scenes; ${queuedCount} queued for deep analysis`,
-          ),
-        });
-        m.redraw();
-        break;
-      }
-
-      case 'scene_story_queued':
-      case 'scene_story_started':
-      case 'scene_story_retrying':
-        this.debugLog('Story job lifecycle:', eventType, data);
-        break;
-
-      case 'scene_story_completed':
-      case 'scene_story_failed':
-      case 'scene_story_dropped':
-        this.debugLog('Story job terminal:', eventType, data);
-        break;
-
-      case 'scene_story_cancelled': {
-        const scope = data.scope === 'session' ? 'session' : 'job';
-        this.debugLog('Story cancelled:', scope, data);
-        if (scope === 'session') {
-          this.ctx.updateMessage(progressMessageId, {
-            content: uiText(
-              '🎬 **场景还原已取消**\n\n部分结果可能尚未生成。',
-              '🎬 **Scene reconstruction cancelled**\n\nSome results may not have been generated.',
-            ),
-          });
-          m.redraw();
-        }
-        break;
-      }
-
-      case 'scene_story_report_ready': {
-        // Terminal event for the new pipeline. Surface the Stage 3 summary
-        // (when present) as the narrative so the existing renderResult
-        // pipeline displays it, then let the connectToSSE() outer loop
-        // notice the terminal type and render the final scene table.
-        this.debugLog('Story report ready:', data);
-        if (typeof data.summary === 'string' && data.summary.length > 0) {
-          applyScenePayload({narrative: data.summary});
-        }
-        break;
-      }
-
-      default:
-        this.debugLog('Scene SSE unknown event:', eventType);
-        break;
-    }
-  }
-
-  /**
-   * Render the scene reconstruction result as a markdown message.
-   * Equivalent to the old AIPanel.renderSceneReconstructionResult().
-   */
-  private renderResult(
-    messageId: string,
-    scenes: any[],
-    _trackEvents: any[],
-    narrative: string,
-    _findings: any[],
-    generation: number,
-  ): void {
-    this.assertCurrent(generation);
-    if (scenes.length === 0) {
-      this.ctx.updateMessage(messageId, {
-        content: uiText(
-          '🎬 **场景还原完成**\n\n未检测到明显的用户操作场景。',
-          '🎬 **Scene reconstruction complete**\n\nNo clear user-interaction scenes were detected.',
-        ),
-      });
-      m.redraw();
-      return;
-    }
-
-    // Build scene cards content
-    let content = uiText(
-      '## 🎬 场景还原结果\n\n',
-      '## 🎬 Scene reconstruction result\n\n',
-    );
-
-    // Scene summary
-    content += uiText(
-      `共还原 **${scenes.length}** 个操作场景（仅回放，不含根因诊断）：\n\n`,
-      `Reconstructed **${scenes.length}** interaction scenes (replay only; no root-cause diagnosis):\n\n`,
-    );
-
-    // Scene timeline as a table
-    content += uiText(
-      '| 序号 | 类型 | 开始时间 | 时长 | 应用/活动 | 响应状态 |\n',
-      '| # | Type | Start time | Duration | App/Activity | Response |\n',
-    );
-    content += '|------|------|----------|------|-----------|-----------|\n';
-
-    scenes.forEach((scene, index) => {
-      const displayName = getSceneDisplayName(scene.type, scene.label);
-      const durationStr =
-        scene.durationMs >= 1000
-          ? `${(scene.durationMs / 1000).toFixed(2)}s`
-          : `${scene.durationMs.toFixed(0)}ms`;
-      const responseStatus = getSceneResponseStatusLabel(
-        scene.type,
-        scene.durationMs,
-        scene.metadata,
-      );
-      const appInfo = scene.appPackage
-        ? scene.activityName
-          ? `${scene.appPackage}/${scene.activityName}`
-          : scene.appPackage
-        : '-';
-
-      // Make start timestamp clickable for navigation
-      const startTsNs = scene.startTs;
-      content += `| ${index + 1} | ${displayName} | `;
-      content += `@ts[${startTsNs}|${formatSceneTimestamp(startTsNs)}] | `;
-      content += `${durationStr} | ${appInfo.length > 30 ? appInfo.substring(0, 30) + '...' : appInfo} | ${responseStatus} |\n`;
-    });
-
-    // Add narrative if available
-    if (narrative) {
-      content += uiText(
-        `\n---\n\n### 📝 操作回放摘要\n\n${narrative}\n`,
-        `\n---\n\n### 📝 Interaction replay summary\n\n${narrative}\n`,
-      );
-    }
-
-    // Add navigation tips
-    content += uiText(
-      '\n---\n\n💡 **提示**：点击时间戳可跳转到对应位置，相关泳道已自动 Pin 到顶部。',
-      '\n---\n\n💡 **Tip**: Select a timestamp to navigate there. Relevant tracks are pinned automatically.',
-    );
-
-    this.ctx.updateMessage(messageId, {content});
-    m.redraw();
-  }
-
-  /**
-   * Auto-pin tracks based on detected scene types.
-   * Equivalent to the old AIPanel.autoPinTracksForScenes().
-   */
-  private async autoPinTracks(
-    scenes: any[],
-    generation: number,
-  ): Promise<void> {
-    this.assertCurrent(generation);
-    const trace = this.ctx.getTrace();
-    if (!trace || scenes.length === 0) return;
-
-    // Collect unique scene types
-    const sceneTypes = new Set(scenes.map((s) => s.type));
-
-    // Collect pin instructions for all detected scene types
-    const allInstructions: ScenePinInstruction[] = [];
-
-    sceneTypes.forEach((sceneType) => {
-      const instructions = SCENE_PIN_MAPPING[sceneType];
-      if (instructions) {
-        instructions.forEach((inst) => {
-          // Avoid duplicates
-          if (!allInstructions.some((i) => i.pattern === inst.pattern)) {
-            allInstructions.push(localizeScenePinInstruction(inst));
-          }
-        });
-      }
-    });
-
-    if (allInstructions.length === 0) return;
-
-    // Get active processes from scenes
-    const activeProcesses = scenes
-      .filter((s) => s.appPackage)
-      .map((s) => ({processName: s.appPackage, frameCount: 1}));
-
-    this.debugLog(
-      'Auto-pinning tracks for scenes:',
-      sceneTypes,
-      'with',
-      allInstructions.length,
-      'instructions',
-    );
-
-    // Delegate to AIPanel via ctx
-    await this.ctx.pinTracksFromInstructions(
-      allInstructions,
-      activeProcesses,
-      () => this.isCurrent(generation),
-    );
-    this.assertCurrent(generation);
+  markTerminal(runId: string): void {
+    if (this.receipt?.runId === runId) this.runActive = false;
   }
 }

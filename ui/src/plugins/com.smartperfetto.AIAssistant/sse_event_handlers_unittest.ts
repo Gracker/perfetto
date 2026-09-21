@@ -5269,3 +5269,14 @@ describe('State Accumulation', () => {
     expect(ctx.collectedErrors).toHaveLength(0);
   });
 });
+
+describe('canonical scene SSE snapshots', () => {
+  it('forwards the same public view for candidate and final without deriving it from raw envelopes', () => {
+    const received: Array<{value: unknown; terminal: boolean}> = [];
+    const ctx = createMockContext({onSceneTimelineReceived: (value, terminal) => received.push({value, terminal})});
+    const timeline = {schemaVersion: 'scene_timeline@1', revision: 3};
+    handleSSEEvent('scene_timeline_updated', {data: timeline} as any, ctx);
+    handleAnalysisCompletedEvent({data: {success: true, findings: [], conclusion: '', sceneTimeline: timeline}} as any, ctx);
+    expect(received).toEqual([{value: timeline, terminal: false}, {value: timeline, terminal: true}]);
+  });
+});

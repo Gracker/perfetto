@@ -35,3 +35,17 @@ describe('scene presentation language', () => {
     expect(output).not.toContain('场景导航');
   });
 });
+
+describe('canonical scene presentation', () => {
+  it('uses stable segment identity and never derives a green grade from contact duration', () => {
+    const component = new SceneNavigationBar();
+    const rendered = component.view({attrs: {trace: {scrollTo: vi.fn()}, scenes: [{
+      id: 'stable-segment', type: 'scene_observation', startTs: '9007199254740993', endTs: '9007199254740994',
+      durationMs: 0.000001, confidence: 0, label: 'Observed touch movement',
+      metadata: {canonical: true, deviceState: 'Unknown', appResponse: 'Unknown', semanticStatus: 'unverified'},
+    }]}} as any);
+    const output = JSON.stringify(rendered);
+    expect(output).toContain('stable-segment'); expect(output).toContain('Observed touch movement');
+    expect(output).not.toContain('🟢'); expect(output).not.toContain('0%');
+  });
+});

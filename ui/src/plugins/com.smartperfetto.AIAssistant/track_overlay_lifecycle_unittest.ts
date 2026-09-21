@@ -113,3 +113,19 @@ describe('track overlay lifecycle', () => {
     expect(sessionStorage.length).toBe(0);
   });
 });
+
+describe('canonical scene overlay capacity', () => {
+  it('keeps all 2000 segments in three lanes and never stores the canonical track in sessionStorage', async () => {
+    sessionStorage.clear(); addDebugSliceTrackMock.mockReset();
+    addDebugSliceTrackMock.mockResolvedValue(undefined);
+    const trace = {traceInfo: {uuid: 'canonical-trace'}, currentWorkspace: {pinnedTracksNode: {children: []}}} as any;
+    const rows = Array.from({length: 6000}, (_, i) => [String(9007199254740993n + BigInt(i)), '1', `observation-${i}`,
+      ['userAction', 'deviceState', 'appResponse'][i % 3], `segment-${Math.floor(i / 3)}`]);
+    await createOverlayTrack(trace, 'scene_canonical', ['ts', 'dur', 'event', 'dimension', 'segment_id'], rows);
+    const request = addDebugSliceTrackMock.mock.calls[0][0];
+    expect(request.data.sqlSource).toContain('observation-5999');
+    expect(request.data.sqlSource).toContain('9007199254740993');
+    expect(request.pivotOn).toBe('dimension');
+    expect(sessionStorage.length).toBe(0);
+  });
+});

@@ -172,6 +172,8 @@ describe('AIPanel finalized result recovery', () => {
   it.each(['failed', 'cancelled', 'quota_exceeded', 'completed'])(
     'preserves a stored %s result and its explicit terminal status while reconnecting', async status => {
       const panel = new AIPanel() as any;
+      panel.state.agentSessionId = 'stored-session';
+      panel.state.agentRunId = 'stored-run';
       const result = {success: status === 'completed', conclusion: 'Stored original body', findings: [],
         completion: {status, runId: 'stored-run'}};
       panel.fetchBackend = vi.fn(async () => ({ok: true, json: async () => ({status, result})}));
@@ -1210,7 +1212,7 @@ describe('AIPanel per-turn analysis mode', () => {
     expect(panel.state.analysisMode).toBe('conversation');
   });
 
-  it('routes composer Stop to a running legacy Story instead of an old Agent session', async () => {
+  it('refuses to cancel a historical Story without run identity instead of cancelling an old Agent session', async () => {
     const panel = createModePanel();
     panel.state.analysisMode = 'conversation';
     panel.state.isLoading = true;
@@ -1223,10 +1225,8 @@ describe('AIPanel per-turn analysis mode', () => {
 
     await findVNodeByTitle(tree, '停止分析').attrs.onclick();
 
-    expect(panel.fetchBackend).toHaveBeenCalledOnce();
-    expect(panel.fetchBackend.mock.calls[0][0])
-      .toContain('/scene-reconstruct/legacy-scene/cancel');
-    expect(panel.fetchBackend.mock.calls[0][1].method).toBe('POST');
+    expect(panel.fetchBackend).not.toHaveBeenCalled();
+    expect(panel.state.storyState.lastError).toContain('运行标识');
     expect(panel.analysisCancellationPending).toBe(false);
     expect(panel.state.analysisMode).toBe('conversation');
   });
