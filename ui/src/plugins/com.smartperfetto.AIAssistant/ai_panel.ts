@@ -8725,6 +8725,9 @@ Click ⚙️ to configure backend connection.`,
         payload.terminationReason === 'cancelled';
       story.status = cancelled ? 'cancelled' : eventType === 'error' || payload.success === false ? 'failed' : 'partial';
       if (eventType === 'error') story.lastError = payload.message || payload.error || uiText('分析失败', 'Analysis failed');
+      // A failed scene run explains itself: no accepted revision, or which retained revision survives.
+      else if (!cancelled && payload.success === false && typeof payload.terminationMessage === 'string' &&
+          payload.terminationMessage.trim()) story.lastError = payload.terminationMessage;
       if (typeof payload.reportUrl === 'string') story.reportUrl = payload.reportUrl;
       const reference = payload.sceneReport;
       if (reference?.schemaVersion === 'scene_report_ref@1' && reference.traceId === story.traceId &&
@@ -12874,7 +12877,8 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private renderStoryCompleted(): m.Children {
-    if (this.state.storyState.timeline) return this.renderCanonicalStory();
+    // A timeline with no committed segment is not a reconstruction; do not show an empty table as a result.
+    if (this.state.storyState.timeline?.segments.length) return this.renderCanonicalStory();
     if (this.state.storyState.traceId) return m('p', this.state.storyState.status === 'cancelled'
       ? uiText('已取消，尚无可显示的场景。', 'Cancelled; no scene timeline is available yet.')
       : uiText('分析已结束，未提交有效场景时间线；还原不完整。', 'Analysis ended without a valid scene timeline; reconstruction is incomplete.'));

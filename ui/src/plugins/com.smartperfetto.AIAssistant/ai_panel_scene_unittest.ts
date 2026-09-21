@@ -146,6 +146,19 @@ describe('AIPanel canonical scene flow', () => {
     expect(controller.start).toHaveBeenCalledOnce();
     expect(value.state.storyState.runId).toBe('run-b');
   });
+  it('shows the product termination reason for a scene run that committed no segment', () => {
+    const value = panel();
+    value.storyController = {markTerminal: vi.fn()};
+    value.state.storyState = {...value.state.storyState, traceId: 'trace-a', sessionId: 'session-a', runId: 'run-a',
+      status: 'running', timeline: {revision: 0, segments: []}};
+    value.handleSSEEvent('analysis_completed', {data: {success: false,
+      terminationMessage: 'Scene reconstruction produced no accepted timeline revision.'}});
+    expect(value.state.storyState.status).toBe('failed');
+    expect(value.state.storyState.lastError).toBe('Scene reconstruction produced no accepted timeline revision.');
+    const rendered = JSON.stringify(value.renderStoryCompleted());
+    expect(rendered).toContain('valid scene timeline');
+    expect(rendered).not.toContain('Revision 0');
+  });
   it('consumes the stop-and-redirect intent after confirmed canonical cancellation', async () => {
     const value = panel();
     value.state.storyState = {...value.state.storyState, traceId: 'trace-a', sessionId: 'session-a', runId: 'run-a', status: 'running'};
