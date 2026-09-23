@@ -648,7 +648,7 @@ function createHostDiv(): HTMLDivElement {
 
 /**
  * Perfetto's fullscreen modal is rendered inside `.pf-ui-main`, whose CSS uses
- * `isolation: isolate`. Mount the SmartPerfetto host under that stable root
+ * `isolation: isolate`. Mount the SmartPerfetto host under the current root
  * instead of directly under `body`, so the floating window can remain visible
  * while still sorting below in-app popups and modals by z-index.
  */
@@ -735,6 +735,12 @@ export function setupFloatingWindow(
   m.mount(hostDiv, null);
 
   const FloatingRoot: m.Component = {
+    onbeforeupdate: () => {
+      // UiMain is replaced when its trace/theme key changes. Perfetto redraws
+      // the application before this portal, so reconnect the existing host to
+      // the new stacking context without remounting the panel or its session.
+      ensureHostParent(hostDiv);
+    },
     view: () => {
       if (!isTimelineRouteActive()) return null;
       const mode = getFloatingState().mode;

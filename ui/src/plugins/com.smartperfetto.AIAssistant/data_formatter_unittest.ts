@@ -473,6 +473,22 @@ describe('formatMessage', () => {
   });
 
   describe('Markdown tables', () => {
+    it('preserves trace comparison units, references and escaped pipes in final tables', () => {
+      const html = formatMessage([
+        '| 阶段 | 基线（ms） | 对比（ms） | 证据 |',
+        '| --- | ---: | ---: | --- |',
+        '| `bind\\|Application` | 120 | 200 | 左侧启动 / 右侧启动 |',
+      ].join('\n'));
+      const container = document.createElement('div');
+      container.innerHTML = html;
+      expect(container.querySelectorAll('table')).toHaveLength(1);
+      expect(Array.from(container.querySelectorAll('th')).map(cell => cell.textContent))
+        .toEqual(['阶段', '基线（ms）', '对比（ms）', '证据']);
+      expect(Array.from(container.querySelectorAll('td')).map(cell => cell.textContent))
+        .toEqual(['bind|Application', '120', '200', '左侧启动 / 右侧启动']);
+      expect(container.querySelector('td code')?.textContent).toBe('bind|Application');
+    });
+
     it('should convert markdown tables to HTML', () => {
       const input = '| Col1 | Col2 |\n|---|---|\n| A | B |';
       const result = formatMessage(input);

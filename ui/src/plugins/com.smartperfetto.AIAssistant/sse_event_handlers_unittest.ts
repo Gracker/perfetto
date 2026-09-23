@@ -3905,6 +3905,45 @@ describe('handleDataEvent', () => {
     expect(ctx.messages[0].serverVerificationDetails).toContain('operator=eq, value=120, unit=ms');
   });
 
+  it('keeps final conclusion values and server evidence beyond both table previews', () => {
+    for (const side of ['current', 'reference']) {
+      handleDataEvent({id: `preview-${side}`, envelope: {
+        meta: {type: 'skill_result', version: '2.0', source: 'compare_skill',
+          traceSide: side, traceId: `trace-${side}`, evidenceRefId: `evidence:${side}`},
+        data: {columns: ['launch_ms'], rows: [[1]]},
+        display: {layer: 'list', format: 'table', title: side,
+          preview: {totalRows: 1000, returnedRows: 1, reason: 'row_limit'}},
+      }}, ctx);
+    }
+    const conclusion = '基线启动 120 ms，对比启动 200 ms，相差 80 ms。';
+    handleAnalysisCompletedEvent({architecture: 'agent-driven', data: {
+      conclusion, partial: true,
+      claimSupport: ['current', 'reference'].map((side, index) => ({
+        claimId: `claim-${side}`, kind: 'numeric', text: `${side} startup`, supportLevel: 'partial',
+        anchors: [{version: 'evidence_anchor@1', evidenceRefId: `evidence:${side}`,
+          context: {traceSide: side, traceId: `trace-${side}`},
+          cells: [{rowIndex: 900, column: 'launch_ms', value: 120 + index * 80,
+            actualValue: 120 + index * 80, unit: 'ms'}]}],
+      })),
+      claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'partial',
+        policy: 'record_only', passed: false, checkedClaimCount: 2, unsupportedClaimCount: 0,
+        claimResults: [], issues: [{severity: 'warning', code: 'claim_not_fully_verified',
+          message: 'Complete proof is unavailable'}]},
+    }}, ctx);
+    const message = ctx.messages[2];
+    expect(message.content).toBe(conclusion);
+    expect(message.serverVerificationDetails).toContain('evidence:current');
+    expect(message.serverVerificationDetails).toContain('evidence:reference');
+    expect(message.serverVerificationDetails).toContain('rowIndex=900');
+    expect(message.serverVerificationDetails).toContain('actualValue=120');
+    expect(message.serverVerificationDetails).toContain('actualValue=200');
+    expect(message.serverVerificationDetails).toContain('unit=ms');
+    expect(message.serverVerificationDetails).toContain('status=partial');
+    expect(message.serverVerificationDetails).toContain('passed=false');
+    expect(message.serverVerificationNotice).toContain('结果完整性提示');
+    expect(message.serverVerificationDetails).not.toContain('行不存在');
+  });
+
   it('keeps support status separate and renders both verifier reference families', () => {
     handleAnalysisCompletedEvent({data: {
       conclusion: 'Canonical body',
