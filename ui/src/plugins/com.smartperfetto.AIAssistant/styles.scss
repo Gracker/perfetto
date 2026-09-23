@@ -680,6 +680,119 @@
   line-height: 1.55;
 }
 
+.sp-critical-path-card h4 {
+  margin: 12px 0 6px;
+  color: var(--chat-text, #202124);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sp-critical-path-metrics.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.sp-critical-path-chain-row.depth-1 {
+  padding-left: 18px;
+}
+
+.sp-critical-path-chain-row.depth-2 {
+  padding-left: 36px;
+}
+
+.sp-critical-path-waker {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+
+  b {
+    color: var(--chat-text, #202124);
+  }
+
+  span {
+    color: var(--chat-text-secondary, #5f6368);
+  }
+}
+
+.sp-critical-path-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+
+  span {
+    border: 1px solid var(--chat-border-light, var(--chat-border, #dadce0));
+    border-radius: 999px;
+    padding: 3px 8px;
+    color: var(--chat-text-secondary, #5f6368);
+    font-size: 11px;
+
+    &.sql_error,
+    &.stdlib_missing {
+      border-color: tint(var(--chat-warning, #e89e00), 40%);
+      color: var(--chat-text, #202124);
+    }
+  }
+}
+
+.sp-critical-path-hypothesis {
+  border-top: 1px solid var(--chat-border-light, var(--chat-border, #dadce0));
+  padding: 9px 0;
+
+  b {
+    display: block;
+    color: var(--chat-text, #202124);
+    font-size: 12px;
+    line-height: 1.5;
+
+    span {
+      margin-left: 6px;
+      color: var(--chat-text-secondary, #5f6368);
+      font-weight: 500;
+    }
+  }
+
+  pre {
+    overflow-x: auto;
+    margin: 6px 0;
+    border-radius: 6px;
+    padding: 8px;
+    background: var(--chat-bg, #fff);
+    color: var(--chat-text, #202124);
+    font-size: 11px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.sp-critical-path-copy,
+.sp-critical-path-handoff {
+  min-height: 40px;
+  border: 1px solid var(--chat-border, #dadce0);
+  border-radius: 6px;
+  padding: 0 12px;
+  cursor: pointer;
+  background: var(--chat-bg, #fff);
+  color: var(--chat-text, #202124);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sp-critical-path-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 12px 14px 14px;
+}
+
+.sp-critical-path-handoff {
+  border-color: var(--chat-primary, #3d5688);
+  background: var(--chat-primary, #3d5688);
+  color: var(--pf-color-text-on-primary, #fff);
+  font-weight: 600;
+}
+
 @media (max-width: 640px) {
   .sp-critical-path-drawer {
     right: 8px;

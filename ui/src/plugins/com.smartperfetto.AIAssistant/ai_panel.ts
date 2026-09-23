@@ -205,9 +205,13 @@ import {
   createOverlayTrack,
 } from './track_overlay';
 import {traceLocationLabel} from './trace_location_label';
+import {copyTextToClipboard} from './clipboard';
 import {
+  clearPendingComposerDraft,
   subscribeClearChat,
+  subscribeComposerDraft,
   subscribeOpenSettings,
+  type ComposerDraft,
 } from './assistant_command_bus';
 import {
   buildPinnedResultForUiAction,
@@ -683,6 +687,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private unsubscribeClearChat?: () => void;
   private unsubscribeOpenSettings?: () => void;
+  private unsubscribeComposerDraft?: () => void;
   private unsubscribeBackendUpload?: () => void;
   private unsubscribeAnalysisBackendConnection?: () => void;
   private analysisBackendConnection?: AnalysisBackendConnection;
@@ -807,28 +812,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
   }
 
-  private async copyTextToClipboard(text: string): Promise<boolean> {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return true;
-      }
-    } catch {}
-
-    try {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(textarea);
-      return ok;
-    } catch {
-      return false;
-    }
+  private copyTextToClipboard(text: string): Promise<boolean> {
+    return copyTextToClipboard(text);
   }
 
   private async copyMessageContent(msg: Message): Promise<void> {
@@ -2745,6 +2730,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    * 重置状态，准备迎接新 Trace
    */
   private resetStateForNewTrace(): void {
+    clearPendingComposerDraft();
     ++this.conversationRestoreOrdinal;
     invalidateConversationRestore(this.state.settings.backendUrl);
     this.conversationRestorePromise = undefined;
@@ -2839,6 +2825,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.unsubscribeOpenSettings = subscribeOpenSettings(() => {
       this.openSettings();
     });
+    this.unsubscribeComposerDraft = subscribeComposerDraft((draft) =>
+      this.acceptComposerDraft(draft),
+    );
 
     // Listen for OS dark mode changes
     const mql = window.matchMedia?.('(prefers-color-scheme: dark)');
@@ -2968,6 +2957,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (this.unsubscribeOpenSettings) {
       this.unsubscribeOpenSettings();
       this.unsubscribeOpenSettings = undefined;
+    }
+    if (this.unsubscribeComposerDraft) {
+      this.unsubscribeComposerDraft();
+      this.unsubscribeComposerDraft = undefined;
     }
     // Clean up dark mode listener
     if (this.darkModeListener) {
@@ -7618,8 +7611,25 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // 更新当前 session ID
     this.state.currentSessionId = session.sessionId;
+    // A draft handed over for the previous session does not carry over.
+    clearPendingComposerDraft();
 
     return session;
+  }
+
+  /**
+   * Take a question another surface prepared (the critical-path drawer): it is
+   * placed in the composer for the user to read and send, never sent here, and
+   * only for the backend trace it was built from. Text already in the composer
+   * is kept above it.
+   */
+  private acceptComposerDraft(draft: ComposerDraft): boolean {
+    if (!draft.traceId || draft.traceId !== this.state.backendTraceId) return false;
+    const current = this.state.input.trim();
+    this.state.input = current ? `${current}\n\n${draft.text}` : draft.text;
+    m.redraw();
+    this.focusChatInput();
+    return true;
   }
 
   /**
@@ -7685,6 +7695,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (!session) return false;
 
     this.cancelSSEConnection();
+    clearPendingComposerDraft();
 
     this.state.currentSessionId = session.sessionId;
     this.state.currentTraceFingerprint = session.traceFingerprint;

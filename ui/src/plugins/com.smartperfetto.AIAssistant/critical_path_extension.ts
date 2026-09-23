@@ -13,64 +13,30 @@ import {
   isSmartPerfettoOidcMode,
   smartPerfettoFetch,
 } from '../../core/smartperfetto_auth';
-import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
+import {
+  buildSmartPerfettoContextHeaders,
+  buildSmartPerfettoWorkspaceApiUrl,
+} from '../../core/smartperfetto_request_context';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 import {SETTINGS_KEY} from './types';
 import {getSettingsStorageKey} from './session_manager';
 import {uiOutputLanguage, uiText} from './ui_language';
 import type {AnalysisBackendConnection} from './analysis_backend_connection';
-
-interface CriticalPathSegment {
-  startOffsetMs?: number;
-  durationMs?: number;
-  processName?: string | null;
-  threadName?: string | null;
-  state?: string | null;
-  modules?: string[];
-  reasons?: string[];
-  slices?: string[];
-}
-
-interface CriticalPathAnalysis {
-  task?: {
-    processName?: string | null;
-    threadName?: string | null;
-    state?: string | null;
-    waker?: {
-      processName?: string | null;
-      threadName?: string | null;
-      interruptContext?: boolean | null;
-    };
-  };
-  totalMs?: number;
-  blockingMs?: number;
-  externalBlockingPercentage?: number;
-  summary?: string;
-  anomalies?: Array<{
-    severity?: 'critical' | 'warning' | 'info';
-    title?: string;
-    detail?: string;
-    evidence?: string[];
-  }>;
-  wakeupChain?: CriticalPathSegment[];
-  moduleBreakdown?: Array<{
-    module: string;
-    durationMs?: number;
-    percentage?: number;
-    segmentCount?: number;
-    examples?: string[];
-  }>;
-  recommendations?: string[];
-  warnings?: string[];
-}
-
-interface CriticalPathAiSummary {
-  generated?: boolean;
-  model?: string;
-  summary?: string;
-  warnings?: string[];
-  redactionApplied?: boolean;
-}
+import {emitComposerDraft} from './assistant_command_bus';
+import {copyTextToClipboard} from './clipboard';
+import {getFloatingState, updateFloatingState} from './ai_floating_state';
+import type {
+  CriticalPathAiSummary,
+  CriticalPathAnalysis,
+  CriticalPathAnalyzeResponse,
+  CriticalPathSegment,
+  CriticalPathUnavailableReason,
+  HypothesisStrength,
+  SemanticSourceName,
+  SemanticSourceStatus,
+  SliceKind,
+  WakerKind,
+} from './generated';
 
 interface CriticalPathState {
   open: boolean;
@@ -79,6 +45,8 @@ interface CriticalPathState {
   analysis: CriticalPathAnalysis | null;
   aiSummary: CriticalPathAiSummary | null;
   error: string;
+  /** Feedback after copying a verification query or handing off. */
+  notice: string;
 }
 
 interface SelectedTask {
@@ -272,7 +240,7 @@ function renderPlainText(value: unknown): string {
 }
 
 function renderAnomalies(analysis: CriticalPathAnalysis): string {
-  const items = analysis.anomalies ?? [];
+  const items = analysis.anomalies;
   if (items.length === 0) {
     return `<div class="sp-critical-path-muted">${uiText(
       '未发现明显异常。',
@@ -292,33 +260,125 @@ function renderAnomalies(analysis: CriticalPathAnalysis): string {
     .join('');
 }
 
+/** The critical-path route under the caller's workspace (reachable in enterprise mode). */
+export function buildCriticalPathAnalyzeUrl(backendUrl: string, traceId: string): string {
+  return buildSmartPerfettoWorkspaceApiUrl(
+    backendUrl,
+    'critical-path',
+    `/${encodeURIComponent(traceId)}/analyze`,
+  );
+}
+
+type TextPair = readonly [zh: string, en: string];
+const pick = ([zh, en]: TextPair): string => uiText(zh, en);
+
+const UNAVAILABLE_TEXT: Record<CriticalPathUnavailableReason, TextPair> = {
+  task_state_running: [
+    '选中的 thread_state 正在运行，没有等待可以分析。',
+    'The selected thread_state is Running, so there is no wait to analyze.',
+  ],
+  no_waiting_time: [
+    '所选窗口内没有睡眠、不可中断或可运行时间。',
+    'The selected window holds no sleeping, uninterruptible or runnable time.',
+  ],
+  no_critical_path_stack: [
+    'Perfetto 没有返回关键路径；trace 可能缺少 sched_waking。',
+    'Perfetto returned no critical path; the trace may lack sched_waking.',
+  ],
+};
+
+const SOURCE_STATUS_TEXT: Record<SemanticSourceStatus, TextPair> = {
+  present: ['有数据', 'present'],
+  empty: ['无匹配', 'no match'],
+  stdlib_missing: ['缺 stdlib', 'stdlib missing'],
+  sql_error: ['查询失败', 'query failed'],
+  skipped: ['未查询', 'skipped'],
+};
+
+const SOURCE_NAME_TEXT: Record<SemanticSourceName, TextPair> = {
+  binder: ['Binder', 'Binder'],
+  monitor: ['Monitor 锁', 'Monitor locks'],
+  io: ['IO', 'I/O'],
+  gc: ['GC', 'GC'],
+  cpu: ['CPU 竞争', 'CPU contention'],
+  wakeSource: ['唤醒来源', 'Wake source'],
+};
+
+const WAKER_KIND_TEXT: Record<WakerKind, TextPair> = {
+  irq: ['中断上下文', 'IRQ context'],
+  swapper: ['idle/swapper', 'idle/swapper'],
+  thread: ['线程', 'thread'],
+  unknown: ['未知', 'unknown'],
+};
+
+const SLICE_KIND_TEXT: Record<SliceKind, TextPair> = {
+  sleeping: ['睡眠', 'sleeping'],
+  uninterruptible: ['不可中断', 'uninterruptible'],
+  runnable: ['可运行', 'runnable'],
+  running: ['运行', 'running'],
+  unknown: ['未知', 'unknown'],
+};
+
+const STRENGTH_TEXT: Record<HypothesisStrength, TextPair> = {
+  strong: ['强', 'strong'],
+  weak: ['弱', 'weak'],
+  speculative: ['推测', 'speculative'],
+};
+
+/** The top-level chain with its recursion children, each tagged with its level. */
+function flattenChain(
+  segments: readonly CriticalPathSegment[],
+  depth = 0,
+  out: Array<{segment: CriticalPathSegment; depth: number}> = [],
+): Array<{segment: CriticalPathSegment; depth: number}> {
+  for (const segment of segments) {
+    out.push({segment, depth});
+    if (segment.children?.length) flattenChain(segment.children, depth + 1, out);
+  }
+  return out;
+}
+
 function renderChain(analysis: CriticalPathAnalysis): string {
-  const items = analysis.wakeupChain ?? [];
+  const items = flattenChain(analysis.wakeupChain);
   if (items.length === 0) {
     return `<div class="sp-critical-path-muted">${uiText(
       '没有取到外部 critical path 段。',
       'No external critical-path segments were found.',
     )}</div>`;
   }
-  return items
-    .slice(0, 24)
-    .map(
-      (item, index) => `
-      <div class="sp-critical-path-chain-row">
-        <div class="sp-critical-path-chain-index">${index + 1}</div>
+  const total = analysis.chainSegmentCount ?? analysis.wakeupChain.length;
+  const shown = analysis.wakeupChain.length;
+  const note =
+    total > shown
+      ? `<div class="sp-critical-path-muted">${uiText(
+          `整条链 ${total} 段，这里显示前 ${shown} 段；时长与占比按整条链计算。`,
+          `The chain has ${total} segments; the first ${shown} are shown. Durations and shares cover the whole chain.`,
+        )}</div>`
+      : '';
+  return (
+    note +
+    items
+      .slice(0, 40)
+      .map(
+        ({segment, depth}, index) => `
+      <div class="sp-critical-path-chain-row${depth > 0 ? ` depth-${Math.min(depth, 2)}` : ''}">
+        <div class="sp-critical-path-chain-index">${depth > 0 ? '↳' : index + 1}</div>
         <div>
-          <b>${escapeHtml(item.processName || '-')} / ${escapeHtml(item.threadName || '-')}</b>
-          <p>${formatMs(item.durationMs)} · +${formatMs(item.startOffsetMs)} · ${escapeHtml(item.state || 'unknown')}</p>
-          ${renderEvidence([...(item.modules ?? []), ...(item.reasons ?? []), ...(item.slices ?? [])])}
+          <b>${escapeHtml(segment.processName || '-')} / ${escapeHtml(segment.threadName || '-')}</b>
+          <p>${formatMs(segment.durationMs)} · +${formatMs(segment.startOffsetMs)} · ${escapeHtml(segment.state || 'unknown')}${
+            segment.blockedFunction ? ` · ${escapeHtml(segment.blockedFunction)}` : ''
+          }</p>
+          ${renderEvidence([...segment.modules, ...segment.reasons, ...segment.slices])}
         </div>
       </div>
     `,
-    )
-    .join('');
+      )
+      .join('')
+  );
 }
 
 function renderModules(analysis: CriticalPathAnalysis): string {
-  const items = analysis.moduleBreakdown ?? [];
+  const items = analysis.moduleBreakdown;
   if (items.length === 0) {
     return `<div class="sp-critical-path-muted">${uiText(
       '暂无模块归因。',
@@ -332,7 +392,7 @@ function renderModules(analysis: CriticalPathAnalysis): string {
       <div class="sp-critical-path-module-row">
         <span>
           <b>${escapeHtml(item.module)}</b>
-          <small>${escapeHtml((item.examples ?? []).join('；') || `${item.segmentCount || 0} segments`)}</small>
+          <small>${escapeHtml(item.examples.join('；') || `${item.segmentCount} segments`)}</small>
         </span>
         <strong>${formatMs(item.durationMs)} · ${formatPercent(item.percentage)}</strong>
       </div>
@@ -363,22 +423,147 @@ function renderAiSummary(aiSummary: CriticalPathAiSummary | null): string {
       <h3>${uiText('AI 诊断', 'AI diagnosis')} <span>${escapeHtml(badge)}</span></h3>
       <div class="sp-critical-path-summary">${renderPlainText(aiSummary.summary)}</div>
       ${aiSummary.redactionApplied ? renderStatus(uiText('已对发送给模型的数据做隐私脱敏。', 'Data sent to the model was privacy-redacted.'), false) : ''}
-      ${aiSummary.warnings?.length ? renderStatus(aiSummary.warnings.join('；'), false) : ''}
+      ${aiSummary.warnings.length ? renderStatus(aiSummary.warnings.join('；'), false) : ''}
     </section>
   `;
 }
 
-function renderAnalysis(
+/** L2: who woke the task, read from its wakeup row. */
+function renderWaker(analysis: CriticalPathAnalysis): string {
+  const waker = analysis.directWaker;
+  if (!waker) return '';
+  const kind = escapeHtml(pick(WAKER_KIND_TEXT[waker.kind]));
+  const who =
+    waker.threadName || waker.processName
+      ? `${escapeHtml(waker.processName || '-')} / ${escapeHtml(waker.threadName || '-')}`
+      : kind;
+  return `
+    <div class="sp-critical-path-waker">
+      <b>${uiText('直接唤醒者', 'Direct waker')}</b>
+      <span>${who} · ${kind}${waker.state ? ` · ${escapeHtml(waker.state)}` : ''}</span>
+      ${renderEvidence(waker.hints)}
+    </div>
+  `;
+}
+
+/** The target thread's own states inside the window, longest first. */
+function renderSlices(analysis: CriticalPathAnalysis): string {
+  const slices = [...(analysis.slices ?? [])].sort((a, b) => b.durationMs - a.durationMs);
+  if (slices.length === 0) return '';
+  return `
+    <section class="sp-critical-path-card">
+      <h3>${uiText('窗口内的线程状态', 'Thread states in the window')}</h3>
+      ${slices
+        .slice(0, 6)
+        .map(
+          (slice) => `
+        <div class="sp-critical-path-module-row">
+          <span>
+            <b>${escapeHtml(slice.state || '-')} · ${escapeHtml(pick(SLICE_KIND_TEXT[slice.kind]))}</b>
+            <small>${escapeHtml(
+              [
+                slice.threadStateId !== null ? `thread_state ${slice.threadStateId}` : '',
+                slice.blockedFunction ?? '',
+                slice.cpu !== null ? `CPU ${slice.cpu}` : '',
+              ]
+                .filter(Boolean)
+                .join(' · '),
+            )}</small>
+          </span>
+          <strong>${formatMs(slice.durationMs)}</strong>
+        </div>
+      `,
+        )
+        .join('')}
+    </section>
+  `;
+}
+
+/** L3: which semantic sources answered, so an empty section is not read as "nothing happened". */
+function renderSources(analysis: CriticalPathAnalysis): string {
+  const sources = analysis.semanticSources ?? {};
+  const names = (Object.keys(SOURCE_NAME_TEXT) as SemanticSourceName[]).filter((name) => sources[name]);
+  if (names.length === 0) return '';
+  return `
+    <div class="sp-critical-path-sources">
+      ${names
+        .map((name) => {
+          const status = sources[name]!;
+          return `<span class="${escapeHtml(status)}">${escapeHtml(pick(SOURCE_NAME_TEXT[name]))}: ${escapeHtml(pick(SOURCE_STATUS_TEXT[status]))}</span>`;
+        })
+        .join('')}
+    </div>
+  `;
+}
+
+/** L5: best case, frames and falsifiable hypotheses with their verification SQL. */
+function renderQuantification(analysis: CriticalPathAnalysis): string {
+  const quantification = analysis.quantification;
+  if (!quantification) return '';
+  const counterfactual = quantification.counterfactual;
+  const frames = quantification.frameImpacts;
+  const hypotheses = quantification.hypotheses;
+  if (!counterfactual && frames.length === 0 && hypotheses.length === 0) return '';
+  const counterfactualBlock = counterfactual
+    ? `
+      <div class="sp-critical-path-metrics compact">
+        ${renderMetric(uiText('最好情况', 'Best case'), formatMs(counterfactual.bestCaseDurationMs))}
+        ${renderMetric(uiText('至多节省', 'Saving at most'), formatMs(counterfactual.maxSavingMs))}
+      </div>
+      <div class="sp-critical-path-muted">${escapeHtml(counterfactual.note)}</div>
+    `
+    : '';
+  const framesBlock = frames.length
+    ? `<h4>${uiText('受影响的帧', 'Affected frames')}</h4>${frames
+        .slice(0, 6)
+        .map(
+          (frame) => `
+        <div class="sp-critical-path-module-row">
+          <span>
+            <b>${uiText('帧', 'Frame')} ${escapeHtml(frame.frameId ?? '-')}</b>
+            <small>${escapeHtml([frame.jankType, frame.presentType, frame.layerName].filter(Boolean).join(' · '))}</small>
+          </span>
+          <strong>${formatMs(frame.overlapMs)} / ${formatMs(frame.expectedDeadlineDurMs)}</strong>
+        </div>
+      `,
+        )
+        .join('')}`
+    : '';
+  const hypothesesBlock = hypotheses.length
+    ? `<h4>${uiText('可验证的假设', 'Verifiable hypotheses')}</h4>${hypotheses
+        .map(
+          (hypothesis, index) => `
+        <div class="sp-critical-path-hypothesis">
+          <b>${escapeHtml(hypothesis.statement)} <span>${escapeHtml(pick(STRENGTH_TEXT[hypothesis.strength]))}</span></b>
+          ${renderEvidence(hypothesis.notes)}
+          <pre>${escapeHtml(hypothesis.verificationSql)}</pre>
+          <button type="button" class="sp-critical-path-copy" data-hypothesis-index="${index}">${uiText('复制验证 SQL', 'Copy verification SQL')}</button>
+        </div>
+      `,
+        )
+        .join('')}`
+    : '';
+  return `
+    <section class="sp-critical-path-card">
+      <h3>${uiText('量化', 'Quantification')}</h3>
+      ${counterfactualBlock}${framesBlock}${hypothesesBlock}
+    </section>
+  `;
+}
+
+/** Everything the drawer shows for one result; exported for tests. */
+export function renderCriticalPathDrawerBody(
   analysis: CriticalPathAnalysis,
   aiSummary: CriticalPathAiSummary | null,
 ): string {
-  const task = analysis.task ?? {};
-  const waker = task.waker?.interruptContext
-    ? 'Interrupt'
-    : task.waker?.threadName
-      ? `${task.waker.processName || '-'} / ${task.waker.threadName || '-'}`
+  const task = analysis.task;
+  const longest = analysis.longestSegment;
+  const unavailable =
+    !analysis.available && analysis.unavailableReason
+      ? renderStatus(pick(UNAVAILABLE_TEXT[analysis.unavailableReason]), false)
       : '';
   return `
+    ${unavailable}
     <div class="sp-critical-path-metrics">
       ${renderMetric('Task', formatMs(analysis.totalMs))}
       ${renderMetric(uiText('外部链路', 'External path'), formatMs(analysis.blockingMs))}
@@ -390,17 +575,64 @@ function renderAnalysis(
       <div class="sp-critical-path-facts">
         <span>${escapeHtml(task.processName || '-')} / ${escapeHtml(task.threadName || '-')}</span>
         <span>${escapeHtml(task.state || 'unknown')}</span>
-        ${waker ? `<span>Waker: ${escapeHtml(waker)}</span>` : ''}
+        ${task.threadStateId !== undefined ? `<span>thread_state ${escapeHtml(task.threadStateId)}</span>` : ''}
+        ${longest ? `<span>${uiText('最长外部段', 'Longest external segment')}: ${escapeHtml(longest.threadName || '-')} ${formatMs(longest.durationMs)}</span>` : ''}
       </div>
+      ${renderWaker(analysis)}
+      ${renderSources(analysis)}
     </section>
     ${renderAiSummary(aiSummary)}
     <section class="sp-critical-path-card"><h3>${uiText('异常判断', 'Anomaly assessment')}</h3>${renderAnomalies(analysis)}</section>
+    ${renderSlices(analysis)}
     <section class="sp-critical-path-card"><h3>${uiText('唤醒链', 'Wakeup chain')}</h3>${renderChain(analysis)}</section>
     <section class="sp-critical-path-card"><h3>${uiText('关联模块', 'Related modules')}</h3>${renderModules(analysis)}</section>
+    ${renderQuantification(analysis)}
     <section class="sp-critical-path-card"><h3>${uiText('下一步', 'Next steps')}</h3>${renderList(analysis.recommendations)}</section>
-    ${analysis.warnings?.length ? renderStatus(analysis.warnings.join('；'), false) : ''}
+    ${analysis.warnings.length ? renderStatus(analysis.warnings.join('；'), false) : ''}
+    <div class="sp-critical-path-actions">
+      <button type="button" class="sp-critical-path-handoff">${uiText('在对话中继续追问', 'Continue in the conversation')}</button>
+    </div>
   `;
 }
+
+function fixed(value: number | undefined | null): string {
+  return Number.isFinite(value) ? Number(value).toFixed(2) : '-';
+}
+
+/**
+ * The question the drawer hands to the conversation. Only ids and numbers go
+ * in: trace-derived names and texts stay out of a message the user sends as
+ * their own, and the agent re-reads the evidence itself from the ids.
+ */
+export function buildCriticalPathHandoffQuestion(analysis: CriticalPathAnalysis): string {
+  const task = analysis.task;
+  const selector =
+    task.threadStateId !== undefined
+      ? `thread_state_id=${task.threadStateId}`
+      : `utid=${task.utid}, start_ts=${task.startTs}, end_ts=${task.startTs + task.dur}`;
+  const longestMs = analysis.longestSegment?.durationMs;
+  const segments = analysis.chainSegmentCount ?? analysis.wakeupChain.length;
+  return uiText(
+    `继续分析这个等待（${selector}，utid ${task.utid}）：窗口 ${fixed(analysis.totalMs)} ms，` +
+      `外部阻塞 ${fixed(analysis.blockingMs)} ms（${fixed(analysis.externalBlockingPercentage)}%），` +
+      `等待链 ${segments} 段${longestMs !== undefined ? `，最长外部段 ${fixed(longestMs)} ms` : ''}。` +
+      `请重新取证：它在等什么、被谁唤醒，最值得先查哪一段。`,
+    `Continue analyzing this wait (${selector}, utid ${task.utid}): window ${fixed(analysis.totalMs)} ms, ` +
+      `external blocking ${fixed(analysis.blockingMs)} ms (${fixed(analysis.externalBlockingPercentage)}%), ` +
+      `${segments} chain segments${longestMs !== undefined ? `, longest external segment ${fixed(longestMs)} ms` : ''}. ` +
+      `Re-acquire the evidence: what it waited on, who woke it, and which segment to examine first.`,
+  );
+}
+
+/** Put the question in the conversation composer and bring the assistant into view; never send it. */
+function handOffToConversation(analysis: CriticalPathAnalysis, traceId: string): void {
+  emitComposerDraft({text: buildCriticalPathHandoffQuestion(analysis), traceId});
+  const floating = getFloatingState();
+  if (floating.mode === 'sidebar' && floating.sidebar.collapsed) {
+    updateFloatingState({sidebar: {collapsed: false}});
+  }
+}
+
 
 export function setupCriticalPathExtension(
   trace: Trace,
@@ -415,6 +647,7 @@ export function setupCriticalPathExtension(
     analysis: null,
     aiSummary: null,
     error: '',
+    notice: '',
   };
 
   let disposed = false;
@@ -443,11 +676,36 @@ export function setupCriticalPathExtension(
       </div>
       ${state.loading ? renderStatus(uiText('正在分析所选 task 的 critical path，并生成 AI 诊断…', 'Analyzing the selected task critical path and generating an AI diagnosis…'), false) : ''}
       ${state.error ? renderStatus(state.error, true) : ''}
-      ${state.analysis ? renderAnalysis(state.analysis, state.aiSummary) : ''}
+      ${state.notice ? renderStatus(state.notice, false) : ''}
+      ${state.analysis ? renderCriticalPathDrawerBody(state.analysis, state.aiSummary) : ''}
     `;
     target
       .querySelector('.sp-critical-path-close')
       ?.addEventListener('click', () => {
+        state.open = false;
+        renderDrawer();
+      });
+    target
+      .querySelectorAll<HTMLButtonElement>('.sp-critical-path-copy')
+      .forEach((button) => {
+        button.addEventListener('click', () => {
+          const index = Number(button.dataset.hypothesisIndex);
+          const sql = state.analysis?.quantification?.hypotheses[index]?.verificationSql;
+          if (!sql) return;
+          void copyTextToClipboard(sql).then((copied) => {
+            if (disposed) return;
+            state.notice = copied
+              ? uiText('已复制验证 SQL。', 'Verification SQL copied.')
+              : uiText('无法访问剪贴板，请手动复制。', 'The clipboard is unavailable; copy the SQL manually.');
+            renderDrawer();
+          });
+        });
+      });
+    target
+      .querySelector('.sp-critical-path-handoff')
+      ?.addEventListener('click', () => {
+        if (!state.analysis || !state.traceId) return;
+        handOffToConversation(state.analysis, state.traceId);
         state.open = false;
         renderDrawer();
       });
@@ -460,6 +718,8 @@ export function setupCriticalPathExtension(
     state.open = true;
     state.loading = true;
     state.error = '';
+    state.notice = '';
+    state.analysis = null;
     state.aiSummary = null;
     renderDrawer();
     try {
@@ -483,12 +743,9 @@ export function setupCriticalPathExtension(
       );
       state.traceId = traceId;
       const selectedTask = getSelectedTask(trace);
-      const result = await fetchJson<{
-        analysis: CriticalPathAnalysis;
-        presentationAnalysis?: CriticalPathAnalysis;
-        aiSummary?: CriticalPathAiSummary;
-      }>(
-        `${backendUrl}/api/critical-path/${encodeURIComponent(traceId)}/analyze`,
+      // No limits of its own: the engine's `CRITICAL_PATH_DEFAULTS.ui` apply.
+      const result = await fetchJson<CriticalPathAnalyzeResponse>(
+        buildCriticalPathAnalyzeUrl(backendUrl, traceId),
         {
           method: 'POST',
           headers: {
@@ -501,14 +758,13 @@ export function setupCriticalPathExtension(
             utid: selectedTask.utid,
             startTs: selectedTask.startTs,
             dur: selectedTask.dur,
-            maxSegments: 180,
             includeAi: true,
             outputLanguage: uiOutputLanguage(),
           }),
         },
       );
       if (disposed || generation !== lifecycleGeneration) return;
-      state.analysis = result.presentationAnalysis ?? result.analysis;
+      state.analysis = result.presentationAnalysis;
       state.aiSummary = result.aiSummary ?? null;
     } catch (error: unknown) {
       if (disposed || generation !== lifecycleGeneration) return;

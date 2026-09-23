@@ -423,8 +423,6 @@ export interface TeachingObservedCriticalTask {
   utid?: number;
   threadStateId?: number;
   state?: string;
-  tableName?: string;
-  stackDepth?: number;
   waker?: TeachingObservedWakeupRef;
   evidenceSource?: string;
   confidence?: number;
@@ -1256,7 +1254,10 @@ export type AiCapabilityFeature =
   | 'cli_provider_test'
   | 'capture_analyze'
   | 'llm_skill_step'
-  | 'background_review_agent';
+  | 'background_review_agent'
+  | 'critical_path_ai_summary'
+  | 'comparison_ai_conclusion'
+  | 'flamegraph_ai_summary';
 
 export interface AiCapabilityPolicy {
   schemaVersion: 1;

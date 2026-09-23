@@ -43,3 +43,58 @@ export function emitClearChatCommand(): void {
 export function emitOpenSettingsCommand(): void {
   emit('open-settings');
 }
+/**
+ * A question another surface hands to the conversation composer. It is only
+ * ever pre-filled, never sent: the user reads and sends it. `traceId` binds it
+ * to the backend trace it was built from; the panel refuses it for any other.
+ */
+export interface ComposerDraft {
+  text: string;
+  traceId: string;
+}
+
+/** Returns true when the draft was taken; false leaves it pending. */
+type ComposerDraftListener = (draft: ComposerDraft) => boolean;
+
+const composerDraftListeners = new Set<ComposerDraftListener>();
+let pendingComposerDraft: ComposerDraft | null = null;
+
+/** Whether `listener` took the draft; a throwing listener did not. */
+function deliverComposerDraft(listener: ComposerDraftListener, draft: ComposerDraft): boolean {
+  try {
+    return listener(draft);
+  } catch (error) {
+    console.warn('[AIAssistantCommandBus] Composer draft listener failed:', error);
+    return false;
+  }
+}
+
+function offerComposerDraft(draft: ComposerDraft): boolean {
+  return [...composerDraftListeners].some((listener) => deliverComposerDraft(listener, draft));
+}
+
+/**
+ * Hand a draft to the composer. With no panel mounted it waits, as the only
+ * pending draft, until one subscribes; a newer draft replaces it.
+ */
+export function emitComposerDraft(draft: ComposerDraft): void {
+  pendingComposerDraft = offerComposerDraft(draft) ? null : draft;
+}
+
+export function subscribeComposerDraft(listener: ComposerDraftListener): () => void {
+  composerDraftListeners.add(listener);
+  if (pendingComposerDraft && deliverComposerDraft(listener, pendingComposerDraft)) pendingComposerDraft = null;
+  return () => {
+    composerDraftListeners.delete(listener);
+  };
+}
+
+/** Drop a draft that was not delivered yet, e.g. when the trace or session changes. */
+export function clearPendingComposerDraft(): void {
+  pendingComposerDraft = null;
+}
+
+/** Test hook: the draft still waiting for a panel, if any. */
+export function peekPendingComposerDraft(): ComposerDraft | null {
+  return pendingComposerDraft;
+}
