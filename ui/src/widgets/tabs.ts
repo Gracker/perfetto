@@ -30,6 +30,11 @@ export interface TabsTab {
   readonly title: m.Children;
   // Content to display when this tab is active.
   readonly content: m.Children;
+  // When set, the content is not rendered until the tab is first activated.
+  // Useful for expensive views that should not be built eagerly. Once
+  // activated, the tab behaves like a regular tab: the content stays mounted
+  // (and keeps its state) when the tab is deactivated.
+  readonly lazy?: boolean;
   // Whether to show a close button on the tab.
   readonly closeButton?: boolean;
   // Icon to display on the left side of the tab title.
@@ -46,22 +51,25 @@ export interface TabsAttrs {
   // If not provided, the component manages its own state (uncontrolled mode).
   readonly activeTabKey?: string;
   // Called when a tab is clicked.
-  onTabChange?(key: string): void;
+  readonly onTabChange?: (key: string) => void;
   // Called when a tab's close button is clicked.
-  onTabClose?(key: string): void;
+  readonly onTabClose?: (key: string) => void;
   // Called when a tab's title is renamed via inline editing. When set, tabs
   // with a string title become renamable on double-click (tabs with non-string
   // titles are not affected). If the input is cleared (empty after trim) or
   // Escape is pressed, the rename is cancelled and this callback is not fired.
-  onTabRename?(key: string, newTitle: string): void;
+  readonly onTabRename?: (key: string, newTitle: string) => void;
   // Whether tabs can be reordered via drag and drop.
   readonly reorderable?: boolean;
   // Called when tabs are reordered. Receives the key of the dragged tab and
   // the key of the tab it was dropped before (or undefined if dropped at end).
-  onTabReorder?(draggedKey: string, beforeKey: string | undefined): void;
+  readonly onTabReorder?: (
+    draggedKey: string,
+    beforeKey: string | undefined,
+  ) => void;
   // Called when the "new tab" button is clicked. When set, a "+" button is
   // shown at the end of the tab bar.
-  onNewTab?(): void;
+  readonly onNewTab?: () => void;
   // Custom content to render in place of the default "+" button. When set,
   // onNewTab is ignored and this content is rendered instead.
   readonly newTabContent?: m.Children;
@@ -238,6 +246,9 @@ export class Tabs implements m.ClassComponent<TabsAttrs> {
   private renamingTabKey?: string;
   private renameInputValue = '';
   private renameCancelled = false;
+  // Keys of the tabs that have been active at least once. Content of lazy
+  // tabs is only rendered after their key lands here.
+  private activatedKeys = new Set<string>();
 
   view({attrs}: m.CVnode<TabsAttrs>): m.Children {
     const {
@@ -256,6 +267,11 @@ export class Tabs implements m.ClassComponent<TabsAttrs> {
 
     // Get active tab key (controlled or uncontrolled)
     const activeKey = activeTabKey ?? this.internalActiveTab ?? tabs[0]?.key;
+    // The active tab counts as activated, so a lazy tab renders its content
+    // on the same render in which it becomes active.
+    if (activeKey !== undefined) {
+      this.activatedKeys.add(activeKey);
+    }
 
     return m(
       '.pf-tabs',
@@ -391,7 +407,14 @@ export class Tabs implements m.ClassComponent<TabsAttrs> {
       m(
         '.pf-tabs__content',
         tabs.map((tab) =>
-          m(Gate, {key: tab.key, open: tab.key === activeKey}, tab.content),
+          m(
+            Gate,
+            {key: tab.key, open: tab.key === activeKey},
+            // Lazy tabs render no content until they are first activated.
+            tab.lazy && !this.activatedKeys.has(tab.key)
+              ? undefined
+              : tab.content,
+          ),
         ),
       ),
     );

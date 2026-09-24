@@ -844,11 +844,17 @@ async function getTraceInfo(
   updateStatus(app, 'Caching trace...');
   const cached = await cacheTrace(traceSource, uuid);
 
-  const downloadable =
-    (traceSource.type === 'ARRAY_BUFFER' && !traceSource.localOnly) ||
+  const shareable =
     traceSource.type === 'FILE' ||
     traceSource.type === 'URL' ||
-    traceSource.type === 'MULTIPLE_FILES';
+    traceSource.type === 'MULTIPLE_FILES' ||
+    (traceSource.type === 'ARRAY_BUFFER' && traceSource.shareable !== false);
+
+  const downloadable =
+    traceSource.type === 'FILE' ||
+    traceSource.type === 'URL' ||
+    traceSource.type === 'MULTIPLE_FILES' ||
+    (traceSource.type === 'ARRAY_BUFFER' && traceSource.downloadable !== false);
 
   return {
     ...traceTime,
@@ -862,6 +868,7 @@ async function getTraceInfo(
     hasFtrace,
     uuid,
     cached,
+    shareable,
     downloadable,
   };
 }

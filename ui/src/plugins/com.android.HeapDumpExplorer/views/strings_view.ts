@@ -34,6 +34,9 @@ import {
 } from '../components';
 import * as queries from '../queries';
 import {dumpFilterSql, type HeapDump} from '../queries';
+import {Anchor} from '../../../widgets/anchor';
+import {DetailsShell} from '../../../widgets/details_shell';
+import {AsyncMemo} from '../../../base/async_memo';
 
 function buildQuery(activeDump: HeapDump): string {
   return `
@@ -74,9 +77,9 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
         const str = row.value != null ? String(row.value) : null;
         const display = `String ${fmtHex(id)}`;
         return m(
-          'button',
+          Anchor,
           {
-            class: 'pf-hde-link',
+            class: 'pf-hde-str-color',
             onclick: () =>
               navigate('object', {
                 id,
@@ -88,7 +91,7 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
           m(
             'span',
             {
-              class: 'pf-hde-mono pf-hde-break-all pf-hde-str-color',
+              class: 'pf-hde-mono pf-hde-break-all',
             },
             str
               ? '"' +
@@ -161,11 +164,18 @@ interface StringsViewAttrs {
   readonly hasFieldValues?: boolean;
 }
 
-export function StringsView(): m.Component<StringsViewAttrs> {
-  let allRows: StringListRow[] | null = null;
-  let alive = true;
-  let dataSource: SQLDataSource | null = null;
+export function StringsView({
+  attrs: {engine, activeDump},
+}: m.Vnode<StringsViewAttrs>): m.Component<StringsViewAttrs> {
+  const query = buildQuery(activeDump);
+  const datasource = new SQLDataSource({
+    engine,
+    tableOrSubquery: query,
+    preamble: SQL_PREAMBLE,
+  });
   const counter = new RowCounter();
+  counter.init(engine, query, SQL_PREAMBLE);
+  const allRowsMemo = new AsyncMemo<readonly StringListRow[]>();
   let filters: Filter[] = [];
 
   function applyNavFilter(
@@ -180,46 +190,44 @@ export function StringsView(): m.Component<StringsViewAttrs> {
 
   return {
     oninit(vnode) {
-      const {engine, activeDump} = vnode.attrs;
-      const query = buildQuery(activeDump);
-      dataSource = new SQLDataSource({
-        engine,
-        tableOrSubquery: query,
-        preamble: SQL_PREAMBLE,
-      });
-      counter.init(engine, query, SQL_PREAMBLE);
       applyNavFilter(vnode.attrs.initialQuery, vnode.attrs.clearNavParam);
-      queries
-        .getStringList(engine, activeDump)
-        .then((r) => {
-          if (!alive) return;
-          allRows = r;
-          m.redraw();
-        })
-        .catch(console.error);
     },
     onupdate(vnode) {
       applyNavFilter(vnode.attrs.initialQuery, vnode.attrs.clearNavParam);
     },
     onremove() {
-      alive = false;
+      datasource.dispose();
+      allRowsMemo.dispose();
     },
     view(vnode) {
       const {navigate} = vnode.attrs;
 
-      if (!allRows) {
-        return m('div', {class: 'pf-hde-loading'}, m(Spinner, {easing: true}));
+      const {isPending, data: allRows} = allRowsMemo.use({
+        key: {},
+        compute: () => queries.getStringList(engine, activeDump),
+      });
+
+      if (isPending) {
+        return m(
+          DetailsShell,
+          {title: 'Strings', fillHeight: true, className: 'pf-hde-tab--padded'},
+          m('div', {class: 'pf-hde-loading'}, m(Spinner, {easing: true})),
+        );
       }
 
       if (allRows.length === 0) {
-        return m(EmptyState, {
-          icon: 'text_fields',
-          title:
-            vnode.attrs.hasFieldValues === false
-              ? 'String values require an ART heap dump (.hprof)'
-              : 'No string data available',
-          fillHeight: true,
-        });
+        return m(
+          DetailsShell,
+          {title: 'Strings', fillHeight: true, className: 'pf-hde-tab--padded'},
+          m(EmptyState, {
+            icon: 'text_fields',
+            title:
+              vnode.attrs.hasFieldValues === false
+                ? 'String values require an ART heap dump (.hprof)'
+                : 'No string data available',
+            fillHeight: true,
+          }),
+        );
       }
 
       const totalRetained = allRows.reduce((s, r) => s + r.retainedSize, 0);
@@ -235,44 +243,48 @@ export function StringsView(): m.Component<StringsViewAttrs> {
         {property: 'Total retained', value: fmtSize(totalRetained)},
       ];
 
-      return m('div', {class: 'pf-hde-view-content'}, [
-        m('h2', {class: 'pf-hde-view-heading'}, counter.heading('Strings')),
-
-        m('div', {class: 'pf-hde-card pf-hde-mb-4 pf-hde-flex-none'}, [
-          m(DataGrid, {
-            schema: SUMMARY_SCHEMA,
-            data: summaryRows,
-            initialColumns: [
-              {id: 'property', field: 'property'},
-              {id: 'value', field: 'value'},
-            ],
-          }),
-        ]),
-
-        dataSource
-          ? m(DataGrid, {
-              schema: makeUiSchema(navigate),
-              data: dataSource,
-              fillHeight: true,
+      return m(
+        DetailsShell,
+        {
+          title: counter.heading('Strings'),
+          fillHeight: true,
+          className: 'pf-hde-tab--padded',
+        },
+        [
+          m('div', {class: 'pf-hde-card pf-hde-mb-4 pf-hde-flex-none'}, [
+            m(DataGrid, {
+              schema: SUMMARY_SCHEMA,
+              data: summaryRows,
               initialColumns: [
-                {id: 'id', field: 'id'},
+                {id: 'property', field: 'property'},
                 {id: 'value', field: 'value'},
-                {id: 'retained', field: 'retained'},
-                {id: 'reachable_size', field: 'reachable_size'},
-                {id: 'reachable_native', field: 'reachable_native'},
-                {id: 'reachable_count', field: 'reachable_count'},
-                {id: 'len', field: 'len'},
-                {id: 'heap', field: 'heap'},
               ],
-              filters,
-              showExportButton: true,
-              onFiltersChanged: (f) => {
-                filters = [...f];
-                counter.onFiltersChanged(f);
-              },
-            })
-          : null,
-      ]);
+            }),
+          ]),
+
+          m(DataGrid, {
+            schema: makeUiSchema(navigate),
+            data: datasource,
+            fillHeight: true,
+            initialColumns: [
+              {id: 'id', field: 'id'},
+              {id: 'value', field: 'value'},
+              {id: 'retained', field: 'retained'},
+              {id: 'reachable_size', field: 'reachable_size'},
+              {id: 'reachable_native', field: 'reachable_native'},
+              {id: 'reachable_count', field: 'reachable_count'},
+              {id: 'len', field: 'len'},
+              {id: 'heap', field: 'heap'},
+            ],
+            filters,
+            showExportButton: true,
+            onFiltersChanged: (f) => {
+              filters = [...f];
+              counter.onFiltersChanged(f);
+            },
+          }),
+        ],
+      );
     },
   };
 }

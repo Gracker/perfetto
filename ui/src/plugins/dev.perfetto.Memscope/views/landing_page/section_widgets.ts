@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Presentational widgets shared by the Memscope per-section panels (Java,
-// bitmaps, native): the compact top-N table, class-name cells, the share bar,
-// the delta cell and the single-ratio bar.
+// bitmaps, native): the compact top-N table, class-name cells, the delta cell
+// and the single-ratio bar.
 
 import m from 'mithril';
 import {Panel} from '../../components/panel';
@@ -129,6 +129,11 @@ export function topTable(opts: {
 // matches the explorer's own objects_<class> links.
 export function heapDumpClassHref(cls: string): string {
   return `#!/heapdump/objects_${encodeURIComponent(cls)}`;
+}
+
+// Link to the Heap Dump Explorer's bitmaps view.
+export function heapDumpBitmapsHref(): string {
+  return '#!/heapdump/bitmaps';
 }
 
 // A class-name cell. The class name links to that class's instances in the Heap

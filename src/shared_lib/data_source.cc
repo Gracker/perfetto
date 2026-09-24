@@ -463,6 +463,14 @@ void PerfettoDsFlushDone(PerfettoDsAsyncFlusher* stopper) {
   delete cb;
 }
 
+uint64_t PerfettoDsOnFlushArgsGetReason(struct PerfettoDsOnFlushArgs* args) {
+  if (!args) {
+    return PERFETTO_DS_FLUSH_REASON_UNKNOWN;
+  }
+  auto* flush_args = reinterpret_cast<const ShlibDataSource::FlushArgs*>(args);
+  return static_cast<uint64_t>(flush_args->flush_flags.reason());
+}
+
 void* PerfettoDsImplGetInstanceLocked(struct PerfettoDsImpl* ds_impl,
                                       PerfettoDsInstanceIndex idx) {
   auto* internal_state = ds_impl->cpp_type.static_state()->TryGet(idx);
@@ -609,6 +617,13 @@ void PerfettoDsTracerImplFlush(struct PerfettoDsTracerImpl* tracer,
     fn = [user_arg, cb]() { cb(user_arg); };
   }
   tls_inst->trace_writer->Flush(fn);
+}
+
+uint64_t PerfettoDsTracerImplGetDropCount(struct PerfettoDsTracerImpl* tracer) {
+  auto* tls_inst =
+      reinterpret_cast<DataSourceInstanceThreadLocalState*>(tracer);
+
+  return tls_inst->trace_writer->drop_count();
 }
 
 uint32_t PerfettoDsGetDefaultClockId() {

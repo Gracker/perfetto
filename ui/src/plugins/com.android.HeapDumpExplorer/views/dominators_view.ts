@@ -30,6 +30,8 @@ import {
   colHeader,
 } from '../components';
 import {dumpFilterSql, type HeapDump} from '../queries';
+import {Anchor} from '../../../widgets/anchor';
+import {DetailsShell} from '../../../widgets/details_shell';
 
 interface DominatorsViewAttrs {
   readonly engine: Engine;
@@ -71,9 +73,8 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
         const cls = String(row.cls ?? '');
         const display = `${shortClassName(cls)} ${fmtHex(id)}`;
         return m(
-          'button',
+          Anchor,
           {
-            class: 'pf-hde-link',
             onclick: () => navigate('object', {id, label: display}),
           },
           display,
@@ -143,31 +144,34 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
   };
 }
 
-export function DominatorsView(): m.Component<DominatorsViewAttrs> {
-  let dataSource: SQLDataSource | null = null;
+export function DominatorsView({
+  attrs: {engine, activeDump},
+}: m.Vnode<DominatorsViewAttrs>): m.Component<DominatorsViewAttrs> {
+  const query = buildQuery(activeDump);
+  const datasource = new SQLDataSource({
+    engine,
+    tableOrSubquery: query,
+    preamble: SQL_PREAMBLE,
+  });
   const counter = new RowCounter();
+  counter.init(engine, query, SQL_PREAMBLE);
 
   return {
-    oninit(vnode) {
-      const {engine, activeDump} = vnode.attrs;
-      const query = buildQuery(activeDump);
-      dataSource = new SQLDataSource({
-        engine,
-        tableOrSubquery: query,
-        preamble: SQL_PREAMBLE,
-      });
-      counter.init(engine, query, SQL_PREAMBLE);
+    onremove() {
+      datasource.dispose();
     },
     view(vnode) {
       const {navigate} = vnode.attrs;
 
-      if (!dataSource) return null;
-
-      return m('div', {class: 'pf-hde-view-content'}, [
-        m('h2', {class: 'pf-hde-view-heading'}, counter.heading('Dominators')),
+      return m(
+        DetailsShell,
+        {
+          title: counter.heading('Dominators'),
+          fillHeight: true,
+        },
         m(DataGrid, {
           schema: makeUiSchema(navigate),
-          data: dataSource,
+          data: datasource,
           fillHeight: true,
           initialColumns: [
             {id: 'id', field: 'id'},
@@ -185,7 +189,7 @@ export function DominatorsView(): m.Component<DominatorsViewAttrs> {
           showExportButton: true,
           onFiltersChanged: counter.onFiltersChanged,
         }),
-      ]);
+      );
     },
   };
 }

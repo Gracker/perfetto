@@ -205,6 +205,26 @@ base::Status QuerySubcommand::Run(const SubcommandContext& ctx) {
   base::TimeNanos t_load{};
   ASSIGN_OR_RETURN(auto tp, CreateTraceProcessor(*ctx.global, ctx.platform,
                                                  trace_file, &t_load));
+  // One-shot `query TRACE` calls re-parse the trace every time. Scripts and
+  // coding agents rarely read --help but do read stderr, so when parsing
+  // was slow enough to matter tell them, once per call, how to keep the
+  // trace loaded across queries. Measured on agents: this line alone moved
+  // warm-session use from 0% to >80% of runs; longer guides were not read.
+  constexpr double kSlowParseSeconds = 1.0;
+  double load_s = static_cast<double>(t_load.count()) / 1e9;
+  if (!ctx.global->quiet && ctx.global->remote_addr.empty() && !interactive_ &&
+      load_s >= kSlowParseSeconds) {
+    fprintf(
+        stderr,
+        "Tip: parsing took %.1fs and `query TRACE` re-parses on every call. "
+        "To run many queries, load once and reuse the session:\n"
+        "  trace_processor server unix --name S --daemonize %s\n"
+        "  trace_processor query --remote S \"SELECT ...\"\n"
+        "  trace_processor server kill S\n"
+        "Schema discovery and PerfettoSQL tips: `trace_processor help "
+        "agent`.\n",
+        load_s, trace_file.c_str());
+  }
 
   if (!query_file_.empty()) {
     if (!base::ReadFile(query_file_, &sql)) {
@@ -220,7 +240,7 @@ base::Status QuerySubcommand::Run(const SubcommandContext& ctx) {
 #endif
 
   base::TimeNanos t_query_start = base::GetWallTimeNs();
-  auto status = RunQueries(tp.get(), sql, true);
+  auto status = RunQueries(tp.get(), sql, true, ctx.global->quiet);
   if (!status.ok()) {
     MaybeWriteMetatrace(tp.get(), ctx.global->metatrace_path);
     return status;
@@ -233,9 +253,12 @@ base::Status QuerySubcommand::Run(const SubcommandContext& ctx) {
 
   if (interactive_) {
     RETURN_IF_ERROR(StartInteractiveShell(
-        tp.get(),
-        InteractiveOptions{
-            wide_ ? 40u : 20u, MetricV1OutputFormat::kNone, {}, {}, nullptr}));
+        tp.get(), InteractiveOptions{wide_ ? 40u : 20u,
+                                     MetricV1OutputFormat::kNone,
+                                     {},
+                                     {},
+                                     nullptr,
+                                     ctx.global->quiet}));
   }
 
   RETURN_IF_ERROR(MaybeWriteMetatrace(tp.get(), ctx.global->metatrace_path));
@@ -269,8 +292,9 @@ base::Status QuerySubcommand::RunStructuredQuery(
         structured_query_id_.c_str());
   }
 
-  RETURN_IF_ERROR(
-      RunQueries(tp.get(), "SELECT * FROM " + query_result.table_name, true));
+  RETURN_IF_ERROR(RunQueries(tp.get(),
+                             "SELECT * FROM " + query_result.table_name, true,
+                             ctx.global->quiet));
   base::TimeNanos t_query = base::GetWallTimeNs() - t_query_start;
 
   if (!perf_file_.empty()) {

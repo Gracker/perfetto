@@ -33,7 +33,7 @@ interface MonitorRowData {
   readonly id: number;
   readonly ts: bigint;
   readonly dur: bigint | null;
-  readonly lock_name: string;
+  readonly lock_name: string | null;
   readonly waiter_count: number;
   readonly blocked_thread_name: string | null;
   readonly blocking_thread_name: string | null;
@@ -324,8 +324,6 @@ export class AndroidLockContentionEventSource {
     eventId: number,
     trackUri: string,
   ): Promise<LockContentionDetails | null> {
-    const resolvedId = await this.resolveEventId(eventId, trackUri);
-
     const monitorQuery = await this.trace.engine.query(`
       SELECT 
         id, ts, dur,
@@ -338,7 +336,7 @@ export class AndroidLockContentionEventSource {
         (SELECT id FROM thread_track WHERE utid = blocking_utid) as blocking_track_id,
         (SELECT is_main_thread FROM thread WHERE utid = blocking_utid) as is_blocking_thread_main
       FROM android_monitor_contention_chain
-      WHERE id = ${resolvedId}
+      WHERE id = ${eventId}
       LIMIT 1
     `);
 
@@ -347,7 +345,7 @@ export class AndroidLockContentionEventSource {
         id: NUM,
         ts: LONG,
         dur: LONG_NULL,
-        lock_name: STR,
+        lock_name: STR_NULL,
         waiter_count: NUM,
         blocked_thread_name: STR_NULL,
         blocking_thread_name: STR_NULL,
@@ -364,30 +362,8 @@ export class AndroidLockContentionEventSource {
       });
       return this.fetchMonitorDetails(monitorRow, trackUri);
     } else {
-      return this.fetchFallbackDetails(resolvedId, trackUri);
+      return this.fetchFallbackDetails(eventId, trackUri);
     }
-  }
-
-  private async resolveEventId(
-    eventId: number,
-    trackUri: string,
-  ): Promise<number> {
-    const debugMatch = trackUri.match(/^debug\.track(\d+)(?:_\d+)?$/);
-    const ownerTrackPrefix = 'com.android.AndroidLockContention#OwnerEvents';
-
-    if (trackUri.startsWith(ownerTrackPrefix)) {
-      return eventId;
-    } else if (debugMatch) {
-      const tableId = debugMatch[1];
-      const tableName = `__debug_track_${tableId}`;
-      const query = await this.trace.engine.query(`
-        SELECT raw_original_id FROM ${tableName} WHERE id = ${eventId} LIMIT 1
-      `);
-      if (query.numRows() > 0) {
-        return query.firstRow({raw_original_id: NUM}).raw_original_id;
-      }
-    }
-    return eventId;
   }
 
   private async fetchMonitorDetails(
@@ -420,7 +396,7 @@ export class AndroidLockContentionEventSource {
 
     const blockingTrackUri =
       monitorRow.owner_tid !== null
-        ? `com.android.AndroidLockContention#OwnerEvents_${monitorRow.owner_tid}`
+        ? `com.android.AndroidLockContention#OwnerEvents_Counter_${monitorRow.owner_tid}`
         : undefined;
 
     return {
@@ -430,7 +406,7 @@ export class AndroidLockContentionEventSource {
         monitorRow.dur !== null ? Duration.fromRaw(monitorRow.dur) : undefined,
       waiterCount,
       isMonitor: true,
-      lockName: monitorRow.lock_name,
+      lockName: monitorRow.lock_name ?? '',
 
       parentId,
       binderReplyId,
@@ -463,7 +439,7 @@ export class AndroidLockContentionEventSource {
   ): Promise<LockContentionDetails | null> {
     const query = await this.trace.engine.query(`
       SELECT 
-        c.id, c.ts, c.dur, c.name AS lock_name, c.owner_tid,
+        c.id, c.ts, c.dur, c.lock_name, c.owner_tid,
         c.blocked_thread_name, c.blocking_thread_name,
         t.is_main_thread as is_blocking_thread_main,
         c.lock_type, c.is_monitor
@@ -477,7 +453,7 @@ export class AndroidLockContentionEventSource {
       id: NUM,
       ts: LONG,
       dur: LONG_NULL,
-      lock_name: STR,
+      lock_name: STR_NULL,
       owner_tid: NUM_NULL,
       blocked_thread_name: STR_NULL,
       blocking_thread_name: STR_NULL,
@@ -488,7 +464,7 @@ export class AndroidLockContentionEventSource {
 
     const blockingTrackUri =
       row.owner_tid !== null
-        ? `com.android.AndroidLockContention#OwnerEvents_${row.owner_tid}`
+        ? `com.android.AndroidLockContention#OwnerEvents_Counter_${row.owner_tid}`
         : undefined;
 
     return {

@@ -18,6 +18,7 @@
 
 import m from 'mithril';
 import {AsyncMemo} from '../../../../../base/async_memo';
+import {Icons} from '../../../../../base/semantic_icons';
 import {Time, type time} from '../../../../../base/time';
 import type {Trace} from '../../../../../public/trace';
 import {
@@ -29,6 +30,7 @@ import {
 } from '../../../../../trace_processor/query_result';
 import {Panel} from '../../../components/panel';
 import {Callout} from '../../../components/callout';
+import {Anchor} from '../../../../../widgets/anchor';
 import {Intent} from '../../../../../widgets/common';
 import {
   deltaText,
@@ -41,11 +43,12 @@ import {nearestByTs} from '../selection';
 import {
   deltaCell,
   emptyPanel,
+  heapDumpBitmapsHref,
   loadingPanel,
   shortClassName,
   topTable,
 } from '../section_widgets';
-import {ShareBar} from '../../../components/share_bar';
+import {ProgressBar} from '../../../components/progress_bar';
 import {Stack} from '../../../../../widgets/stack';
 import {BillboardStrip} from '../../../components/billboard';
 
@@ -173,8 +176,8 @@ async function loadBitmapRetainer(
     const res = await trace.engine.query(`
       WITH RECURSIVE
       last_ts AS (
-        SELECT MAX(graph_sample_ts) AS ts
-        FROM heap_graph_object WHERE upid = ${upid}
+        SELECT MAX(ts) AS ts
+        FROM heap_graph WHERE upid = ${upid}
       ),
       ck AS (
         SELECT c.id,
@@ -402,7 +405,7 @@ export class BitmapsSection implements m.ClassComponent<BitmapsSectionAttrs> {
           // Share of all bitmap bytes, with the change in share (percentage
           // points, this snapshot's total vs the baseline's) below in diff mode.
           deltaCell(
-            m(ShareBar, {frac: shareFrac}),
+            m(ProgressBar, {pct: shareFrac * 100}),
             comparing ? (shareFrac - baseShareFrac) * 100 : undefined,
             comparing,
             (n) =>
@@ -417,7 +420,18 @@ export class BitmapsSection implements m.ClassComponent<BitmapsSectionAttrs> {
 
     return m(
       Panel,
-      m(Panel.Header, {title: TITLE, subtitle: SUBTITLE}),
+      m(Panel.Header, {
+        title: TITLE,
+        subtitle: SUBTITLE,
+        controls: m(
+          Anchor,
+          {
+            href: heapDumpBitmapsHref(),
+            icon: Icons.UpdateSelection,
+          },
+          'Open in Heap Dump Explorer',
+        ),
+      }),
       m(
         Panel.Body,
         m(Stack, {spacing: 'large'}, [

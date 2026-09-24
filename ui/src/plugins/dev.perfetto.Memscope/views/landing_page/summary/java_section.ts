@@ -43,7 +43,7 @@ import {
   shortClassName,
   topTable,
 } from '../section_widgets';
-import {ShareBar} from '../../../components/share_bar';
+import {ProgressBar} from '../../../components/progress_bar';
 import {Stack} from '../../../../../widgets/stack';
 import {BillboardStrip} from '../../../components/billboard';
 
@@ -80,8 +80,7 @@ interface DumpStats {
   readonly reachableHeapSize: number;
   readonly reachableNativeSize: number;
   readonly reachableObjCount: number;
-  // MIN(heap_graph_object.id) for this dump — the HeapProfile track event id
-  // used to select the dump on the timeline.
+  // heap_graph.id, used to select the dump on the HeapProfile track.
   readonly eventId: number;
 }
 
@@ -111,14 +110,11 @@ async function loadJavaData(trace: Trace, upid: number): Promise<JavaData> {
   await trace.engine.query(
     'INCLUDE PERFETTO MODULE android.memory.heap_graph.heap_graph_stats;',
   );
-  // MIN(object id) per dump — the HeapProfile track event id for that dump
-  // (mirrors how dev.perfetto.HeapProfile builds its timeline events).
   const eventIdByTs = new Map<bigint, number>();
   const eventRes = await trace.engine.query(`
-    SELECT graph_sample_ts AS ts, MIN(id) AS event_id
-    FROM heap_graph_object
+    SELECT ts, id AS event_id
+    FROM heap_graph
     WHERE upid = ${upid}
-    GROUP BY graph_sample_ts
   `);
   for (
     const it = eventRes.iter({ts: LONG, event_id: NUM});
@@ -194,7 +190,7 @@ async function loadJavaData(trace: Trace, upid: number): Promise<JavaData> {
     )
     SELECT
       r.graph_sample_ts AS ts,
-      r.type_name AS type_name,
+      ifnull(r.type_name, '[unknown]') AS type_name,
       r.reachable_obj_count AS reachable_obj_count,
       r.reachable_size_bytes AS reachable_size_bytes,
       r.reachable_native_size_bytes AS reachable_native_size_bytes,
@@ -275,8 +271,8 @@ async function loadRetainers(
     const res = await trace.engine.query(`
       WITH
       last_ts AS (
-        SELECT MAX(graph_sample_ts) AS ts
-        FROM heap_graph_object WHERE upid = ${upid}
+        SELECT MAX(ts) AS ts
+        FROM heap_graph WHERE upid = ${upid}
       ),
       ck AS (
         -- Classify by the *wrapped* name: a class object is named
@@ -385,7 +381,8 @@ async function loadRetainers(
         FROM hits
         GROUP BY owned_class, retainer
       )
-      SELECT a.owned_class AS type_name, a.retainer AS retainer_name,
+      SELECT ifnull(a.owned_class, '[unknown]') AS type_name,
+        ifnull(a.retainer, '[unknown]') AS retainer_name,
         a.bytes AS bytes
       FROM agg a
       WHERE a.rrn <= ${RETAINER_MAX_VIAS}
@@ -533,11 +530,13 @@ export class JavaSection implements m.ClassComponent<JavaSectionAttrs> {
       baseTotal: number,
     ): m.Children => {
       const frac = total > 0 ? value / total : 0;
-      if (!comparing) return m(ShareBar, {frac});
+      if (!comparing) return m(ProgressBar, {pct: frac * 100});
       const baseFrac =
         baseValue !== undefined && baseTotal > 0 ? baseValue / baseTotal : 0;
-      return withDelta(m(ShareBar, {frac}), (frac - baseFrac) * 100, (n) =>
-        n === 0 ? '±0 pts' : `${n > 0 ? '+' : ''}${n.toFixed(1)} pts`,
+      return withDelta(
+        m(ProgressBar, {pct: frac * 100}),
+        (frac - baseFrac) * 100,
+        (n) => (n === 0 ? '±0 pts' : `${n > 0 ? '+' : ''}${n.toFixed(1)} pts`),
       );
     };
     const unreachableHeap = cur.totalHeapSize - cur.reachableHeapSize;

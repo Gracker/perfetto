@@ -31,6 +31,8 @@ import {
   colHeader,
 } from '../components';
 import {dumpFilterSql, type HeapDump} from '../queries';
+import {Anchor} from '../../../widgets/anchor';
+import {DetailsShell} from '../../../widgets/details_shell';
 
 interface AllObjectsViewAttrs {
   readonly engine: Engine;
@@ -81,9 +83,8 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
         const str = row.str != null ? String(row.str) : null;
         return m('span', [
           m(
-            'button',
+            Anchor,
             {
-              class: 'pf-hde-link',
               onclick: () =>
                 navigate('object', {id, label: str ? `"${str}"` : display}),
             },
@@ -162,9 +163,18 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
   };
 }
 
-export function AllObjectsView(): m.Component<AllObjectsViewAttrs> {
-  let dataSource: SQLDataSource | null = null;
+export function AllObjectsView({
+  attrs: {engine, activeDump},
+}: m.Vnode<AllObjectsViewAttrs>): m.Component<AllObjectsViewAttrs> {
+  const query = buildQuery(activeDump);
+  const datasource = new SQLDataSource({
+    engine,
+    tableOrSubquery: query,
+    preamble: SQL_PREAMBLE,
+  });
   const counter = new RowCounter();
+  counter.init(engine, query, SQL_PREAMBLE);
+
   let filters: Filter[] = [];
 
   function applyNavFilter(
@@ -179,29 +189,26 @@ export function AllObjectsView(): m.Component<AllObjectsViewAttrs> {
 
   return {
     oninit(vnode) {
-      const {engine, activeDump} = vnode.attrs;
-      const query = buildQuery(activeDump);
-      dataSource = new SQLDataSource({
-        engine,
-        tableOrSubquery: query,
-        preamble: SQL_PREAMBLE,
-      });
-      counter.init(engine, query, SQL_PREAMBLE);
       applyNavFilter(vnode.attrs.initialClass, vnode.attrs.clearNavParam);
     },
     onupdate(vnode) {
       applyNavFilter(vnode.attrs.initialClass, vnode.attrs.clearNavParam);
     },
+    onremove() {
+      datasource.dispose();
+    },
     view(vnode) {
       const {navigate} = vnode.attrs;
 
-      if (!dataSource) return null;
-
-      return m('div', {class: 'pf-hde-view-content'}, [
-        m('h2', {class: 'pf-hde-view-heading'}, counter.heading('Objects')),
+      return m(
+        DetailsShell,
+        {
+          title: counter.heading('Objects'),
+          fillHeight: true,
+        },
         m(DataGrid, {
           schema: makeUiSchema(navigate),
-          data: dataSource,
+          data: datasource,
           fillHeight: true,
           initialColumns: [
             {id: 'id', field: 'id'},
@@ -223,7 +230,7 @@ export function AllObjectsView(): m.Component<AllObjectsViewAttrs> {
             counter.onFiltersChanged(f);
           },
         }),
-      ]);
+      );
     },
   };
 }

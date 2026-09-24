@@ -42,6 +42,7 @@
 #include "perfetto/ext/base/string_utils.h"
 #include "perfetto/protozero/scattered_heap_buffer.h"
 #include "perfetto/trace_processor/basic_types.h"
+#include "perfetto/trace_processor/io.h"
 #include "perfetto/trace_processor/iterator.h"
 #include "perfetto/trace_processor/summarizer.h"
 #include "perfetto/trace_processor/trace_blob.h"
@@ -88,6 +89,8 @@
 #include "src/trace_processor/perfetto_sql/stdlib/stdlib.h"
 #include "src/trace_processor/plugins/ancestor/ancestor.h"
 #include "src/trace_processor/plugins/android_framework_track_event/android_framework_track_event.h"
+#include "src/trace_processor/plugins/android_job_scheduler/android_job_scheduler.h"
+#include "src/trace_processor/plugins/android_process_state/android_process_state.h"
 #include "src/trace_processor/plugins/args/args.h"
 #include "src/trace_processor/plugins/art_heap_graph_functions/art_heap_graph_functions.h"
 #include "src/trace_processor/plugins/art_process_metadata_importer/art_process_metadata_importer.h"
@@ -110,6 +113,8 @@
 #include "src/trace_processor/plugins/experimental_flamegraph/experimental_flamegraph.h"
 #include "src/trace_processor/plugins/experimental_flat_slice/experimental_flat_slice.h"
 #include "src/trace_processor/plugins/experimental_slice_layout/experimental_slice_layout.h"
+#include "src/trace_processor/plugins/flamechart/flamechart_function.h"
+#include "src/trace_processor/plugins/flamegraph/flamegraph_function.h"
 #include "src/trace_processor/plugins/graph_scan/graph_scan.h"
 #include "src/trace_processor/plugins/graph_traversal/graph_traversal.h"
 #include "src/trace_processor/plugins/import/import.h"
@@ -148,6 +153,7 @@
 #include "src/trace_processor/sqlite/bindings/sqlite_function.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_result.h"
 #include "src/trace_processor/sqlite/sql_source.h"
+#include "src/trace_processor/sqlite/sqlite_export.h"
 #include "src/trace_processor/sqlite_iterator_impl.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/tp_metatrace.h"
@@ -336,6 +342,8 @@ TraceProcessorImpl::TraceProcessorImpl(
   // explicit calls once the static-init based registration is restored.
   ancestor::RegisterPlugin();
   android_framework_track_event::RegisterPlugin();
+  android_job_scheduler::RegisterPlugin();
+  android_process_state::RegisterPlugin();
   args::RegisterPlugin();
   art_heap_graph_functions::RegisterPlugin();
   art_process_metadata_importer::RegisterPlugin();
@@ -358,6 +366,8 @@ TraceProcessorImpl::TraceProcessorImpl(
   experimental_flamegraph::RegisterPlugin();
   experimental_flat_slice::RegisterPlugin();
   experimental_slice_layout::RegisterPlugin();
+  flamechart::RegisterPlugin();
+  flamegraph::RegisterPlugin();
   graph_scan::RegisterPlugin();
   graph_traversal::RegisterPlugin();
   import::RegisterPlugin();
@@ -1209,6 +1219,25 @@ base::Status TraceProcessorImpl::CreateSummarizer(
 
 base::Status TraceProcessorImpl::Export(ExportFormat format,
                                         ExportOutput* output) {
+  if (!output) {
+    return base::ErrStatus("Export output is null");
+  }
+  if (format == ExportFormat::kSqlite) {
+    std::optional<std::string> path = output->GetFilePath();
+    if (!path) {
+      return base::ErrStatus("SQLite export requires a file path");
+    }
+    // SQLite export is an explicit API call (not reachable from SQL), so it is
+    // not gated behind Config::enable_sql_file_access. Embedders without a
+    // filesystem, such as the RPC server and Wasm, fail here cleanly.
+    // The filesystem is borrowed at construction and must outlive this
+    // instance.
+    io::FileSystem* file_system = context()->file_system;
+    if (!file_system) {
+      return base::ErrStatus("SQLite export requires a file system");
+    }
+    return ExportSqliteDatabase(this, file_system, *path);
+  }
   return trace_export::WriteExport(
       plugin_dataframes_, context()->storage->string_pool(), format, output);
 }

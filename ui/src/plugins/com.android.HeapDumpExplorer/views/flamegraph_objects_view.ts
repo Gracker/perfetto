@@ -29,14 +29,17 @@ import {
   COL_INFO,
   colHeader,
 } from '../components';
+import {Anchor} from '../../../widgets/anchor';
+import {DetailsShell} from '../../../widgets/details_shell';
+import {Memo} from '../../../base/memo';
 
 interface FlamegraphObjectsViewAttrs {
-  engine: Engine;
-  navigate: NavFn;
-  onBackToTimeline?: () => void;
-  nodeName?: string;
-  pathHashes?: string;
-  isDominator?: boolean;
+  readonly engine: Engine;
+  readonly navigate: NavFn;
+  readonly pathHashes?: string;
+  readonly isDominator: boolean;
+  readonly onBackToTimeline?: () => void;
+  readonly nodeName?: string;
 }
 
 export function flamegraphQuery(
@@ -87,9 +90,8 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
         const str = row.str != null ? String(row.str) : null;
         return m('span', [
           m(
-            'button',
+            Anchor,
             {
-              class: 'pf-hde-link',
               onclick: () =>
                 navigate('object', {id, label: str ? `"${str}"` : display}),
             },
@@ -169,56 +171,44 @@ function makeUiSchema(navigate: NavFn): ColumnSchema {
 }
 
 export function FlamegraphObjectsView(): m.Component<FlamegraphObjectsViewAttrs> {
-  let dataSource: SQLDataSource | null = null;
-  let lastPathHashes: string | undefined;
+  // The data source depends on the selected flamegraph node (pathHashes),
+  // which changes within this component's lifetime. Memo recreates it on
+  // change and disposes the previous one (SQLDataSource is a Disposable).
+  const datasourceMemo = new Memo<SQLDataSource>();
   const counter = new RowCounter();
 
-  function initDataSource(
-    engine: Engine,
-    pathHashes: string,
-    isDominator: boolean,
-  ): void {
-    const query = flamegraphQuery(pathHashes, isDominator);
-    dataSource = new SQLDataSource({
-      engine,
-      tableOrSubquery: query,
-      preamble: SQL_PREAMBLE,
-    });
-    counter.init(engine, query, SQL_PREAMBLE);
-  }
-
   return {
-    oninit(vnode) {
-      const {pathHashes, isDominator, engine} = vnode.attrs;
-      lastPathHashes = pathHashes;
-      if (pathHashes) {
-        initDataSource(engine, pathHashes, isDominator ?? false);
-      }
-    },
-    onupdate(vnode) {
-      if (vnode.attrs.pathHashes !== lastPathHashes) {
-        const {pathHashes, isDominator, engine} = vnode.attrs;
-        lastPathHashes = pathHashes;
-        if (pathHashes) {
-          initDataSource(engine, pathHashes, isDominator ?? false);
-        } else {
-          dataSource = null;
-        }
-      }
+    onremove() {
+      datasourceMemo.dispose();
     },
     view(vnode) {
       const {navigate, nodeName, onBackToTimeline} = vnode.attrs;
+      const {pathHashes, isDominator, engine} = vnode.attrs;
 
-      if (!dataSource) {
-        return m('div', [
-          nodeName
-            ? m(
-                'h2',
-                {class: 'pf-hde-view-heading'},
-                'Flamegraph: ',
-                m('span', {class: 'pf-hde-mono'}, nodeName),
-              )
-            : null,
+      const datasource = pathHashes
+        ? datasourceMemo.use({
+            key: {pathHashes, isDominator},
+            compute: () => {
+              const query = flamegraphQuery(pathHashes, isDominator);
+              const ds = new SQLDataSource({
+                engine,
+                tableOrSubquery: query,
+                preamble: SQL_PREAMBLE,
+              });
+              counter.init(engine, query, SQL_PREAMBLE);
+              return ds;
+            },
+          })
+        : null;
+
+      if (!datasource) {
+        return m(
+          DetailsShell,
+          {
+            title: nodeName ? `Flamegraph: ${nodeName}` : 'Flamegraph Objects',
+            fillHeight: true,
+            className: 'pf-hde-tab--padded',
+          },
           m(
             'div',
             {class: 'pf-hde-card pf-hde-mb-3'},
@@ -228,29 +218,27 @@ export function FlamegraphObjectsView(): m.Component<FlamegraphObjectsViewAttrs>
               'flamegraph and choose "Open in Heapdump Explorer" to see objects here.',
             ),
           ),
-        ]);
+        );
       }
 
-      return m('div', {class: 'pf-hde-view-content'}, [
-        m('div', {class: 'pf-hde-heading-row'}, [
-          m(
-            'h2',
-            {class: 'pf-hde-view-heading'},
-            counter.heading(
-              nodeName ? `Flamegraph: ${nodeName}` : 'Flamegraph Objects',
-            ),
+      return m(
+        DetailsShell,
+        {
+          title: counter.heading(
+            nodeName ? `Flamegraph: ${nodeName}` : 'Flamegraph Objects',
           ),
-          onBackToTimeline
+          fillHeight: true,
+          buttons: onBackToTimeline
             ? m(
-                'button',
+                Anchor,
                 {class: 'pf-hde-download-link', onclick: onBackToTimeline},
                 'Back to Timeline',
               )
             : null,
-        ]),
+        },
         m(DataGrid, {
           schema: makeUiSchema(navigate),
-          data: dataSource,
+          data: datasource,
           fillHeight: true,
           initialColumns: [
             {id: 'id', field: 'id'},
@@ -268,7 +256,7 @@ export function FlamegraphObjectsView(): m.Component<FlamegraphObjectsViewAttrs>
           showExportButton: true,
           onFiltersChanged: counter.onFiltersChanged,
         }),
-      ]);
+      );
     },
   };
 }

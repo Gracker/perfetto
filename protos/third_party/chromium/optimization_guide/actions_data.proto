@@ -303,9 +303,6 @@ message FormFillingRequest {
   // Specifies a field that is part of the form. Autofill will be triggered from
   // this field, but will fill other fields of the same autofill section with
   // the available data.
-  //
-  // TODO(crbug.com/452946211): This field is repeated to be able to support a form that
-  // is spread over multiple autofill sections.
   repeated ActionTarget trigger_fields = 1;
 
   // Specifies which data is requested. The requested data type will be
@@ -465,9 +462,21 @@ message LoadAndExtractContentAction {
   repeated string urls = 1;
 }
 
+// Translates the page in a tab.
+// Note: This action is not currently used by Gemini in Chrome (GiC).
+// Next ID: 3
+message TranslatePageAction {
+  // The BCP-47 language tag of the language to translate to. If empty or
+  // not set, the default translation target language is used.
+  string target_language = 1 [features = { field_presence: EXPLICIT }];
+
+  // The id of the tab to translate.
+  int32 tab_id = 2 [features = { field_presence: EXPLICIT }];
+}
+
 // All of the actions that can be taken.
 // Only one of these is allowed per action.
-// Next ID: 25
+// Next ID: 26
 message Action {
 
   oneof action {
@@ -518,6 +527,8 @@ message Action {
     LoadAndExtractContentAction load_and_extract_content = 23;
 
     AttemptOtpFillingAction attempt_otp_filling = 24;
+
+    TranslatePageAction translate_page = 25;
   }
 }
 
@@ -796,9 +807,6 @@ message ActionsResult {
 message BrowserStartTask {
   // The id of the tab the task should be started in. If not set, the task
   // will be started in a new tab.
-  // TODO(crbug.com/421441072): Remove this field. This is only needed in the short term
-  // since we need a mechanism to start tasks in a new tab, and the model has
-  // not yet been trained to use CreateTabAction.
   int32 tab_id = 1 [features = { field_presence: EXPLICIT }];
 }
 

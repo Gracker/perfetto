@@ -30,20 +30,21 @@
 #include "perfetto/base/logging.h"
 #include "perfetto/base/status.h"
 #include "perfetto/ext/base/flat_hash_map.h"
-#include "perfetto/ext/base/hash.h"
 #include "perfetto/ext/base/murmur_hash.h"
 #include "perfetto/ext/base/small_vector.h"
 #include "perfetto/ext/base/status_or.h"
-#include "perfetto/trace_processor/basic_types.h"
 #include "src/trace_processor/containers/string_pool.h"
 #include "src/trace_processor/core/dataframe/dataframe.h"
 #include "src/trace_processor/core/plugin/plugin.h"
+#include "src/trace_processor/core/plugin/registration.h"
 #include "src/trace_processor/perfetto_sql/engine/dataframe_module.h"
 #include "src/trace_processor/perfetto_sql/engine/perfetto_sql_database.h"
+#include "src/trace_processor/perfetto_sql/engine/pipeline_module.h"
 #include "src/trace_processor/perfetto_sql/engine/runtime_table_function.h"
 #include "src/trace_processor/perfetto_sql/engine/static_table_function_module.h"
 #include "src/trace_processor/perfetto_sql/parser/function_util.h"
 #include "src/trace_processor/perfetto_sql/parser/perfetto_sql_parser.h"
+#include "src/trace_processor/perfetto_sql/pipeline/logical_plan.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_module.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_result.h"
 #include "src/trace_processor/sqlite/bindings/sqlite_window_function.h"
@@ -54,6 +55,8 @@
 #include "src/trace_processor/util/sql_modules.h"
 
 namespace perfetto::trace_processor {
+
+class ConnectionCatalog;
 
 // Intermediary class which translates high-level concepts and algorithms used
 // in trace processor into lower-level concepts and functions can be understood
@@ -293,9 +296,6 @@ class PerfettoSqlConnection {
                                       typename Function::Context* ctx,
                                       bool deterministic = true);
 
-  // Enables memoization for the given SQL function.
-  base::Status EnableSqlFunctionMemoization(const std::string& name);
-
   SqliteConnection* sqlite_connection() { return connection_.get(); }
 
   // Test-only accessor for the |PerfettoSqlDatabase| backing this connection.
@@ -361,16 +361,15 @@ class PerfettoSqlConnection {
   }
 
   // Find dataframe registered with this connection with provided name.
-  const dataframe::Dataframe* GetDataframeOrNull(const std::string& name) const;
+  const dataframe::Dataframe* GetDataframeOrNull(std::string_view name) const;
 
-  // Registers a function with the prototype |prototype| which returns a value
-  // of |return_type| and is implemented by executing the SQL statement |sql|.
+  // Registers a function with the prototype |prototype| implemented by
+  // executing the SQL statement |sql|.
   //
   // LEGACY: This function uses SQL-based function definitions. For new code,
   // prefer RegisterFunction() which uses C++ implementations.
   base::Status RegisterLegacyRuntimeFunction(bool replace,
                                              const FunctionPrototype& prototype,
-                                             sql_argument::Type return_type,
                                              SqlSource sql);
 
  private:
@@ -455,12 +454,16 @@ class PerfettoSqlConnection {
                               const PerfettoSqlParser& parser);
 
   // Creates a runtime table and registers it with SQLite.
-  base::Status ExecuteCreateTable(
-      const PerfettoSqlParser::CreateTable& create_table);
+  base::Status ExecuteCreateTable(PerfettoSqlParser::CreateTable create_table,
+                                  const SqlSource& statement_sql);
 
   base::Status ExecuteCreateView(const PerfettoSqlParser::CreateView&);
 
   base::Status ExecuteCreateMacro(const PerfettoSqlParser::CreateMacro&);
+
+  base::StatusOr<SqliteConnection::PreparedStatement> PreparePipeline(
+      pipeline::LogicalPlan,
+      const SqlSource&);
 
   base::Status ExecuteCreateIndex(const PerfettoSqlParser::CreateIndex&);
 
@@ -576,6 +579,7 @@ class PerfettoSqlConnection {
   // context class of the module inherits from ModuleStateManagerBase.
   std::vector<sqlite::ModuleStateManagerBase*> virtual_module_state_managers_;
 
+  PipelineModule::Context* pipeline_context_ = nullptr;
   RuntimeTableFunctionModule::Context* runtime_table_fn_context_ = nullptr;
   StaticTableFunctionModule::Context* static_table_fn_context_ = nullptr;
   DataframeModule::Context* dataframe_context_ = nullptr;
@@ -604,7 +608,7 @@ class PerfettoSqlConnection {
   //    intrinsic's context with a CreatedFunction::State.
   //
   // 2) Teardown: scalar function contexts can hold prepared statements
-  //    (CreatedFunction::State::stmts_); those must be finalized before the
+  //    (CreatedFunction::State::stmt_); those must be finalized before the
   //    underlying sqlite3* is closed. The destructor walks this map and
   //    explicitly unregisters every entry, which triggers SQLite to invoke
   //    each entry's |FnCtxDestructor| in turn.
@@ -618,6 +622,8 @@ class PerfettoSqlConnection {
       fn_registry_;
 
   std::unique_ptr<SqliteConnection> connection_;
+  // Passed to every parser, for compiling pipelines.
+  std::unique_ptr<ConnectionCatalog> catalog_;
 
   // Reused across Execute() calls via Reset() to avoid the syntaqlite
   // create/destroy round-trip. Re-entrant Execute() and include frames
