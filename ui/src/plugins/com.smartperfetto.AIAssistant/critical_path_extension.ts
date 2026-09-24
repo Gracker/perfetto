@@ -29,12 +29,15 @@ import type {
   CriticalPathAiSummary,
   CriticalPathAnalysis,
   CriticalPathAnalyzeResponse,
+  CriticalPathRole,
+  CriticalPathRootWaitContext,
   CriticalPathSegment,
   CriticalPathUnavailableReason,
   HypothesisStrength,
   SemanticSourceName,
   SemanticSourceStatus,
   SliceKind,
+  WaitClass,
   WakerKind,
 } from './generated';
 
@@ -285,6 +288,37 @@ const UNAVAILABLE_TEXT: Record<CriticalPathUnavailableReason, TextPair> = {
     'Perfetto 没有返回关键路径；trace 可能缺少 sched_waking。',
     'Perfetto returned no critical path; the trace may lack sched_waking.',
   ],
+  no_thread_state_in_window: [
+    '该线程在所选窗口内没有调度记录；请换一个有数据的线程或窗口。',
+    'The thread has no scheduling records in the selected window; pick a thread or window with data.',
+  ],
+  wait_open_at_trace_end: [
+    '选中的等待一直持续到 trace 结束，没有可分析的结束点。',
+    'The selected wait is still open at the end of the trace, so it has no end to analyze.',
+  ],
+};
+
+const PATH_ROLE_TEXT: Record<CriticalPathRole, TextPair> = {
+  work: ['运行', 'work'],
+  runnable: ['可运行', 'runnable'],
+  device_wait: ['设备等待（链路末端）', 'device wait (chain end)'],
+  event_wait: ['事件等待（链路末端）', 'event wait (chain end)'],
+  other: ['其他', 'other'],
+};
+
+const ROOT_WAIT_TEXT: Record<CriticalPathRootWaitContext, TextPair> = {
+  in_slice: ['等待发生在 slice 内', 'The wait is inside a slice'],
+  between_slices: ['等待发生在两个 slice 之间（线程空闲）', 'The wait is between slices (the thread is idle)'],
+  no_slice_data: ['线程缺少 slice 数据，无法判断是否空闲', 'The thread lacks slice data, so idleness is undetermined'],
+};
+
+const WAIT_CLASS_TEXT: Record<WaitClass, TextPair> = {
+  network_receive_candidate: ['网络收包候选', 'network-receive candidate'],
+  timer_or_device_wake: ['定时器或设备唤醒', 'timer or device wake'],
+  worker_handoff: ['线程交接', 'worker hand-off'],
+  binder_reply: ['Binder 回复', 'binder reply'],
+  system_service: ['系统服务唤醒', 'system service'],
+  unknown: ['未知', 'unknown'],
 };
 
 const SOURCE_STATUS_TEXT: Record<SemanticSourceStatus, TextPair> = {
@@ -366,6 +400,8 @@ function renderChain(analysis: CriticalPathAnalysis): string {
         <div>
           <b>${escapeHtml(segment.processName || '-')} / ${escapeHtml(segment.threadName || '-')}</b>
           <p>${formatMs(segment.durationMs)} · +${formatMs(segment.startOffsetMs)} · ${escapeHtml(segment.state || 'unknown')}${
+            segment.pathRole ? ` · ${pick(PATH_ROLE_TEXT[segment.pathRole])}` : ''
+          }${
             segment.blockedFunction ? ` · ${escapeHtml(segment.blockedFunction)}` : ''
           }</p>
           ${renderEvidence([...segment.modules, ...segment.reasons, ...segment.slices])}
@@ -551,6 +587,16 @@ function renderQuantification(analysis: CriticalPathAnalysis): string {
   `;
 }
 
+/**
+ * The drawer's headline figure. Engines since the attributable split report
+ * other threads' real path work; older results only carry path coverage.
+ */
+function headlineOf(analysis: CriticalPathAnalysis): {attributable: boolean; ms: number; pct: number} {
+  return analysis.attributableMs !== undefined
+    ? {attributable: true, ms: analysis.attributableMs, pct: analysis.attributablePercentage ?? 0}
+    : {attributable: false, ms: analysis.blockingMs, pct: analysis.externalBlockingPercentage};
+}
+
 /** Everything the drawer shows for one result; exported for tests. */
 export function renderCriticalPathDrawerBody(
   analysis: CriticalPathAnalysis,
@@ -558,6 +604,9 @@ export function renderCriticalPathDrawerBody(
 ): string {
   const task = analysis.task;
   const longest = analysis.longestSegment;
+  const leaf = analysis.longestEventWait;
+  const rootWait = analysis.rootWait;
+  const headline = headlineOf(analysis);
   const unavailable =
     !analysis.available && analysis.unavailableReason
       ? renderStatus(pick(UNAVAILABLE_TEXT[analysis.unavailableReason]), false)
@@ -566,8 +615,12 @@ export function renderCriticalPathDrawerBody(
     ${unavailable}
     <div class="sp-critical-path-metrics">
       ${renderMetric('Task', formatMs(analysis.totalMs))}
-      ${renderMetric(uiText('外部链路', 'External path'), formatMs(analysis.blockingMs))}
-      ${renderMetric(uiText('占比', 'Share'), formatPercent(analysis.externalBlockingPercentage))}
+      ${renderMetric(
+        headline.attributable ? uiText('可归因外部耗时', 'Attributable') : uiText('外部链路', 'External path'),
+        formatMs(headline.ms),
+      )}
+      ${renderMetric(uiText('占比', 'Share'), formatPercent(headline.pct))}
+      ${headline.attributable ? renderMetric(uiText('链路覆盖', 'Path coverage'), formatMs(analysis.blockingMs)) : ''}
     </div>
     <section class="sp-critical-path-card">
       <h3>${uiText('规则事实', 'Rule facts')}</h3>
@@ -576,7 +629,13 @@ export function renderCriticalPathDrawerBody(
         <span>${escapeHtml(task.processName || '-')} / ${escapeHtml(task.threadName || '-')}</span>
         <span>${escapeHtml(task.state || 'unknown')}</span>
         ${task.threadStateId !== undefined ? `<span>thread_state ${escapeHtml(task.threadStateId)}</span>` : ''}
-        ${longest ? `<span>${uiText('最长外部段', 'Longest external segment')}: ${escapeHtml(longest.threadName || '-')} ${formatMs(longest.durationMs)}</span>` : ''}
+        ${longest ? `<span>${uiText('最长可归因段', 'Longest attributable segment')}: ${escapeHtml(longest.threadName || '-')} ${formatMs(longest.durationMs)}</span>` : ''}
+        ${leaf ? `<span>${uiText('最长链路末端等待', 'Longest chain-end wait')}: ${escapeHtml(leaf.threadName || '-')} ${formatMs(leaf.durationMs)}${
+          leaf.wakeSourceClass ? ` · ${pick(WAIT_CLASS_TEXT[leaf.wakeSourceClass])}` : ''
+        }</span>` : ''}
+        ${rootWait ? `<span>${pick(ROOT_WAIT_TEXT[rootWait.context])}${
+          rootWait.enclosingSlice ? `: ${escapeHtml(rootWait.enclosingSlice.name)}` : ''
+        }</span>` : ''}
       </div>
       ${renderWaker(analysis)}
       ${renderSources(analysis)}
@@ -612,14 +671,18 @@ export function buildCriticalPathHandoffQuestion(analysis: CriticalPathAnalysis)
       : `utid=${task.utid}, start_ts=${task.startTs}, end_ts=${task.startTs + task.dur}`;
   const longestMs = analysis.longestSegment?.durationMs;
   const segments = analysis.chainSegmentCount ?? analysis.wakeupChain.length;
+  const {attributable, ms: headlineMs, pct: headlinePct} = headlineOf(analysis);
+  const leafMs = analysis.longestEventWait?.durationMs;
   return uiText(
     `继续分析这个等待（${selector}，utid ${task.utid}）：窗口 ${fixed(analysis.totalMs)} ms，` +
-      `外部阻塞 ${fixed(analysis.blockingMs)} ms（${fixed(analysis.externalBlockingPercentage)}%），` +
-      `等待链 ${segments} 段${longestMs !== undefined ? `，最长外部段 ${fixed(longestMs)} ms` : ''}。` +
+      `${attributable ? '可归因外部耗时' : '外部阻塞'} ${fixed(headlineMs)} ms（${fixed(headlinePct)}%），` +
+      `等待链 ${segments} 段${longestMs !== undefined ? `，最长${attributable ? '可归因' : '外部'}段 ${fixed(longestMs)} ms` : ''}` +
+      `${leafMs !== undefined ? `，最长链路末端等待 ${fixed(leafMs)} ms` : ''}。` +
       `请重新取证：它在等什么、被谁唤醒，最值得先查哪一段。`,
     `Continue analyzing this wait (${selector}, utid ${task.utid}): window ${fixed(analysis.totalMs)} ms, ` +
-      `external blocking ${fixed(analysis.blockingMs)} ms (${fixed(analysis.externalBlockingPercentage)}%), ` +
-      `${segments} chain segments${longestMs !== undefined ? `, longest external segment ${fixed(longestMs)} ms` : ''}. ` +
+      `${attributable ? 'attributable' : 'external blocking'} ${fixed(headlineMs)} ms (${fixed(headlinePct)}%), ` +
+      `${segments} chain segments${longestMs !== undefined ? `, longest ${attributable ? 'attributable' : 'external'} segment ${fixed(longestMs)} ms` : ''}` +
+      `${leafMs !== undefined ? `, longest chain-end wait ${fixed(leafMs)} ms` : ''}. ` +
       `Re-acquire the evidence: what it waited on, who woke it, and which segment to examine first.`,
   );
 }

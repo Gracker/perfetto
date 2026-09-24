@@ -207,6 +207,41 @@ describe('critical path drawer contract', () => {
     }
   });
 
+  it('leads with attributable time and keeps path coverage and the chain-end wait apart', () => {
+    const analysis = analysisFixture({
+      blockingMs: 48, externalBlockingPercentage: 96, attributableMs: 2, attributablePercentage: 4,
+      eventWaitMs: 46, eventWaitPercentage: 92,
+      rootWait: {threadStateId: 7, state: 'S', startTs: 100, endTs: 50_000_100, durationMs: 50,
+        context: 'between_slices', enclosingSlice: null},
+      longestEventWait: {utid: 41, processName: 'com.secret.app', threadName: 'SecretWorker', state: 'S',
+        durationMs: 46, wakeSourceClass: 'timer_or_device_wake'},
+      wakeupChain: [{...analysisFixture().wakeupChain[0], pathRole: 'event_wait'}],
+    });
+    const root = document.createElement('div');
+    root.innerHTML = renderCriticalPathDrawerBody(analysis, null);
+    const metrics = root.querySelector('.sp-critical-path-metrics')?.textContent ?? '';
+
+    expect(metrics).toMatch(/Attributable|可归因/);
+    expect(metrics).toMatch(/Path coverage|链路覆盖/);
+    expect(root.textContent).toMatch(/timer or device wake|定时器或设备唤醒/);
+    expect(root.textContent).toMatch(/between slices|两个 slice 之间/);
+    expect(root.textContent).toMatch(/event wait \(chain end\)|事件等待（链路末端）/);
+
+    const question = buildCriticalPathHandoffQuestion(analysis);
+    expect(question).toContain('4.00');
+    expect(question).toContain('46.00');
+    expect(question).not.toContain('96.00');
+    expect(question).not.toContain('SecretWorker');
+  });
+
+  it('explains a thread without scheduling data in the window', () => {
+    const root = document.createElement('div');
+    root.innerHTML = renderCriticalPathDrawerBody(
+      analysisFixture({available: false, unavailableReason: 'no_thread_state_in_window', wakeupChain: []}), null);
+
+    expect(root.textContent).toMatch(/scheduling records|调度记录/);
+  });
+
   it('calls the workspace route without limits of its own and hands the question to the composer', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       success: true, analysis: analysisFixture(), presentationAnalysis: analysisFixture(),
