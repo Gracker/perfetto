@@ -126,6 +126,9 @@ import {
   type ConversationClientConfig,
   type ConversationFullHandoff,
   type ConversationRunReceipt,
+  deferred,
+  stopReviewAndWait,
+  type Deferred,
 } from './conversation_client';
 import {
   appendConversationMessage,
@@ -133,6 +136,7 @@ import {
   clearConversationStore,
   conversationAuthorityKey,
   conversationMessageContent,
+  conversationMessageId,
   conversationOutcomeTurn,
   conversationRecoveryNotice,
   conversationRestoreErrorMessage,
@@ -143,9 +147,11 @@ import {
   loadConversationStoreForUpdate,
   type StoredConversation,
   saveConversationStore,
+  unfinishedProvisionalAnswerMessage,
   updateConversationMessageSourceEnrichment,
 } from './conversation_store';
 import {ConversationStartQueue} from './conversation_start_queue';
+import {answerVerificationCueText, reviewStopPhaseText} from './answer_verification';
 import {conversationTraceContextResetNotice} from './conversation_context_notice';
 import {readPageAuthGateState} from './page_auth_lifecycle';
 import {
@@ -746,6 +752,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private conversationRequestOrdinal = 0;
   private activeConversationRun?: ConversationRunReceipt;
   private conversationAbortController?: AbortController;
+  /** Agent run whose review-only stop was accepted; another stop is a force stop. */
+  private reviewStopRequestedRunId?: string;
+  /** Resolves when the current conversation run's verdict landed or the request ended. */
+  private conversationRunSettlement?: Deferred;
   private pendingFullAnalysisHandoff?: ConversationFullHandoff;
   private conversationStartQueue?: ConversationStartQueue;
   private conversationStartQueueBackendUrl = '';
@@ -4101,6 +4111,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   class: bubbleClass,
                                 },
                                 [
+                                  msg.answerVerification
+                                    ? m('div.ai-answer-verification-cue', {
+                                        class: `ai-answer-verification-${msg.answerVerification}`,
+                                        role: 'status',
+                                      }, answerVerificationCueText(msg.answerVerification))
+                                    : null,
                                   msg.serverVerificationNotice
                                     ? m('div.ai-message-content.ai-server-verification-notice', {
                                         oncreate: ({dom}) => {
@@ -5087,7 +5103,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                 'button.ai-send-btn.ai-stop-btn',
                                 {
                                   onclick: () => this.cancelAnalysis(),
-                                  title: uiText('停止分析', 'Stop analysis'),
+                                  title: this.reviewStopRequestedRunId === this.state.agentRunId
+                                    ? uiText('强制停止：放弃本次核验与保存', 'Force stop: abandon this verification and save')
+                                    : this.hasProvisionalAgentAnswer()
+                                      ? uiText('停止核验：保留结论，标为未核验', 'Stop verification: keep the answer as unverified')
+                                      : uiText('停止分析', 'Stop analysis'),
                                 },
                                 m('i.pf-icon', 'stop_circle'),
                               ),
@@ -8723,6 +8743,9 @@ Click ⚙️ to configure backend connection.`,
     if (result.stopLoading) {
       this.setLoadingState(false);
     }
+    // A review-only stop hands the composer back once the verdict (or any
+    // other terminal state) has arrived.
+    if (result.isTerminal) this.consumeRedirectIntent();
 
     // Note: completionHandled is updated via setCompletionHandled() directly on this.state
     // Do NOT sync ctx.completionHandled back - it's the original value before handler ran
@@ -10358,6 +10381,10 @@ Click ⚙️ to configure backend connection.`,
       return; // Recovery is fail-closed; the hydration path shows the notice.
     }
     if (restoreOrdinal !== this.conversationRequestOrdinal || !requestIsCurrent()) return;
+    // The previous answer is already on screen: end only its review and let it
+    // settle with its verdict first, so it lands in history before this question.
+    await this.settleProvisionalConversationRun(config);
+    if (restoreOrdinal !== this.conversationRequestOrdinal || !requestIsCurrent()) return;
     let store = loadConversationStoreForUpdate(config.backendUrl);
     if (
       store.sessionId &&
@@ -10397,6 +10424,8 @@ Click ⚙️ to configure backend connection.`,
     this.state.loadingPhase = uiText('正在理解问题…', 'Understanding the question…');
     m.redraw();
 
+    const settlement = deferred();
+    this.conversationRunSettlement = settlement;
     try {
       const receipt = await this.getConversationStartQueue().enqueue(config, {
         query: message,
@@ -10435,8 +10464,30 @@ Click ⚙️ to configure backend connection.`,
         this.conversationAbortController = undefined;
         this.setLoadingState(false);
       }
+      settlement.resolve();
       m.redraw();
     }
+  }
+
+  /** The active conversation run whose answer is on screen while its review runs. */
+  private provisionalConversationRun(): ConversationRunReceipt | undefined {
+    const active = this.activeConversationRun;
+    if (!active) return undefined;
+    const messageId = conversationMessageId(active.sessionId, active.runId, 'assistant');
+    return this.state.messages.some(
+      (message) => message.id === messageId && message.answerVerification === 'pending') ? active : undefined;
+  }
+
+  /**
+   * End only the review of a conversation run whose answer is already shown and
+   * wait (bounded) for its verdict, so it lands in history before the next question.
+   */
+  private async settleProvisionalConversationRun(config: ConversationClientConfig): Promise<void> {
+    const active = this.provisionalConversationRun();
+    if (!active) return;
+    this.state.loadingPhase = uiText('正在结束上一条结论的核验…', 'Finishing verification of the previous answer…');
+    m.redraw();
+    await stopReviewAndWait(config, active, this.conversationRunSettlement?.promise);
   }
 
   private async consumeConversationRun(
@@ -10453,14 +10504,50 @@ Click ⚙️ to configure backend connection.`,
       ordinal === this.conversationRequestOrdinal && restoreOrdinal === this.conversationRestoreOrdinal &&
       requestIsCurrent();
     let conversationAssistantMessage: Message | undefined;
+    // One deterministic id per run: the provisional answer and the final
+    // outcome are the same message, and the restored history uses it too.
+    const messageId = conversationMessageId(receipt.sessionId, receipt.runId, 'assistant');
+    const settlement = this.conversationRunSettlement;
+    // A run that ends without its verdict keeps the text it showed, marked unverified.
+    const settleProvisional = (next: 'unfinished' | undefined) => {
+      const shown = this.state.messages.find(message => message.id === messageId);
+      if (shown?.answerVerification !== 'pending') return;
+      this.updateMessage(messageId, {answerVerification: next});
+      if (next === 'unfinished' && restoreOrdinal === this.conversationRestoreOrdinal && requestIsCurrent()) {
+        appendConversationMessage(config.backendUrl, unfinishedProvisionalAnswerMessage({id: messageId,
+          runId: receipt.runId, content: shown.content, privateContent: shown.privateContent}), receipt.sessionId);
+      }
+    };
     const outcome = await streamConversationRun(config, receipt, {
       signal: controller.signal,
+      onProvisionalAnswer: ({message: answer}) => {
+        if (!isCurrentStream()) return;
+        const provisionalMessage: Message = {
+          id: messageId,
+          role: 'assistant',
+          content: answer,
+          timestamp: Date.now(),
+          privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext),
+          answerVerification: 'pending',
+        };
+        // Screen only: nothing is persisted until the verdict replaces it.
+        const existing = this.state.messages.find(message => message.id === messageId);
+        if (existing) {
+          this.updateMessage(messageId, provisionalMessage, {persist: false});
+        } else {
+          this.state.messages.push(provisionalMessage);
+          this.scrollToBottom(true);
+        }
+        this.conversationMessageIds.add(messageId);
+        m.redraw();
+      },
       onPrimaryOutcome: (primaryOutcome) => {
-        if (
-          !isCurrentStream() ||
-          primaryOutcome.kind === 'cancelled'
-        ) return;
-        const messageId = restored ? `conversation-${receipt.sessionId}-${receipt.runId}-assistant` : this.generateId();
+        if (!isCurrentStream()) return;
+        if (primaryOutcome.kind === 'cancelled') {
+          settleProvisional('unfinished');
+          settlement?.resolve();
+          return;
+        }
         const existing = this.state.messages.find(message => message.id === messageId);
         const assistantMessage: Message = {
           id: messageId,
@@ -10473,11 +10560,17 @@ Click ⚙️ to configure backend connection.`,
           timestamp: Date.now(),
           privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext),
           conversationEvidence: primaryOutcome.evidence,
+          answerVerification: undefined,
         };
-        conversationAssistantMessage = existing ?? assistantMessage;
         this.conversationMessageIds.add(assistantMessage.id);
-        if (existing) Object.assign(existing, assistantMessage);
+        // Replacing the provisional message persists the local session too, so
+        // no pending or unfinished copy of it is left behind.
+        if (existing) this.updateMessage(messageId, assistantMessage);
         else this.addMessage(assistantMessage);
+        conversationAssistantMessage = this.state.messages.find(message => message.id === messageId) ?? assistantMessage;
+        // The verdict landed: a waiting next question may start now, without
+        // waiting for source enrichment to finish.
+        settlement?.resolve();
         appendConversationMessage(config.backendUrl, {
           id: assistantMessage.id,
           role: 'assistant',
@@ -10527,7 +10620,7 @@ Click ⚙️ to configure backend connection.`,
           m.redraw();
         }
       },
-    });
+    }).finally(() => settleProvisional('unfinished'));
     if (!isCurrentStream() || outcome.kind === 'cancelled') return;
   }
 
@@ -10550,6 +10643,8 @@ Click ⚙️ to configure backend connection.`,
     const ownsStream = () => ordinal === this.conversationRequestOrdinal &&
       this.conversationAbortController === controller && this.activeConversationRun === receipt;
     this.setLoadingState(true);
+    const settlement = deferred();
+    this.conversationRunSettlement = settlement;
     try {
       await this.consumeConversationRun(config, receipt, controller, ordinal, requestIsCurrent, true);
     } catch (error) {
@@ -10563,6 +10658,7 @@ Click ⚙️ to configure backend connection.`,
         this.conversationAbortController = undefined;
         this.setLoadingState(false);
       }
+      settlement.resolve();
       m.redraw();
     }
   }
@@ -10585,6 +10681,16 @@ Click ⚙️ to configure backend connection.`,
   private async cancelConversationAnalysis(): Promise<void> {
     const active = this.activeConversationRun;
     if (!active) return;
+    if (this.provisionalConversationRun()) {
+      // Stop only the review; the stream still delivers the verdict and settles.
+      this.state.loadingPhase = reviewStopPhaseText();
+      m.redraw();
+      await cancelConversationRun({
+        backendUrl: this.state.settings.backendUrl,
+        apiKey: this.state.settings.backendApiKey,
+      }, active.sessionId, active.runId).catch(() => undefined);
+      return;
+    }
     ++this.conversationRequestOrdinal;
     try {
       await cancelConversationRun(
@@ -11226,6 +11332,25 @@ Click ⚙️ to configure backend connection.`,
     status: string,
     reason = 'Analysis cancelled by user',
   ): void {
+    if (status === 'review_stop_requested') {
+      // Not terminal: the answer stays, the review stops, and analysis_completed
+      // still delivers the verdict. Stop-and-redirect waits for that event.
+      this.analysisCancellationPending = false;
+      // The verdict already arrived (loading ended): nothing is left to stop.
+      if (!this.state.isLoading) {
+        m.redraw();
+        return;
+      }
+      this.reviewStopRequestedRunId = this.state.agentRunId ?? undefined;
+      this.state.loadingPhase = reviewStopPhaseText();
+      const sessionId = this.state.agentSessionId;
+      if (sessionId && this.state.sseConnectionState !== 'connected' &&
+          this.state.sseConnectionState !== 'connecting') {
+        void this.listenToAgentSSE(sessionId, true);
+      }
+      m.redraw();
+      return;
+    }
     this.analysisCancellationPending = false;
     this.setLoadingState(false);
     this.consumeRedirectIntent();
@@ -11376,6 +11501,11 @@ Click ⚙️ to configure backend connection.`,
     }
     if (this.analysisCancellationRequest) {
       return this.analysisCancellationRequest;
+    }
+    if (this.hasProvisionalAgentAnswer() && this.state.agentSessionId && this.state.agentRunId &&
+        this.reviewStopRequestedRunId !== this.state.agentRunId) {
+      // Keep the stream: the stop ends only the review and the verdict follows.
+      return this.cancelAgentSessionAndUpdate(this.state.agentSessionId, this.state.agentRunId);
     }
     const waitingForRunIdentity =
       this.analysisRequestCoordinator.requestCancel();
@@ -14015,6 +14145,14 @@ Click ⚙️ to configure backend connection.`,
           ),
       };
       this.state.streamingAnswer = a.streamingAnswer;
+      // Stored messages are never pending, but this run is still in flight: a
+      // provisional answer read back as `unfinished` is still under review, so
+      // it keeps its cue and Stop keeps the review-only path.
+      const answerId = a.streamingAnswer.messageId;
+      const restoredAnswer = answerId ? this.state.messages.find(message => message.id === answerId) : undefined;
+      if (a.completionHandled && restoredAnswer?.answerVerification === 'unfinished') {
+        this.updateMessage(restoredAnswer.id, {answerVerification: 'pending'}, {persist: false});
+      }
       // Mark loading + resume SSE. The resumeFromLastEventId flag tells
       // listenToAgentSSE to preserve sseLastEventId so the initial fetch
       // sends Last-Event-ID. The backend replays any events that arrived
@@ -14413,6 +14551,24 @@ Click ⚙️ to configure backend connection.`,
     this.state.isLoading = loading;
     this.state.loadingPhase = '';
     this.tracePairWorkspaceController.setSelectionLocked(loading);
+    // A run that stops without its verdict (error, cancel, lost stream) never
+    // leaves an answer looking as if verification were still running.
+    if (!loading) this.settlePendingAnswerCues();
+  }
+
+  private settlePendingAnswerCues(): void {
+    for (const message of this.state.messages) {
+      if (message.answerVerification === 'pending') {
+        this.updateMessage(message.id, {answerVerification: 'unfinished'});
+      }
+    }
+  }
+
+  /** The current agent answer is on screen while its review runs. */
+  private hasProvisionalAgentAnswer(): boolean {
+    const messageId = this.state.streamingAnswer.messageId;
+    return Boolean(this.state.isLoading && messageId && this.state.messages.some(
+      (message) => message.id === messageId && message.answerVerification === 'pending'));
   }
 
   private isAnalysisIdentityLocked(): boolean {

@@ -17,7 +17,10 @@ import {formatMessage} from './data_formatter';
 import {resolveChatInputKeyAction} from './chat_input';
 import {
   cancelConversationRun,
+  deferred,
+  stopReviewAndWait,
   streamConversationRun,
+  type Deferred,
   type ConversationFullHandoff,
   type ConversationOutcome,
   type ConversationRunReceipt,
@@ -27,6 +30,7 @@ import {
   clearConversationStore,
   clearConversationRuntimeIdentities,
   conversationMessageContent,
+  conversationMessageId,
   conversationRecoveryNotice,
   conversationOutcomeTurn,
   conversationRestoreErrorMessage,
@@ -34,6 +38,7 @@ import {
   invalidateConversationRestore,
   restoreConversationStore,
   saveConversationStore,
+  unfinishedProvisionalAnswerMessage,
   updateConversationMessageSourceEnrichment,
   type StoredConversation,
   type StoredConversationMessage,
@@ -45,6 +50,7 @@ import {
 } from './conversation_start_queue';
 import {conversationTraceContextResetNotice} from './conversation_context_notice';
 import {uiText} from './ui_language';
+import {answerVerificationCueText} from './answer_verification';
 import {
   PageAuthLifecycle,
   type PageAuthTransition,
@@ -71,6 +77,34 @@ function renderMessageContent(message: StoredConversationMessage): m.Vnode {
       (dom as HTMLElement).innerHTML = formatMessage(conversationMessageContent(message));
     },
   });
+}
+
+function renderThreadMessage(message: StoredConversationMessage, cue?: 'pending'): m.Vnode {
+  return m(
+    `article.ai-conversation-page-message.ai-conversation-page-message-${message.role}`,
+    {key: message.id},
+    [
+      m('div.ai-conversation-page-role', message.role === 'user' ? uiText('你', 'You') : 'AI'),
+      cue
+        ? m('div.ai-answer-verification-cue.ai-answer-verification-pending', {role: 'status'},
+          answerVerificationCueText(cue))
+        : null,
+      renderMessageContent(message),
+      message.evidence?.length
+        ? m('details.ai-conversation-sources', [
+            m('summary', uiText(
+              `来源 ${message.evidence.length}`,
+              `${message.evidence.length} source(s)`,
+            )),
+            m('ul', message.evidence.map((item) => m('li', [
+              item.label,
+              item.source ? ` · ${item.source}` : '',
+            ]))),
+          ])
+        : null,
+      renderSourceEnrichment(message),
+    ],
+  );
 }
 
 function renderSourceEnrichment(message: StoredConversationMessage): m.Children {
@@ -136,6 +170,10 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   private requestOrdinal = 0;
   private error = '';
   private primaryConversationOutcomeReady = false;
+  /** Screen-only answer of the active run while its review runs; stored once, with the verdict. */
+  private provisionalAnswer?: {runId: string; message: StoredConversationMessage};
+  /** Resolves when the current run's verdict landed or its send/resume request ended. */
+  private runSettlement?: Deferred;
 
   oncreate(): void {
     this.authLifecycle.mount();
@@ -231,27 +269,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       ]),
       m('section.ai-conversation-page-thread',
         this.store.messages.length > 0
-          ? this.store.messages.map((message) => m(
-              `article.ai-conversation-page-message.ai-conversation-page-message-${message.role}`,
-              {key: message.id},
-              [
-                m('div.ai-conversation-page-role', message.role === 'user' ? uiText('你', 'You') : 'AI'),
-                renderMessageContent(message),
-                message.evidence?.length
-                  ? m('details.ai-conversation-sources', [
-                      m('summary', uiText(
-                        `来源 ${message.evidence.length}`,
-                        `${message.evidence.length} source(s)`,
-                      )),
-                      m('ul', message.evidence.map((item) => m('li', [
-                        item.label,
-                        item.source ? ` · ${item.source}` : '',
-                      ]))),
-                    ])
-                  : null,
-                renderSourceEnrichment(message),
-              ],
-            ))
+          ? [
+              ...this.store.messages.map((message) => renderThreadMessage(message)),
+              this.provisionalAnswer
+                ? renderThreadMessage(this.provisionalAnswer.message, 'pending')
+                : null,
+            ]
           : m('div.ai-conversation-page-empty', [
               m('h2', uiText('从问题开始，不从流程开始', 'Start with the question, not a workflow')),
               m('p', uiText(
@@ -263,7 +286,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       pendingHandoff
         ? this.renderFullHandoff(attrs.app, pendingHandoff)
         : null,
-      this.activeReceipt
+      this.activeReceipt && this.provisionalAnswer?.runId === this.activeReceipt.runId
+        ? m('div.ai-conversation-page-running', uiText(
+            '结论已生成，正在核验；新消息会先结束核验。',
+            'The answer is ready and being verified; a new message ends the verification first.',
+          ))
+        : this.activeReceipt
         ? m('div.ai-conversation-page-running', uiText(
             this.primaryConversationOutcomeReady
               ? '主回答已完成，正在进行有界源码补充；新消息会停止补充。'
@@ -419,6 +447,10 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       return; // Preserve the query and the explicit recovery notice; never fork.
     }
     if (restoreOrdinal !== this.restoreOrdinal || !this.authLifecycle.isCurrent(authority)) return;
+    // The previous answer is already on screen: end only its review and let it
+    // settle into history with its verdict before this question.
+    await this.settleProvisionalRun();
+    if (restoreOrdinal !== this.restoreOrdinal || !this.authLifecycle.isCurrent(authority)) return;
     const controller = this.authLifecycle.createAbortController(authority);
     this.activeController?.abort();
     this.activeController = controller;
@@ -448,6 +480,8 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       privateContent: analysisContextRequiresFullMode(analysisContext),
     }, this.store.sessionId);
     m.redraw();
+    const settlement = deferred();
+    this.runSettlement = settlement;
     try {
       const receipt = await this.startQueue.enqueue({
         backendUrl: this.settings.backendUrl,
@@ -485,8 +519,18 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         this.activeReceipt = undefined;
         this.primaryConversationOutcomeReady = false;
       }
+      settlement.resolve();
       m.redraw();
     }
+  }
+
+  private async settleProvisionalRun(): Promise<void> {
+    const active = this.activeReceipt;
+    if (!active || this.provisionalAnswer?.runId !== active.runId) return;
+    await stopReviewAndWait({
+      backendUrl: this.settings.backendUrl,
+      apiKey: this.settings.backendApiKey,
+    }, active, this.runSettlement?.promise);
   }
 
   private async consumeConversationRun(
@@ -506,6 +550,23 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         JSON.stringify(loadAnalysisContext(this.settings.backendUrl, authority.context));
     let assistantMessageId: string | undefined;
     let primaryCommitted = false;
+    // One deterministic id per run, shared by the provisional answer, the
+    // committed outcome and the restored history.
+    const runMessageId = conversationMessageId(receipt.sessionId, receipt.runId, 'assistant');
+    const settlement = this.runSettlement;
+    const releaseProvisional = (keepUnfinished: boolean) => {
+      const provisional = this.provisionalAnswer;
+      if (provisional?.runId !== receipt.runId) return;
+      this.provisionalAnswer = undefined;
+      // A run that ended without its verdict keeps the text it showed, marked unverified.
+      if (keepUnfinished && restoreOrdinal === this.restoreOrdinal && this.authLifecycle.isCurrent(authority)) {
+        this.store = appendConversationMessage(this.settings.backendUrl,
+          unfinishedProvisionalAnswerMessage({id: runMessageId, runId: receipt.runId,
+            content: provisional.message.content, privateContent: provisional.message.privateContent}),
+          receipt.sessionId);
+      }
+      m.redraw();
+    };
     const commitPrimaryOutcome = (outcome: ConversationOutcome) => {
       if (
         primaryCommitted ||
@@ -514,7 +575,8 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       ) return;
       primaryCommitted = true;
       this.primaryConversationOutcomeReady = true;
-      assistantMessageId = restored ? `conversation-${receipt.sessionId}-${receipt.runId}-assistant` : messageId('assistant');
+      releaseProvisional(false);
+      assistantMessageId = runMessageId;
       this.store = appendConversationMessage(this.settings.backendUrl, {
         id: assistantMessageId,
         role: 'assistant',
@@ -527,6 +589,8 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         outcomeKind: outcome.kind,
         ...(outcome.kind === 'recommend_full' ? {fullHandoff: outcome.handoff} : {}),
       }, receipt.sessionId);
+      // The verdict landed: a waiting next question may start without waiting for source enrichment.
+      settlement?.resolve();
       m.redraw();
     };
     const updateSourceEnrichment = (update: ConversationSourceEnrichmentUpdate) => {
@@ -543,9 +607,16 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       apiKey: this.settings.backendApiKey,
     }, receipt, {
       signal: controller.signal,
+      onProvisionalAnswer: ({message}) => {
+        if (!isCurrentStream()) return;
+        this.provisionalAnswer = {runId: receipt.runId, message: {id: runMessageId, role: 'assistant',
+          content: message, timestamp: Date.now(),
+          privateContent: restored || analysisContextRequiresFullMode(analysisContext)}};
+        m.redraw();
+      },
       onPrimaryOutcome: commitPrimaryOutcome,
       onSourceEnrichment: updateSourceEnrichment,
-    });
+    }).finally(() => releaseProvisional(true));
     if (
       !isCurrentStream() ||
       outcome.kind === 'cancelled'
@@ -566,6 +637,8 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     this.activeReceipt = receipt;
     const ownsStream = () => ordinal === this.requestOrdinal &&
       this.activeController === controller && this.activeReceipt === receipt;
+    const settlement = deferred();
+    this.runSettlement = settlement;
     try {
       await this.consumeConversationRun(receipt, controller, ordinal, authority,
         loadAnalysisContext(this.settings.backendUrl, authority.context), true);
@@ -580,6 +653,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         this.activeReceipt = undefined;
         this.primaryConversationOutcomeReady = false;
       }
+      settlement.resolve();
       m.redraw();
     }
   }

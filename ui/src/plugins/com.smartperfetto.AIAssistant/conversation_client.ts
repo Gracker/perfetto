@@ -220,6 +220,12 @@ export async function streamConversationRun(
   options: {
     signal?: AbortSignal;
     onEvent?(event: ParsedConversationSseEvent): void;
+    /**
+     * The finished answer while its semantic review runs. Render it, keep the
+     * run active, and let onPrimaryOutcome replace the same message with the
+     * verdict; persist nothing until then.
+     */
+    onProvisionalAnswer?(answer: {message: string}): void;
     onPrimaryOutcome?(outcome: ConversationOutcome): void;
     onSourceEnrichment?(update: ConversationSourceEnrichmentUpdate): void;
   } = {},
@@ -246,6 +252,10 @@ export async function streamConversationRun(
     buffer = parsed.remainder;
     for (const event of parsed.events) {
       options.onEvent?.(event);
+      if (event.type === 'provisional_answer' && !primaryOutcome) {
+        const message = (event.data as {message?: unknown}).message;
+        if (typeof message === 'string' && message.trim()) options.onProvisionalAnswer?.({message});
+      }
       if (event.type === 'run_completed') {
         const completed = event.data as {
           outcome: ConversationOutcome;
@@ -308,4 +318,35 @@ export async function cancelConversationRun(
     body: JSON.stringify({runId}),
   });
   if (!response.ok) throw await readError(response);
+}
+
+/** A promise with its resolver, for "this request has settled" signals. */
+export interface Deferred {
+  promise: Promise<void>;
+  resolve(): void;
+}
+
+export function deferred(): Deferred {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {resolve = done;});
+  return {promise, resolve};
+}
+
+/**
+ * End only the review of a run whose answer is already shown, then wait (at
+ * most `timeoutMs`) for its verdict to land. The cancel request is not awaited:
+ * the backend answers it only after the run settled, which could otherwise hold
+ * the next question for minutes.
+ */
+export async function stopReviewAndWait(
+  config: ConversationClientConfig,
+  receipt: Pick<ConversationRunReceipt, 'sessionId' | 'runId'>,
+  settlement: Promise<void> | undefined,
+  timeoutMs = 5_000,
+): Promise<void> {
+  void cancelConversationRun(config, receipt.sessionId, receipt.runId).catch(() => undefined);
+  if (!settlement) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([settlement, new Promise<void>((resolve) => {timer = setTimeout(resolve, timeoutMs);})]);
+  clearTimeout(timer);
 }

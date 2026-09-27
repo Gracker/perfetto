@@ -259,6 +259,87 @@ describe('ConversationPage OIDC lifecycle', () => {
     page.onremove();
   });
 
+  it('shows the provisional answer in memory and stores it once, with the verdict, under the run id', async () => {
+    const encoder = new TextEncoder();
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+        controller.enqueue(encoder.encode(
+          'event: provisional_answer\ndata: {"type":"provisional_answer","message":"answer body","verification":"pending"}\n\n',
+        ));
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(startResponse())
+      .mockResolvedValueOnce(new Response(body, {status: 200, headers: {'content-type': 'text/event-stream'}})));
+    const page = createPage();
+    page.input = 'trace 时长';
+    const send = page.send();
+    await vi.waitFor(() => expect(page.provisionalAnswer?.message.content).toBe('answer body'));
+    expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([]);
+    streamController.enqueue(encoder.encode(
+      'event: run_completed\ndata: {"type":"run_completed","outcome":{"kind":"answered","message":"answer body"}}\n\n',
+    ));
+    streamController.close();
+    await send;
+    expect(page.provisionalAnswer).toBeUndefined();
+    expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([
+      expect.objectContaining({id: 'conversation-session-a-run-a-assistant', content: 'answer body'}),
+    ]);
+    page.onremove();
+  });
+
+  it('a new message first ends the previous review and keeps an unverdicted answer before the new question', async () => {
+    const encoder = new TextEncoder();
+    let firstStream!: ReadableStreamDefaultController<Uint8Array>;
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/conversation') && calls.filter(call => call === 'start').length === 0) {
+        calls.push('start');
+        return startResponse('session-a', 'run-a');
+      }
+      if (url.includes('/stream') && url.includes('run-a')) {
+        calls.push('stream-a');
+        return new Response(new ReadableStream<Uint8Array>({start(controller) {
+          firstStream = controller;
+          controller.enqueue(encoder.encode(
+            'event: provisional_answer\ndata: {"type":"provisional_answer","message":"first answer","verification":"pending"}\n\n'));
+        }}), {status: 200, headers: {'content-type': 'text/event-stream'}});
+      }
+      if (url.endsWith('/cancel')) {
+        calls.push('cancel-a');
+        // The run could not settle with a verdict: its stream ends without run_completed.
+        firstStream.close();
+        return new Response(JSON.stringify({success: true, runId: 'run-a', status: 'cancelled'}), {status: 200});
+      }
+      if (url.endsWith('/conversation')) {
+        calls.push('start-b');
+        return startResponse('session-a', 'run-b');
+      }
+      calls.push('stream-b');
+      return streamResponse('second answer');
+    }));
+    const page = createPage();
+    page.input = 'trace 时长';
+    const first = page.send();
+    await vi.waitFor(() => expect(page.provisionalAnswer?.message.content).toBe('first answer'));
+    page.input = '应用包名';
+    await page.send();
+    await first.catch(() => undefined);
+    expect(calls.indexOf('cancel-a')).toBeGreaterThan(-1);
+    expect(calls.indexOf('cancel-a')).toBeLessThan(calls.indexOf('start-b'));
+    expect(page.store.messages.map((message: {role: string; content: string; turn?: {partial: boolean}}) =>
+      [message.role, message.content, message.turn?.partial ?? null])).toEqual([
+      ['user', 'trace 时长', null],
+      ['assistant', 'first answer', true],
+      ['user', '应用包名', null],
+      ['assistant', 'second answer', null],
+    ]);
+    page.onremove();
+  });
+
   it('rejects a late start completion after logout', async () => {
     const pendingStart = deferredResponse();
     const fetchMock = vi.fn().mockReturnValue(pendingStart.promise);

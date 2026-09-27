@@ -5319,3 +5319,74 @@ describe('canonical scene SSE snapshots', () => {
     expect(received).toEqual([{value: timeline, terminal: false}, {value: timeline, terminal: true}]);
   });
 });
+
+describe('deliver first, verify after', () => {
+  const provisional = (conclusion = 'Trace duration is 12.3 s.') => ({
+    runId: 'run-a',
+    data: {conclusion, provisional: true, verification: 'pending'},
+  });
+
+  it('renders the provisional answer with a pending cue and keeps the run active', () => {
+    const ctx = createMockContext();
+    const result = handleSSEEvent('conclusion', provisional(), ctx);
+    expect(result.stopLoading).toBeUndefined();
+    expect(result.isTerminal).toBeUndefined();
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0]).toMatchObject({answerVerification: 'pending', flowTag: 'answer_stream'});
+    expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
+    expect(ctx.completionHandled).toBe(true);
+  });
+
+  it('replaces the verdict on the same message when analysis_completed arrives', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('conclusion', provisional(), ctx);
+    const messageId = ctx.messages[0].id;
+    const result = handleSSEEvent('analysis_completed', {runId: 'run-a', data: {
+      success: true, conclusion: 'Trace duration is 12.3 s.', findings: [],
+    }}, ctx);
+    expect(result).toMatchObject({isTerminal: true, stopLoading: true});
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].id).toBe(messageId);
+    expect(ctx.messages[0].answerVerification).toBeUndefined();
+    expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
+  });
+
+  it.each([
+    ['error', {data: {message: 'finalization failed'}}],
+    ['analysis_cancelled', {data: {reason: 'Analysis cancelled by user'}}],
+    ['end', {}],
+  ] as const)('downgrades the pending cue when %s arrives without a verdict', (eventType, payload) => {
+    const ctx = createMockContext();
+    handleSSEEvent('conclusion', provisional(), ctx);
+    handleSSEEvent(eventType, payload, ctx);
+    const answer = ctx.messages.find((message) => message.flowTag === 'answer_stream');
+    expect(answer?.answerVerification).toBe('unfinished');
+    expect(answer?.content).toContain('Trace duration is 12.3 s.');
+  });
+
+  it('clears an unfinished cue restored with completionHandled when the verdict arrives', () => {
+    const ctx = createMockContext();
+    ctx.addMessage({id: 'restored-answer', role: 'assistant', content: 'Trace duration is 12.3 s.',
+      timestamp: 1, flowTag: 'answer_stream', answerVerification: 'unfinished'});
+    ctx.streamingAnswer.messageId = 'restored-answer';
+    ctx.setCompletionHandled(true);
+    handleSSEEvent('analysis_completed', {runId: 'run-a', data: {success: true,
+      conclusion: 'Trace duration is 12.3 s.', findings: []}}, ctx);
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].answerVerification).toBeUndefined();
+  });
+
+  it('does not upgrade an unfinished cue on a later error', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('conclusion', provisional(), ctx);
+    handleSSEEvent('error', {data: {message: 'lost'}}, ctx);
+    handleSSEEvent('end', {}, ctx);
+    expect(ctx.messages.find((message) => message.flowTag === 'answer_stream')?.answerVerification).toBe('unfinished');
+  });
+
+  it('keeps a legacy non-provisional conclusion near-terminal', () => {
+    const ctx = createMockContext();
+    expect(handleSSEEvent('conclusion', {data: {conclusion: 'Legacy answer'}}, ctx)).toEqual({stopLoading: true});
+    expect(ctx.messages[0].answerVerification).toBeUndefined();
+  });
+});

@@ -4582,6 +4582,28 @@ function renderConclusionContract(
 }
 
 /**
+ * A run that stopped without its verdict (error, cancellation, a stream end)
+ * keeps the provisional text and marks it unverified. The verdict itself clears
+ * the cue inside the analysis_completed message patch.
+ */
+function markAnswerUnverified(ctx: SSEHandlerContext): void {
+  const messageId = ctx.streamingAnswer.messageId;
+  if (!messageId) return;
+  const message = ctx.getMessages().find((candidate) => candidate.id === messageId);
+  if (message?.answerVerification !== 'pending') return;
+  ctx.updateMessage(messageId, {answerVerification: 'unfinished'}, {persist: true});
+}
+
+function pushFinalConclusionOutput(ctx: SSEHandlerContext, payload: AnalysisCompletedPayload | undefined): void {
+  pushStreamingOutput(
+    ctx,
+    analysisCompletedResultStatus(payload) === 'completed'
+      ? uiText('最终结论已生成', 'Final conclusion generated')
+      : uiText('本轮输出已保留，完整性与核验状态见提示', 'Run output retained; see completeness and verification notices'),
+  );
+}
+
+/**
  * Process analysis_completed event - final analysis result.
  */
 function updateCurrentAnswerSourceEnrichment(
@@ -4650,6 +4672,7 @@ export function handleAnalysisCompletedEvent(
   // Guard against duplicate conclusion handling — but still extract reportUrl
   // (agentv3 sends 'conclusion' first, then 'analysis_completed' carries reportUrl)
   if (ctx.completionHandled) {
+    pushFinalConclusionOutput(ctx, payload);
     if (DEBUG_SSE) {
       console.log(
         '[SSEHandlers] Completion already handled, extracting reportUrl only',
@@ -4669,7 +4692,11 @@ export function handleAnalysisCompletedEvent(
       : undefined;
     const serverVerificationDetails = renderServerVerificationDetails(payload);
     const serverVerificationNotice = renderServerVerificationNotice(payload);
+    // The verdict replaces any verification cue on the answer, pending or unfinished.
+    const answerHasCue = Boolean(ctx.getMessages().find(
+      (msg) => msg.id === ctx.streamingAnswer.messageId)?.answerVerification);
     if (
+      answerHasCue ||
       reportUrl ||
       resultSnapshotId ||
       conclusionContract ||
@@ -4697,6 +4724,7 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(
           answerMsgId,
           {
+            answerVerification: undefined,
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.smartScenePreview
               ? {smartScenePreview: payload.smartScenePreview}
@@ -4805,6 +4833,9 @@ export function handleAnalysisCompletedEvent(
         payload.reportError,
       );
     }
+    if (ctx.collectedErrors.length > 0) {
+      showErrorSummary(ctx);
+    }
     if (sourceEnrichmentPending) {
       updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
     }
@@ -4822,12 +4853,7 @@ export function handleAnalysisCompletedEvent(
     // Keep the in-flight context object consistent as well (unit tests and
     // any caller that reuses the same context instance for multiple events).
     ctx.completionHandled = true;
-    pushStreamingOutput(
-      ctx,
-      analysisCompletedResultStatus(payload) === 'completed'
-        ? uiText('最终结论已生成', 'Final conclusion generated')
-        : uiText('本轮输出已保留，完整性与核验状态见提示', 'Run output retained; see completeness and verification notices'),
-    );
+    pushFinalConclusionOutput(ctx, payload);
 
     // Build content with agent-driven metadata if available
     const content = buildVisibleConclusionContentWithReportAppendix(
@@ -4869,6 +4895,7 @@ export function handleAnalysisCompletedEvent(
         streamedAnswerMessageId,
         {
           content,
+          answerVerification: undefined,
           serverVerificationDetails,
           serverVerificationNotice,
           serverVerificationBinding: payload?.serverVerificationBinding,
@@ -4953,6 +4980,7 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(
           streamedAnswerMessageId,
           {
+            answerVerification: undefined,
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
             ...(payload?.analysisReceipt
@@ -5039,6 +5067,7 @@ export function handleAnalysisCancelledEvent(
   if (ctx.streamingAnswer.status === 'streaming') {
     completeStreamingAnswer(ctx);
   }
+  markAnswerUnverified(ctx);
 
   const isDefaultUserCancellation =
     reason === 'Analysis cancelled by user' || reason === 'Aborted by user';
@@ -5758,6 +5787,7 @@ export function handleErrorEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   failStreamingAnswer(ctx);
+  markAnswerUnverified(ctx);
 
   const payload = eventPayload(data);
   const error =
@@ -6551,11 +6581,15 @@ function handleSSEEventInner(
     }
 
     case 'conclusion': {
-      // agentv3 sends 'conclusion' when the SDK result arrives (answer done).
-      // 'analysis_completed' follows later with reportUrl after HTML report generation.
-      // So conclusion is near-terminal: stop loading but keep connection open.
+      // Deliver first, verify after: the backend sends a provisional
+      // conclusion when the final semantic review starts. The body is final;
+      // the run (loading, stop control, session lock) stays active until
+      // analysis_completed replaces this message with its verdict. A legacy,
+      // non-provisional conclusion keeps the old near-terminal behaviour.
       const conclusionPayload = eventPayload(eventData);
       const conclusionText = readStringField(conclusionPayload, 'conclusion');
+      const provisional = conclusionPayload.provisional === true;
+      const verificationCue = provisional ? {answerVerification: 'pending' as const} : {};
       if (DEBUG_SSE) console.log('[SSEHandlers] CONCLUSION event received');
 
       // The answer is ready to read, but analysis_completed still owns the
@@ -6588,6 +6622,7 @@ function handleSSEEventInner(
               serverVerificationBinding: undefined,
               timestamp: Date.now(),
               flowTag: 'answer_stream',
+              ...verificationCue,
             },
             {persist: true},
           );
@@ -6602,6 +6637,7 @@ function handleSSEEventInner(
             serverVerificationBinding: undefined,
             timestamp: Date.now(),
             flowTag: 'answer_stream',
+            ...verificationCue,
           });
           ctx.streamingAnswer.messageId = messageId;
           ctx.streamingAnswer.content = content;
@@ -6614,7 +6650,7 @@ function handleSSEEventInner(
         ctx.setCompletionHandled(true);
       }
       // Not terminal — analysis_completed with reportUrl still follows
-      return {stopLoading: true};
+      return provisional ? {} : {stopLoading: true};
     }
 
     case 'sub_agent_started': {
@@ -6732,6 +6768,7 @@ function handleSSEEventInner(
       return handleSkillErrorEvent(eventData, ctx);
 
     case 'end':
+      markAnswerUnverified(ctx);
       if (ctx.streamingFlow.status === 'running') {
         partialStreamingFlow(ctx, uiText(
           '未收到最终完成与核验状态，请保留当前结果并重试。',

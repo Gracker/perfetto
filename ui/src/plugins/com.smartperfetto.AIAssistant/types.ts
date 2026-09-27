@@ -16,6 +16,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import type {AnswerVerificationState} from './answer_verification';
 import {getDefaultSmartPerfettoBackendUrl} from '../../core/smartperfetto_backend_url';
 
 /**
@@ -110,6 +111,13 @@ export interface Message {
   serverVerificationNotice?: string;
   /** Exact finalized candidate identity that owns serverVerificationDetails. */
   serverVerificationBinding?: ServerVerificationBinding;
+  /**
+   * Deliver first, verify after. `pending`: the body is final and its one
+   * semantic review is still running; analysis_completed (or run_completed)
+   * replaces the message with its verdict. `unfinished`: the run ended without
+   * a verdict, so the text stays but must not read as verified.
+   */
+  answerVerification?: AnswerVerificationState;
 }
 
 export interface ServerVerificationBinding {

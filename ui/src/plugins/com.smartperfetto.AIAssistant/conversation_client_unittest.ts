@@ -132,6 +132,37 @@ describe('streamConversationRun source enrichment', () => {
   });
 });
 
+describe('streamConversationRun provisional answer', () => {
+  it('hands the provisional answer over before the verdict and ignores it afterwards', async () => {
+    const frames = [
+      'event: provisional_answer\ndata: {"type":"provisional_answer","message":"answer body","verification":"pending"}\n\n',
+      'event: run_completed\ndata: {"type":"run_completed","enrichmentPending":false,"outcome":{"kind":"answered","message":"answer body"}}\n\n',
+      'event: provisional_answer\ndata: {"type":"provisional_answer","message":"late replay","verification":"pending"}\n\n',
+    ];
+    const encoder = new TextEncoder();
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+    } as Response)));
+    const order: string[] = [];
+    await streamConversationRun(
+      {backendUrl: 'http://backend'},
+      {sessionId: 'conversation-1', runId: 'run-1', isNewSession: true, traceContextAttached: false},
+      {
+        onProvisionalAnswer: ({message}) => order.push(`provisional:${message}`),
+        onPrimaryOutcome: primary => order.push(`primary:${primary.message}`),
+      },
+    );
+    expect(order).toEqual(['provisional:answer body', 'primary:answer body']);
+  });
+});
+
 describe('getConversation', () => {
   it.each([401, 404, 409])('preserves HTTP %s without retrying or starting a new session', async (status) => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({

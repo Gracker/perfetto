@@ -18,6 +18,7 @@ import {
   type ConversationFullHandoff,
   type ConversationOutcome,
 } from './conversation_client';
+import {answerVerificationCueText} from './answer_verification';
 import {projectMessageForStorage} from './private_message_storage';
 import type {ConversationSourceEnrichmentUpdate} from './types';
 import {uiText} from './ui_language';
@@ -236,7 +237,7 @@ export function restoreConversationStore(
     }
     const now = Date.now();
     const messages: StoredConversationMessage[] = restored.history.map((message, index) => ({
-      id: `conversation-${restored.sessionId}-${message.turnId ?? message.turn?.id ?? index}-${message.role}`,
+      id: conversationMessageId(restored.sessionId, message.turnId ?? message.turn?.id ?? index, message.role),
       role: message.role,
       content: message.content,
       timestamp: now + index,
@@ -317,6 +318,29 @@ export function conversationOutcomeTurn(
     terminationMessage: result.terminationMessage,
     uncertainties: result.uncertainties ?? [], nextSteps: result.nextSteps ?? [], evidence: [],
   };
+}
+
+/**
+ * Deterministic message id for one role of one conversation turn. The run id is
+ * the turn id, so a provisional answer, its final outcome and the restored
+ * history all address the same message.
+ */
+export function conversationMessageId(sessionId: string, turnId: string | number, role: 'user' | 'assistant'): string {
+  return `conversation-${sessionId}-${turnId}-${role}`;
+}
+
+/**
+ * A provisional answer whose run ended without a verdict (failure, lost stream,
+ * or a stop that had to fall back to a full cancel). The text the user read is
+ * kept in history, explicitly marked unverified and incomplete.
+ */
+export function unfinishedProvisionalAnswerMessage(input: {
+  id: string; runId: string; content: string; privateContent?: boolean;
+}): StoredConversationMessage {
+  return {id: input.id, role: 'assistant', content: input.content, timestamp: Date.now(),
+    ...(input.privateContent ? {privateContent: true} : {}),
+    turn: {id: input.runId, turnIndex: 0, partial: true, completionStatus: 'incomplete',
+      terminationMessage: answerVerificationCueText('unfinished'), uncertainties: [], nextSteps: [], evidence: []}};
 }
 
 export function conversationRestoreErrorMessage(error: unknown): string {
