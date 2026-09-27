@@ -167,11 +167,16 @@ export type ConclusionClaimDiagnosticCode = 'invalid_claim' | 'invalid_reference
 export type ConclusionClaimDiagnosticField =
   'claim' | 'text' | 'id' | 'conclusionId' | 'kind' | 'references' | 'artifactRefs' | 'relationRefs' | 'semantics' | 'semantics.unknown_field' | 'semantics.schemaVersion' | 'semantics.predicate' | 'semantics.polarity' | 'semantics.discourse' | 'semantics.quantifier' | 'semantics.modality' | 'semantics.conditions' | 'semantics.scope' | 'semantics.scope.unknown_field' | 'semantics.scope.population' | 'semantics.scope.subjectRefs' | 'semantics.scope.objectRefs' | 'semantics.scope.timeRangeNs' | 'semantics.numeric' | 'semantics.source' | 'parser_metadata';
 
+/** The failing part of `semantics.numeric`: its object shape or keys, `operator`, `value` or `unit`. */
+export type ConclusionClaimNumericSubreason = 'shape' | 'operator' | 'value' | 'unit';
+
 /** One failing claim: its 1-based position in `claims`, the parse issue and the schema field. */
 export interface ConclusionClaimDiagnostic {
   readonly ordinal: number;
   readonly code: ConclusionClaimDiagnosticCode;
   readonly field: ConclusionClaimDiagnosticField;
+  /** Only for `semantics.numeric`; absent in older diagnostics. */
+  readonly subreason?: ConclusionClaimNumericSubreason;
 }
 
 export type ConclusionRelationProposalItemReason =
