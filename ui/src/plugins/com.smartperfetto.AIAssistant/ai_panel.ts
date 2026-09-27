@@ -152,6 +152,12 @@ import {
 } from './conversation_store';
 import {ConversationStartQueue} from './conversation_start_queue';
 import {answerVerificationCueText, reviewStopPhaseText} from './answer_verification';
+import {
+  classifyConversationRuntimeUpdate,
+  reduceAnswerDraft,
+  type AnswerDraftEvent,
+  type AnswerDraftTracking,
+} from './answer_draft';
 import {conversationTraceContextResetNotice} from './conversation_context_notice';
 import {readPageAuthGateState} from './page_auth_lifecycle';
 import {
@@ -5104,7 +5110,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                 {
                                   onclick: () => this.cancelAnalysis(),
                                   title: this.reviewStopRequestedRunId === this.state.agentRunId
-                                    ? uiText('强制停止：放弃本次核验与保存', 'Force stop: abandon this verification and save')
+                                    ? uiText('强制停止：结束本轮，已显示的结论按未核验保留', 'Force stop: end this run; the answer shown stays, unverified')
                                     : this.hasProvisionalAgentAnswer()
                                       ? uiText('停止核验：保留结论，标为未核验', 'Stop verification: keep the answer as unverified')
                                       : uiText('停止分析', 'Stop analysis'),
@@ -8683,6 +8689,7 @@ Click ⚙️ to configure backend connection.`,
         }
         return false;
       },
+      removeMessage: (messageId: string) => this.removeAnswerDraft(messageId),
       setLoading: (loading: boolean) => {
         this.setLoadingState(loading);
       },
@@ -10504,10 +10511,31 @@ Click ⚙️ to configure backend connection.`,
       ordinal === this.conversationRequestOrdinal && restoreOrdinal === this.conversationRestoreOrdinal &&
       requestIsCurrent();
     let conversationAssistantMessage: Message | undefined;
-    // One deterministic id per run: the provisional answer and the final
-    // outcome are the same message, and the restored history uses it too.
+    // One deterministic id per run: the answer draft, the provisional answer
+    // and the final outcome are the same message, and the restored history
+    // uses it too.
     const messageId = conversationMessageId(receipt.sessionId, receipt.runId, 'assistant');
     const settlement = this.conversationRunSettlement;
+    let draft: AnswerDraftTracking = {runId: receipt.runId, attempt: 0, owned: false};
+    const applyDraft = (event: AnswerDraftEvent) => {
+      const shown = this.state.messages.find(message => message.id === messageId);
+      // A provisional or final answer owns the message; a draft never replaces it.
+      const step = reduceAnswerDraft({...draft, owned: Boolean(shown && !shown.answerDraft)}, event);
+      draft = step.tracking;
+      if (step.op === 'ignore') return;
+      if (step.op !== 'append') this.removeAnswerDraft(messageId);
+      if (event.kind === 'reset') return;
+      const current = this.state.messages.find(message => message.id === messageId);
+      if (current) {
+        this.updateMessage(messageId, {content: current.content + event.text}, {persist: false});
+        return;
+      }
+      // Screen only: a draft is never stored and never replayed.
+      this.state.messages.push({id: messageId, role: 'assistant', content: event.text, timestamp: Date.now(),
+        privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext), answerDraft: true});
+      this.conversationMessageIds.add(messageId);
+      this.scrollToBottom(true);
+    };
     // A run that ends without its verdict keeps the text it showed, marked unverified.
     const settleProvisional = (next: 'unfinished' | undefined) => {
       const shown = this.state.messages.find(message => message.id === messageId);
@@ -10529,6 +10557,7 @@ Click ⚙️ to configure backend connection.`,
           timestamp: Date.now(),
           privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext),
           answerVerification: 'pending',
+          answerDraft: undefined,
         };
         // Screen only: nothing is persisted until the verdict replaces it.
         const existing = this.state.messages.find(message => message.id === messageId);
@@ -10544,6 +10573,7 @@ Click ⚙️ to configure backend connection.`,
       onPrimaryOutcome: (primaryOutcome) => {
         if (!isCurrentStream()) return;
         if (primaryOutcome.kind === 'cancelled') {
+          this.replaceConversationAnswerDraftWithCancelledNotice(messageId);
           settleProvisional('unfinished');
           settlement?.resolve();
           return;
@@ -10561,6 +10591,7 @@ Click ⚙️ to configure backend connection.`,
           privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext),
           conversationEvidence: primaryOutcome.evidence,
           answerVerification: undefined,
+          answerDraft: undefined,
         };
         this.conversationMessageIds.add(assistantMessage.id);
         // Replacing the provisional message persists the local session too, so
@@ -10606,21 +10637,18 @@ Click ⚙️ to configure backend connection.`,
       onEvent: (event) => {
         if (!isCurrentStream()) return;
         if (event.type !== 'runtime_update' || !event.data || typeof event.data !== 'object') return;
-        const update = (event.data as {update?: unknown}).update;
-        const content = update && typeof update === 'object'
-          ? (update as {content?: unknown}).content
-          : undefined;
-        const phase = typeof content === 'string'
-          ? content
-          : content && typeof content === 'object' && typeof (content as {message?: unknown}).message === 'string'
-            ? String((content as {message: string}).message)
-            : '';
-        if (phase) {
-          this.state.loadingPhase = phase;
-          m.redraw();
-        }
+        // Only progress updates name the loading phase; answer events are drafts.
+        const action = classifyConversationRuntimeUpdate((event.data as {update?: unknown}).update);
+        if (action.kind === 'ignore') return;
+        if (action.kind === 'loading_phase') this.state.loadingPhase = action.phase;
+        else applyDraft(action.event);
+        m.redraw();
       },
-    }).finally(() => settleProvisional('unfinished'));
+    }).finally(() => {
+      settleProvisional('unfinished');
+      // A run that ended without an answer leaves no draft behind.
+      if (isCurrentStream()) this.removeAnswerDraft(messageId);
+    });
     if (!isCurrentStream() || outcome.kind === 'cancelled') return;
   }
 
@@ -10678,6 +10706,19 @@ Click ⚙️ to configure backend connection.`,
     void this.sendMessage();
   }
 
+  /** Remove a message only while it is still a draft (never stored, so nothing to rewrite). */
+  private removeAnswerDraft(messageId: string): void {
+    if (!this.state.messages.some(message => message.id === messageId && message.answerDraft)) return;
+    this.state.messages = this.state.messages.filter(message => message.id !== messageId);
+  }
+
+  /** A stop during the draft is a full cancel: the draft becomes the cancelled notice. */
+  private replaceConversationAnswerDraftWithCancelledNotice(messageId: string): void {
+    if (!this.state.messages.some(message => message.id === messageId && message.answerDraft)) return;
+    this.updateMessage(messageId, {content: uiText('分析已取消。', 'Analysis cancelled.'), answerDraft: undefined,
+      privateContent: undefined, timestamp: Date.now()});
+  }
+
   private async cancelConversationAnalysis(): Promise<void> {
     const active = this.activeConversationRun;
     if (!active) return;
@@ -10691,21 +10732,40 @@ Click ⚙️ to configure backend connection.`,
       }, active.sessionId, active.runId).catch(() => undefined);
       return;
     }
-    ++this.conversationRequestOrdinal;
+    // Draft only, as far as this panel knows. The backend decides: when its
+    // provisional answer is already on the way, the stop is review-only
+    // (`review_stop_requested`) and the attached stream delivers that answer.
+    this.state.loadingPhase = uiText('正在停止分析…', 'Stopping analysis…');
+    m.redraw();
+    let status: string | undefined;
     try {
-      await cancelConversationRun(
-        {
-          backendUrl: this.state.settings.backendUrl,
-          apiKey: this.state.settings.backendApiKey,
-        },
-        active.sessionId,
-        active.runId,
-      );
-    } finally {
-      this.activeConversationRun = undefined;
-      this.setLoadingState(false);
-      m.redraw();
+      status = await cancelConversationRun({
+        backendUrl: this.state.settings.backendUrl,
+        apiKey: this.state.settings.backendApiKey,
+      }, active.sessionId, active.runId);
+    } catch {
+      status = undefined;
     }
+    if (status === 'review_stop_requested') {
+      if (this.activeConversationRun === active) this.state.loadingPhase = reviewStopPhaseText();
+      m.redraw();
+      return;
+    }
+    // The stream may already have settled the run (and shown the cancelled notice).
+    if (this.activeConversationRun !== active) return;
+    if (status !== 'cancelled') {
+      // Unconfirmed (request failed) or the run settled another way: the backend
+      // may still deliver, so keep the stream attached and let it settle the run.
+      this.state.loadingPhase = uiText('停止未确认，分析仍在进行', 'Stop not confirmed; the analysis is still running');
+      m.redraw();
+      return;
+    }
+    ++this.conversationRequestOrdinal;
+    this.replaceConversationAnswerDraftWithCancelledNotice(
+      conversationMessageId(active.sessionId, active.runId, 'assistant'));
+    this.activeConversationRun = undefined;
+    this.setLoadingState(false);
+    m.redraw();
   }
 
   private async handleChatMessage(message: string) {
@@ -11286,7 +11346,7 @@ Click ⚙️ to configure backend connection.`,
   private async requestBackendCancellation(
     sessionId: string,
     runId: string,
-  ): Promise<{status: string; reason?: string}> {
+  ): Promise<{status: string; reason?: string; outcome?: string}> {
     const cancelUrl = buildAssistantApiV1Url(
       this.state.settings.backendUrl,
       `/${sessionId}/cancel`,
@@ -11325,14 +11385,23 @@ Click ⚙️ to configure backend connection.`,
       ...('reason' in payload && typeof payload.reason === 'string'
         ? {reason: payload.reason}
         : {}),
+      ...('outcome' in payload && typeof payload.outcome === 'string'
+        ? {outcome: payload.outcome}
+        : {}),
     };
   }
 
   private applyConfirmedCancellation(
     status: string,
     reason = 'Analysis cancelled by user',
+    outcome?: string,
   ): void {
-    if (status === 'review_stop_requested') {
+    // A force stop waits (bounded) for the run to commit. `committed` (its
+    // verdict) or `review_not_finished` (the answer kept as an unverified
+    // partial turn) is already the run's terminal event; the (reattached)
+    // stream delivers it with analysis_completed, like a review-only stop.
+    const forceStopFoundCommit = outcome === 'committed' || outcome === 'review_not_finished';
+    if (status === 'review_stop_requested' || forceStopFoundCommit) {
       // Not terminal: the answer stays, the review stops, and analysis_completed
       // still delivers the verdict. Stop-and-redirect waits for that event.
       this.analysisCancellationPending = false;
@@ -11434,8 +11503,8 @@ Click ⚙️ to configure backend connection.`,
       return this.analysisCancellationRequest;
     }
     const request = this.requestBackendCancellation(sessionId, runId)
-      .then(({status, reason}) =>
-        this.applyConfirmedCancellation(status, reason),
+      .then(({status, reason, outcome}) =>
+        this.applyConfirmedCancellation(status, reason, outcome),
       )
       .catch((error: unknown) =>
         this.handleCancellationFailure(sessionId, error),

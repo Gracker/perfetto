@@ -303,11 +303,16 @@ export async function streamConversationRun(
   throw new Error('Conversation stream ended before a result was received');
 }
 
+/**
+ * Returns the backend's answer: `review_stop_requested` when the run's answer
+ * was already delivered (only its review stops; the stream carries the turn),
+ * otherwise the settled outcome kind.
+ */
 export async function cancelConversationRun(
   config: ConversationClientConfig,
   sessionId: string,
   runId: string,
-): Promise<void> {
+): Promise<string | undefined> {
   const url = buildAssistantApiV1Url(
     config.backendUrl,
     `/conversation/${encodeURIComponent(sessionId)}/cancel`,
@@ -318,6 +323,9 @@ export async function cancelConversationRun(
     body: JSON.stringify({runId}),
   });
   if (!response.ok) throw await readError(response);
+  const payload: unknown = await response.json().catch(() => undefined);
+  const status = payload && typeof payload === 'object' ? (payload as {status?: unknown}).status : undefined;
+  return typeof status === 'string' ? status : undefined;
 }
 
 /** A promise with its resolver, for "this request has settled" signals. */

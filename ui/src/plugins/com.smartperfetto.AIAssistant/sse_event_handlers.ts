@@ -68,6 +68,7 @@ import {
 } from './trace_location_label';
 import {uiOutputLanguage, uiText} from './ui_language';
 import {parseSourceUseReceipt} from './analysis_context';
+import {readAnswerDraftEvent, reduceAnswerDraft, type AnswerDraftEvent, type AnswerDraftOp} from './answer_draft';
 
 /** Set to true for verbose SSE event logging during development. */
 const DEBUG_SSE = false;
@@ -349,7 +350,7 @@ function settleAnalysisCompletedStreams(
     );
     // The authoritative body was already projected. Changing run state must
     // not flush an earlier incremental buffer over that final body.
-    ctx.streamingAnswer.status = 'failed';
+    ctx.streamingAnswer.status = 'finalized';
   } else if (status === 'cancelled') {
     cancelStreamingFlow(ctx);
   } else if (status === 'partial' || status === 'quota_exceeded') {
@@ -581,6 +582,8 @@ export interface SSEHandlerContext {
   getMessages: () => readonly Message[];
   /** Remove the last message if it matches a condition */
   removeLastMessageIf: (predicate: (msg: Message) => boolean) => boolean;
+  /** Remove a message that is still an answer draft (never stored). */
+  removeMessage: (messageId: string) => void;
   /** Set/get loading state */
   setLoading: (loading: boolean) => void;
   /** Track displayed skill progress for deduplication */
@@ -1142,49 +1145,6 @@ function ensureAnswerTimelineStarted(ctx: SSEHandlerContext): void {
   );
 }
 
-
-
-
-
-
-
-function syncAnswerStreamToConversationTimeline(
-  ctx: SSEHandlerContext,
-  options: {force?: boolean; completed?: boolean} = {},
-): void {
-  const answer = ctx.streamingAnswer;
-  const answerText = `${answer.content}${answer.pending}`.trim();
-  if (!answerText) return;
-
-  if (answerText) {
-    ensureAnswerTimelineStarted(ctx);
-  }
-
-  const flow = ctx.streamingFlow;
-  const textLength = answerText.length;
-  // Answer snippets are deliberately not mirrored into the process view. They
-  // existed to keep the timeline moving while it sat above the answer; the
-  // answer bubble streams live on its own, and with the process shown below the
-  // answer these snapshots would print the same text twice.
-
-  if (options.completed === true && !flow.answerTimelineCompleted) {
-    flow.answerTimelineCompleted = true;
-    appendAnswerTimelineLine(
-      ctx,
-      'result',
-      'agent',
-      uiText(
-        `最终回答已输出（${textLength} 字）。`,
-        `The final answer was emitted (${textLength} characters).`,
-      ),
-    );
-    refreshStreamingFlowMessage(ctx, 'conversation', {
-      createIfMissing: true,
-      persist: true,
-    });
-  }
-}
-
 function getConversationPhaseMinGapMs(
   phase: ConversationStepTimelineItem['phase'],
 ): number {
@@ -1320,16 +1280,15 @@ function ensureStreamingAnswerMessage(ctx: SSEHandlerContext): string {
       content: answer.content || '',
       timestamp: Date.now(),
       flowTag: 'answer_stream',
+      answerDraft: true,
     });
   }
 
   return answer.messageId!;
 }
 
-function flushStreamingAnswer(
-  ctx: SSEHandlerContext,
-  options: {force?: boolean; persist?: boolean} = {},
-): void {
+/** Render the buffered draft text. A draft is display-only: never persisted. */
+function flushStreamingAnswer(ctx: SSEHandlerContext, options: {force?: boolean} = {}): void {
   const answer = ctx.streamingAnswer;
   if (!options.force && !answer.pending) return;
 
@@ -1347,30 +1306,37 @@ function flushStreamingAnswer(
       timestamp: answer.lastUpdatedAt,
       flowTag: 'answer_stream',
     },
-    {persist: options.persist === true},
+    {persist: false},
   );
 }
 
-function completeStreamingAnswer(ctx: SSEHandlerContext): void {
+/**
+ * Revoke the draft on screen: a reset, or a run that ended (error,
+ * cancellation, stream end, verdict without a body) before any conclusion
+ * confirmed it. The draft never becomes a stored answer.
+ */
+function discardStreamingDraft(ctx: SSEHandlerContext): void {
   const answer = ctx.streamingAnswer;
-  if (answer.status === 'completed') return;
-  if (!answer.messageId && !answer.pending && !answer.content) {
-    answer.status = 'completed';
-    return;
+  const messageId = answer.messageId;
+  const shown = messageId ? ctx.getMessages().find((msg) => msg.id === messageId) : undefined;
+  if (shown?.answerDraft) ctx.removeMessage(shown.id);
+  if (!shown || shown.answerDraft) {
+    answer.messageId = null;
+    answer.content = '';
   }
-  flushStreamingAnswer(ctx, {force: true, persist: true});
-  answer.status = 'completed';
+  answer.pending = '';
+  if (answer.status === 'streaming') answer.status = 'idle';
 }
 
-function failStreamingAnswer(ctx: SSEHandlerContext): void {
+/** Apply the shared draft rule; a `restart` or `clear` has already removed the draft on screen. */
+function adoptDraftEvent(ctx: SSEHandlerContext, event: AnswerDraftEvent): AnswerDraftOp {
   const answer = ctx.streamingAnswer;
-  if (answer.status === 'failed') return;
-  if (!answer.messageId && !answer.pending && !answer.content) {
-    answer.status = 'failed';
-    return;
-  }
-  flushStreamingAnswer(ctx, {force: true, persist: true});
-  answer.status = 'failed';
+  const {tracking, op} = reduceAnswerDraft(
+    {runId: answer.draftRunId, attempt: answer.draftAttempt, owned: answer.status === 'finalized'}, event);
+  answer.draftRunId = tracking.runId;
+  answer.draftAttempt = tracking.attempt;
+  if (op === 'restart' || op === 'clear') discardStreamingDraft(ctx);
+  return op;
 }
 
 function describeEnvelopeOutput(envelope: DataEnvelope): string {
@@ -4625,6 +4591,9 @@ export function handleAnalysisCompletedEvent(
   const rawPayload = asRecord(eventRecord.data);
   if (rawPayload.sceneTimeline) ctx.onSceneTimelineReceived?.(rawPayload.sceneTimeline, true);
   const payload = toAnalysisCompletedPayload(eventRecord.data);
+  // A stop whose review did not end in time keeps the read body as an
+  // unverified partial turn: the verdict itself is "unfinished".
+  const verdictCue = payload?.terminationReason === 'review_not_finished' ? 'unfinished' as const : undefined;
   const sourceEnrichmentPending = payload?.sourceEnrichmentPending === true;
   const rawConclusionContract = rawPayload.conclusionContract;
   const conclusionContract =
@@ -4724,7 +4693,7 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(
           answerMsgId,
           {
-            answerVerification: undefined,
+            answerVerification: verdictCue,
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.smartScenePreview
               ? {smartScenePreview: payload.smartScenePreview}
@@ -4740,6 +4709,7 @@ export function handleAnalysisCompletedEvent(
             ...(canonicalContent
               ? {
                   content: canonicalContent,
+                  answerDraft: undefined,
                   serverVerificationDetails,
                   serverVerificationNotice,
                   serverVerificationBinding: payload?.serverVerificationBinding,
@@ -4795,7 +4765,7 @@ export function handleAnalysisCompletedEvent(
           ctx.streamingAnswer.messageId = messageId;
           ctx.streamingAnswer.content = canonicalContent;
           ctx.streamingAnswer.pending = '';
-          ctx.streamingAnswer.status = 'completed';
+          ctx.streamingAnswer.status = 'finalized';
         } else {
           // Preserve the legacy report-metadata backfill, but never put a
           // source-use receipt on a message without a current-run identity.
@@ -4887,15 +4857,16 @@ export function handleAnalysisCompletedEvent(
     );
 
     if (hasStreamedAnswer && streamedAnswerMessageId) {
-      completeStreamingAnswer(ctx);
+      // The canonical body replaces the draft on the same message.
       ctx.streamingAnswer.content = content;
       ctx.streamingAnswer.pending = '';
-      ctx.streamingAnswer.status = 'completed';
+      ctx.streamingAnswer.status = 'finalized';
       ctx.updateMessage(
         streamedAnswerMessageId,
         {
           content,
-          answerVerification: undefined,
+          answerDraft: undefined,
+          answerVerification: verdictCue,
           serverVerificationDetails,
           serverVerificationNotice,
           serverVerificationBinding: payload?.serverVerificationBinding,
@@ -4943,13 +4914,15 @@ export function handleAnalysisCompletedEvent(
       ctx.streamingAnswer.messageId = messageId;
       ctx.streamingAnswer.content = content;
       ctx.streamingAnswer.pending = '';
-      ctx.streamingAnswer.status = 'completed';
+      ctx.streamingAnswer.status = 'finalized';
     }
   }
 
   // When conclusion is empty (e.g. timeout) but answer was streamed,
-  // still attach the reportUrl to the streamed answer message.
+  // still attach the reportUrl to the streamed answer message. An unconfirmed
+  // draft is not that message: the verdict carried no body for it.
   if (!answerContent) {
+    discardStreamingDraft(ctx);
     const reportUrl = payload?.reportUrl;
     const streamedAnswerMessageId = ctx.streamingAnswer.messageId;
     const serverVerificationDetails = renderServerVerificationDetails(payload);
@@ -4972,7 +4945,6 @@ export function handleAnalysisCompletedEvent(
             String(m.content || '').trim().length > 0,
         );
       if (streamedMsg) {
-        completeStreamingAnswer(ctx);
         const exactMetadataBackfill = sameServerVerificationBinding(
           streamedMsg.serverVerificationBinding,
           payload?.serverVerificationBinding,
@@ -4980,7 +4952,7 @@ export function handleAnalysisCompletedEvent(
         ctx.updateMessage(
           streamedAnswerMessageId,
           {
-            answerVerification: undefined,
+            answerVerification: verdictCue,
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
             ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
             ...(payload?.analysisReceipt
@@ -5004,10 +4976,6 @@ export function handleAnalysisCompletedEvent(
   // Show error summary if there were any non-fatal errors
   if (ctx.collectedErrors.length > 0) {
     showErrorSummary(ctx);
-  }
-
-  if (ctx.streamingAnswer.status === 'streaming') {
-    completeStreamingAnswer(ctx);
   }
 
   if (sourceEnrichmentPending) {
@@ -5064,9 +5032,8 @@ export function handleAnalysisCancelledEvent(
     readStringField(eventRecord, 'reason');
 
   cancelStreamingFlow(ctx);
-  if (ctx.streamingAnswer.status === 'streaming') {
-    completeStreamingAnswer(ctx);
-  }
+  // A stop during the draft is a full cancel: the notice below replaces it.
+  discardStreamingDraft(ctx);
   markAnswerUnverified(ctx);
 
   const isDefaultUserCancellation =
@@ -5786,7 +5753,7 @@ export function handleErrorEvent(
   data: RawSSEEvent,
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
-  failStreamingAnswer(ctx);
+  discardStreamingDraft(ctx);
   markAnswerUnverified(ctx);
 
   const payload = eventPayload(data);
@@ -6328,13 +6295,16 @@ export function handleAnswerTokenEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   const payload = eventPayload(data);
-  const rawToken = payload.token ?? payload.delta ?? '';
-  const token = String(rawToken || '');
+  // No identity, no draft; a conclusion owns the message, so later draft text is stale.
+  const event = readAnswerDraftEvent('answer_token', payload);
+  if (!event || event.kind !== 'token' || adoptDraftEvent(ctx, event) === 'ignore') return {};
+  const token = event.text;
   const done = payload.done === true;
 
   if (token) {
     const answer = ctx.streamingAnswer;
-    if (answer.status === 'idle') {
+    if (answer.startedAt === null) {
+      answer.startedAt = Date.now();
       ensureAnswerTimelineStarted(ctx);
       pushStreamingOutput(
         ctx,
@@ -6354,20 +6324,23 @@ export function handleAnswerTokenEvent(
       now - lastUpdate >= ANSWER_STREAM_RENDER_INTERVAL_MS;
 
     if (shouldFlush) {
-      flushStreamingAnswer(ctx, {persist: false});
+      flushStreamingAnswer(ctx);
     }
-    syncAnswerStreamToConversationTimeline(ctx);
   }
 
-  if (done) {
-    syncAnswerStreamToConversationTimeline(ctx, {
-      force: true,
-      completed: true,
-    });
-    pushStreamingOutput(ctx, uiText('最终回答已输出', 'Final answer emitted'));
-    completeStreamingAnswer(ctx);
-  }
+  // The end of the draft is not the answer: only a conclusion confirms it.
+  if (done) flushStreamingAnswer(ctx);
 
+  return {};
+}
+
+/** Process answer_segment_reset: the runtime revoked the draft it streamed. */
+export function handleAnswerSegmentResetEvent(
+  data: RawSSEEvent,
+  ctx: SSEHandlerContext,
+): SSEHandlerResult {
+  const event = readAnswerDraftEvent('answer_segment_reset', eventPayload(data));
+  if (event) adoptDraftEvent(ctx, event);
   return {};
 }
 
@@ -6490,6 +6463,9 @@ function handleSSEEventInner(
     case 'answer_token':
       return handleAnswerTokenEvent(eventData, ctx);
 
+    case 'answer_segment_reset':
+      return handleAnswerSegmentResetEvent(eventData, ctx);
+
     case 'data':
       return handleDataEvent(eventData, ctx);
 
@@ -6581,22 +6557,17 @@ function handleSSEEventInner(
     }
 
     case 'conclusion': {
-      // Deliver first, verify after: the backend sends a provisional
-      // conclusion when the final semantic review starts. The body is final;
-      // the run (loading, stop control, session lock) stays active until
-      // analysis_completed replaces this message with its verdict. A legacy,
-      // non-provisional conclusion keeps the old near-terminal behaviour.
+      // Deliver first, verify after. A provisional conclusion (review running)
+      // or a final one (no review) is the finished body and replaces any answer
+      // draft on the same message. Either way the run (loading, stop control,
+      // session lock) stays active until analysis_completed brings the verdict
+      // and report metadata; a legacy stream that ends without it stops on
+      // `end`. Only a provisional body carries the pending cue.
       const conclusionPayload = eventPayload(eventData);
       const conclusionText = readStringField(conclusionPayload, 'conclusion');
       const provisional = conclusionPayload.provisional === true;
       const verificationCue = provisional ? {answerVerification: 'pending' as const} : {};
       if (DEBUG_SSE) console.log('[SSEHandlers] CONCLUSION event received');
-
-      // The answer is ready to read, but analysis_completed still owns the
-      // final completeness and verification verdict for the process view.
-      if (ctx.streamingAnswer.status === 'streaming') {
-        completeStreamingAnswer(ctx);
-      }
 
       if (conclusionText) {
         const content = buildVisibleConclusionContentWithReportAppendix(
@@ -6612,11 +6583,12 @@ function handleSSEEventInner(
         if (hasStreamedAnswerMessage && streamedAnswerMessageId) {
           ctx.streamingAnswer.content = content;
           ctx.streamingAnswer.pending = '';
-          ctx.streamingAnswer.status = 'completed';
+          ctx.streamingAnswer.status = 'finalized';
           ctx.updateMessage(
             streamedAnswerMessageId,
             {
               content,
+              answerDraft: undefined,
               serverVerificationDetails: undefined,
               serverVerificationNotice: undefined,
               serverVerificationBinding: undefined,
@@ -6642,15 +6614,16 @@ function handleSSEEventInner(
           ctx.streamingAnswer.messageId = messageId;
           ctx.streamingAnswer.content = content;
           ctx.streamingAnswer.pending = '';
-          ctx.streamingAnswer.status = 'completed';
+          ctx.streamingAnswer.status = 'finalized';
         }
       }
 
-      if (conclusionText || ctx.streamingAnswer.content.length > 0) {
+      // A draft alone is not an answer: only a conclusion body completes it.
+      if (conclusionText) {
         ctx.setCompletionHandled(true);
       }
-      // Not terminal — analysis_completed with reportUrl still follows
-      return provisional ? {} : {stopLoading: true};
+      // Not terminal — analysis_completed with the verdict and reportUrl follows
+      return {};
     }
 
     case 'sub_agent_started': {
@@ -6775,9 +6748,7 @@ function handleSSEEventInner(
           'Final completion and verification status was not received. Retain this output and retry.',
         ));
       }
-      if (ctx.streamingAnswer.status === 'streaming') {
-        completeStreamingAnswer(ctx);
-      }
+      discardStreamingDraft(ctx);
       return {stopLoading: true};
 
     default:

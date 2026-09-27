@@ -288,7 +288,9 @@ export function conversationMessageContent(message: StoredConversationMessage): 
   const notices: string[] = [];
   if (message.role === 'assistant' && turn && (turn.partial || turn.completionStatus !== 'completed')) {
     const interrupted = turn.terminationMessage === 'conversation_run_interrupted_before_final_commit';
-    const reason = interrupted ? uiText(
+    // The same cue as a provisional answer whose verdict never arrived.
+    const reason = turn.terminationReason === 'review_not_finished' ? answerVerificationCueText('unfinished')
+      : interrupted ? uiText(
       '上一轮在保存最终结论前被中断，请基于已有证据和未完成项继续提问。',
       'The previous turn was interrupted before its final conclusion was saved. Continue with the available evidence and open questions.',
     ) : turn.terminationMessage || turn.terminationReason || uiText(

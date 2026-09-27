@@ -118,6 +118,12 @@ export interface Message {
    * a verdict, so the text stays but must not read as verified.
    */
   answerVerification?: AnswerVerificationState;
+  /**
+   * Display-only answer draft (see answer_draft.ts): streamed before the answer
+   * is finalized and revocable. Never stored; the provisional or final answer
+   * replaces it and clears this flag.
+   */
+  answerDraft?: boolean;
 }
 
 export interface ServerVerificationBinding {
@@ -592,7 +598,6 @@ export interface StreamingFlowState {
   localStepOrdinal: number;
   answerTimelineStarted: boolean;
   answerTimelineOrdinal: number;
-  answerTimelineCompleted: boolean;
   status: 'idle' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled';
   /** Last accepted terminal verdict; metadata-only report backfills cannot replace it. */
   lastTerminalStatus?: 'completed' | 'partial' | 'failed' | 'cancelled' | 'quota_exceeded';
@@ -630,7 +635,6 @@ export function createStreamingFlowState(): StreamingFlowState {
     localStepOrdinal: 0,
     answerTimelineStarted: false,
     answerTimelineOrdinal: 0,
-    answerTimelineCompleted: false,
     status: 'idle',
     lastTerminalStatus: undefined,
     phases: [],
@@ -649,15 +653,20 @@ export function createStreamingFlowState(): StreamingFlowState {
 }
 
 /**
- * Incremental final-answer text stream state.
+ * Incremental answer stream state: the display-only draft until a provisional
+ * or final conclusion replaces it (status `finalized`).
  */
 export interface StreamingAnswerState {
   messageId: string | null;
   content: string;
   pending: string;
-  status: 'idle' | 'streaming' | 'completed' | 'failed';
+  /** `finalized`: a conclusion (or the verdict) owns the message; later draft events are stale. */
+  status: 'idle' | 'streaming' | 'finalized';
   startedAt: number | null;
   lastUpdatedAt: number | null;
+  /** Run and segment of the draft on screen; older segments are dropped. */
+  draftRunId: string | null;
+  draftAttempt: number;
 }
 
 export function createStreamingAnswerState(): StreamingAnswerState {
@@ -668,6 +677,8 @@ export function createStreamingAnswerState(): StreamingAnswerState {
     status: 'idle',
     startedAt: null,
     lastUpdatedAt: null,
+    draftRunId: null,
+    draftAttempt: 0,
   };
 }
 

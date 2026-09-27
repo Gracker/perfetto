@@ -476,6 +476,17 @@ describe('SessionManager safe source-use receipt storage', () => {
       .toEqual({status: 'cancelled'});
     expect(message.analysisSourceEnrichment).toEqual({status: 'running'});
   });
+
+  it('never stores a display-only answer draft', () => {
+    const manager = new SessionManager();
+    const question: Message = {id: 'question', role: 'user', content: 'Why?', timestamp: 1};
+    const draft: Message = {id: 'draft', role: 'assistant', content: 'DRAFT_CANARY', timestamp: 2,
+      flowTag: 'answer_stream', answerDraft: true};
+
+    manager.saveHistory([question, draft], null, 'trace-a');
+
+    expect(manager.loadLegacyHistory()?.messages.map((message) => message.id)).toEqual(['question']);
+  });
 });
 
 describe('SessionManager analysis mode', () => {

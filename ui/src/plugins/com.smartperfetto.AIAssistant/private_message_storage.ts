@@ -12,6 +12,12 @@ export interface PrivateMessageStorageMarker {
   serverVerificationNotice?: string;
   serverVerificationBinding?: unknown;
   answerVerification?: 'pending' | 'unfinished';
+  answerDraft?: boolean;
+}
+
+/** A display-only answer draft is never stored; its replacement is. */
+export function isStorableMessage(message: {answerDraft?: boolean}): boolean {
+  return message.answerDraft !== true;
 }
 
 export function privateQueryStoragePlaceholder(): string {

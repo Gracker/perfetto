@@ -16,10 +16,12 @@ import {
   clearConversationStore,
   restoreConversationStore,
   conversationMessageContent,
+  conversationOutcomeTurn,
   conversationRecoveryNotice,
   updateConversationMessageSourceEnrichment,
 } from './conversation_store';
 import {invalidateSmartPerfettoAuthSession} from '../../core/smartperfetto_auth';
+import {answerVerificationCueText} from './answer_verification';
 
 beforeEach(() => {
   clearConversationRuntimeIdentities();
@@ -314,6 +316,20 @@ describe('conversation completion notices', () => {
     expect(content).toContain('Received answer');
     expect(content).not.toMatch(/结果完整性提示|Result completeness notice/);
     expect(content).toMatch(/后端重启|backend restart/);
+  });
+
+  it('restores a review-not-finished turn with the unfinished verification cue, live and restored alike', () => {
+    const turn = conversationOutcomeTurn({kind: 'answered', message: 'Read answer', finalResult: {
+      partial: true, terminationReason: 'review_not_finished',
+      terminationMessage: 'The semantic review did not finish: this answer is unverified.'}} as never, 'run-1')!;
+    expect(turn).toMatchObject({partial: true, completionStatus: 'incomplete', terminationReason: 'review_not_finished'});
+    const live = conversationMessageContent({id: 'a', role: 'assistant', content: 'Read answer', timestamp: 1, turn});
+    const restored = conversationMessageContent({id: 'a', role: 'assistant', content: 'Read answer', timestamp: 1,
+      turn: {id: 'run-1', turnIndex: 3, partial: true, completionStatus: 'incomplete',
+        terminationReason: 'review_not_finished', uncertainties: [], nextSteps: [], evidence: []}});
+    expect(live).toBe(restored);
+    expect(live).toContain(answerVerificationCueText('unfinished'));
+    expect(live).toContain('Read answer');
   });
 });
 

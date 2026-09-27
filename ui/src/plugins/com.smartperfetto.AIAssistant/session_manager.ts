@@ -51,7 +51,7 @@ import {
 } from '../../core/smartperfetto_backend_url';
 import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
 import {normalizeUiLanguagePreference} from './ui_language';
-import {projectMessageForStorage} from './private_message_storage';
+import {isStorableMessage, projectMessageForStorage} from './private_message_storage';
 
 export {getSmartPerfettoWindowId};
 
@@ -113,7 +113,7 @@ function scrubOidcIdentityFields(value: unknown): unknown {
 }
 
 function projectOidcMessageForStorage(message: Message): Message | undefined {
-  if (message.transient || isLegacyOidcConnectionStatusMessage(message)) {
+  if (message.transient || !isStorableMessage(message) || isLegacyOidcConnectionStatusMessage(message)) {
     return undefined;
   }
   const projected = projectMessageForStorage(message);
@@ -453,7 +453,7 @@ export class SessionManager {
    */
   private trimStorageMessages(messages: Message[]): Message[] {
     const MAX_ROWS_PERSISTED = 50;
-    return messages.filter((msg) => !msg.transient).map((msg) => {
+    return messages.filter((msg) => !msg.transient && isStorableMessage(msg)).map((msg) => {
       // P2-9: Strip large data fields that are not essential for session restore
       const trimmed: Message = {
         ...projectMessageForStorage(msg),

@@ -1294,7 +1294,7 @@ describe('AIPanel per-turn analysis mode', () => {
     panel.conversationAbortController = new AbortController();
     panel.activeConversationRun = {sessionId: 'chat-session', runId: 'chat-run'};
     const fetch = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('{}', {status: 200}));
+      .mockResolvedValue(new Response('{"success":true,"status":"cancelled"}', {status: 200}));
 
     expect(panel.isAnalysisInputLocked()).toBe(false);
     await panel.cancelAnalysis();

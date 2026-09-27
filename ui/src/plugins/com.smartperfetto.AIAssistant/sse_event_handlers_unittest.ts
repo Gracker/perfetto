@@ -122,6 +122,10 @@ function createMockContext(
       }
       return false;
     },
+    removeMessage: (messageId: string) => {
+      const index = messages.findIndex((msg) => msg.id === messageId);
+      if (index !== -1) messages.splice(index, 1);
+    },
     setLoading: () => {},
     displayedSkillProgress: new Set<string>(),
     collectedErrors: [],
@@ -4285,21 +4289,29 @@ describe('handleAnswerTokenEvent', () => {
     ctx = createMockContext();
   });
 
-  it('should append streamed answer tokens into one assistant message', () => {
-    handleAnswerTokenEvent({data: {token: '你好'}}, ctx);
-    handleAnswerTokenEvent({data: {token: '，世界'}}, ctx);
-    handleAnswerTokenEvent({data: {done: true}}, ctx);
+  it('should append streamed answer tokens into one display-only draft message', () => {
+    handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, token: '你好'}}, ctx);
+    handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, token: '，世界'}}, ctx);
+    handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
     expect(ctx.messages[0].content).toBe('你好，世界');
-    expect(ctx.streamingAnswer.status).toBe('completed');
+    // The end of the draft does not confirm it; only a conclusion does.
+    expect(ctx.messages[0].answerDraft).toBe(true);
+    expect(ctx.streamingAnswer.status).toBe('streaming');
   });
 
-  it('should record answer start and end in the process view without echoing the answer', () => {
+  it('shows no draft for a token without the draft identity', () => {
+    handleAnswerTokenEvent({data: {token: 'legacy text'}}, ctx);
+    expect(ctx.messages).toHaveLength(0);
+  });
+
+  it('should record the draft start in the process view without echoing the answer', () => {
     handleAnswerTokenEvent(
       {
         data: {
+          runId: 'run-1', attempt: 0,
           token:
             'Phase 1 发现冷启动 dur=1338ms，TTID=1912ms，需要进入 Phase 2。',
         },
@@ -4309,12 +4321,13 @@ describe('handleAnswerTokenEvent', () => {
     handleAnswerTokenEvent(
       {
         data: {
+          runId: 'run-1', attempt: 0,
           token: '\n主线程 Running=63%，Q4b Sleeping=35.1%，需要深挖阻塞原因。',
         },
       },
       ctx,
     );
-    handleAnswerTokenEvent({data: {done: true}}, ctx);
+    handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
@@ -4322,7 +4335,7 @@ describe('handleAnswerTokenEvent', () => {
     const timeline = ctx.flowMessages[0].content;
     expect(timeline).toContain('🧭 分析过程');
     expect(timeline).toContain('开始流式输出分析结果');
-    expect(timeline).toContain('最终回答已输出');
+    expect(timeline).not.toContain('最终回答已输出');
     // The answer streams in its own bubble; mirroring snippets here printed
     // the same text twice once the process view moved below the answer.
     expect(timeline).not.toContain('流式更新');
@@ -4347,13 +4360,14 @@ describe('handleAnswerTokenEvent', () => {
     handleAnswerTokenEvent(
       {
         data: {
+          runId: 'run-1', attempt: 0,
           token:
             '关键发现：主线程 Running=63%，Q4b Sleeping=35.1%，需要继续定位。',
         },
       },
       ctx,
     );
-    handleAnswerTokenEvent({data: {done: true}}, ctx);
+    handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     const timeline = ctx.flowMessages[0].content;
     // Answer checkpoints sort after every backend step rather than
@@ -4651,7 +4665,7 @@ describe('handleSSEEvent', () => {
         timelines.push(roundCtx.streamingFlow.conversationMessageId!);
         const conclusion = `Final conclusion for round ${round}`;
         if (mode === 'streamed') {
-          handleSSEEvent('answer_token', {data: {token: conclusion, done: true}}, roundCtx);
+          handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, token: conclusion, done: true}}, roundCtx);
         }
         if (mode === 'streamed' || mode === 'conclusion') {
           handleSSEEvent('conclusion', {data: {conclusion}}, roundCtx);
@@ -4686,7 +4700,7 @@ describe('handleSSEEvent', () => {
   it('should replace early streamed answer tokens with canonical conclusion text', () => {
     handleSSEEvent(
       'answer_token',
-      {data: {token: 'Interim pre-plan text'}},
+      {data: {runId: 'run-1', attempt: 0, token: 'Interim pre-plan text'}},
       ctx,
     );
 
@@ -4771,7 +4785,7 @@ describe('handleSSEEvent', () => {
       expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
     }
     expect(payload).toEqual(originalPayload);
-    if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('failed');
+    if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('finalized');
   });
 
   it.each([
@@ -4914,7 +4928,7 @@ describe('handleSSEEvent', () => {
     }
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/late.html');
-    if (state === 'failed') expect(ctx.streamingAnswer.status).toBe('failed');
+    if (state === 'failed') expect(ctx.streamingAnswer.status).toBe('finalized');
   });
 
   it('does not use a metadata-only event or legacy body to clear provisional partial status', () => {
@@ -4995,7 +5009,7 @@ describe('handleSSEEvent', () => {
   });
 
   it('retains an authoritative failed body when completion metadata follows earlier tokens and conclusion', () => {
-    handleSSEEvent('answer_token', {data: {token: 'Earlier tokens'}}, ctx);
+    handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, token: 'Earlier tokens'}}, ctx);
     handleSSEEvent('conclusion', {data: {conclusion: 'Earlier conclusion'}}, ctx);
     handleSSEEvent('analysis_completed', {data: {
       conclusion: 'Final failed body', success: false, terminalRunStatus: 'failed',
@@ -5003,7 +5017,7 @@ describe('handleSSEEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toBe('Final failed body');
-    expect(ctx.streamingAnswer.status).toBe('failed');
+    expect(ctx.streamingAnswer.status).toBe('finalized');
     expect(ctx.streamingFlow.status).toBe('failed');
     expect(getAISharedState().status).toBe('error');
   });
@@ -5024,7 +5038,7 @@ describe('handleSSEEvent', () => {
       timestamp: 1,
       flowTag: 'streaming_flow',
     });
-    handleSSEEvent('answer_token', {data: {token: 'Partial answer'}}, ctx);
+    handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, token: 'Partial answer'}}, ctx);
 
     const result = handleSSEEvent(
       'analysis_cancelled',
@@ -5168,9 +5182,9 @@ describe('handleSSEEvent', () => {
   });
 
   it('should route answer_token events to incremental answer stream', () => {
-    handleSSEEvent('answer_token', {data: {token: 'A'}}, ctx);
-    handleSSEEvent('answer_token', {data: {token: 'B'}}, ctx);
-    handleSSEEvent('answer_token', {data: {done: true}}, ctx);
+    handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, token: 'A'}}, ctx);
+    handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, token: 'B'}}, ctx);
+    handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].flowTag).toBe('answer_stream');
@@ -5384,9 +5398,80 @@ describe('deliver first, verify after', () => {
     expect(ctx.messages.find((message) => message.flowTag === 'answer_stream')?.answerVerification).toBe('unfinished');
   });
 
-  it('keeps a legacy non-provisional conclusion near-terminal', () => {
+  it('renders a final (no-review) conclusion without a cue but keeps the run active until analysis_completed', () => {
     const ctx = createMockContext();
-    expect(handleSSEEvent('conclusion', {data: {conclusion: 'Legacy answer'}}, ctx)).toEqual({stopLoading: true});
+    expect(handleSSEEvent('conclusion', {data: {conclusion: 'Final answer'}}, ctx)).toEqual({});
     expect(ctx.messages[0].answerVerification).toBeUndefined();
+    expect(ctx.messages[0].content).toContain('Final answer');
+    expect(handleSSEEvent('analysis_completed', {runId: 'run-a', data: {success: true, conclusion: 'Final answer',
+      findings: []}}, ctx)).toMatchObject({isTerminal: true, stopLoading: true});
+  });
+
+  it('stops a legacy stream that ends after its conclusion without analysis_completed', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('conclusion', {data: {conclusion: 'Legacy answer'}}, ctx);
+    expect(handleSSEEvent('end', {}, ctx)).toEqual({stopLoading: true});
+    expect(ctx.messages[0].content).toContain('Legacy answer');
+  });
+});
+
+describe('display-only answer draft', () => {
+  const token = (text: string, attempt = 0, runId = 'run-a') => ({runId, data: {token: text, runId, attempt}});
+  const reset = (attempt: number, runId = 'run-a') => ({runId, data: {runId, attempt}});
+  const answers = (ctx: ReturnType<typeof createMockContext>) =>
+    ctx.messages.filter((message) => message.flowTag === 'answer_stream');
+
+  it('clears the draft on a reset and drops a late token of the revoked segment', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('answer_token', token('Pre-tool text'), ctx);
+    expect(answers(ctx)).toMatchObject([{content: 'Pre-tool text', answerDraft: true}]);
+    handleSSEEvent('answer_segment_reset', reset(1), ctx);
+    expect(answers(ctx)).toEqual([]);
+    handleSSEEvent('answer_token', token('LATE', 0), ctx);
+    handleSSEEvent('answer_token', token('OTHER_RUN', 1, 'run-b'), ctx);
+    handleSSEEvent('answer_token', token('Answer', 1), ctx);
+    expect(answers(ctx)).toMatchObject([{content: 'Answer', answerDraft: true}]);
+  });
+
+  it('treats a token of a newer segment as a reset', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('answer_token', token('Old'), ctx);
+    handleSSEEvent('answer_token', token('New', 2), ctx);
+    expect(answers(ctx)).toMatchObject([{content: 'New'}]);
+  });
+
+  it.each([true, false])('lets the conclusion (provisional=%s) replace the draft on the same message', provisional => {
+    const ctx = createMockContext();
+    handleSSEEvent('answer_token', token('Draft body'), ctx);
+    const draftId = answers(ctx)[0].id;
+    handleSSEEvent('conclusion', {runId: 'run-a', data: {conclusion: 'Final body',
+      ...(provisional ? {provisional: true, verification: 'pending'} : {})}}, ctx);
+    expect(answers(ctx)).toHaveLength(1);
+    expect(answers(ctx)[0].id).toBe(draftId);
+    expect(answers(ctx)[0].answerDraft).toBeUndefined();
+    expect(answers(ctx)[0].content).toContain('Final body');
+    // A late draft event cannot reopen or clear the finalized answer.
+    handleSSEEvent('answer_token', token(' LATE'), ctx);
+    handleSSEEvent('answer_segment_reset', reset(5), ctx);
+    expect(answers(ctx)).toHaveLength(1);
+    expect(answers(ctx)[0].content).not.toContain('LATE');
+  });
+
+  it('replaces a draft with the cancelled notice when the run is stopped', () => {
+    const ctx = createMockContext();
+    handleSSEEvent('answer_token', token('Half an answer'), ctx);
+    handleSSEEvent('analysis_cancelled', {data: {reason: 'Analysis cancelled by user'}}, ctx);
+    expect(ctx.messages.map((message) => message.content)).toEqual(['分析已取消。']);
+  });
+
+  it.each([
+    ['error', {data: {message: 'provider failed'}}],
+    ['end', {}],
+    ['analysis_completed', {runId: 'run-a', data: {success: false, findings: []}}],
+  ] as const)('never turns an unconfirmed draft into an answer on %s', (eventType, payload) => {
+    const ctx = createMockContext();
+    handleSSEEvent('answer_token', token('Unconfirmed draft'), ctx);
+    handleSSEEvent(eventType, payload, ctx);
+    expect(ctx.messages.some((message) => message.content.includes('Unconfirmed draft'))).toBe(false);
   });
 });
