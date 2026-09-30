@@ -18,7 +18,9 @@ import {AIPanel} from './ai_panel';
 import {resetAISharedState} from './ai_shared_state';
 import {cancelConversationRun, deferred, streamConversationRun} from './conversation_client';
 import {appendConversationMessage} from './conversation_store';
-import {projectMessageForStorage} from './private_message_storage';
+import {isStorableMessage, projectMessageForStorage} from './private_message_storage';
+import {reviewStopPhaseText} from './answer_verification';
+import {setUiLanguagePreference} from './ui_language';
 import type {Message} from './types';
 
 function panel() {
@@ -338,7 +340,7 @@ describe('AIPanel conversation deliver first, verify after', () => {
     const ordinal = value.conversationRequestOrdinal;
     await value.cancelConversationAnalysis();
     expect(value.conversationRequestOrdinal).toBe(ordinal + 1);
-    expect(cancelConversationRun).toHaveBeenCalledWith(expect.anything(), 'conv-1', 'run-1');
+    expect(cancelConversationRun).toHaveBeenCalledWith(expect.anything(), 'conv-1', 'run-1', expect.any(AbortSignal));
     const shown = value.state.messages.find((message: Message) => message.id === messageId);
     expect(shown.content).toMatch(/分析已取消|Analysis cancelled/);
     expect(shown.answerDraft).toBeUndefined();
@@ -391,10 +393,232 @@ describe('AIPanel conversation deliver first, verify after', () => {
     showPending(value);
     const ordinal = value.conversationRequestOrdinal;
     await value.cancelConversationAnalysis();
-    expect(cancelConversationRun).toHaveBeenCalledWith(expect.anything(), 'conv-1', 'run-1');
+    expect(cancelConversationRun).toHaveBeenCalledWith(expect.anything(), 'conv-1', 'run-1', expect.any(AbortSignal));
     expect(value.conversationRequestOrdinal).toBe(ordinal);
     expect(value.activeConversationRun).toBe(receipt);
     expect(value.setLoadingState).not.toHaveBeenCalledWith(false);
+  });
+
+  const FORCE_TITLE = '强制停止：结束本轮，已显示的结论按未核验保留';
+  const REVIEW_TITLE = '停止核验：保留结论，标为未核验';
+  const UNCONFIRMED = /停止未确认|Stop not confirmed/;
+  const hangingStop = () => {
+    let resolve!: (status: string | undefined) => void;
+    let reject!: (error: unknown) => void;
+    vi.mocked(cancelConversationRun).mockImplementationOnce(() => new Promise((res, rej) => {
+      resolve = res; reject = rej;
+    }));
+    return {resolve: (status: string | undefined) => resolve(status), reject: (error: unknown) => reject(error)};
+  };
+
+  it('labels the next stop as force only once the backend confirmed the review stop', async () => {
+    setUiLanguagePreference('zh-CN');
+    const value = panel();
+    showPending(value);
+    expect(value.conversationStopTitle()).toBe(REVIEW_TITLE);
+    const response = hangingStop();
+    const stop = value.cancelConversationAnalysis();
+    expect(value.conversationStopTitle()).toBe(REVIEW_TITLE);
+    response.resolve('review_stop_requested');
+    await stop;
+    expect(value.conversationStopTitle()).toBe(FORCE_TITLE);
+    expect(value.state.loadingPhase).toBe(reviewStopPhaseText());
+  });
+
+  it('labels the next stop as force when a stop outcome is unknown, since the backend may have applied it', async () => {
+    setUiLanguagePreference('zh-CN');
+    const value = panel();
+    showPending(value);
+    vi.mocked(cancelConversationRun).mockRejectedValueOnce(new Error('network'));
+    await value.cancelConversationAnalysis();
+    expect(value.conversationStopTitle()).toBe(FORCE_TITLE);
+    expect(value.state.loadingPhase).toMatch(UNCONFIRMED);
+    expect(value.activeConversationRun).toBe(receipt);
+  });
+
+  it('a draft-phase stop answered with a settled outcome leaves the verdict to the stream', async () => {
+    const value = panel();
+    value.activeConversationRun = receipt;
+    vi.mocked(cancelConversationRun).mockResolvedValueOnce('answered');
+    await value.cancelConversationAnalysis();
+    expect(value.state.loadingPhase).not.toMatch(UNCONFIRMED);
+    expect(value.conversationStopEscalatesRunId).toBeUndefined();
+    expect(value.activeConversationRun).toBe(receipt);
+    expect(value.state.isLoading).toBe(true);
+  });
+
+  it('sends one stop for a double press while the first is in flight', async () => {
+    const value = panel();
+    showPending(value);
+    const response = hangingStop();
+    const first = value.cancelConversationAnalysis();
+    expect(value.conversationStopPending()).toBe(true);
+    await value.cancelConversationAnalysis();
+    expect(cancelConversationRun).toHaveBeenCalledOnce();
+    response.resolve('review_stop_requested');
+    await first;
+    expect(value.conversationStopPending()).toBe(false);
+  });
+
+  it.each([
+    ['review_stop_requested', (response: ReturnType<typeof hangingStop>) => response.resolve('review_stop_requested')],
+    ['a failure', (response: ReturnType<typeof hangingStop>) => response.reject(new Error('network'))],
+  ])('ignores %s that arrives after the verdict', async (_label, settle) => {
+    const value = panel();
+    showPending(value);
+    const response = hangingStop();
+    const stop = value.cancelConversationAnalysis();
+    // The verdict lands first and ends loading.
+    Object.getPrototypeOf(value).setLoadingState.call(value, false);
+    settle(response);
+    await stop;
+    expect(value.conversationStopEscalatesRunId).toBeUndefined();
+    expect(value.state.loadingPhase).toBe('');
+  });
+
+  it('bounds a stop request that never answers and treats it as an unknown outcome', async () => {
+    setUiLanguagePreference('zh-CN');
+    vi.useFakeTimers();
+    try {
+      const value = panel();
+      showPending(value);
+      let lateResolve!: (status: string) => void;
+      vi.mocked(cancelConversationRun).mockImplementationOnce((_config, _sessionId, _runId, signal) =>
+        new Promise((resolve, reject) => {
+          lateResolve = resolve;
+          signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }));
+      const first = value.cancelConversationAnalysis();
+      expect(value.conversationStopPending()).toBe(true);
+      await vi.advanceTimersByTimeAsync(25_000);
+      await first;
+      expect(value.conversationStopPending()).toBe(false);
+      expect(value.conversationStopTitle()).toBe(FORCE_TITLE);
+      expect(value.state.loadingPhase).toMatch(UNCONFIRMED);
+      expect(cancelConversationRun).toHaveBeenCalledOnce();
+      const second = hangingStop();
+      const press = value.cancelConversationAnalysis();
+      expect(cancelConversationRun).toHaveBeenCalledTimes(2);
+      lateResolve('review_stop_requested');
+      await Promise.resolve();
+      expect(value.conversationStopPending()).toBe(true);
+      second.resolve('answered');
+      await press;
+      expect(cancelConversationRun).toHaveBeenCalledTimes(2);
+    } finally {vi.useRealTimers();}
+  });
+
+  it('a late response of an older run never clears the stop in flight for the current run', async () => {
+    const value = panel();
+    value.activeConversationRun = receipt;
+    const older = hangingStop();
+    const olderStop = value.cancelConversationAnalysis();
+    // A new message superseded the run (dropping its stop state) and its receipt arrived.
+    const next = {...receipt, runId: 'run-2'};
+    value.conversationStopInFlight = undefined;
+    value.activeConversationRun = next;
+    const current = hangingStop();
+    const currentStop = value.cancelConversationAnalysis();
+    older.resolve('review_stop_requested');
+    await olderStop;
+    expect(value.conversationStopPending()).toBe(true);
+    expect(value.conversationStopEscalatesRunId).toBeUndefined();
+    await value.cancelConversationAnalysis();
+    expect(cancelConversationRun).toHaveBeenCalledTimes(2);
+    current.resolve('review_stop_requested');
+    await currentStop;
+    expect(value.conversationStopEscalatesRunId).toBe('run-2');
+  });
+
+  it('a redirect sends the shared review stop: a click meanwhile adds none, a press after confirmation is force', async () => {
+    setUiLanguagePreference('zh-CN');
+    const value = panel();
+    showPending(value);
+    const settlement = deferred();
+    value.conversationRunSettlement = settlement;
+    const response = hangingStop();
+    const redirect = value.settleProvisionalConversationRun();
+    expect(cancelConversationRun).toHaveBeenCalledOnce();
+    expect(value.conversationStopPending()).toBe(true);
+    await value.cancelConversationAnalysis();
+    expect(cancelConversationRun).toHaveBeenCalledOnce();
+    response.resolve('review_stop_requested');
+    await vi.waitFor(() => expect(value.conversationStopTitle()).toBe(FORCE_TITLE));
+    vi.mocked(cancelConversationRun).mockResolvedValueOnce('answered');
+    await value.cancelConversationAnalysis();
+    expect(cancelConversationRun).toHaveBeenCalledTimes(2);
+    settlement.resolve();
+    await redirect;
+  });
+
+  it('a redirect while a stop is in flight sends no second cancel', async () => {
+    const value = panel();
+    showPending(value);
+    const settlement = deferred();
+    value.conversationRunSettlement = settlement;
+    const response = hangingStop();
+    const stop = value.cancelConversationAnalysis();
+    const redirect = value.settleProvisionalConversationRun();
+    expect(cancelConversationRun).toHaveBeenCalledOnce();
+    response.resolve('review_stop_requested');
+    await stop;
+    settlement.resolve();
+    await redirect;
+    expect(cancelConversationRun).toHaveBeenCalledOnce();
+  });
+
+  it('a redirect after a confirmed review stop sends none, since another request would force', async () => {
+    const value = panel();
+    showPending(value);
+    const settlement = deferred();
+    value.conversationRunSettlement = settlement;
+    vi.mocked(cancelConversationRun).mockResolvedValueOnce('review_stop_requested');
+    await value.cancelConversationAnalysis();
+    const redirect = value.settleProvisionalConversationRun();
+    settlement.resolve();
+    await redirect;
+    expect(cancelConversationRun).toHaveBeenCalledOnce();
+  });
+
+  it('after a provisional answer a cancelled status is left to the stream, which keeps the text unverified', async () => {
+    const value = panel();
+    const controller = new AbortController();
+    value.conversationAbortController = controller; value.activeConversationRun = receipt;
+    let finish!: () => void;
+    vi.mocked(streamConversationRun).mockImplementation(async (_config, _receipt, options) => {
+      options?.onProvisionalAnswer?.({message: 'Answer body.'});
+      await new Promise<void>((resolve) => {finish = resolve;});
+      options?.onPrimaryOutcome?.({kind: 'cancelled', message: ''});
+      return {kind: 'cancelled', message: ''};
+    });
+    const run = value.consumeConversationRun(config, receipt, controller, value.conversationRequestOrdinal, () => true);
+    await vi.waitFor(() => expect(value.provisionalConversationRun()).toBe(receipt));
+    vi.mocked(cancelConversationRun).mockResolvedValueOnce('cancelled');
+    await value.cancelConversationAnalysis();
+    expect(value.activeConversationRun).toBe(receipt);
+    expect(controller.signal.aborted).toBe(false);
+    expect(value.state.isLoading).toBe(true);
+    finish();
+    await run;
+    const shown = value.state.messages.filter((message: Message) => message.id === messageId);
+    expect(shown).toHaveLength(1);
+    expect(shown[0].content).toBe('Answer body.');
+    expect(shown[0].answerVerification).toBe('unfinished');
+  });
+
+  it('a confirmed cancel before any draft shows the cancelled notice as the run message', async () => {
+    const value = panel();
+    value.activeConversationRun = receipt;
+    vi.mocked(cancelConversationRun).mockResolvedValueOnce('cancelled');
+    await value.cancelConversationAnalysis();
+    const shown = value.state.messages.filter((message: Message) => message.id === messageId);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toMatchObject({role: 'assistant'});
+    expect(shown[0].content).toMatch(/分析已取消|Analysis cancelled/);
+    expect(shown[0].answerDraft).toBeUndefined();
+    expect(isStorableMessage(shown[0])).toBe(true);
+    expect(value.conversationMessageIds.has(messageId)).toBe(true);
+    expect(value.state.isLoading).toBe(false);
   });
 
   it('a new message first stops the review and waits for the verdict, not for the cancel response', async () => {
@@ -404,14 +628,12 @@ describe('AIPanel conversation deliver first, verify after', () => {
     value.conversationRunSettlement = settlement;
     const order: string[] = [];
     // The backend answers the stop only after the run settled; never wait on that response.
-    vi.stubGlobal('fetch', vi.fn((url: string) => {
-      order.push(`stop-review:${String(url).endsWith('/conversation/conv-1/cancel')}`);
+    vi.mocked(cancelConversationRun).mockImplementationOnce((_config, sessionId, runId) => {
+      order.push(`stop-review:${sessionId === 'conv-1' && runId === 'run-1'}`);
       queueMicrotask(() => {order.push('verdict'); settlement.resolve();});
-      return new Promise<Response>(() => {});
-    }));
-    try {
-      await value.settleProvisionalConversationRun(config);
-    } finally {vi.unstubAllGlobals();}
+      return new Promise<string | undefined>(() => {});
+    });
+    await value.settleProvisionalConversationRun();
     order.push('continue');
     expect(order).toEqual(['stop-review:true', 'verdict', 'continue']);
   });
@@ -422,10 +644,10 @@ describe('AIPanel conversation deliver first, verify after', () => {
       const value = panel();
       showPending(value);
       value.conversationRunSettlement = deferred();
-      vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
-      const waiting = value.settleProvisionalConversationRun(config);
+      vi.mocked(cancelConversationRun).mockImplementationOnce(() => new Promise<string | undefined>(() => {}));
+      const waiting = value.settleProvisionalConversationRun();
       await vi.advanceTimersByTimeAsync(5_000);
       await expect(waiting).resolves.toBeUndefined();
-    } finally {vi.useRealTimers(); vi.unstubAllGlobals();}
+    } finally {vi.useRealTimers();}
   });
 });

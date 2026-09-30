@@ -312,6 +312,7 @@ export async function cancelConversationRun(
   config: ConversationClientConfig,
   sessionId: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const url = buildAssistantApiV1Url(
     config.backendUrl,
@@ -321,6 +322,7 @@ export async function cancelConversationRun(
     method: 'POST',
     headers: requestHeaders(config),
     body: JSON.stringify({runId}),
+    ...(signal ? {signal} : {}),
   });
   if (!response.ok) throw await readError(response);
   const payload: unknown = await response.json().catch(() => undefined);
@@ -353,6 +355,14 @@ export async function stopReviewAndWait(
   timeoutMs = 5_000,
 ): Promise<void> {
   void cancelConversationRun(config, receipt.sessionId, receipt.runId).catch(() => undefined);
+  await waitForSettlement(settlement, timeoutMs);
+}
+
+/** Wait at most `timeoutMs` for a run's verdict to land. */
+export async function waitForSettlement(
+  settlement: Promise<void> | undefined,
+  timeoutMs = 5_000,
+): Promise<void> {
   if (!settlement) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([settlement, new Promise<void>((resolve) => {timer = setTimeout(resolve, timeoutMs);})]);

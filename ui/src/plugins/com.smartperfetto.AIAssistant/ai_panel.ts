@@ -127,7 +127,7 @@ import {
   type ConversationFullHandoff,
   type ConversationRunReceipt,
   deferred,
-  stopReviewAndWait,
+  waitForSettlement,
   type Deferred,
 } from './conversation_client';
 import {
@@ -328,6 +328,9 @@ import type {
 const DEBUG_AI_PANEL = false;
 const MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS = 32;
 const ANALYSIS_CONTEXT_CODEBASE_RETRY_DELAY_MS = 15_000;
+// Above the backend review-stop watchdog (15 s by default), which bounds the
+// only stop that blocks: a force stop waiting for the run to commit.
+const CONVERSATION_STOP_REQUEST_TIMEOUT_MS = 25_000;
 const MODEL_BACKED_COMMANDS = new Set([
   '/analyze',
   '/anr',
@@ -760,6 +763,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private conversationAbortController?: AbortController;
   /** Agent run whose review-only stop was accepted; another stop is a force stop. */
   private reviewStopRequestedRunId?: string;
+  /**
+   * Conversation run whose next stop the backend may treat as a force stop: its
+   * review stop was confirmed, or a stop's outcome is unknown (it may have applied).
+   */
+  private conversationStopEscalatesRunId?: string;
+  /** Conversation request whose stop was pressed before its run receipt arrived. */
+  private conversationStopRequestedFor?: AbortController;
+  /** The one stop request in flight; compared by reference so a late response never clears a newer one. */
+  private conversationStopInFlight?: {runId: string};
   /** Resolves when the current conversation run's verdict landed or the request ended. */
   private conversationRunSettlement?: Deferred;
   private pendingFullAnalysisHandoff?: ConversationFullHandoff;
@@ -3632,6 +3644,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const analysisSourceEnrichmentRunning = hasRunningAnalysisSourceEnrichment(
       this.state.messages,
     );
+    const conversationPrimaryRunning = this.conversationPrimaryRunning();
+    const conversationEnrichmentRunning = this.conversationEnrichmentRunning();
 
     // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
     const sessions = isInRpcMode ? this.getCurrentTraceSessions() : [];
@@ -5119,7 +5133,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                               ),
                             ]
                           : [
-                              analysisSourceEnrichmentRunning
+                              // The input stays open during a conversation run (a new
+                              // message redirects it), so its stop lives here.
+                              conversationPrimaryRunning
+                                ? m(
+                                    'button.ai-send-btn.ai-stop-btn',
+                                    {
+                                      onclick: () => this.cancelAnalysis(),
+                                      title: this.conversationStopTitle(),
+                                      disabled: this.conversationStopPending(),
+                                    },
+                                    m('i.pf-icon', 'stop_circle'),
+                                  )
+                                : analysisSourceEnrichmentRunning || conversationEnrichmentRunning
                                 ? m(
                                     'button.ai-send-btn.ai-stop-btn',
                                     {
@@ -5128,6 +5154,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         '停止深度源码补充',
                                         'Stop deep source enrichment',
                                       ),
+                                      disabled: conversationEnrichmentRunning && this.conversationStopPending(),
                                     },
                                     m('i.pf-icon', 'stop_circle'),
                                   )
@@ -10390,7 +10417,7 @@ Click ⚙️ to configure backend connection.`,
     if (restoreOrdinal !== this.conversationRequestOrdinal || !requestIsCurrent()) return;
     // The previous answer is already on screen: end only its review and let it
     // settle with its verdict first, so it lands in history before this question.
-    await this.settleProvisionalConversationRun(config);
+    await this.settleProvisionalConversationRun();
     if (restoreOrdinal !== this.conversationRequestOrdinal || !requestIsCurrent()) return;
     let store = loadConversationStoreForUpdate(config.backendUrl);
     if (
@@ -10416,6 +10443,13 @@ Click ⚙️ to configure backend connection.`,
     const controller = new AbortController();
     this.conversationAbortController?.abort();
     this.conversationAbortController = controller;
+    // This request owns the execution slot now: a stop pressed before its receipt
+    // is recorded for it, never sent to the run it supersedes (the backend start
+    // path stops that one).
+    this.activeConversationRun = undefined;
+    this.conversationStopRequestedFor = undefined;
+    this.conversationStopInFlight = undefined;
+    this.conversationStopEscalatesRunId = undefined;
     const userMessage = [...this.state.messages].reverse().find(
       (candidate) => candidate.role === 'user' && candidate.content === message,
     );
@@ -10452,6 +10486,11 @@ Click ⚙️ to configure backend connection.`,
         sessionId: receipt.sessionId,
         traceId: this.state.backendTraceId ?? undefined,
       });
+      if (this.conversationStopRequestedFor === controller) {
+        // Stop was pressed while the run was starting: send it now, as the stream is consumed.
+        this.conversationStopRequestedFor = undefined;
+        void this.cancelConversationAnalysis();
+      }
       await this.consumeConversationRun(config, receipt, controller, ordinal, requestIsCurrent);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -10466,6 +10505,7 @@ Click ⚙️ to configure backend connection.`,
         timestamp: Date.now(),
       });
     } finally {
+      if (this.conversationStopRequestedFor === controller) this.conversationStopRequestedFor = undefined;
       if (ordinal === this.conversationRequestOrdinal && this.conversationAbortController === controller) {
         this.activeConversationRun = undefined;
         this.conversationAbortController = undefined;
@@ -10489,12 +10529,17 @@ Click ⚙️ to configure backend connection.`,
    * End only the review of a conversation run whose answer is already shown and
    * wait (bounded) for its verdict, so it lands in history before the next question.
    */
-  private async settleProvisionalConversationRun(config: ConversationClientConfig): Promise<void> {
+  private async settleProvisionalConversationRun(): Promise<void> {
     const active = this.provisionalConversationRun();
     if (!active) return;
+    const settlement = this.conversationRunSettlement?.promise;
+    // The same stop the button sends: a stop already in flight is reused, and a
+    // run whose stop was confirmed (or may have applied) gets none, since a
+    // second request would be a force stop. Wait for the verdict, not the response.
+    if (this.conversationStopEscalatesRunId !== active.runId) void this.cancelConversationAnalysis();
     this.state.loadingPhase = uiText('正在结束上一条结论的核验…', 'Finishing verification of the previous answer…');
     m.redraw();
-    await stopReviewAndWait(config, active, this.conversationRunSettlement?.promise);
+    await waitForSettlement(settlement);
   }
 
   private async consumeConversationRun(
@@ -10573,7 +10618,7 @@ Click ⚙️ to configure backend connection.`,
       onPrimaryOutcome: (primaryOutcome) => {
         if (!isCurrentStream()) return;
         if (primaryOutcome.kind === 'cancelled') {
-          this.replaceConversationAnswerDraftWithCancelledNotice(messageId);
+          this.showConversationCancelledNotice(messageId);
           settleProvisional('unfinished');
           settlement?.resolve();
           return;
@@ -10712,59 +10757,131 @@ Click ⚙️ to configure backend connection.`,
     this.state.messages = this.state.messages.filter(message => message.id !== messageId);
   }
 
-  /** A stop during the draft is a full cancel: the draft becomes the cancelled notice. */
-  private replaceConversationAnswerDraftWithCancelledNotice(messageId: string): void {
-    if (!this.state.messages.some(message => message.id === messageId && message.answerDraft)) return;
-    this.updateMessage(messageId, {content: uiText('分析已取消。', 'Analysis cancelled.'), answerDraft: undefined,
-      privateContent: undefined, timestamp: Date.now()});
+  /**
+   * A stop before the answer is a full cancel: the run's message becomes the
+   * cancelled notice, replacing its draft or standing in for an answer never
+   * drafted. A provisional or final answer is kept.
+   */
+  private showConversationCancelledNotice(messageId: string): void {
+    const shown = this.state.messages.find(message => message.id === messageId);
+    if (shown && !shown.answerDraft) return;
+    const notice = {content: uiText('分析已取消。', 'Analysis cancelled.'), answerDraft: undefined,
+      privateContent: undefined, timestamp: Date.now()};
+    if (shown) {
+      this.updateMessage(messageId, notice);
+      return;
+    }
+    this.addMessage({id: messageId, role: 'assistant', ...notice});
+    this.conversationMessageIds.add(messageId);
+  }
+
+  /** A conversation run is executing (or starting) and has not delivered its verdict. */
+  private conversationPrimaryRunning(): boolean {
+    return this.state.isLoading && this.isConversationExecutionActive();
+  }
+
+  /** The verdict landed and the run's stream still carries its source enrichment. */
+  private conversationEnrichmentRunning(): boolean {
+    const active = this.activeConversationRun;
+    if (this.state.isLoading || !active) return false;
+    const messageId = conversationMessageId(active.sessionId, active.runId, 'assistant');
+    return this.state.messages.some(
+      (message) => message.id === messageId && message.conversationSourceEnrichment?.status === 'running');
+  }
+
+  /** A stop for the current conversation run is already on its way; another press would be a second stop. */
+  private conversationStopPending(): boolean {
+    const active = this.activeConversationRun;
+    if (active) return this.conversationStopInFlight?.runId === active.runId;
+    return Boolean(this.conversationAbortController) &&
+      this.conversationStopRequestedFor === this.conversationAbortController;
+  }
+
+  private conversationStopTitle(): string {
+    const active = this.activeConversationRun;
+    // Over-stating is safe, under-stating is not: never promise a review-only
+    // stop for a press the backend may treat as force.
+    if (active && this.conversationStopEscalatesRunId === active.runId) {
+      return uiText('强制停止：结束本轮，已显示的结论按未核验保留', 'Force stop: end this run; the answer shown stays, unverified');
+    }
+    return this.provisionalConversationRun()
+      ? uiText('停止核验：保留结论，标为未核验', 'Stop verification: keep the answer as unverified')
+      : uiText('停止分析', 'Stop analysis');
+  }
+
+  /**
+   * Send one bounded stop request for `active`. Returns the backend status, or
+   * undefined when the outcome is unknown (failed, timed out or unreadable).
+   */
+  private async requestConversationStop(active: ConversationRunReceipt): Promise<string | undefined> {
+    const request = {runId: active.runId};
+    this.conversationStopInFlight = request;
+    m.redraw();
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), CONVERSATION_STOP_REQUEST_TIMEOUT_MS);
+    try {
+      return await cancelConversationRun({
+        backendUrl: this.state.settings.backendUrl,
+        apiKey: this.state.settings.backendApiKey,
+      }, active.sessionId, active.runId, timeout.signal);
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+      if (this.conversationStopInFlight === request) this.conversationStopInFlight = undefined;
+    }
   }
 
   private async cancelConversationAnalysis(): Promise<void> {
     const active = this.activeConversationRun;
-    if (!active) return;
-    if (this.provisionalConversationRun()) {
-      // Stop only the review; the stream still delivers the verdict and settles.
+    if (!active) {
+      // The run is still starting: record the stop and send it once its receipt arrives.
+      const controller = this.conversationAbortController;
+      if (!controller || !this.state.isLoading || this.conversationStopRequestedFor === controller) return;
+      this.conversationStopRequestedFor = controller;
+      this.state.loadingPhase = uiText('正在停止分析…', 'Stopping analysis…');
+      m.redraw();
+      return;
+    }
+    if (this.conversationStopPending()) return;
+    if (this.conversationEnrichmentRunning()) {
+      // The backend cancels the finished run's enrichment; the stream reports it and ends.
+      await this.requestConversationStop(active);
+      if (this.activeConversationRun === active) m.redraw();
+      return;
+    }
+    const controller = this.conversationAbortController;
+    // After a provisional answer the stop ends only the review. Before it, the
+    // backend decides: when its provisional answer is already on the way the
+    // stop is review-only (`review_stop_requested`) and the stream delivers it.
+    const provisional = Boolean(this.provisionalConversationRun());
+    this.state.loadingPhase = provisional ? reviewStopPhaseText() : uiText('正在停止分析…', 'Stopping analysis…');
+    const status = await this.requestConversationStop(active);
+    // A verdict or another run that landed first makes this response a no-op.
+    if (this.activeConversationRun !== active || !this.state.isLoading) {
+      m.redraw();
+      return;
+    }
+    if (status === 'cancelled' && !provisional) {
+      ++this.conversationRequestOrdinal;
+      this.showConversationCancelledNotice(conversationMessageId(active.sessionId, active.runId, 'assistant'));
+      this.activeConversationRun = undefined;
+      // Detach the stream too, so the execution is no longer active.
+      if (controller && this.conversationAbortController === controller) {
+        controller.abort();
+        this.conversationAbortController = undefined;
+      }
+      this.setLoadingState(false);
+    } else if (status === 'review_stop_requested') {
+      this.conversationStopEscalatesRunId = active.runId;
       this.state.loadingPhase = reviewStopPhaseText();
-      m.redraw();
-      await cancelConversationRun({
-        backendUrl: this.state.settings.backendUrl,
-        apiKey: this.state.settings.backendApiKey,
-      }, active.sessionId, active.runId).catch(() => undefined);
-      return;
-    }
-    // Draft only, as far as this panel knows. The backend decides: when its
-    // provisional answer is already on the way, the stop is review-only
-    // (`review_stop_requested`) and the attached stream delivers that answer.
-    this.state.loadingPhase = uiText('正在停止分析…', 'Stopping analysis…');
-    m.redraw();
-    let status: string | undefined;
-    try {
-      status = await cancelConversationRun({
-        backendUrl: this.state.settings.backendUrl,
-        apiKey: this.state.settings.backendApiKey,
-      }, active.sessionId, active.runId);
-    } catch {
-      status = undefined;
-    }
-    if (status === 'review_stop_requested') {
-      if (this.activeConversationRun === active) this.state.loadingPhase = reviewStopPhaseText();
-      m.redraw();
-      return;
-    }
-    // The stream may already have settled the run (and shown the cancelled notice).
-    if (this.activeConversationRun !== active) return;
-    if (status !== 'cancelled') {
-      // Unconfirmed (request failed) or the run settled another way: the backend
-      // may still deliver, so keep the stream attached and let it settle the run.
+    } else if (status === undefined) {
+      // The backend may have applied it: keep the stream attached and label the next press as force.
+      this.conversationStopEscalatesRunId = active.runId;
       this.state.loadingPhase = uiText('停止未确认，分析仍在进行', 'Stop not confirmed; the analysis is still running');
-      m.redraw();
-      return;
     }
-    ++this.conversationRequestOrdinal;
-    this.replaceConversationAnswerDraftWithCancelledNotice(
-      conversationMessageId(active.sessionId, active.runId, 'assistant'));
-    this.activeConversationRun = undefined;
-    this.setLoadingState(false);
+    // Any other status: the run settled (or a force stop found it committed);
+    // the attached stream delivers the verdict and settles it.
     m.redraw();
   }
 

@@ -43,6 +43,7 @@ import {setBackendUploadState} from '../../core/backend_upload_state';
 import {persistTracePairWorkspace} from './trace_pair_workspace_persistence';
 import {TracePairWorkspaceController as ConcreteTracePairWorkspaceController} from './trace_pair_workspace_state';
 import {RUN_CONFLICT_RETRY_INTERVAL_MS} from './analysis_run_conflict';
+import {cancelConversationRun} from './conversation_client';
 
 beforeEach(() => {
   setUiLanguagePreference('zh-CN');
@@ -224,6 +225,13 @@ function findVNodeByTitle(node: any, title: string): any {
   }
   if (node.attrs?.title === title) return node;
   return findVNodeByTitle(node.children, title);
+}
+
+function findVNodesByClass(node: any, className: string): any[] {
+  if (node === null || node === undefined || node === false) return [];
+  if (Array.isArray(node)) return node.flatMap((child) => findVNodesByClass(child, className));
+  const classes = String(node.attrs?.className ?? '').split(' ');
+  return [...(classes.includes(className) ? [node] : []), ...findVNodesByClass(node.children, className)];
 }
 
 function findVNodeById(node: any, id: string): any {
@@ -1306,6 +1314,178 @@ describe('AIPanel per-turn analysis mode', () => {
     expect(panel.fetchBackend).not.toHaveBeenCalled();
     expect(panel.state.analysisMode).toBe('conversation');
     expect(panel.state.isLoading).toBe(false);
+  });
+
+  describe('Conversation stop control', () => {
+    const stopButtons = (tree: unknown) => findVNodesByClass(tree, 'ai-stop-btn');
+    const cancelBodies = (fetch: Mock) => fetch.mock.calls
+      .filter(([url]) => String(url).includes('/cancel'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)).runId);
+    const receiptResponse = (runId: string) => new Response(JSON.stringify({
+      sessionId: 'stop-chat', runId, isNewSession: true, traceContextAttached: true,
+    }), {status: 200});
+    // Hydrated first, so rendering does not reset the run state the test sets up.
+    async function conversationPanel() {
+      const panel = createModePanel();
+      panel.state.analysisMode = 'conversation';
+      panel.updateSliceCard = vi.fn();
+      await panel.hydrateConversationHistory();
+      return panel;
+    }
+
+    it('shows no Stop while no conversation run executes', async () => {
+      const panel = await conversationPanel();
+      expect(stopButtons(panel.view({attrs: {}}))).toHaveLength(0);
+    });
+
+    it('shows Stop beside Send while a run executes and detaches the run on a confirmed cancel', async () => {
+      const panel = await conversationPanel();
+      panel.state.isLoading = true;
+      const controller = new AbortController();
+      panel.conversationAbortController = controller;
+      panel.activeConversationRun = {sessionId: 'chat-session', runId: 'chat-run'};
+      const fetch = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{"success":true,"status":"cancelled"}', {status: 200}));
+      const tree = panel.view({attrs: {}});
+      // The input stays open: a new message is the conversation redirect.
+      expect(findVNodeById(tree, 'ai-input').attrs.disabled).toBe(false);
+      expect(findVNodeByTitle(tree, '发送（Enter）')).toBeDefined();
+      const stops = stopButtons(tree);
+      expect(stops).toHaveLength(1);
+      expect(stops[0].attrs.title).toBe('停止分析');
+
+      await stops[0].attrs.onclick();
+
+      expect(cancelBodies(fetch)).toEqual(['chat-run']);
+      expect(String(fetch.mock.calls[0][0])).toContain('/conversation/chat-session/cancel');
+      expect(controller.signal.aborted).toBe(true);
+      expect(panel.isConversationExecutionActive()).toBe(false);
+      expect(stopButtons(panel.view({attrs: {}}))).toHaveLength(0);
+    });
+
+    it('offers only the enrichment Stop once the verdict landed while source enrichment runs', async () => {
+      const panel = await conversationPanel();
+      panel.state.isLoading = false;
+      panel.conversationAbortController = new AbortController();
+      panel.activeConversationRun = {sessionId: 'chat-session', runId: 'chat-run'};
+      panel.state.messages.push({id: 'conversation-chat-session-chat-run-assistant', role: 'assistant',
+        content: 'answer', timestamp: 1, conversationSourceEnrichment: {status: 'running'}});
+      const ordinal = panel.conversationRequestOrdinal;
+      const fetch = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{"success":true,"status":"answered"}', {status: 200}));
+      const stops = stopButtons(panel.view({attrs: {}}));
+      expect(stops).toHaveLength(1);
+      expect(stops[0].attrs.title).toBe('停止深度源码补充');
+
+      await stops[0].attrs.onclick();
+
+      expect(cancelBodies(fetch)).toEqual(['chat-run']);
+      expect(panel.state.isLoading).toBe(false);
+      expect(panel.state.loadingPhase).toBe('');
+      expect(panel.conversationRequestOrdinal).toBe(ordinal);
+      expect(panel.activeConversationRun?.runId).toBe('chat-run');
+    });
+
+    it('sends a Stop pressed before the run receipt once it arrives, exactly once', async () => {
+      const panel = await conversationPanel();
+      let resolveStart!: (response: Response) => void;
+      let resolveCancel!: (response: Response) => void;
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+        if (String(url).includes('/cancel')) return new Promise<Response>((resolve) => {resolveCancel = resolve;});
+        if (init?.method === 'POST') return new Promise<Response>((resolve) => {resolveStart = resolve;});
+        return new Response(new ReadableStream<Uint8Array>({start(controller) { stream = controller; }}));
+      });
+      const request = panel.handleConversationMessage('question');
+      await vi.waitFor(() => expect(resolveStart).toBeDefined());
+      expect(panel.activeConversationRun).toBeUndefined();
+
+      await stopButtons(panel.view({attrs: {}}))[0].attrs.onclick();
+      expect(cancelBodies(fetch)).toEqual([]);
+      const pending = stopButtons(panel.view({attrs: {}}));
+      expect(pending[0].attrs.disabled).toBe(true);
+      await pending[0].attrs.onclick();
+
+      resolveStart(receiptResponse('started-run'));
+      await vi.waitFor(() => expect(cancelBodies(fetch)).toEqual(['started-run']));
+      // A press while the replayed stop is in flight is not a second stop.
+      const replaying = stopButtons(panel.view({attrs: {}}));
+      expect(replaying[0].attrs.disabled).toBe(true);
+      await replaying[0].attrs.onclick();
+      expect(cancelBodies(fetch)).toEqual(['started-run']);
+
+      resolveCancel(new Response('{"success":true,"status":"cancelled"}', {status: 200}));
+      await vi.waitFor(() => expect(panel.state.isLoading).toBe(false));
+      stream?.close();
+      await request;
+      expect(cancelBodies(fetch)).toEqual(['started-run']);
+      expect(stopButtons(panel.view({attrs: {}}))).toHaveLength(0);
+    });
+
+    it('bounds the stop request through the client signal and then labels the next press as force', async () => {
+      const panel = await conversationPanel();
+      vi.useFakeTimers();
+      panel.state.isLoading = true;
+      panel.conversationAbortController = new AbortController();
+      panel.activeConversationRun = {sessionId: 'chat-session', runId: 'chat-run'};
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        }));
+      const stop = panel.cancelConversationAnalysis();
+      expect(fetch.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(panel.conversationStopPending()).toBe(false);
+      await stop;
+      expect(panel.state.loadingPhase).toBe('停止未确认，分析仍在进行');
+      const stops = stopButtons(panel.view({attrs: {}}));
+      expect(stops[0].attrs.title).toBe('强制停止：结束本轮，已显示的结论按未核验保留');
+      expect(stops[0].attrs.disabled).toBe(false);
+      expect(panel.activeConversationRun?.runId).toBe('chat-run');
+    });
+
+    it('points Stop at the new message while its receipt is pending, never at the run it supersedes', async () => {
+      const panel = await conversationPanel();
+      panel.state.isLoading = true;
+      panel.conversationAbortController = new AbortController();
+      panel.activeConversationRun = {sessionId: 'stop-chat', runId: 'old-run'};
+      let resolveStart!: (response: Response) => void;
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+        if (String(url).includes('/cancel')) return new Response('{"success":true,"status":"cancelled"}', {status: 200});
+        if (init?.method === 'POST') return new Promise<Response>((resolve) => {resolveStart = resolve;});
+        return new Response(new ReadableStream<Uint8Array>({start(controller) { stream = controller; }}));
+      });
+      const request = panel.handleConversationMessage('redirect');
+      await vi.waitFor(() => expect(resolveStart).toBeDefined());
+
+      await stopButtons(panel.view({attrs: {}}))[0].attrs.onclick();
+      expect(cancelBodies(fetch)).toEqual([]);
+
+      resolveStart(receiptResponse('new-run'));
+      await vi.waitFor(() => expect(cancelBodies(fetch)).toEqual(['new-run']));
+      await vi.waitFor(() => expect(panel.state.isLoading).toBe(false));
+      stream?.close();
+      await request;
+      expect(cancelBodies(fetch)).toEqual(['new-run']);
+    });
+  });
+});
+
+describe('cancelConversationRun', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('passes its signal to the request, and aborting it rejects the call', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      }));
+    const controller = new AbortController();
+    const request = cancelConversationRun({backendUrl: 'http://backend'}, 'chat-session', 'chat-run', controller.signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(fetch.mock.calls[0][1]?.signal).toBe(controller.signal);
+    controller.abort();
+    await expect(request).rejects.toThrow('aborted');
   });
 });
 
