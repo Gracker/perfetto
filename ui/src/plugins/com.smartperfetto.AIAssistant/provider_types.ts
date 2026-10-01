@@ -401,8 +401,8 @@ export function providerStoreUnreadable(body: unknown): boolean {
 
 export function providerStoreUnreadableMessage(): string {
   return uiText(
-    'providers.json 无法读取，已暂停所有提供商修改，当前按系统默认配置（.env）运行。请修复或移走该文件后刷新。',
-    'providers.json could not be read, so provider changes are paused and the system default (.env) is in use. Repair or move the file, then refresh.',
+    'providers.json 无法读取，已暂停所有提供商修改；跟随当前提供商的分析也会被拒绝，不会改用系统默认配置（.env）。请修复或移走该文件后刷新。',
+    'providers.json could not be read, so provider changes are paused and analyses that follow the active provider are refused rather than run on the system default (.env). Repair or move the file, then refresh.',
   );
 }
 
