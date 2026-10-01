@@ -384,6 +384,53 @@ export function apiUrl(backendUrl: string, path: string): string {
   return buildSmartPerfettoWorkspaceApiUrl(backendUrl, 'providers', path);
 }
 
+const PROVIDER_STORE_UNREADABLE_CODE = 'provider_store_unreadable';
+
+/**
+ * True when the backend reports that providers.json exists but cannot be read:
+ * the list is empty because of the file, not because nothing is configured,
+ * and every change is refused until the file is repaired.
+ */
+export function providerStoreUnreadable(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null) return false;
+  const {code, store} = body as {code?: unknown; store?: {status?: unknown}};
+  return (
+    code === PROVIDER_STORE_UNREADABLE_CODE || store?.status === 'unreadable'
+  );
+}
+
+export function providerStoreUnreadableMessage(): string {
+  return uiText(
+    'providers.json 无法读取，已暂停所有提供商修改，当前按系统默认配置（.env）运行。请修复或移走该文件后刷新。',
+    'providers.json could not be read, so provider changes are paused and the system default (.env) is in use. Repair or move the file, then refresh.',
+  );
+}
+
+/** A failed provider request, carrying the backend's reason when it gave one. */
+export class ProviderRequestError extends Error {
+  constructor(
+    message: string,
+    readonly storeUnreadable: boolean,
+  ) {
+    super(message);
+  }
+}
+
+export async function providerRequestFailure(
+  res: Response,
+  fallback: string,
+): Promise<ProviderRequestError> {
+  const body: unknown = await res.json().catch(() => undefined);
+  if (providerStoreUnreadable(body)) {
+    return new ProviderRequestError(providerStoreUnreadableMessage(), true);
+  }
+  const error = (body as {error?: unknown} | undefined)?.error;
+  return new ProviderRequestError(
+    typeof error === 'string' && error.length > 0 ? error : fallback,
+    false,
+  );
+}
+
 export function providerHasClaudeSurface(provider: ProviderConfig): boolean {
   const conn = provider.connection;
   if (

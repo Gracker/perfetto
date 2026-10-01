@@ -17,6 +17,7 @@ import {
   buildHeaders,
   apiUrl,
   createEmptyForm,
+  providerRequestFailure,
 } from './provider_types';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 import {uiText as text} from './ui_language';
@@ -318,10 +319,9 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       }
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(
-          (errData as {error?: string}).error ||
-            text(`保存失败：${res.status}`, `Save failed: ${res.status}`),
+        throw await providerRequestFailure(
+          res,
+          text(`保存失败：${res.status}`, `Save failed: ${res.status}`),
         );
       }
 

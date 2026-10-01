@@ -6,6 +6,10 @@ import {describe, expect, it} from 'vitest';
 
 import {
   providerHasQoderSurface,
+  ProviderRequestError,
+  providerRequestFailure,
+  providerStoreUnreadable,
+  providerStoreUnreadableMessage,
   providerRuntimeLabel,
   providerRuntimeShortLabel,
   providerSupportsRuntime,
@@ -98,5 +102,40 @@ describe('providerSupportsRuntime', () => {
       connection: {qoderAccessToken: 'qpat_123'},
     });
     expect(providerSupportsRuntime(provider, 'qoder-agent-sdk')).toBe(true);
+  });
+});
+
+describe('providerStoreUnreadable', () => {
+  it('recognizes the list state and the refused-write code', () => {
+    expect(providerStoreUnreadable({store: {status: 'unreadable'}})).toBe(true);
+    expect(
+      providerStoreUnreadable({
+        success: false,
+        code: 'provider_store_unreadable',
+      }),
+    ).toBe(true);
+    expect(providerStoreUnreadable({store: {status: 'ok'}})).toBe(false);
+    expect(providerStoreUnreadable({success: false, error: 'x'})).toBe(false);
+    expect(providerStoreUnreadable(undefined)).toBe(false);
+  });
+});
+
+describe('providerRequestFailure', () => {
+  const jsonResponse = (body: unknown) =>
+    new Response(JSON.stringify(body), {status: 409});
+
+  it.each([
+    [
+      jsonResponse({code: 'provider_store_unreadable', error: 'raw'}),
+      providerStoreUnreadableMessage(),
+      true,
+    ],
+    [jsonResponse({error: 'Provider not found'}), 'Provider not found', false],
+    [new Response('not json', {status: 500}), 'fallback', false],
+  ])('reads the backend reason (%#)', async (res, message, storeUnreadable) => {
+    const failure = await providerRequestFailure(res, 'fallback');
+    expect(failure).toBeInstanceOf(ProviderRequestError);
+    expect(failure.message).toBe(message);
+    expect(failure.storeUnreadable).toBe(storeUnreadable);
   });
 });

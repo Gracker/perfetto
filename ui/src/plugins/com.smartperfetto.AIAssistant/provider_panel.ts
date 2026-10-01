@@ -15,6 +15,10 @@ import {
   resolveProviderRuntime,
   buildHeaders,
   apiUrl,
+  ProviderRequestError,
+  providerRequestFailure,
+  providerStoreUnreadable,
+  providerStoreUnreadableMessage,
 } from './provider_types';
 import {renderProviderIcon} from './provider_icons';
 import {getTokens, STYLES as getStyles} from './provider_styles';
@@ -35,6 +39,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
   private modelOptionsByProvider = new Map<string, ProviderModelOption[]>();
   private loading = true;
   private error: string | null = null;
+  /** providers.json exists but the backend cannot read it; changes are refused. */
+  private storeUnreadable = false;
   private success: string | null = null;
   private view_mode: 'list' | 'add' | 'edit' = 'list';
   private editingId: string | null = null;
@@ -142,6 +148,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       const templatesData = await templatesRes.json();
 
       this.providers = providersData.providers || [];
+      this.storeUnreadable = providerStoreUnreadable(providersData);
       this.templates = templatesData.templates || [];
       const providerIds = new Set(this.providers.map(provider => provider.id));
       for (const providerId of this.modelOptionsByProvider.keys()) {
@@ -194,7 +201,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         },
       );
       if (!res.ok) {
-        throw new Error(
+        throw await providerRequestFailure(
+          res,
           text(`激活失败：${res.status}`, `Activation failed: ${res.status}`),
         );
       }
@@ -204,10 +212,19 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       await this.loadData();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
-      this.error =
-        e instanceof Error ? e.message : text('激活失败', 'Activation failed');
-      m.redraw();
+      this.showFailure(e, text('激活失败', 'Activation failed'));
     }
+  }
+
+  /** An unreadable store becomes the panel state; any other failure an error. */
+  private showFailure(e: unknown, fallback: string): void {
+    if (e instanceof ProviderRequestError && e.storeUnreadable) {
+      this.storeUnreadable = true;
+      this.error = null;
+    } else {
+      this.error = e instanceof Error ? e.message : fallback;
+    }
+    m.redraw();
   }
 
   private async deactivateAll() {
@@ -220,7 +237,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         },
       );
       if (!res.ok) {
-        throw new Error(
+        throw await providerRequestFailure(
+          res,
           text(`停用失败：${res.status}`, `Deactivation failed: ${res.status}`),
         );
       }
@@ -233,11 +251,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       await this.loadData();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
-      this.error =
-        e instanceof Error
-          ? e.message
-          : text('停用失败', 'Deactivation failed');
-      m.redraw();
+      this.showFailure(e, text('停用失败', 'Deactivation failed'));
     }
   }
 
@@ -254,7 +268,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         headers: buildHeaders(this.apiKey),
       });
       if (!res.ok) {
-        throw new Error(
+        throw await providerRequestFailure(
+          res,
           text(`删除失败：${res.status}`, `Delete failed: ${res.status}`),
         );
       }
@@ -267,10 +282,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       await this.loadData();
       this.clearSuccessAfterDelay();
     } catch (e: unknown) {
-      this.error =
-        e instanceof Error ? e.message : text('删除失败', 'Delete failed');
       this.deleting = null;
-      m.redraw();
+      this.showFailure(e, text('删除失败', 'Delete failed'));
     }
   }
 
@@ -470,6 +483,12 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
         },
       },
       [
+        this.storeUnreadable
+          ? m('div', {style: s.errorBanner}, [
+              m('span', '⚠️'),
+              m('span', providerStoreUnreadableMessage()),
+            ])
+          : null,
         this.error
           ? m('div', {style: s.errorBanner}, [
               m('span', '⚠️'),
@@ -502,7 +521,10 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
           m(
             'button',
             {
-              style: s.addBtn,
+              style: this.storeUnreadable
+                ? {...s.addBtn, opacity: 0.5, cursor: 'not-allowed'}
+                : s.addBtn,
+              disabled: this.storeUnreadable,
               onclick: () => this.startAdd(),
             },
             text('+ 添加提供商', '+ Add Provider'),
@@ -532,9 +554,11 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                   m('span', '⏳'),
                   text('正在加载提供商……', 'Loading providers...'),
                 ])
-              : this.providers.length === 0
-                ? this.renderEmpty()
-                : this.renderGrid(),
+              : this.storeUnreadable
+                ? null
+                : this.providers.length === 0
+                  ? this.renderEmpty()
+                  : this.renderGrid(),
             this.renderTestResult(),
           ],
         ),
