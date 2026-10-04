@@ -143,22 +143,6 @@ export interface PendingGeneration {
   createdAt: number;
 }
 
-export interface ExternalKnowledgeSourceSummary {
-  sourceId: string;
-  kind: 'android_internals_wiki';
-  displayName: string;
-  revision: string;
-  contentFingerprint: string;
-  dirty: boolean;
-  license: string;
-  rightsAcknowledged: boolean;
-  sendToProvider: boolean;
-  activeGeneration?: string;
-  indexGeneration: number;
-  indexedArticleCount?: number;
-  indexedChunkCount?: number;
-}
-
 export interface CodebasePreview {
   blocked: boolean;
   blockedReason?: string;
@@ -276,13 +260,6 @@ export interface ReindexCodebaseResult {
   coverage?: IndexCoverage;
 }
 
-export interface RegisterExternalKnowledgeSourceInput {
-  rootPath: string;
-  displayName: string;
-  rightsAcknowledged: true;
-  sendToProvider: boolean;
-}
-
 function trimTrailingSlash(value: string): string {
   return String(value || '').replace(/\/+$/, '');
 }
@@ -355,56 +332,6 @@ export async function listCodebases(
     featureEnabled: body.featureEnabled !== false,
     codebases: body.codebases || [],
   };
-}
-
-export async function listExternalKnowledgeSources(
-  backendUrl: string,
-  apiKey?: string,
-): Promise<ExternalKnowledgeSourceSummary[]> {
-  const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(backendUrl, '/android-internals/sources'),
-    {headers: buildHeaders(apiKey)},
-  );
-  const body = await readJsonOrThrow<{
-    sources?: ExternalKnowledgeSourceSummary[];
-  }>(res);
-  return body.sources || [];
-}
-
-export async function registerExternalKnowledgeSource(
-  backendUrl: string,
-  input: RegisterExternalKnowledgeSourceInput,
-  apiKey?: string,
-): Promise<ExternalKnowledgeSourceSummary> {
-  const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(backendUrl, '/android-internals/sources'),
-    {
-      method: 'POST',
-      headers: buildHeaders(apiKey),
-      body: JSON.stringify(input),
-    },
-  );
-  const body = await readJsonOrThrow<{source: ExternalKnowledgeSourceSummary}>(res);
-  return body.source;
-}
-
-export async function reindexExternalKnowledgeSource(
-  backendUrl: string,
-  sourceId: string,
-  apiKey?: string,
-): Promise<void> {
-  const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(
-      backendUrl,
-      `/android-internals/sources/${encodeURIComponent(sourceId)}/reindex`,
-    ),
-    {
-      method: 'POST',
-      headers: buildHeaders(apiKey),
-      body: JSON.stringify({}),
-    },
-  );
-  await readJsonOrThrow(res);
 }
 
 export async function previewCodebaseRoot(
@@ -646,27 +573,6 @@ export async function updateCodebaseSelection(
   return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
 }
 
-export async function updateExternalKnowledgeSourceConsent(
-  backendUrl: string,
-  sourceId: string,
-  sendToProvider: boolean,
-  apiKey?: string,
-): Promise<ExternalKnowledgeSourceSummary> {
-  const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(
-      backendUrl,
-      `/android-internals/sources/${encodeURIComponent(sourceId)}/consent`,
-    ),
-    {
-      method: 'PATCH',
-      headers: buildHeaders(apiKey),
-      body: JSON.stringify({sendToProvider}),
-    },
-  );
-  const body = await readJsonOrThrow<{source: ExternalKnowledgeSourceSummary}>(res);
-  return body.source;
-}
-
 export async function loadCodebaseAudit(
   backendUrl: string,
   codebaseId: string,
@@ -682,7 +588,8 @@ export async function loadCodebaseAudit(
 
 
 // ---------------------------------------------------------------------------
-// Knowledge bases (`/api/rag/knowledge`): document collections and the Wiki.
+// Knowledge bases (`/api/rag/knowledge`): document collections, plus records
+// of the retired legacy Wiki connector that stay listed until deleted.
 // Responses never carry a registered root.
 // ---------------------------------------------------------------------------
 
@@ -702,6 +609,8 @@ export interface KnowledgeBaseSummary {
   indexedChunkCount?: number;
   documentCount: number;
   hasActiveIndex: boolean;
+  /** The backend no longer serves this kind (the legacy Wiki connector); listed only so it can be deleted. */
+  retired?: boolean;
   lifecycleState?: 'active' | 'deleting';
 }
 
@@ -734,9 +643,27 @@ export interface RegisterKnowledgeCollectionInput extends KnowledgeCollectionSel
   sendToProvider: boolean;
 }
 
-/** A document collection the model may search this run: indexed, rights acknowledged, text consented. */
+/**
+ * A record the backend reports as retired (the legacy Wiki connector's kind).
+ * It is never served to a run (the run start answers
+ * `ANALYSIS_CONTEXT_SOURCE_RETIRED`) and stays listed only so it can be deleted.
+ */
+export function knowledgeBaseRetired(source: KnowledgeBaseSummary): boolean {
+  return source.retired === true;
+}
+
+/** Why a retired knowledge base cannot be chosen, and what replaces it. */
+export function knowledgeBaseRetiredText(): string {
+  return text(
+    '已停用：旧版 Wiki 连接器。请将 Wiki 的 src/ 目录重新注册为文档知识库。',
+    "Retired: legacy Wiki connector. Re-register the Wiki's src/ folder as a document knowledge base.",
+  );
+}
+
+/** A document collection the model may search this run: not retired, indexed, rights acknowledged, text consented. */
 export function knowledgeBaseSelectable(source: KnowledgeBaseSummary): boolean {
-  return (source.lifecycleState ?? 'active') === 'active' &&
+  return !knowledgeBaseRetired(source) &&
+    (source.lifecycleState ?? 'active') === 'active' &&
     source.rightsAcknowledged === true &&
     source.sendToProvider === true &&
     source.hasActiveIndex === true;

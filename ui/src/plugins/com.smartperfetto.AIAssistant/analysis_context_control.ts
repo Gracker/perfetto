@@ -23,8 +23,11 @@ import {
 import {
   codebaseUnavailableReasonText,
   codebaseUsableInMode,
+  knowledgeBaseRetired,
+  knowledgeBaseRetiredText,
   knowledgeBaseSelectable,
   type CodebaseSummary,
+  type KnowledgeBaseSummary,
 } from './codebase_api';
 import {uiText as text} from './ui_language';
 import type {
@@ -161,6 +164,14 @@ export class AnalysisContextControl implements m.ClassComponent<AnalysisContextC
       : text('可定位', 'Locate');
   }
 
+  private knowledgeStatus(source: KnowledgeBaseSummary, selectable: boolean): string {
+    if (selectable) return text('可检索', 'Searchable');
+    if (knowledgeBaseRetired(source)) return text('已停用', 'Retired');
+    return source.hasActiveIndex
+      ? text('未允许发送正文', 'Text not allowed')
+      : text('未建索引', 'Not indexed');
+  }
+
   private renderPopover(attrs: AnalysisContextControlAttrs): m.Children {
     const selection = normalizeAnalysisContext(attrs.selection);
     const mode = selection.codeAwareMode;
@@ -229,23 +240,24 @@ export class AnalysisContextControl implements m.ClassComponent<AnalysisContextC
           ? m('div.ai-context-control-note', text('还没有知识库，可在“管理…”中添加。', 'No knowledge bases yet; add one under Manage….'))
           : knowledge.map(source => {
               const selectable = knowledgeBaseSelectable(source);
-              return m('label.ai-context-control-item', {class: selectable ? '' : 'disabled'}, [
-                m('input[type=checkbox]', {
-                  checked: selection.knowledgeSourceIds.includes(source.sourceId),
-                  disabled: attrs.disabled || !selectable,
-                  onchange: () => {
-                    const ids = new Set(selection.knowledgeSourceIds);
-                    ids.has(source.sourceId) ? ids.delete(source.sourceId) : ids.add(source.sourceId);
-                    this.change(attrs, {...selection, knowledgeSourceIds: [...ids]});
-                  },
-                }),
-                m('span.ai-context-control-name', source.displayName),
-                m('span.ai-context-control-status', selectable
-                  ? text('可检索', 'Searchable')
-                  : !source.hasActiveIndex
-                    ? text('未建索引', 'Not indexed')
-                    : text('未允许发送正文', 'Text not allowed')),
-              ]);
+              const checked = selection.knowledgeSourceIds.includes(source.sourceId);
+              return [
+                m('label.ai-context-control-item', {class: selectable ? '' : 'disabled'}, [
+                  m('input[type=checkbox]', {
+                    checked,
+                    // An entry that can no longer be used may still be cleared, never chosen.
+                    disabled: attrs.disabled || (!selectable && !checked),
+                    onchange: () => {
+                      const ids = new Set(selection.knowledgeSourceIds);
+                      ids.has(source.sourceId) ? ids.delete(source.sourceId) : ids.add(source.sourceId);
+                      this.change(attrs, {...selection, knowledgeSourceIds: [...ids]});
+                    },
+                  }),
+                  m('span.ai-context-control-name', source.displayName),
+                  m('span.ai-context-control-status', this.knowledgeStatus(source, selectable)),
+                ]),
+                knowledgeBaseRetired(source) ? m('div.ai-context-control-note', knowledgeBaseRetiredText()) : null,
+              ];
             }),
       ]),
       m('div.ai-context-control-section', [

@@ -19,11 +19,7 @@
 import m from 'mithril';
 
 import type {AnalysisContextSelection} from './types';
-import type {
-  CodebaseSummary,
-  ExternalKnowledgeSourceSummary,
-  KnowledgeBaseSummary,
-} from './codebase_api';
+import type {CodebaseSummary, KnowledgeBaseSummary} from './codebase_api';
 import {
   CodebaseApiError,
   acceptPendingCodebaseGeneration,
@@ -31,12 +27,9 @@ import {
   codebaseUsableInMode,
   deleteCodebase,
   knowledgeBaseSelectable,
-  registerExternalKnowledgeSource,
   rejectPendingCodebaseGeneration,
   reindexCodebase,
-  reindexExternalKnowledgeSource,
   revokeCodebaseContentConsent,
-  updateExternalKnowledgeSourceConsent,
 } from './codebase_api';
 import {
   bumpAnalysisContextAuthorizationEpoch,
@@ -50,7 +43,6 @@ import {ContentDisclosureReview} from './content_disclosure_review';
 import {analysisCatalog} from './analysis_catalog';
 import {uiText as text} from './ui_language';
 import {MANAGEMENT_STYLES} from './management_ui';
-import {knowledgeConsentQuestion} from './source_analysis_disclosure';
 
 export interface CodebasePanelAttrs {
   backendUrl: string;
@@ -64,7 +56,7 @@ export interface CodebasePanelAttrs {
   onAuthorizationChange?: () => void;
 }
 
-type ViewMode = 'list' | 'add-codebase' | 'edit-codebase' | 'add-knowledge';
+type ViewMode = 'list' | 'add-codebase' | 'edit-codebase';
 
 const STYLES = MANAGEMENT_STYLES;
 
@@ -167,15 +159,9 @@ function formatDate(value: number | string | undefined): string {
   return date.toLocaleString();
 }
 
-function compactIdentity(value: string | undefined, maxLength = 18): string {
-  if (!value) return text('未知', 'unknown');
-  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
-}
-
 export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private codebases: CodebaseSummary[] = [];
-  private knowledgeSources: ExternalKnowledgeSourceSummary[] = [];
-  /** Document collections from `/knowledge`; the Wiki keeps its legacy list. */
+  /** Every `/knowledge` row: document collections and retired legacy Wiki records. */
   private knowledgeBases: KnowledgeBaseSummary[] = [];
   private loading = true;
   /** A first load finished: later refreshes keep the lists (and their children) mounted. */
@@ -192,12 +178,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private updatingConsentId: string | null = null;
   /** The codebase whose source-text disclosure is under review. */
   private reviewingCodebaseId: string | null = null;
-  private reindexingKnowledgeId: string | null = null;
-  private registeringKnowledge = false;
-  private knowledgeRootPath = '';
-  private knowledgeDisplayName = 'Android Internals Wiki';
-  private knowledgeRightsAcknowledged = false;
-  private knowledgeSendToProvider = false;
   private loadEpoch = 0;
   private identityEpoch = 0;
   private registrationBoundaryRevision = 0;
@@ -232,7 +212,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.codebases = [];
       this.loaded = false;
       this.unavailableCodebaseIds.clear();
-      this.knowledgeSources = [];
       this.knowledgeBases = [];
       this.error = null;
       this.reindexingId = null;
@@ -240,8 +219,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.deletingId = null;
       this.updatingConsentId = null;
       this.reviewingCodebaseId = null;
-      this.reindexingKnowledgeId = null;
-      this.registeringKnowledge = false;
       this.success = null;
       this.expandedAuditId = null;
       this.editingCodebaseId = null;
@@ -287,7 +264,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.featureEnabled = state.featureEnabled;
       this.codebases = state.codebases;
     }
-    if (state.loaded.wikiSources) this.knowledgeSources = state.wikiSources;
     if (state.loaded.knowledgeBases) this.knowledgeBases = state.knowledgeBases;
   }
 
@@ -314,15 +290,11 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     return state.loaded.codebases;
   }
 
-  private confirmProviderConsent(displayName: string): boolean {
-    return typeof window === 'undefined' || window.confirm(knowledgeConsentQuestion(displayName));
-  }
-
   private codebaseMutationInProgress(): boolean {
     return this.reindexingId !== null ||
       this.deletingId !== null ||
       this.pendingAction !== null ||
-      this.updatingConsentId?.startsWith('codebase:') === true;
+      this.updatingConsentId !== null;
   }
 
   private requestIdentityIsCurrent(
@@ -376,43 +348,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     }
   }
 
-  private async setKnowledgeSourceConsent(
-    source: ExternalKnowledgeSourceSummary,
-    sendToProvider: boolean,
-  ) {
-    if (this.readOnly || (sendToProvider && !this.confirmProviderConsent(source.displayName))) return;
-    const operationId = `knowledge:${source.sourceId}`;
-    const identityEpoch = this.identityEpoch;
-    const backendUrl = this.backendUrl;
-    const apiKey = this.apiKey;
-    this.updatingConsentId = operationId;
-    this.error = null;
-    this.success = null;
-    try {
-      await updateExternalKnowledgeSourceConsent(
-        backendUrl,
-        source.sourceId,
-        sendToProvider,
-        apiKey,
-      );
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.success = sendToProvider
-        ? text(`已允许发送 ${source.displayName} 的正文`, `Allowed text from ${source.displayName}`)
-        : text(`已撤销 ${source.displayName} 的正文发送授权`, `Revoked text for ${source.displayName}`);
-      this.emitAuthorizationChange();
-      if (this.updatingConsentId === operationId) this.updatingConsentId = null;
-      await this.load();
-    } catch (e: unknown) {
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.error = e instanceof Error ? e.message : text('更新授权失败', 'Failed to update consent');
-    } finally {
-      if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
-        if (this.updatingConsentId === operationId) this.updatingConsentId = null;
-        m.redraw();
-      }
-    }
-  }
-
   private emitSelection(selection: AnalysisContextSelection): void {
     const normalized = normalizeAnalysisContext(selection);
     if (sameAnalysisContext(normalized, this.selection)) return;
@@ -434,7 +369,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     knowledgeLoaded: boolean;
   }): void {
     const codebases = new Map(this.codebases.map((codebase) => [codebase.codebaseId, codebase]));
-    // `/knowledge` lists every kind, the Wiki included: one predicate decides.
+    // `/knowledge` lists every kind, retired Wiki records included: one predicate decides.
     const usableSources = new Set(this.knowledgeBases.filter(knowledgeBaseSelectable).map((source) => source.sourceId));
     let next = normalizeAnalysisContext(this.selection);
     if (input.codebasesLoaded) {
@@ -458,70 +393,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       };
     }
     this.emitSelection(next);
-  }
-
-  private async registerKnowledgeSource(): Promise<void> {
-    if (
-      this.readOnly ||
-      this.registeringKnowledge ||
-      !this.knowledgeRootPath.trim() ||
-      !this.knowledgeRightsAcknowledged
-    ) return;
-    if (this.knowledgeSendToProvider && !this.confirmProviderConsent(this.knowledgeDisplayName)) return;
-    const identityEpoch = this.identityEpoch;
-    const backendUrl = this.backendUrl;
-    const apiKey = this.apiKey;
-    this.registeringKnowledge = true;
-    this.error = null;
-    try {
-      const source = await registerExternalKnowledgeSource(backendUrl, {
-        rootPath: this.knowledgeRootPath.trim(),
-        displayName: this.knowledgeDisplayName.trim() || 'Android Internals Wiki',
-        rightsAcknowledged: true,
-        sendToProvider: this.knowledgeSendToProvider,
-      }, apiKey);
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.success = text(`已注册 ${source.displayName}`, `Registered ${source.displayName}`);
-      this.viewMode = 'list';
-      this.knowledgeRootPath = '';
-      this.knowledgeRightsAcknowledged = false;
-      this.knowledgeSendToProvider = false;
-      this.registeringKnowledge = false;
-      await this.load();
-    } catch (error) {
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.error = error instanceof Error ? error.message : text('注册知识源失败', 'Failed to register knowledge source');
-    } finally {
-      if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
-        this.registeringKnowledge = false;
-        m.redraw();
-      }
-    }
-  }
-
-  private async reindexKnowledgeSource(source: ExternalKnowledgeSourceSummary): Promise<void> {
-    if (this.readOnly || this.reindexingKnowledgeId) return;
-    const identityEpoch = this.identityEpoch;
-    const backendUrl = this.backendUrl;
-    const apiKey = this.apiKey;
-    this.reindexingKnowledgeId = source.sourceId;
-    this.error = null;
-    try {
-      await reindexExternalKnowledgeSource(backendUrl, source.sourceId, apiKey);
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      // An index rebuild changes no authorization: sessions continue (runs pin their generation).
-      this.success = text(`已重新索引 ${source.displayName}`, `Reindexed ${source.displayName}`);
-      this.reindexingKnowledgeId = null;
-      await this.load();
-    } catch (error) {
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.error = error instanceof Error ? error.message : text('知识源索引失败', 'Failed to reindex knowledge source');
-    } finally {
-      if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
-        this.reindexingKnowledgeId = null;
-        m.redraw();
-      }
-    }
   }
 
   private async reindex(codebase: CodebaseSummary) {
@@ -923,155 +794,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     ]);
   }
 
-  private renderKnowledgeSources(): m.Children {
-    return m('div', {style: {marginTop: '18px'}}, [
-      m('div', {style: STYLES.header}, [
-        m('h4', {style: STYLES.title}, text('Android Internals Wiki', 'Android Internals Wiki')),
-        m('button', {
-          type: 'button',
-          style: STYLES.button,
-          disabled: this.readOnly,
-          onclick: () => { this.viewMode = 'add-knowledge'; },
-        }, text('新增知识源', 'Add knowledge source')),
-      ]),
-      m('div', {style: STYLES.subtitle}, text(
-        '建好索引并允许发送正文后，可在输入框旁的上下文选择中用于分析。',
-        'Once indexed and its text allowed, choose it for a turn beside the input box.',
-      )),
-      this.knowledgeSources.length === 0
-        ? m('div', {style: {...STYLES.empty, marginTop: '10px'}}, text(
-            '尚未注册外部知识源。可在这里登记后端允许访问的 Android Internals Wiki 路径。',
-            'No external knowledge sources are registered. Add an Android Internals Wiki path allowed by the backend.',
-          ))
-        : m('div', {style: {...STYLES.list, marginTop: '10px'}},
-        this.knowledgeSources.map((source) => {
-          // The `/knowledge` row of the same source decides, as for every knowledge base.
-          const listed = this.knowledgeBases.find(candidate => candidate.sourceId === source.sourceId);
-          const usable = listed !== undefined && knowledgeBaseSelectable(listed);
-          return m('div', {style: STYLES.card}, [
-            m('div', {style: STYLES.name}, source.displayName),
-            m('div', {style: STYLES.meta}, source.sourceId),
-            m('div', {style: STYLES.chips}, [
-              m('span', {style: STYLES.chip}, `${text('文章', 'articles')} ${source.indexedArticleCount ?? 0}`),
-              m('span', {style: STYLES.chip}, `${text('分片', 'chunks')} ${source.indexedChunkCount ?? 0}`),
-              m('span', {
-                style: STYLES.chip,
-                title: source.revision,
-              }, `${text('修订', 'revision')} ${compactIdentity(source.revision)}`),
-              m('span', {style: STYLES.chip}, source.dirty
-                ? text('工作区有改动', 'dirty checkout')
-                : text('工作区干净', 'clean checkout')),
-              m('span', {
-                style: STYLES.chip,
-                title: source.activeGeneration,
-              }, `${text('活动代际', 'active generation')} ${compactIdentity(source.activeGeneration)}`),
-              m('span', {
-                style: STYLES.chip,
-                title: source.contentFingerprint,
-              }, `${text('内容指纹', 'fingerprint')} ${compactIdentity(source.contentFingerprint, 14)}`),
-              m('span', {style: STYLES.chip}, source.license),
-              m('span', {style: STYLES.chip}, usable
-                ? text('可用于分析', 'ready')
-                : text('未索引或未授权', 'inactive or not consented')),
-            ]),
-            m('div', {style: STYLES.actions}, [
-              m('button', {
-                type: 'button',
-                style: STYLES.button,
-                disabled: this.readOnly || this.reindexingKnowledgeId !== null,
-                onclick: () => this.reindexKnowledgeSource(source),
-              }, this.reindexingKnowledgeId === source.sourceId
-                ? text('索引中…', 'Indexing...')
-                : text('重新索引', 'Reindex')),
-              m('button', {
-                type: 'button',
-                style: STYLES.button,
-                disabled: this.readOnly ||
-                  this.updatingConsentId !== null ||
-                  !source.rightsAcknowledged,
-                onclick: () => this.setKnowledgeSourceConsent(source, !source.sendToProvider),
-              }, this.updatingConsentId === `knowledge:${source.sourceId}`
-                ? text('更新中…', 'Updating...')
-                : source.sendToProvider
-                  ? text('撤销正文授权', 'Revoke text')
-                  : text('允许发送正文', 'Allow text')),
-            ]),
-          ]);
-        })),
-    ]);
-  }
-
-  private renderKnowledgeSourceForm(): m.Children {
-    return m('div', {style: STYLES.shell}, [
-      m('div', {style: STYLES.header}, [
-        m('div', [
-          m('h4', {style: STYLES.title}, text('注册外部知识源', 'Register external knowledge source')),
-          m('div', {style: STYLES.subtitle}, text(
-            '路径必须位于后端允许的知识根目录内；注册后执行一次索引才能用于分析。',
-            'The path must be under a backend-approved knowledge root; reindex once before analysis.',
-          )),
-        ]),
-      ]),
-      m('label', {style: STYLES.check}, [
-        m('span', {style: {minWidth: '110px'}}, text('显示名称', 'Display name')),
-        m('input[type=text]', {
-          value: this.knowledgeDisplayName,
-          disabled: this.readOnly || this.registeringKnowledge,
-          oninput: (event: InputEvent) => {
-            this.knowledgeDisplayName = (event.target as HTMLInputElement).value;
-          },
-        }),
-      ]),
-      m('label', {style: {...STYLES.check, marginTop: '10px'}}, [
-        m('span', {style: {minWidth: '110px'}}, text('后端路径', 'Backend path')),
-        m('input[type=text]', {
-          value: this.knowledgeRootPath,
-          placeholder: '/knowledge/android-internals-wiki',
-          disabled: this.readOnly || this.registeringKnowledge,
-          oninput: (event: InputEvent) => {
-            this.knowledgeRootPath = (event.target as HTMLInputElement).value;
-          },
-        }),
-      ]),
-      m('label', {style: {...STYLES.check, marginTop: '12px'}}, [
-        m('input[type=checkbox]', {
-          checked: this.knowledgeRightsAcknowledged,
-          disabled: this.readOnly || this.registeringKnowledge,
-          onchange: (event: Event) => {
-            this.knowledgeRightsAcknowledged = (event.target as HTMLInputElement).checked;
-          },
-        }),
-        text('我确认有权按 CC-BY-NC-SA-4.0 使用该内容。', 'I confirm the content may be used under CC-BY-NC-SA-4.0.'),
-      ]),
-      m('label', {style: {...STYLES.check, marginTop: '10px'}}, [
-        m('input[type=checkbox]', {
-          checked: this.knowledgeSendToProvider,
-          disabled: this.readOnly || this.registeringKnowledge,
-          onchange: (event: Event) => {
-            this.knowledgeSendToProvider = (event.target as HTMLInputElement).checked;
-          },
-        }),
-        text('允许把脱敏片段发送给模型提供商。', 'Allow redacted snippets to be sent to the model provider.'),
-      ]),
-      this.error ? m('div', {style: {...STYLES.error, marginTop: '10px'}}, this.error) : null,
-      m('div', {style: STYLES.actions}, [
-        m('button', {
-          type: 'button',
-          style: {...STYLES.button, ...STYLES.primary},
-          disabled: this.readOnly || this.registeringKnowledge ||
-            !this.knowledgeRootPath.trim() || !this.knowledgeRightsAcknowledged,
-          onclick: () => this.registerKnowledgeSource(),
-        }, this.registeringKnowledge ? text('注册中…', 'Registering...') : text('注册', 'Register')),
-        m('button', {
-          type: 'button',
-          style: STYLES.button,
-          disabled: this.registeringKnowledge,
-          onclick: () => { this.viewMode = 'list'; },
-        }, text('取消', 'Cancel')),
-      ]),
-    ]);
-  }
-
   private completeCodebaseRegistration(
     codebase: CodebaseSummary,
     useForAnalysis: boolean,
@@ -1104,7 +826,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   }
 
   view(_vnode: m.Vnode<CodebasePanelAttrs>): m.Children {
-    if (this.viewMode === 'add-knowledge') return this.renderKnowledgeSourceForm();
     if (this.viewMode === 'edit-codebase') {
       const codebase = this.codebases.find(
         (candidate) => candidate.codebaseId === this.editingCodebaseId,
@@ -1221,12 +942,11 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         apiKey: this.apiKey,
         scopeKey: this.scopeKey,
         readOnly: this.readOnly,
-        sources: this.knowledgeBases.filter(source => source.kind === 'document_collection'),
+        sources: this.knowledgeBases,
         selectedIds: this.selection.knowledgeSourceIds,
         onChanged: () => this.load(),
         onAuthorizationChange: () => this.emitAuthorizationChange(),
       }),
-      initialLoading ? null : this.renderKnowledgeSources(),
     ]);
   }
 }

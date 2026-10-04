@@ -6,13 +6,12 @@ import m from 'mithril';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 const api = vi.hoisted(() => ({
-  listCodebases: vi.fn(), listKnowledgeBases: vi.fn(), listWiki: vi.fn(), consent: vi.fn(),
+  listCodebases: vi.fn(), listKnowledgeBases: vi.fn(), consent: vi.fn(),
 }));
 vi.mock('./codebase_api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./codebase_api')>(),
   listCodebases: api.listCodebases,
   listKnowledgeBases: api.listKnowledgeBases,
-  listExternalKnowledgeSources: api.listWiki,
   setKnowledgeBaseConsent: api.consent,
 }));
 
@@ -31,7 +30,6 @@ describe('CodebasePanel with its knowledge section, mounted', () => {
 
   beforeEach(() => {
     api.listCodebases.mockReset().mockResolvedValue({featureEnabled: true, codebases: []});
-    api.listWiki.mockReset().mockResolvedValue([]);
     api.listKnowledgeBases.mockReset().mockResolvedValue([handbook()]);
     api.consent.mockReset().mockResolvedValue(handbook({sendToProvider: false}));
     root = document.createElement('div');
@@ -74,5 +72,33 @@ describe('CodebasePanel with its knowledge section, mounted', () => {
       expect(root.textContent).toMatch(/Revoked text for Handbook|已撤销 Handbook 的正文发送授权/);
     });
     expect(attrs.onAuthorizationChange).toHaveBeenCalledOnce();
+  });
+
+  it('lists a retired Wiki record as delete-only, has no legacy Wiki section, and drops its stored selection', async () => {
+    api.listKnowledgeBases.mockResolvedValue([
+      handbook({sourceId: 'wiki', kind: 'android_internals_wiki', retired: true, displayName: 'Old Wiki'}),
+      handbook(),
+    ]);
+    const attrs: CodebasePanelAttrs = {
+      backendUrl: 'http://retired-backend', scopeKey: 'tenant\0workspace\0user',
+      selection: {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['kb-a', 'wiki']},
+      onSelectionChange: vi.fn(), onAuthorizationChange: vi.fn(),
+    };
+    const rerender = () => m.render(root, m(CodebasePanel, attrs));
+    rerender();
+    await vi.waitFor(() => {
+      rerender();
+      expect(root.textContent).toContain('Old Wiki');
+    });
+
+    expect(attrs.onSelectionChange).toHaveBeenCalledWith(expect.objectContaining({knowledgeSourceIds: ['kb-a']}));
+    expect(root.textContent).not.toMatch(/Add knowledge source|新增知识源|Register external knowledge source/);
+    const cards = [...root.querySelectorAll('div')].filter(div =>
+      [...div.children].some(child => child.textContent === 'Old Wiki'));
+    const wikiCard = cards[cards.length - 1];
+    expect(wikiCard.textContent).toMatch(/Re-register the Wiki's src\/ folder|请将 Wiki 的 src\/ 目录重新注册/);
+    const labels = [...wikiCard.querySelectorAll('button')].map(button => button.textContent);
+    expect(labels).toHaveLength(1);
+    expect(labels[0]).toMatch(/Delete|删除/);
   });
 });

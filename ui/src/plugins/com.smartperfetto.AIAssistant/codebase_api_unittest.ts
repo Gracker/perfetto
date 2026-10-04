@@ -7,6 +7,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {
   CodebaseApiError,
   acceptPendingCodebaseGeneration,
+  deleteKnowledgeBase,
   reindexCodebase,
   authorizeCodebaseContent,
   previewCodebaseSelection,
@@ -14,8 +15,6 @@ import {
   deleteCodebase,
   getCodebaseDirectoryPickerCapability,
   previewCodebaseRoot,
-  registerExternalKnowledgeSource,
-  reindexExternalKnowledgeSource,
   rejectPendingCodebaseGeneration,
   searchKnowledgeCollection,
   selectDirectory,
@@ -358,77 +357,24 @@ describe('codebase directory picker API', () => {
   });
 });
 
-describe('external knowledge source API', () => {
-  it('registers a source through the scoped RAG endpoint', async () => {
-    const source = {
-      sourceId: 'wiki-a',
-      kind: 'android_internals_wiki' as const,
-      displayName: 'Android Internals',
-      revision: 'rev-a',
-      contentFingerprint: 'fingerprint-a',
-      dirty: false,
-      license: 'CC-BY-NC-SA-4.0',
-      rightsAcknowledged: true,
-      sendToProvider: true,
-      indexGeneration: 0,
-    };
-    const fetchMock = vi.fn(async (
-      _input: RequestInfo | URL,
-      _init?: RequestInit,
-    ) => ({
-      ok: true,
-      status: 201,
-      json: async () => ({success: true, source}),
-    } as Response));
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(registerExternalKnowledgeSource('http://backend/', {
-      rootPath: '/knowledge/wiki',
-      displayName: 'Android Internals',
-      rightsAcknowledged: true,
-      sendToProvider: true,
-    }, 'secret-key')).resolves.toEqual(source);
-    expect(fetchMock).toHaveBeenCalledWith(
-      'http://backend/api/rag/android-internals/sources',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          rootPath: '/knowledge/wiki',
-          displayName: 'Android Internals',
-          rightsAcknowledged: true,
-          sendToProvider: true,
-        }),
-      }),
-    );
-    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBeUndefined();
-    expect(
-      new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'),
-    ).toBe('Bearer secret-key');
+describe('retired legacy Wiki records', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it('reindexes a source using an encoded identifier', async () => {
-    const fetchMock = vi.fn(async (
-      _input: RequestInfo | URL,
-      _init?: RequestInit,
-    ) => ({
-      ok: true,
-      status: 200,
-      json: async () => ({success: true}),
-    } as Response));
+  it('are deleted through the shared `/knowledge` endpoint; no legacy route is called', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      ({ok: true, status: 200, json: async () => ({success: true})} as Response));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(reindexExternalKnowledgeSource(
-      'http://backend',
-      'wiki/a',
-      'secret-key',
-    )).resolves.toBeUndefined();
+    await expect(deleteKnowledgeBase('http://backend/', 'wiki/a', 'secret-key')).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://backend/api/rag/android-internals/sources/wiki%2Fa/reindex',
-      expect.objectContaining({method: 'POST'}),
+      'http://backend/api/rag/knowledge/wiki%2Fa',
+      expect.objectContaining({method: 'DELETE'}),
     );
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/android-internals/'))).toBe(false);
   });
 });
-
 
 describe('structured codebase failures', () => {
   it('retains typed availability without assuming a truthy malformed value is permission', async () => {

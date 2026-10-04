@@ -6,10 +6,11 @@
  * Document knowledge bases in the codebase settings panel: register a folder
  * (local folder picker, or a typed backend path where no picker exists),
  * index it, allow its text to reach the AI service, try a search, and delete
- * it. Which knowledge bases a turn uses is chosen beside the input box. The
- * picked folder path is transient local interaction data: it lives only in
- * this form's memory until registration, and no response shows a registered
- * root.
+ * it. A record of the retired legacy Wiki connector is still listed, marked
+ * as retired, with only Delete. Which knowledge bases a turn uses is chosen
+ * beside the input box. The picked folder path is transient local
+ * interaction data: it lives only in this form's memory until registration,
+ * and no response shows a registered root.
  */
 
 import m from 'mithril';
@@ -18,6 +19,8 @@ import {catalogIdentityKey} from './analysis_catalog';
 import {
   deleteKnowledgeBase,
   getCodebaseDirectoryPickerCapability,
+  knowledgeBaseRetired,
+  knowledgeBaseRetiredText,
   knowledgeBaseSelectable,
   previewKnowledgeCollection,
   registerKnowledgeCollection,
@@ -47,7 +50,7 @@ export interface KnowledgeBaseSectionAttrs {
   apiKey?: string;
   scopeKey: string;
   readOnly: boolean;
-  /** Document collections only; the Wiki keeps its own legacy section. */
+  /** Every `/knowledge` row; retired legacy Wiki records are shown last, delete-only. */
   sources: readonly KnowledgeBaseSummary[];
   /** Shown as "used this turn"; chosen in the context popover. */
   selectedIds: readonly string[];
@@ -351,7 +354,24 @@ export class KnowledgeBaseSection implements m.ClassComponent<KnowledgeBaseSecti
     });
   }
 
+  private deleteButton(attrs: KnowledgeBaseSectionAttrs, source: KnowledgeBaseSummary): m.Children {
+    return m('button', {
+      type: 'button', style: STYLES.button, disabled: attrs.readOnly || this.busy !== null,
+      onclick: () => this.remove(attrs, source),
+    }, this.busy === `delete:${source.sourceId}` ? text('删除中…', 'Deleting…') : text('删除', 'Delete'));
+  }
+
+  /** A retired record: no index, consent or search actions (the backend serves none), only Delete. */
+  private renderRetiredSource(attrs: KnowledgeBaseSectionAttrs, source: KnowledgeBaseSummary): m.Children {
+    return m('div', {style: STYLES.card}, [
+      m('div', {style: STYLES.name}, source.displayName),
+      m('div', {style: STYLES.meta}, knowledgeBaseRetiredText()),
+      m('div', {style: STYLES.actions}, [this.deleteButton(attrs, source)]),
+    ]);
+  }
+
   private renderSource(attrs: KnowledgeBaseSectionAttrs, source: KnowledgeBaseSummary): m.Children {
+    if (knowledgeBaseRetired(source)) return this.renderRetiredSource(attrs, source);
     const selectable = knowledgeBaseSelectable(source);
     const busy = this.busy !== null;
     const searching = this.searchSourceId === source.sourceId;
@@ -389,10 +409,7 @@ export class KnowledgeBaseSection implements m.ClassComponent<KnowledgeBaseSecti
             this.searchQuery = '';
           },
         }, searching ? text('收起试搜索', 'Hide search') : text('试搜索', 'Try a search')),
-        m('button', {
-          type: 'button', style: STYLES.button, disabled: attrs.readOnly || busy,
-          onclick: () => this.remove(attrs, source),
-        }, this.busy === `delete:${source.sourceId}` ? text('删除中…', 'Deleting…') : text('删除', 'Delete')),
+        this.deleteButton(attrs, source),
       ]),
       searching ? this.renderSearch(attrs, source) : null,
     ]);
@@ -532,6 +549,10 @@ export class KnowledgeBaseSection implements m.ClassComponent<KnowledgeBaseSecti
 
   view({attrs}: m.Vnode<KnowledgeBaseSectionAttrs>): m.Children {
     this.syncIdentity(attrs);
+    const sources = [
+      ...attrs.sources.filter(source => !knowledgeBaseRetired(source)),
+      ...attrs.sources.filter(knowledgeBaseRetired),
+    ];
     return m('div', {style: {marginTop: '18px'}}, [
       m('div', {style: STYLES.header}, [
         m('h4', {style: STYLES.title}, text('文档知识库', 'Document knowledge bases')),
@@ -547,9 +568,9 @@ export class KnowledgeBaseSection implements m.ClassComponent<KnowledgeBaseSecti
       this.form ? this.renderForm(attrs, this.form) : this.renderTypedPath(attrs),
       this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,
       this.success ? m('div', {style: STYLES.success, role: 'status'}, this.success) : null,
-      attrs.sources.length === 0 && !this.form
+      sources.length === 0 && !this.form
         ? m('div', {style: {...STYLES.empty, marginTop: '10px'}}, text('还没有文档知识库。', 'No document knowledge bases yet.'))
-        : m('div', {style: {...STYLES.list, marginTop: '10px'}}, attrs.sources.map(source => this.renderSource(attrs, source))),
+        : m('div', {style: {...STYLES.list, marginTop: '10px'}}, sources.map(source => this.renderSource(attrs, source))),
     ]);
   }
 }

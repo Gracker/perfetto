@@ -82,6 +82,44 @@ describe('knowledge base selectability', () => {
     expect(knowledgeBaseSelectable(collection({rightsAcknowledged: false}))).toBe(false);
     expect(knowledgeBaseSelectable(collection({lifecycleState: 'deleting'}))).toBe(false);
   });
+
+  it('never offers a retired legacy Wiki record', () => {
+    expect(knowledgeBaseSelectable(collection({kind: 'android_internals_wiki', retired: true}))).toBe(false);
+  });
+});
+
+describe('KnowledgeBaseSection retired legacy Wiki records', () => {
+  const wiki = () => collection({sourceId: 'wiki', kind: 'android_internals_wiki', retired: true, displayName: 'Old Wiki'});
+
+  it('lists the record last, marked retired with what replaces it, and offers only Delete', async () => {
+    const {attrs, view} = harness([wiki(), collection()]);
+    (attrs as any).selectedIds = ['wiki'];
+    const tree = view();
+    const text = collectText(tree);
+    expect(text.indexOf('Handbook')).toBeLessThan(text.indexOf('Old Wiki'));
+    expect(text).toContain('Retired: legacy Wiki connector.');
+    expect(text).toContain("Re-register the Wiki's src/ folder as a document knowledge base");
+    // The live collection keeps its actions; the retired card adds only its own Delete.
+    const buttons: any[] = [];
+    (function walk(node: any) {
+      if (!node) return;
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node.tag === 'button') buttons.push(collectText(node).trim());
+      walk(node.children);
+    })(tree);
+    expect(buttons.filter(label => /^(Delete|删除)$/.test(label))).toHaveLength(2);
+    expect(buttons.filter(label => /Rebuild index|重建索引/.test(label))).toHaveLength(1);
+    expect(buttons.filter(label => /Revoke text|撤销正文授权/.test(label))).toHaveLength(1);
+    expect(buttons.filter(label => /Try a search|试搜索/.test(label))).toHaveLength(1);
+    // A retired record is never shown as used by this turn.
+    expect(text).not.toMatch(/Used this turn/);
+
+    api.remove.mockResolvedValue(undefined);
+    const {attrs: retiredAttrs, view: retiredView} = harness([wiki()]);
+    await findButton(retiredView(), /^\s*Delete\s*$|^\s*删除\s*$/).attrs.onclick();
+    expect(api.remove).toHaveBeenCalledWith('http://backend', 'wiki', undefined, PINNED);
+    expect(retiredAttrs.onChanged).toHaveBeenCalled();
+  });
 });
 
 describe('KnowledgeBaseSection registration', () => {

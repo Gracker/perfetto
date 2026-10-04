@@ -4,12 +4,11 @@
 
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
-const api = vi.hoisted(() => ({listCodebases: vi.fn(), listKnowledgeBases: vi.fn(), listWiki: vi.fn()}));
+const api = vi.hoisted(() => ({listCodebases: vi.fn(), listKnowledgeBases: vi.fn()}));
 vi.mock('./codebase_api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./codebase_api')>(),
   listCodebases: api.listCodebases,
   listKnowledgeBases: api.listKnowledgeBases,
-  listExternalKnowledgeSources: api.listWiki,
 }));
 
 import {
@@ -21,7 +20,8 @@ import {
 } from './analysis_context_control';
 import {analysisCatalog, AnalysisCatalog} from './analysis_catalog';
 import {analysisContextWithSourceMode} from './analysis_context';
-import type {CodebaseSummary} from './codebase_api';
+import * as codebaseApi from './codebase_api';
+import type {CodebaseSummary, KnowledgeBaseSummary} from './codebase_api';
 import {setUiLanguagePreference} from './ui_language';
 import type {AnalysisContextSelection} from './types';
 
@@ -47,8 +47,12 @@ function findAll(node: any, predicate: (candidate: any) => boolean, found: any[]
   return findAll(node.children, predicate, found);
 }
 
+const RETIRED_WIKI: KnowledgeBaseSummary = {
+  sourceId: 'wiki', kind: 'android_internals_wiki', retired: true, displayName: 'Old Wiki', rightsAcknowledged: true,
+  sendToProvider: true, indexGeneration: 1, documentCount: 9, hasActiveIndex: true,
+};
+
 beforeEach(() => {
-  api.listWiki.mockReset().mockResolvedValue([]);
   api.listCodebases.mockReset().mockResolvedValue({featureEnabled: true, codebases: [
     codebase(), codebase({codebaseId: 'cb-b', displayName: 'Locked', eligibleForSendToProvider: false}),
     codebase({codebaseId: 'cb-c', displayName: 'Gone', rootAvailable: false, unavailableReason: 'root_missing'}),
@@ -199,6 +203,29 @@ describe('AnalysisContextControl popover', () => {
     }
   });
 
+  it('marks a retired Wiki record, never offers it, and lets a stale selection be cleared', async () => {
+    api.listKnowledgeBases.mockResolvedValue([RETIRED_WIKI]);
+    const wikiBox = (tree: any) => findAll(
+      findAll(tree, node => node.tag === 'label' && collectText(node).includes('Old Wiki')),
+      node => node.tag === 'input',
+    )[0];
+
+    const fresh = await opened();
+    const tree = fresh.view();
+    expect(collectText(tree)).toContain('Retired');
+    expect(collectText(tree)).toContain("Re-register the Wiki's src/ folder as a document knowledge base");
+    expect(wikiBox(tree).attrs).toMatchObject({checked: false, disabled: true});
+
+    const stale = await opened({selection: {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['wiki'],
+      sourceDepth: 'auto'}});
+    const box = wikiBox(stale.view());
+    expect(box.attrs).toMatchObject({checked: true, disabled: false});
+    box.attrs.onchange();
+    expect(stale.attrs.onChange).toHaveBeenLastCalledWith(expect.objectContaining({knowledgeSourceIds: []}));
+    fresh.control.onremove();
+    stale.control.onremove();
+  });
+
   it('is read-only while a run is active and still offers Manage', async () => {
     const {attrs, view} = await opened({disabled: true});
     const inputs = findAll(view(), node => node.tag === 'input');
@@ -241,6 +268,19 @@ describe('shared catalog scope', () => {
     resolveFirst({featureEnabled: true, codebases: [codebase({codebaseId: 'cb-stale'})]});
     await first;
     expect(catalog.read(identity('workspace-a')).codebases.map(item => item.codebaseId)).toEqual(['cb-fresh']);
+  });
+
+  it('reads only codebases and `/knowledge`; the legacy Wiki list is gone', async () => {
+    const catalog = new AnalysisCatalog();
+    api.listKnowledgeBases.mockResolvedValueOnce([RETIRED_WIKI]);
+    const state = await catalog.refresh(identity('workspace-a'));
+    expect(api.listCodebases).toHaveBeenCalledOnce();
+    expect(api.listKnowledgeBases).toHaveBeenCalledOnce();
+    expect(state).not.toHaveProperty('wikiSources');
+    expect(state?.loaded).toEqual({codebases: true, knowledgeBases: true});
+    // A retired record stays listed (for deletion), as `/knowledge` returned it.
+    expect(state?.knowledgeBases.map(item => item.sourceId)).toEqual(['wiki']);
+    expect(Object.keys(codebaseApi).filter(name => /ExternalKnowledgeSource/.test(name))).toEqual([]);
   });
 
   it('keys the credential by a tag, never the secret itself', () => {

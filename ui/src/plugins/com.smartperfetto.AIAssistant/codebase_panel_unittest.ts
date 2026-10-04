@@ -7,12 +7,10 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 const apiMocks = vi.hoisted(() => ({
   acceptPending: vi.fn(),
   listCodebases: vi.fn(),
-  listKnowledge: vi.fn(),
   listKnowledgeBases: vi.fn(),
   authorizeContent: vi.fn(),
   getCodebase: vi.fn(),
   revokeContent: vi.fn(),
-  reindexKnowledge: vi.fn(),
   reindexCodebase: vi.fn(),
   rejectPending: vi.fn(),
 }));
@@ -23,12 +21,10 @@ vi.mock('./codebase_api', async (importOriginal) => {
     ...actual,
     acceptPendingCodebaseGeneration: apiMocks.acceptPending,
     listCodebases: apiMocks.listCodebases,
-    listExternalKnowledgeSources: apiMocks.listKnowledge,
     listKnowledgeBases: apiMocks.listKnowledgeBases,
     authorizeCodebaseContent: apiMocks.authorizeContent,
     getCodebase: apiMocks.getCodebase,
     revokeCodebaseContentConsent: apiMocks.revokeContent,
-    reindexExternalKnowledgeSource: apiMocks.reindexKnowledge,
     reindexCodebase: apiMocks.reindexCodebase,
     rejectPendingCodebaseGeneration: apiMocks.rejectPending,
   };
@@ -40,7 +36,7 @@ import {
   codebaseUsableInMode,
   knowledgeBaseSelectable,
 } from './codebase_api';
-import type {CodebaseSummary, ExternalKnowledgeSourceSummary, KnowledgeBaseSummary} from './codebase_api';
+import type {CodebaseSummary, KnowledgeBaseSummary} from './codebase_api';
 import {
   analysisContextAfterCodebaseDelete,
   analysisContextAfterCodebaseRegistration,
@@ -69,30 +65,10 @@ function codebase(overrides: Partial<CodebaseSummary> = {}): CodebaseSummary {
   };
 }
 
-function source(
-  overrides: Partial<ExternalKnowledgeSourceSummary> = {},
-): ExternalKnowledgeSourceSummary {
-  return {
-    sourceId: 'wiki',
-    kind: 'android_internals_wiki',
-    displayName: 'Android Internals',
-    revision: 'rev-1',
-    contentFingerprint: 'fingerprint-1',
-    dirty: false,
-    license: 'CC-BY-SA',
-    rightsAcknowledged: true,
-    sendToProvider: true,
-    activeGeneration: 'generation-1',
-    indexGeneration: 1,
-    indexedChunkCount: 10,
-    ...overrides,
-  };
-}
-
 /** A `/knowledge` row: the one list every knowledge base's selectability is read from. */
 function knowledgeRow(overrides: Partial<KnowledgeBaseSummary> = {}): KnowledgeBaseSummary {
   return {
-    sourceId: 'wiki', kind: 'android_internals_wiki', displayName: 'Android Internals', rightsAcknowledged: true,
+    sourceId: 'kb', kind: 'document_collection', displayName: 'Handbook', rightsAcknowledged: true,
     sendToProvider: true, indexGeneration: 1, documentCount: 3, hasActiveIndex: true, ...overrides,
   };
 }
@@ -119,13 +95,11 @@ function findNode(node: any, predicate: (candidate: any) => boolean): any {
 
 beforeEach(() => {
   apiMocks.listCodebases.mockReset().mockResolvedValue({featureEnabled: true, codebases: []});
-  apiMocks.listKnowledge.mockReset().mockResolvedValue([]);
   apiMocks.listKnowledgeBases.mockReset().mockResolvedValue([]);
   apiMocks.acceptPending.mockReset().mockResolvedValue(codebase());
   apiMocks.authorizeContent.mockReset().mockResolvedValue(codebase());
   apiMocks.getCodebase.mockReset();
   apiMocks.revokeContent.mockReset().mockResolvedValue(codebase());
-  apiMocks.reindexKnowledge.mockReset().mockResolvedValue(undefined);
   apiMocks.rejectPending.mockReset().mockResolvedValue(codebase());
   apiMocks.reindexCodebase.mockReset().mockResolvedValue({
     chunksAdded: 1,
@@ -133,12 +107,29 @@ beforeEach(() => {
   });
 });
 
-describe('external knowledge active-index contract', () => {
-  it('reads the Wiki through the same predicate as every knowledge base', () => {
+describe('knowledge base active-index contract', () => {
+  it('reads every knowledge base through one predicate', () => {
     expect(knowledgeBaseSelectable(knowledgeRow())).toBe(true);
     expect(knowledgeBaseSelectable(knowledgeRow({hasActiveIndex: false}))).toBe(false);
     expect(knowledgeBaseSelectable(knowledgeRow({sendToProvider: false}))).toBe(false);
     expect(knowledgeBaseSelectable(knowledgeRow({rightsAcknowledged: false}))).toBe(false);
+    expect(knowledgeBaseSelectable(knowledgeRow({lifecycleState: 'deleting'}))).toBe(false);
+  });
+
+  it('never offers a retired legacy Wiki record, however ready it looks', () => {
+    expect(knowledgeBaseSelectable(knowledgeRow({kind: 'android_internals_wiki', retired: true}))).toBe(false);
+  });
+
+  it('drops a stored retired Wiki selection on reconcile instead of sending it', () => {
+    const panel = new CodebasePanel() as any;
+    const onSelectionChange = vi.fn();
+    panel.knowledgeBases = [knowledgeRow(), knowledgeRow({sourceId: 'wiki', kind: 'android_internals_wiki', retired: true})];
+    panel.selection = {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['kb', 'wiki']};
+    panel.onSelectionChange = onSelectionChange;
+
+    panel.reconcileSelection({codebasesLoaded: false, knowledgeLoaded: true});
+
+    expect(onSelectionChange).toHaveBeenCalledWith(expect.objectContaining({knowledgeSourceIds: ['kb']}));
   });
 
   it('removes a stale persisted selection before a run can reach the backend', () => {
@@ -148,7 +139,7 @@ describe('external knowledge active-index contract', () => {
     panel.selection = {
       codeAwareMode: 'off',
       codebaseIds: [],
-      knowledgeSourceIds: ['wiki'],
+      knowledgeSourceIds: ['kb'],
     };
     panel.onSelectionChange = onSelectionChange;
 
@@ -169,7 +160,7 @@ describe('external knowledge active-index contract', () => {
     panel.selection = {
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-a'],
-      knowledgeSourceIds: ['stale-wiki'],
+      knowledgeSourceIds: ['stale-kb'],
     };
     panel.onSelectionChange = onSelectionChange;
 
@@ -213,10 +204,9 @@ describe('document knowledge base selection', () => {
         sendToProvider: true, indexGeneration: 1, documentCount: 2, hasActiveIndex: true},
       {sourceId: 'kb-no-consent', kind: 'document_collection', displayName: 'No consent', rightsAcknowledged: true,
         sendToProvider: false, indexGeneration: 1, documentCount: 2, hasActiveIndex: true},
-      {sourceId: 'wiki', kind: 'android_internals_wiki', displayName: 'Wiki', rightsAcknowledged: true,
+      {sourceId: 'wiki', kind: 'android_internals_wiki', retired: true, displayName: 'Wiki', rightsAcknowledged: true,
         sendToProvider: true, indexGeneration: 1, documentCount: 2, hasActiveIndex: true},
     ]);
-    apiMocks.listKnowledge.mockResolvedValue([source()]);
     const panel = new CodebasePanel() as any;
     const onSelectionChange = vi.fn();
     panel.backendUrl = 'http://backend';
@@ -226,10 +216,10 @@ describe('document knowledge base selection', () => {
     await panel.load();
 
     expect(panel.knowledgeBases.map((item: any) => item.sourceId)).toEqual(['kb-ready', 'kb-no-consent', 'wiki']);
-    // The Wiki row stays in its legacy section; the document section gets collections only.
+    // One section lists every row, the retired Wiki record included (marked there, delete-only).
     const section = findNode(panel.view({attrs: {}}), (node: any) => Array.isArray(node.attrs?.sources));
-    expect(section.attrs.sources.map((item: any) => item.sourceId)).toEqual(['kb-ready', 'kb-no-consent']);
-    expect(onSelectionChange).toHaveBeenCalledWith(expect.objectContaining({knowledgeSourceIds: ['kb-ready', 'wiki']}));
+    expect(section.attrs.sources.map((item: any) => item.sourceId)).toEqual(['kb-ready', 'kb-no-consent', 'wiki']);
+    expect(onSelectionChange).toHaveBeenCalledWith(expect.objectContaining({knowledgeSourceIds: ['kb-ready']}));
   });
 
   it('keeps every knowledge selection when the collection list fails to load', async () => {
@@ -399,7 +389,7 @@ describe('codebase lifecycle contract', () => {
     vi.unstubAllGlobals();
   });
 
-  it('starts no new session for index-only changes: reindex, accepted candidate, knowledge reindex', async () => {
+  it('starts no new session for index-only changes: reindex, accepted candidate', async () => {
     vi.stubGlobal('window', {confirm: vi.fn(() => true)});
     const panel = new CodebasePanel() as any;
     const onAuthorizationChange = vi.fn();
@@ -416,12 +406,9 @@ describe('codebase lifecycle contract', () => {
         enumerationComplete: true, deterministic: true, filesEnumerated: 2, filesSelected: 1,
         bytesSelected: 10, chunksIndexed: 1, truncated: true, complete: false},
     }}), true);
-    apiMocks.reindexKnowledge.mockResolvedValueOnce(undefined);
-    await panel.reindexKnowledgeSource(source());
 
     expect(apiMocks.reindexCodebase).toHaveBeenCalledOnce();
     expect(apiMocks.acceptPending).toHaveBeenCalledOnce();
-    expect(apiMocks.reindexKnowledge).toHaveBeenCalledOnce();
     expect(onAuthorizationChange).not.toHaveBeenCalled();
     expect(onSelectionChange).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
@@ -689,7 +676,6 @@ describe('codebase lifecycle contract', () => {
     panel.featureEnabled = true;
     panel.loading = false;
     panel.codebases = [];
-    panel.knowledgeSources = [];
     panel.selection = {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: []};
     panel.success = 'Saved';
     panel.error = 'Failed';

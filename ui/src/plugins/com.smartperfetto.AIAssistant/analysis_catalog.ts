@@ -4,7 +4,7 @@
 
 /**
  * One in-memory catalog of what a backend partition has registered —
- * codebases, knowledge bases, and the legacy Wiki list — shared by the input
+ * codebases and knowledge bases — shared by the input
  * bar chip, the context popover and the Settings panel. It is keyed by the
  * backend, the credential and the full tenant/workspace/user scope: a
  * different key clears every list at once, and an answer that arrives for an
@@ -15,10 +15,8 @@ import m from 'mithril';
 
 import {
   listCodebases,
-  listExternalKnowledgeSources,
   listKnowledgeBases,
   type CodebaseSummary,
-  type ExternalKnowledgeSourceSummary,
   type KnowledgeBaseSummary,
 } from './codebase_api';
 import {uiText as text} from './ui_language';
@@ -51,12 +49,10 @@ export interface AnalysisCatalogState {
   status: 'empty' | 'loading' | 'ready' | 'error';
   featureEnabled: boolean;
   codebases: CodebaseSummary[];
-  /** Every kind `/knowledge` lists, the Wiki included. */
+  /** Every kind `/knowledge` lists, retired legacy Wiki records included. */
   knowledgeBases: KnowledgeBaseSummary[];
-  /** The legacy Wiki list (`/android-internals/sources`) the Settings panel manages. */
-  wikiSources: ExternalKnowledgeSourceSummary[];
   /** Which lists the latest finished refresh actually read; a failed one keeps its previous rows. */
-  loaded: {codebases: boolean; knowledgeBases: boolean; wikiSources: boolean};
+  loaded: {codebases: boolean; knowledgeBases: boolean};
   errors: string[];
 }
 
@@ -64,8 +60,8 @@ const RETRY_DELAY_MS = 15_000;
 
 function emptyState(key: string): AnalysisCatalogState {
   return {
-    key, status: 'empty', featureEnabled: true, codebases: [], knowledgeBases: [], wikiSources: [],
-    loaded: {codebases: false, knowledgeBases: false, wikiSources: false}, errors: [],
+    key, status: 'empty', featureEnabled: true, codebases: [], knowledgeBases: [],
+    loaded: {codebases: false, knowledgeBases: false}, errors: [],
   };
 }
 
@@ -106,10 +102,9 @@ export class AnalysisCatalog {
     const key = this.state.key;
     const epoch = ++this.epoch;
     this.state = {...this.state, status: 'loading'};
-    const [codebases, knowledgeBases, wikiSources] = await Promise.allSettled([
+    const [codebases, knowledgeBases] = await Promise.allSettled([
       listCodebases(identity.backendUrl, identity.apiKey),
       listKnowledgeBases(identity.backendUrl, identity.apiKey),
-      listExternalKnowledgeSources(identity.backendUrl, identity.apiKey),
     ]);
     if (key !== this.state.key) return undefined;
     if (epoch !== this.epoch) return this.state;
@@ -117,7 +112,6 @@ export class AnalysisCatalog {
     const errors = [
       ...failure(codebases, text('源码列表加载失败', 'Failed to load codebases')),
       ...failure(knowledgeBases, text('知识库列表加载失败', 'Failed to load knowledge bases')),
-      ...failure(wikiSources, text('Wiki 列表加载失败', 'Failed to load the Wiki list')),
     ];
     this.retryAfter = errors.length > 0 ? this.now() + RETRY_DELAY_MS : 0;
     this.state = {
@@ -128,11 +122,9 @@ export class AnalysisCatalog {
       knowledgeBases: knowledgeBases.status === 'fulfilled'
         ? knowledgeBases.value.filter(source => (source.lifecycleState ?? 'active') === 'active')
         : previous.knowledgeBases,
-      wikiSources: wikiSources.status === 'fulfilled' ? wikiSources.value : previous.wikiSources,
       loaded: {
         codebases: codebases.status === 'fulfilled',
         knowledgeBases: knowledgeBases.status === 'fulfilled',
-        wikiSources: wikiSources.status === 'fulfilled',
       },
       errors,
     };
