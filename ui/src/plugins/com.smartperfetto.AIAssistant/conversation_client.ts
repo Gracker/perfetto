@@ -4,10 +4,11 @@
 
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
+import {analysisContextRequestFields} from './analysis_context';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import {uiText} from './ui_language';
 import type {
   AnalysisContextSelection,
-  ConversationSourceEnrichmentUpdate,
   SelectionContext,
 } from './types';
 
@@ -76,6 +77,11 @@ export interface ConversationRunReceipt {
   runId: string;
   isNewSession: boolean;
   traceContextAttached: boolean;
+  /**
+   * Local only: the saved conversation was authorized for another analysis
+   * context, so this run started a new conversation with the same question.
+   */
+  restartedAfterContextChange?: true;
 }
 
 export interface ConversationClientConfig {
@@ -116,6 +122,20 @@ export class ConversationClientError extends Error {
   }
 }
 
+/** The saved conversation was authorized for other sources or knowledge; it cannot continue. */
+export function isAnalysisContextRestartRequired(error: unknown): boolean {
+  return error instanceof ConversationClientError && error.status === 409 &&
+    error.code === 'ANALYSIS_CONTEXT_CHANGED_RESTART_REQUIRED';
+}
+
+/** The one line shown when a turn restarted its conversation for a changed analysis context. */
+export function conversationContextRestartNotice(): string {
+  return uiText(
+    '源码或知识库授权已变化，旧对话不能继续；已用当前选择开始新对话，并重新发送这个问题。',
+    'Source or knowledge authorization changed, so the previous conversation cannot continue. A new conversation started with the current selection and this question was sent again.',
+  );
+}
+
 export function isConversationNotFoundError(error: unknown): boolean {
   return error instanceof ConversationClientError &&
     error.status === 404 &&
@@ -146,11 +166,7 @@ export async function startConversationTurn(
   const url = buildAssistantApiV1Url(config.backendUrl, '/conversation');
   const analysisContext = input.analysisContext;
   const options = {
-    ...(analysisContext ? {
-      codeAwareMode: analysisContext.codeAwareMode,
-      codebaseIds: analysisContext.codebaseIds,
-      knowledgeSourceIds: analysisContext.knowledgeSourceIds,
-    } : {}),
+    ...(analysisContext ? analysisContextRequestFields(analysisContext) : {}),
     ...(input.selectionContext
       ? {selectionContext: input.selectionContext}
       : {}),
@@ -222,12 +238,11 @@ export async function streamConversationRun(
     onEvent?(event: ParsedConversationSseEvent): void;
     /**
      * The finished answer while its semantic review runs. Render it, keep the
-     * run active, and let onPrimaryOutcome replace the same message with the
+     * run active, and let onOutcome replace the same message with the
      * verdict; persist nothing until then.
      */
     onProvisionalAnswer?(answer: {message: string}): void;
-    onPrimaryOutcome?(outcome: ConversationOutcome): void;
-    onSourceEnrichment?(update: ConversationSourceEnrichmentUpdate): void;
+    onOutcome?(outcome: ConversationOutcome): void;
   } = {},
 ): Promise<ConversationOutcome> {
   const url = buildAssistantApiV1Url(
@@ -244,7 +259,6 @@ export async function streamConversationRun(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let primaryOutcome: ConversationOutcome | undefined;
   while (true) {
     const {done, value} = await reader.read();
     buffer += decoder.decode(value, {stream: !done});
@@ -252,54 +266,22 @@ export async function streamConversationRun(
     buffer = parsed.remainder;
     for (const event of parsed.events) {
       options.onEvent?.(event);
-      if (event.type === 'provisional_answer' && !primaryOutcome) {
+      if (event.type === 'provisional_answer') {
         const message = (event.data as {message?: unknown}).message;
         if (typeof message === 'string' && message.trim()) options.onProvisionalAnswer?.({message});
       }
       if (event.type === 'run_completed') {
-        const completed = event.data as {
-          outcome: ConversationOutcome;
-          enrichmentPending?: boolean;
-        };
-        primaryOutcome = completed.outcome;
-        options.onPrimaryOutcome?.(primaryOutcome);
-        if (completed.enrichmentPending !== true) return primaryOutcome;
+        // Terminal: nothing further arrives for the run.
+        const outcome = (event.data as {outcome: ConversationOutcome}).outcome;
+        options.onOutcome?.(outcome);
+        return outcome;
       }
       if (event.type === 'run_failed') {
         throw new Error(String((event.data as {error?: unknown}).error || 'Conversation failed'));
       }
-      if (event.type === 'source_enrichment_started') {
-        options.onSourceEnrichment?.({status: 'running'});
-      }
-      if (event.type === 'source_enrichment_completed') {
-        const completed = event.data as {
-          message?: unknown;
-          evidence?: ConversationEvidenceRef[];
-          metrics?: {searchCalls: number; readCalls: number; durationMs: number};
-        };
-        options.onSourceEnrichment?.({
-          status: 'completed',
-          message: typeof completed.message === 'string' ? completed.message : '',
-          evidence: Array.isArray(completed.evidence) ? completed.evidence : [],
-          metrics: completed.metrics ?? {searchCalls: 0, readCalls: 0, durationMs: 0},
-        });
-        if (primaryOutcome) return primaryOutcome;
-      }
-      if (event.type === 'source_enrichment_failed') {
-        options.onSourceEnrichment?.({
-          status: 'failed',
-          errorCode: String((event.data as {errorCode?: unknown}).errorCode || 'source_enrichment_failed'),
-        });
-        if (primaryOutcome) return primaryOutcome;
-      }
-      if (event.type === 'source_enrichment_cancelled') {
-        options.onSourceEnrichment?.({status: 'cancelled'});
-        if (primaryOutcome) return primaryOutcome;
-      }
     }
     if (done) break;
   }
-  if (primaryOutcome) return primaryOutcome;
   throw new Error('Conversation stream ended before a result was received');
 }
 

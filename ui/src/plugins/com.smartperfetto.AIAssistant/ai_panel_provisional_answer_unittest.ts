@@ -239,7 +239,7 @@ describe('AIPanel conversation deliver first, verify after', () => {
       // The first provisional insert is screen-only.
       expect(value.saveHistory).not.toHaveBeenCalled();
       expect(value.setLoadingState).not.toHaveBeenCalledWith(false);
-      options?.onPrimaryOutcome?.({kind: 'answered', message: 'Answer body.'});
+      options?.onOutcome?.({kind: 'answered', message: 'Answer body.'});
       return {kind: 'answered', message: 'Answer body.'};
     });
     const settlement = deferred();
@@ -306,7 +306,7 @@ describe('AIPanel conversation deliver first, verify after', () => {
       expect(shown().answerDraft).toBeUndefined();
       options?.onEvent?.(draft(' AFTER', 1));
       expect(shown().content).toBe('Answer body.');
-      options?.onPrimaryOutcome?.({kind: 'answered', message: 'Answer body.'});
+      options?.onOutcome?.({kind: 'answered', message: 'Answer body.'});
       return {kind: 'answered', message: 'Answer body.'};
     });
     await value.consumeConversationRun(config, receipt, controller, ordinal, () => true);
@@ -588,7 +588,7 @@ describe('AIPanel conversation deliver first, verify after', () => {
     vi.mocked(streamConversationRun).mockImplementation(async (_config, _receipt, options) => {
       options?.onProvisionalAnswer?.({message: 'Answer body.'});
       await new Promise<void>((resolve) => {finish = resolve;});
-      options?.onPrimaryOutcome?.({kind: 'cancelled', message: ''});
+      options?.onOutcome?.({kind: 'cancelled', message: ''});
       return {kind: 'cancelled', message: ''};
     });
     const run = value.consumeConversationRun(config, receipt, controller, value.conversationRequestOrdinal, () => true);

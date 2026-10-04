@@ -33,12 +33,18 @@ import type {
   AnalysisReceiptV1,
   AnalysisReceiptV2,
   DataEnvelopeDisplay,
+  KnowledgeCitationStatus,
   QueryReviewV1,
+  RequestedSourceDepth,
+  SourceCitationStatus,
+  SourceClaimStatus,
+  SourceDepth,
   UiActionProposalV1,
   SceneTimelineView,
   SceneReportReference,
 } from './generated/data_contract.types';
 import type {ServerRuntimeKind} from './provider_types';
+import type {AnalysisResultPrivateContext} from './analysis_result_snapshot_state';
 import type {UiLanguagePreference} from './ui_language';
 
 export type {
@@ -46,6 +52,7 @@ export type {
   AnalysisReceiptV1,
   AnalysisReceiptV2,
   QueryReviewV1,
+  RequestedSourceDepth,
   UiActionProposalV1,
 };
 
@@ -98,13 +105,13 @@ export interface Message {
   analysisReceipt?: AnalysisReceipt;
   /** Bounded terminal-run source-use metadata; never contains source references or text. */
   sourceUseReceipt?: SourceUseReceipt;
+  /** User turns only: the analysis context this question was sent with. */
+  submittedAnalysisContext?: SubmittedAnalysisContext;
+  /** Counts of selected knowledge delivered and cited; never paths or citations. */
+  knowledgeUseReceipt?: KnowledgeUseReceipt;
   uiActionProposals?: UiActionProposalV1[];
   /** Compact provenance shown only for dedicated conversation answers. */
   conversationEvidence?: Array<{id: string; label: string; source?: string}>;
-  /** Non-blocking source supplement attached after the primary answer. */
-  conversationSourceEnrichment?: ConversationSourceEnrichmentUpdate;
-  /** Deep source supplement for Fast/Auto/Full analysis. */
-  analysisSourceEnrichment?: AnalysisSourceEnrichmentUpdate;
   /** Server-owned verification text, rendered separately from the canonical answer. */
   serverVerificationDetails?: string;
   /** Server-owned partial/failure notice shown before the canonical answer. */
@@ -168,29 +175,42 @@ export interface SourceUseReceipt {
   >;
   coverageComplete?: boolean;
   incompleteReasons?: string[];
+  /** `source_claim_verifier@1` binding strengths (historical results); empty for @2. */
   mechanismStatuses: SourceMechanismStatus[];
+  /** Which verifier judged the run's source claims; absent in receipts stored before @2. */
+  claimVerifier?: 'source_claim_verifier@1' | 'source_claim_verifier@2';
+  /** Admitted references this run returned, and how many of them it read as a body. */
+  referenceCounts?: {located: number; read: number};
+  /** @2: source-dependent claims per product-computed status. */
+  claimStatusCounts?: Partial<Record<SourceClaimStatus, number>>;
+  /** @2: source locations written in the answer, per match status. */
+  citationStatusCounts?: Partial<Record<SourceCitationStatus, number>>;
+  /** @2: some written citations were not read. */
+  citationsTruncated?: boolean;
+  /** How deep the run's source access went, and why. */
+  depth?: SourceUseReceiptDepth;
 }
 
-export type ConversationSourceEnrichmentUpdate =
-  | {status: 'running'}
-  | {
-      status: 'completed';
-      message: string;
-      evidence: Array<{id: string; label: string; source?: string}>;
-      metrics: {searchCalls: number; readCalls: number; durationMs: number};
-    }
-  | {status: 'failed'; errorCode: string}
-  | {status: 'cancelled'};
+export interface SourceUseReceiptDepth {
+  requested: RequestedSourceDepth;
+  effective: SourceDepth;
+  origin: 'requested' | 'intent' | 'budget';
+  cap?: 'metadata_only';
+}
 
-export type AnalysisSourceEnrichmentUpdate =
-  | {status: 'running'}
-  | {
-      status: 'completed';
-      message: string;
-      metrics: {searchCalls: number; readCalls: number; durationMs: number};
-    }
-  | {status: 'failed'; errorCode: string}
-  | {status: 'cancelled'};
+/**
+ * Counts from a run's `knowledge_use@1` record. Never the citations or paths
+ * themselves; an absent receipt means "not recorded", never zero.
+ */
+export interface KnowledgeUseReceipt {
+  schemaVersion: 'knowledge_use_receipt@1';
+  /** Knowledge bases that delivered content in this run. */
+  sourceCount: number;
+  /** Distinct references delivered, summed over those bases. */
+  deliveredReferenceCount: number;
+  citationStatusCounts: Partial<Record<KnowledgeCitationStatus, number>>;
+  citationsTruncated?: boolean;
+}
 
 export interface QuickRunReceipt {
   requestedMode: 'fast' | 'auto' | 'full';
@@ -840,6 +860,8 @@ export interface AnalysisResultPickerItem {
   reportId?: string;
   createdBy?: string;
   visibility: 'private' | 'workspace' | string;
+  /** Private source/knowledge the run could read; `unknown` restricts like private. */
+  privateContext?: AnalysisResultPrivateContext;
   sceneType: string;
   title: string;
   userQuery: string;
@@ -1044,8 +1066,24 @@ export interface AnalysisContextSelection {
   codeAwareMode: CodeAwareAnalysisMode;
   codebaseIds: string[];
   knowledgeSourceIds: string[];
+  /**
+   * How deep this turn may go into source (`auto` when absent). A per-run
+   * budget, never part of the authorization: changing it starts no new session.
+   */
+  sourceDepth?: RequestedSourceDepth;
   /** Explicit local invalidation boundary for source/RAG authorization changes. */
   authorizationEpoch?: number;
+}
+
+/**
+ * What one user turn actually submitted, kept on its message for the bubble
+ * label: display names and counts only, never paths or identifiers.
+ */
+export interface SubmittedAnalysisContext {
+  codeAwareMode: CodeAwareAnalysisMode;
+  codebaseLabels: string[];
+  knowledgeSourceCount: number;
+  sourceDepth: RequestedSourceDepth;
 }
 
 /**

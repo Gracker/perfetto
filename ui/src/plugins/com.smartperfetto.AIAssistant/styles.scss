@@ -161,33 +161,6 @@
   font-size: 12px;
 }
 
-.ai-conversation-source-enrichment {
-  margin-top: 10px;
-  padding-left: 10px;
-  border-left: 2px solid var(--chat-border);
-  color: var(--chat-text-secondary);
-  font-size: 12px;
-
-  summary {
-    cursor: pointer;
-    font-weight: 600;
-  }
-}
-
-.ai-conversation-source-enrichment-content {
-  margin-top: 8px;
-  color: var(--chat-text);
-  font-size: 13px;
-}
-
-.ai-conversation-source-enrichment.is-running {
-  border-left-color: var(--chat-accent, #0b57d0);
-}
-
-.ai-conversation-source-enrichment.is-muted {
-  opacity: 0.8;
-}
-
 .ai-conversation-page-empty {
   max-width: 520px;
   margin: 18vh auto 0;
@@ -7396,5 +7369,147 @@ tr.detail-row {
     font-size: 11px;
     line-height: 1.4;
     white-space: pre;
+  }
+}
+
+// Per-turn analysis context control: the mode selector's trigger and menu
+// (.ai-mode-selector / .ai-mode-trigger / .ai-mode-menu), wider content.
+//
+// Layout: the control is the one flexible item of the input-controls row.
+// The trigger is clipped to the control's box (never wider than it), so it
+// cannot spill under the provider switcher; the summary gives up its width
+// first (ellipsis), then the arrow, and the control never shrinks below the
+// icon. In a narrow row the summary is hidden outright; the trigger's
+// aria-label and title always carry it whole.
+.ai-input-controls {
+  container-type: inline-size;
+  container-name: ai-input-controls;
+}
+
+.ai-context-control {
+  // Not the popover's anchor: the input-controls row is (its container
+  // establishes the containing block), so the popover opens inside the panel.
+  position: static;
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 30px;
+}
+
+.ai-context-control-trigger {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+
+  &.active {
+    color: var(--chat-primary);
+  }
+
+  .pf-icon {
+    flex-shrink: 0;
+  }
+}
+
+.ai-context-control-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+@container ai-input-controls (max-width: 380px) {
+  .ai-context-control-summary,
+  .ai-context-control-arrow {
+    display: none;
+  }
+}
+
+.ai-context-control-popover {
+  left: auto;
+  right: 0;
+  width: min(360px, 100%);
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  color: var(--chat-text);
+  font-size: 12px;
+}
+
+.ai-context-control-section {
+  padding: 8px 0;
+  border-top: 1px solid var(--chat-border);
+
+  &:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+}
+
+.ai-context-control-heading {
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.ai-context-control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.ai-context-control-option,
+.ai-context-control-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  cursor: pointer;
+
+  &.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+.ai-context-control-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-context-control-status,
+.ai-context-control-note {
+  color: var(--chat-text-secondary);
+  font-size: 11px;
+}
+
+.ai-context-control-error {
+  color: var(--chat-error);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.ai-context-control-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--chat-border);
+}
+
+.ai-context-control-button {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  background: var(--chat-bg-secondary);
+  color: var(--chat-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 }

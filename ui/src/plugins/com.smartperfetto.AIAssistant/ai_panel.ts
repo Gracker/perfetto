@@ -19,6 +19,7 @@
 import m from 'mithril';
 import {SettingsModal, type SettingsTab} from './settings_modal';
 import {ProviderQuickSwitcher} from './provider_switcher';
+import {AnalysisContextControl, analysisContextSummary} from './analysis_context_control';
 import {SqlResultTable} from './sql_result_table';
 import type {UserInteraction} from './sql_result_table';
 import {ChartVisualizer} from './chart_visualizer';
@@ -116,11 +117,11 @@ import type {
   TeachingPipelineResult,
   TeachingTrackHint,
   TeachingWarning,
-  ConversationSourceEnrichmentUpdate,
 } from './types';
 import {resolveChatInputKeyAction} from './chat_input';
 import {
   cancelConversationRun,
+  conversationContextRestartNotice,
   conversationTraceContextChanged,
   streamConversationRun,
   type ConversationClientConfig,
@@ -148,7 +149,6 @@ import {
   type StoredConversation,
   saveConversationStore,
   unfinishedProvisionalAnswerMessage,
-  updateConversationMessageSourceEnrichment,
 } from './conversation_store';
 import {ConversationStartQueue} from './conversation_start_queue';
 import {answerVerificationCueText, reviewStopPhaseText} from './answer_verification';
@@ -199,17 +199,25 @@ import {
   isAnalysisResultComparisonRequest,
   resolveAnalysisResultComparisonRequest,
 } from './analysis_result_references';
-import {latestSnapshotFromAnalysisCompletedEvent} from './analysis_result_snapshot_state';
+import {
+  analysisResultShareable,
+  latestSnapshotFromAnalysisCompletedEvent,
+  parseAnalysisResultPrivateContext,
+  PrivateContextNotShareableError,
+  readAnalysisResultVisibilityResponse,
+} from './analysis_result_snapshot_state';
 import {
   buildAgentSseStreamInit,
   buildAgentSseStreamUrl,
 } from './agent_sse_transport';
 import {formatPerfettoSql} from './sql_formatter';
 import {clearComparisonState} from './comparison_state_manager';
-import {handleSSEEvent as handleSSEEventExternal} from './sse_event_handlers';
+import {
+  handleSSEEvent as handleSSEEventExternal,
+  isAgentSseTerminalEvent,
+} from './sse_event_handlers';
 import type {SSEHandlerContext} from './sse_event_handlers';
 import {orderMessagesForDisplay} from './message_order';
-import {hasRunningAnalysisSourceEnrichment} from './analysis_source_enrichment_state';
 import {
   STEP_TO_OVERLAY,
   cleanupOverlayTracks,
@@ -300,24 +308,32 @@ import {
 import {providerRuntimeLabel} from './provider_types';
 import {setUiLanguagePreference, uiOutputLanguage, uiText} from './ui_language';
 import {
+  analysisAuthorizationKey,
   analysisContextAfterBackendError,
+  analysisContextRequestFields,
   analysisContextRequiresFullMode as hasPrivateAnalysisContext,
+  analysisContextScopeKey,
   bumpAnalysisContextAuthorizationEpoch,
   EMPTY_ANALYSIS_CONTEXT,
   loadAnalysisContext,
   normalizeAnalysisContext,
-  selectedCodebaseLabels,
-  type SelectedCodebaseLabelDescriptor,
+  sameAnalysisAuthorization,
   sameAnalysisContext,
   saveAnalysisContext,
-  sourceUseReceiptPresentation,
+  submittedAnalysisContext,
 } from './analysis_context';
+import {
+  knowledgeUseReceiptPresentation,
+  memoizedReceiptPresentation,
+  type ReceiptPresentation,
+  sourceUseReceiptPresentation,
+} from './source_use_receipt';
 import {
   RUN_CONFLICT_RETRY_INTERVAL_MS,
   RUN_CONFLICT_WAIT_MS,
   isTransientRunConflict,
 } from './analysis_run_conflict';
-import {listCodebases} from './codebase_api';
+import {analysisCatalog, catalogIdentityKey, type CatalogIdentity} from './analysis_catalog';
 import type {
   SmartDisplayedScene,
   SmartScenePreviewPayload,
@@ -326,8 +342,6 @@ import type {
 } from './types';
 
 const DEBUG_AI_PANEL = false;
-const MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS = 32;
-const ANALYSIS_CONTEXT_CODEBASE_RETRY_DELAY_MS = 15_000;
 // Above the backend review-stop watchdog (15 s by default), which bounds the
 // only stop that blocks: a force stop waiting for the run to commit.
 const CONVERSATION_STOP_REQUEST_TIMEOUT_MS = 25_000;
@@ -786,15 +800,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private applicationUpdatePollTimer: ReturnType<typeof setTimeout> | null =
     null;
   private applicationUpdatePollAttempts = 0;
-  private analysisContextCodebaseDescriptors = new Map<
-    string,
-    SelectedCodebaseLabelDescriptor
-  >();
-  private analysisContextCodebaseIdentityKey = '';
-  private analysisContextCodebaseRequestKey = '';
-  private analysisContextCodebaseFailedRequestKey = '';
-  private analysisContextCodebaseRetryAfterMs = 0;
-  private analysisContextCodebaseEpoch = 0;
 
   // Delegate to mermaidRenderer module
   private async renderMermaidInElement(container: HTMLElement): Promise<void> {
@@ -3641,11 +3646,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const canSendFromCurrentSurface =
       isInRpcMode || this.state.analysisMode === 'conversation';
     const analysisInputLocked = this.isAnalysisInputLocked();
-    const analysisSourceEnrichmentRunning = hasRunningAnalysisSourceEnrichment(
-      this.state.messages,
-    );
-    const conversationPrimaryRunning = this.conversationPrimaryRunning();
-    const conversationEnrichmentRunning = this.conversationEnrichmentRunning();
+    const conversationRunning = this.conversationRunning();
+    // Names for the context chip and the labels questions record.
+    this.ensureAnalysisContextCodebaseLabels();
 
     // 获取当前 trace 的所有 sessions（只在 RPC 模式下有意义）
     const sessions = isInRpcMode ? this.getCurrentTraceSessions() : [];
@@ -4277,84 +4280,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         )),
                                       ])
                                     : null,
-                                  msg.conversationSourceEnrichment
-                                    ? msg.conversationSourceEnrichment.status === 'completed'
-                                      ? m('details.ai-conversation-source-enrichment', {open: true}, [
-                                          m('summary', uiText(
-                                            `源码补充 · ${msg.conversationSourceEnrichment.metrics.searchCalls} 次搜索 / ${msg.conversationSourceEnrichment.metrics.readCalls} 次读取`,
-                                            `Source supplement · ${msg.conversationSourceEnrichment.metrics.searchCalls} search / ${msg.conversationSourceEnrichment.metrics.readCalls} reads`,
-                                          )),
-                                          m('div.ai-conversation-source-enrichment-content', {
-                                            oncreate: ({dom}) => {
-                                              (dom as HTMLElement).innerHTML = formatMessage(
-                                                msg.conversationSourceEnrichment?.status === 'completed'
-                                                  ? msg.conversationSourceEnrichment.message
-                                                  : '',
-                                              );
-                                            },
-                                            onupdate: ({dom}) => {
-                                              (dom as HTMLElement).innerHTML = formatMessage(
-                                                msg.conversationSourceEnrichment?.status === 'completed'
-                                                  ? msg.conversationSourceEnrichment.message
-                                                  : '',
-                                              );
-                                            },
-                                          }),
-                                        ])
-                                      : m('div.ai-conversation-source-enrichment.is-muted',
-                                          msg.conversationSourceEnrichment.status === 'running'
-                                            ? uiText(
-                                                '源码补充中，不影响上方主结论…',
-                                                'Adding source context without blocking the primary answer…',
-                                              )
-                                            : msg.conversationSourceEnrichment.status === 'failed'
-                                              ? uiText(
-                                                  '源码补充未在预算内完成，主结论不受影响。',
-                                                  'Source enrichment did not finish within budget; the primary answer is unchanged.',
-                                                )
-                                              : uiText('源码补充已取消。', 'Source enrichment was cancelled.'))
-                                    : null,
-                                  msg.analysisSourceEnrichment
-                                    ? msg.analysisSourceEnrichment.status === 'completed'
-                                      ? m('details.ai-conversation-source-enrichment', {open: true}, [
-                                          m('summary', uiText(
-                                            `深度源码补充 · ${msg.analysisSourceEnrichment.metrics.searchCalls} 次搜索 / ${msg.analysisSourceEnrichment.metrics.readCalls} 次读取`,
-                                            `Deep source supplement · ${msg.analysisSourceEnrichment.metrics.searchCalls} searches / ${msg.analysisSourceEnrichment.metrics.readCalls} reads`,
-                                          )),
-                                          m('div.ai-conversation-source-enrichment-content', {
-                                            oncreate: ({dom}) => {
-                                              (dom as HTMLElement).innerHTML = formatMessage(
-                                                msg.analysisSourceEnrichment?.status === 'completed'
-                                                  ? msg.analysisSourceEnrichment.message
-                                                  : '',
-                                              );
-                                            },
-                                            onupdate: ({dom}) => {
-                                              (dom as HTMLElement).innerHTML = formatMessage(
-                                                msg.analysisSourceEnrichment?.status === 'completed'
-                                                  ? msg.analysisSourceEnrichment.message
-                                                  : '',
-                                              );
-                                            },
-                                          }),
-                                        ])
-                                      : m('div.ai-conversation-source-enrichment.is-muted',
-                                          msg.analysisSourceEnrichment.status === 'running'
-                                            ? uiText(
-                                                '主结论已完成，正在独立进行深度源码补充…',
-                                                'Primary analysis is complete; deep source enrichment is running separately…',
-                                              )
-                                            : msg.analysisSourceEnrichment.status === 'failed'
-                                              ? uiText(
-                                                  '深度源码补充失败，主结论不受影响。',
-                                                  'Deep source enrichment failed; the primary analysis is unchanged.',
-                                                )
-                                              : uiText(
-                                                  '深度源码补充已取消，主结论不受影响。',
-                                                  'Deep source enrichment was cancelled; the primary analysis is unchanged.',
-                                                ))
-                                    : null,
-
                                   // Detailed HTML report link and authenticated download action.
                                   msg.reportUrl
                                     ? m('div.ai-report-link', [
@@ -4398,9 +4323,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                   this.renderQuickRunReceipt(msg.quickRun),
                                   this.renderAnalysisReceipt(
                                     msg.analysisReceipt,
+                                    msg.knowledgeUseReceipt !== undefined,
                                   ),
                                   this.renderSourceUseReceipt(
                                     msg.sourceUseReceipt,
+                                  ),
+                                  this.renderKnowledgeUseReceipt(
+                                    msg.knowledgeUseReceipt,
                                   ),
                                   this.renderExternalIssueReporting(msg),
                                   this.renderUiActionProposals(
@@ -4854,6 +4783,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     ],
                                   )
                                 : null,
+                              // The analysis context this question was actually sent with.
+                              msg.role === 'user' && msg.submittedAnalysisContext
+                                ? m('div.ai-model-badge.ai-submitted-context', {
+                                    title: uiText('这个问题发送时使用的源码与知识库', 'Source and knowledge this question was sent with'),
+                                  }, [
+                                    m('i.pf-icon', {style: {fontSize: '11px', verticalAlign: 'middle'}}, 'source'),
+                                    m('span', ` ${analysisContextSummary(msg.submittedAnalysisContext)}`),
+                                  ])
+                                : null,
                             ]), // end ai-bubble-wrapper
 
                             // Message actions — available during normal input,
@@ -5010,7 +4948,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               this.state.analysisMode === 'conversation' ||
               this.state.messages.length > 0
                 ? m('div.ai-input-area', [
-                    this.renderAnalysisContextIndicator(),
                     this.state.analysisMode === 'conversation'
                       ? m('div.ai-context-indicator', [
                           m('i.pf-icon', this.state.backendTraceId ? 'attachment' : 'chat'),
@@ -5097,6 +5034,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         this.renderPresetQuestionButtons(isInRpcMode),
                         m('div.ai-input-control-spacer'),
                         this.renderAnalysisModeSelector(),
+                        m(AnalysisContextControl, {
+                          ...this.analysisCatalogIdentity(),
+                          selection: this.state.analysisContext,
+                          disabled: this.isAnalysisIdentityLocked(),
+                          providerName: this.serverStatus.activeProvider?.name,
+                          onChange: (selection: AnalysisContextSelection) =>
+                            this.onAnalysisContextChange(selection),
+                          onManage: () => this.openSettings('codebases'),
+                        }),
                         m(ProviderQuickSwitcher, {
                           backendUrl: this.state.settings.backendUrl,
                           apiKey:
@@ -5135,26 +5081,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           : [
                               // The input stays open during a conversation run (a new
                               // message redirects it), so its stop lives here.
-                              conversationPrimaryRunning
+                              conversationRunning
                                 ? m(
                                     'button.ai-send-btn.ai-stop-btn',
                                     {
                                       onclick: () => this.cancelAnalysis(),
                                       title: this.conversationStopTitle(),
                                       disabled: this.conversationStopPending(),
-                                    },
-                                    m('i.pf-icon', 'stop_circle'),
-                                  )
-                                : analysisSourceEnrichmentRunning || conversationEnrichmentRunning
-                                ? m(
-                                    'button.ai-send-btn.ai-stop-btn',
-                                    {
-                                      onclick: () => this.cancelAnalysis(),
-                                      title: uiText(
-                                        '停止深度源码补充',
-                                        'Stop deep source enrichment',
-                                      ),
-                                      disabled: conversationEnrichmentRunning && this.conversationStopPending(),
                                     },
                                     m('i.pf-icon', 'stop_circle'),
                                   )
@@ -5728,6 +5661,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private renderAnalysisReceipt(
     receipt?: Message['analysisReceipt'],
+    knowledgeRecorded = false,
   ): m.Children {
     if (!receipt) return null;
     const gateLabel = {
@@ -5777,6 +5711,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             ),
           )
         : null,
+      this.renderKnowledgeReferenceChip(
+        receipt.nonEvidenceContext.knowledgeReferenceCount,
+        knowledgeRecorded,
+      ),
       m(
         `span.ai-quick-run-chip.${gateClass[receipt.qualityGates.claimVerification]}`,
         uiText(
@@ -5794,13 +5732,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     ]);
   }
 
-  private renderSourceUseReceipt(
-    receipt?: Message['sourceUseReceipt'],
+  /**
+   * Knowledge references the run delivered (background, never evidence). An
+   * absent count is "not recorded", never zero; it is shown only when the run
+   * recorded knowledge use at all.
+   */
+  private renderKnowledgeReferenceChip(
+    count: number | undefined,
+    knowledgeRecorded: boolean,
   ): m.Children {
-    if (!receipt || receipt.schemaVersion !== 'source_use_receipt@1') {
-      return null;
+    if (Number.isSafeInteger(count) && Number(count) >= 0) {
+      return m('span.ai-quick-run-chip', uiText(`知识库引用 ${count}`, `Knowledge references ${count}`));
     }
-    const presentation = sourceUseReceiptPresentation(receipt);
+    return knowledgeRecorded
+      ? m('span.ai-quick-run-chip.muted', uiText('知识库引用 未记录', 'Knowledge references not recorded'))
+      : null;
+  }
+
+  private renderReceiptDetails(label: string, presentation: ReceiptPresentation | undefined): m.Children {
     if (!presentation) return null;
     return m('details.ai-source-use-receipt', [
       m('summary', {style: {
@@ -5808,10 +5757,26 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         display: 'flex',
         alignItems: 'center',
         cursor: 'pointer',
-      }}, `${uiText('源码使用', 'Source use')} · ${presentation.summary}`),
+      }}, `${label} · ${presentation.summary}`),
       m('div.ai-quick-run-receipt', presentation.details.map(detail =>
         m('span.ai-quick-run-chip', detail))),
     ]);
+  }
+
+  private renderSourceUseReceipt(
+    receipt?: Message['sourceUseReceipt'],
+  ): m.Children {
+    if (!receipt || receipt.schemaVersion !== 'source_use_receipt@1') return null;
+    return this.renderReceiptDetails(uiText('源码使用', 'Source use'),
+      memoizedReceiptPresentation(receipt, sourceUseReceiptPresentation));
+  }
+
+  private renderKnowledgeUseReceipt(
+    receipt?: Message['knowledgeUseReceipt'],
+  ): m.Children {
+    if (!receipt) return null;
+    return this.renderReceiptDetails(uiText('知识库使用', 'Knowledge use'),
+      memoizedReceiptPresentation(receipt, knowledgeUseReceiptPresentation));
   }
 
   private renderExternalIssueReporting(message: Message): m.Children {
@@ -6679,51 +6644,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     });
   }
 
-  private renderAnalysisContextIndicator(): m.Children {
-    this.ensureAnalysisContextCodebaseLabels();
-    const selection = normalizeAnalysisContext(this.state.analysisContext);
-    const sourceIds =
-      selection.codeAwareMode === 'off' ? [] : selection.codebaseIds;
-    const sourceLabels = selectedCodebaseLabels(
-      sourceIds,
-      [...this.analysisContextCodebaseDescriptors.values()],
-    );
-    const sourceLabelText = sourceLabels.map((item) => item.label).join(', ');
-    const parts = [
-      sourceIds.length > 0
-        ? uiText(
-            `源码 ${sourceLabelText}（${selection.codeAwareMode === 'provider_send' ? '脱敏正文' : '仅元数据'}）`,
-            `Source ${sourceLabelText} (${selection.codeAwareMode === 'provider_send' ? 'redacted content' : 'metadata only'})`,
-          )
-        : '',
-      selection.knowledgeSourceIds.length > 0
-        ? uiText(
-            `外部知识 ${selection.knowledgeSourceIds.length}`,
-            `${selection.knowledgeSourceIds.length} external knowledge source(s)`,
-          )
-        : '',
-    ].filter(Boolean);
-    if (parts.length === 0) return null;
-    const identifiers = [
-      ...sourceLabels.map((item) => item.label),
-      ...selection.knowledgeSourceIds,
-    ].join(', ');
-    return m(
-      'div.ai-context-indicator.ai-analysis-context-indicator',
-      {
-        title: uiText(
-          `本次请求将使用：${identifiers}。源码模式：${selection.codeAwareMode}`,
-          `This request will use: ${identifiers}. Source mode: ${selection.codeAwareMode}.`,
-        ),
-      },
-      [
-        m('i.pf-icon', 'verified_user'),
-        uiText('分析上下文：', 'Analysis context: '),
-        parts.join(' · '),
-      ],
-    );
-  }
-
   /** Render the analysis mode selector inside the input bar. */
   private renderAnalysisModeSelector(): m.Vnode {
     const current = this.state.analysisMode;
@@ -7146,141 +7066,37 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     this.ensureAnalysisContextCodebaseLabels();
   }
 
-  private analysisContextCodebaseScopeKey(): string {
-    const context = getSmartPerfettoRequestContext();
-    return [
-      this.state.settings.backendUrl.replace(/\/+$/, ''),
-      context.tenantId,
-      context.workspaceId,
-      context.userId,
-    ].join('\0');
+  /** Backend, credential and full scope of the shared codebase/knowledge catalog. */
+  private analysisCatalogIdentity(): CatalogIdentity {
+    return {
+      backendUrl: this.state.settings.backendUrl,
+      apiKey: this.state.settings.backendApiKey || undefined,
+      scopeKey: analysisContextScopeKey(this.state.settings.backendUrl, getSmartPerfettoRequestContext()),
+    };
   }
 
-  private resetAnalysisContextCodebaseCache(identityKey: string): void {
-    this.analysisContextCodebaseDescriptors.clear();
-    this.analysisContextCodebaseRequestKey = '';
-    this.analysisContextCodebaseFailedRequestKey = '';
-    this.analysisContextCodebaseRetryAfterMs = 0;
-    this.analysisContextCodebaseIdentityKey = identityKey;
-    this.analysisContextCodebaseEpoch++;
-  }
-
-  private analysisContextCodebaseRequestIsCurrent(
-    epoch: number,
-    backendUrl: string,
-    apiKey: string,
-    identityKey: string,
-    requestKey: string,
-  ): boolean {
-    return epoch === this.analysisContextCodebaseEpoch &&
-      backendUrl === this.state.settings.backendUrl &&
-      apiKey === (this.state.settings.backendApiKey || '') &&
-      identityKey === this.analysisContextCodebaseIdentityKey &&
-      requestKey === this.currentAnalysisContextCodebaseRequestKey(identityKey);
-  }
-
-  private currentAnalysisContextCodebaseRequestKey(identityKey: string): string {
-    const selection = normalizeAnalysisContext(this.state.analysisContext);
-    const selectedIds = selection.codeAwareMode === 'off'
-      ? []
-      : selection.codebaseIds.slice(0, MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS);
-    return selectedIds.length > 0
-      ? `${identityKey}\0${selectedIds.join('\0')}`
-      : '';
-  }
-
+  /** Names for the chip and the labels questions record: load the catalog once a codebase is selected. */
   private ensureAnalysisContextCodebaseLabels(): void {
-    const identityKey = this.analysisContextCodebaseScopeKey();
-    if (identityKey !== this.analysisContextCodebaseIdentityKey) {
-      this.resetAnalysisContextCodebaseCache(identityKey);
-    }
-
     const selection = normalizeAnalysisContext(this.state.analysisContext);
-    const selectedIds = selection.codeAwareMode === 'off'
-      ? []
-      : selection.codebaseIds.slice(0, MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS);
-    if (selectedIds.length === 0) {
-      if (
-        this.analysisContextCodebaseDescriptors.size > 0 ||
-        this.analysisContextCodebaseRequestKey
-      ) {
-        this.analysisContextCodebaseDescriptors.clear();
-        this.analysisContextCodebaseRequestKey = '';
-        this.analysisContextCodebaseFailedRequestKey = '';
-        this.analysisContextCodebaseRetryAfterMs = 0;
-        this.analysisContextCodebaseEpoch++;
-      }
-      return;
-    }
-
-    const missingSelectedDescriptor = selectedIds.some(
-      (id) => !this.analysisContextCodebaseDescriptors.has(id),
-    );
-    const requestKey = this.currentAnalysisContextCodebaseRequestKey(identityKey);
-    if (
-      requestKey === this.analysisContextCodebaseFailedRequestKey &&
-      Date.now() < this.analysisContextCodebaseRetryAfterMs
-    ) {
-      return;
-    }
-    if (
-      !missingSelectedDescriptor ||
-      requestKey === this.analysisContextCodebaseRequestKey
-    ) {
-      return;
-    }
-
-    const epoch = ++this.analysisContextCodebaseEpoch;
-    const backendUrl = this.state.settings.backendUrl;
-    const apiKey = this.state.settings.backendApiKey || '';
-    this.analysisContextCodebaseRequestKey = requestKey;
-    void listCodebases(backendUrl, apiKey)
-      .then(({codebases}) => {
-        if (!this.analysisContextCodebaseRequestIsCurrent(
-          epoch,
-          backendUrl,
-          apiKey,
-          identityKey,
-          requestKey,
-        )) {
-          return;
-        }
-        const selected = new Set(selectedIds);
-        this.analysisContextCodebaseDescriptors = new Map(
-          codebases
-            .filter((codebase) => selected.has(codebase.codebaseId))
-            .slice(0, MAX_ANALYSIS_CONTEXT_CODEBASE_LABELS)
-            .map((codebase) => [codebase.codebaseId, {
-              codebaseId: codebase.codebaseId,
-              displayName: codebase.displayName,
-            }]),
-        );
-        this.analysisContextCodebaseFailedRequestKey = '';
-        this.analysisContextCodebaseRetryAfterMs = 0;
-        m.redraw();
-      })
-      .catch(() => {
-        if (!this.analysisContextCodebaseRequestIsCurrent(
-          epoch,
-          backendUrl,
-          apiKey,
-          identityKey,
-          requestKey,
-        )) {
-          return;
-        }
-        this.analysisContextCodebaseRequestKey = '';
-        this.analysisContextCodebaseFailedRequestKey = requestKey;
-        this.analysisContextCodebaseRetryAfterMs =
-          Date.now() + ANALYSIS_CONTEXT_CODEBASE_RETRY_DELAY_MS;
-        m.redraw();
-      });
+    if (selection.codeAwareMode === 'off' || selection.codebaseIds.length === 0) return;
+    analysisCatalog.ensure(this.analysisCatalogIdentity());
   }
 
   private onAnalysisContextChange(selection: AnalysisContextSelection): void {
     if (this.isAnalysisIdentityLocked()) return;
     const normalized = normalizeAnalysisContext(selection);
     if (sameAnalysisContext(normalized, this.state.analysisContext)) return;
+    if (sameAnalysisAuthorization(normalized, this.state.analysisContext)) {
+      // Source depth is a per-run budget: keep the session, save the preference.
+      this.state.analysisContext = normalized;
+      saveAnalysisContext(
+        this.state.settings.backendUrl,
+        getSmartPerfettoRequestContext(),
+        normalized,
+      );
+      m.redraw();
+      return;
+    }
     this.applyAnalysisContextSelection(normalized);
   }
 
@@ -7320,17 +7136,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     );
   }
 
+  /** The context label a model-backed question records. */
+  private submittedContext(): Pick<Message, 'submittedAnalysisContext'> {
+    const submitted = submittedAnalysisContext(
+      this.state.analysisContext,
+      analysisCatalog.read(this.analysisCatalogIdentity()).codebases,
+    );
+    return submitted ? {submittedAnalysisContext: submitted} : {};
+  }
+
   private analysisContextRequestOptions(): Record<string, unknown> {
-    const selection = normalizeAnalysisContext(this.state.analysisContext);
     return {
       outputLanguage: uiOutputLanguage(),
-      codeAwareMode: selection.codeAwareMode,
-      ...(selection.codeAwareMode !== 'off' && selection.codebaseIds.length > 0
-        ? {codebaseIds: selection.codebaseIds}
-        : {}),
-      ...(selection.knowledgeSourceIds.length > 0
-        ? {knowledgeSourceIds: selection.knowledgeSourceIds}
-        : {}),
+      ...analysisContextRequestFields(this.state.analysisContext),
     };
   }
 
@@ -7367,12 +7185,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     analysisRequest: AnalysisRequestToken,
   ): Promise<Response> {
     const originalContext = normalizeAnalysisContext(this.state.analysisContext);
-    const originalScope = this.analysisContextCodebaseScopeKey();
+    const originalScope = catalogIdentityKey(this.analysisCatalogIdentity());
     const originalAuthority = this.currentOidcAuthorityKey();
     const originalCredential = this.state.settings.backendApiKey;
     const isCurrent = () =>
       this.analysisRequestCoordinator.disposition(analysisRequest) === 'active' &&
-      this.analysisContextCodebaseScopeKey() === originalScope &&
+      catalogIdentityKey(this.analysisCatalogIdentity()) === originalScope &&
       this.currentOidcAuthorityKey() === originalAuthority &&
       this.state.settings.backendApiKey === originalCredential &&
       sameAnalysisContext(this.state.analysisContext, originalContext);
@@ -8395,6 +8213,8 @@ Click ⚙️ to configure backend connection.`,
       ...(hasPrivateAnalysisContext(this.state.analysisContext)
         ? {privateContent: true}
         : {}),
+      // Local commands use no analysis context.
+      ...(input.startsWith('/') ? {} : this.submittedContext()),
     });
 
     this.state.input = '';
@@ -10253,7 +10073,7 @@ Click ⚙️ to configure backend connection.`,
       return Promise.reject(new ConversationRestoreInvalidatedError());
     }
     const traceId = this.state.backendTraceId;
-    const contextKey = JSON.stringify(this.state.analysisContext);
+    const contextKey = analysisAuthorizationKey(this.state.analysisContext);
     if (authority !== this.conversationRestoreAuthority ||
         config.apiKey !== this.conversationRestoreCredential ||
         traceId !== this.conversationRestoreTraceId ||
@@ -10286,7 +10106,7 @@ Click ⚙️ to configure backend connection.`,
       conversationAuthorityKey(this.state.settings.backendUrl) === authority &&
       this.state.settings.backendApiKey === config.apiKey &&
       this.state.backendTraceId === traceId &&
-      JSON.stringify(this.state.analysisContext) === contextKey;
+      analysisAuthorizationKey(this.state.analysisContext) === contextKey;
     const promise = restoreConversationStore(config, isCurrent).then(store => {
       if (!isCurrent()) throw new ConversationRestoreInvalidatedError();
       this.conversationHistoryHydrated = true;
@@ -10298,7 +10118,6 @@ Click ⚙️ to configure backend connection.`,
           content: conversationMessageContent(message),
           timestamp: message.timestamp, privateContent: message.privateContent,
           conversationEvidence: message.evidence,
-          conversationSourceEnrichment: message.sourceEnrichment,
         });
         knownIds.add(message.id);
         this.conversationMessageIds.add(message.id);
@@ -10365,7 +10184,7 @@ Click ⚙️ to configure backend connection.`,
     this.conversationRestoreAuthority = conversationAuthorityKey(this.state.settings.backendUrl);
     this.conversationRestoreCredential = this.state.settings.backendApiKey;
     this.conversationRestoreTraceId = this.state.backendTraceId;
-    this.conversationRestoreContextKey = JSON.stringify(this.state.analysisContext);
+    this.conversationRestoreContextKey = analysisAuthorizationKey(this.state.analysisContext);
     this.conversationAbortController?.abort();
     this.conversationAbortController = undefined;
     this.getConversationStartQueue().reset();
@@ -10398,12 +10217,12 @@ Click ⚙️ to configure backend connection.`,
       apiKey: this.state.settings.backendApiKey,
     };
     const requestAuthority = conversationAuthorityKey(config.backendUrl);
-    const contextKey = JSON.stringify(this.state.analysisContext);
+    const contextKey = analysisAuthorizationKey(this.state.analysisContext);
     const requestIsCurrent = () => {
       try {
         return conversationAuthorityKey(this.state.settings.backendUrl) === requestAuthority &&
           this.state.settings.backendApiKey === config.apiKey &&
-          JSON.stringify(this.state.analysisContext) === contextKey;
+          analysisAuthorizationKey(this.state.analysisContext) === contextKey;
       } catch {
         return false;
       }
@@ -10436,8 +10255,7 @@ Click ⚙️ to configure backend connection.`,
       });
       store = loadConversationStoreForUpdate(config.backendUrl);
     }
-    // A new primary conversation owns Stop even while an older Agent's
-    // detached source supplement is still finishing its SSE stream.
+    // A new primary conversation owns Stop.
     this.activeAgentRequest = undefined;
     const ordinal = ++this.conversationRequestOrdinal;
     const controller = new AbortController();
@@ -10480,6 +10298,14 @@ Click ⚙️ to configure backend connection.`,
         return;
       }
       this.activeConversationRun = receipt;
+      if (receipt.restartedAfterContextChange) {
+        this.addMessage({
+          id: this.generateId(),
+          role: 'system',
+          content: conversationContextRestartNotice(),
+          timestamp: Date.now(),
+        });
+      }
       store = loadConversationStoreForUpdate(config.backendUrl);
       saveConversationStore({
         ...store,
@@ -10555,7 +10381,6 @@ Click ⚙️ to configure backend connection.`,
       this.conversationAbortController === controller && this.activeConversationRun === receipt &&
       ordinal === this.conversationRequestOrdinal && restoreOrdinal === this.conversationRestoreOrdinal &&
       requestIsCurrent();
-    let conversationAssistantMessage: Message | undefined;
     // One deterministic id per run: the answer draft, the provisional answer
     // and the final outcome are the same message, and the restored history
     // uses it too.
@@ -10615,9 +10440,9 @@ Click ⚙️ to configure backend connection.`,
         this.conversationMessageIds.add(messageId);
         m.redraw();
       },
-      onPrimaryOutcome: (primaryOutcome) => {
+      onOutcome: (turnOutcome) => {
         if (!isCurrentStream()) return;
-        if (primaryOutcome.kind === 'cancelled') {
+        if (turnOutcome.kind === 'cancelled') {
           this.showConversationCancelledNotice(messageId);
           settleProvisional('unfinished');
           settlement?.resolve();
@@ -10628,13 +10453,13 @@ Click ⚙️ to configure backend connection.`,
           id: messageId,
           role: 'assistant' as const,
           content: conversationMessageContent({
-            id: receipt.runId, role: 'assistant', content: primaryOutcome.message,
-            timestamp: Date.now(), turn: conversationOutcomeTurn(primaryOutcome, receipt.runId),
-            recoveryStatus: primaryOutcome.recoveryStatus,
+            id: receipt.runId, role: 'assistant', content: turnOutcome.message,
+            timestamp: Date.now(), turn: conversationOutcomeTurn(turnOutcome, receipt.runId),
+            recoveryStatus: turnOutcome.recoveryStatus,
           }),
           timestamp: Date.now(),
           privateContent: restored || hasPrivateAnalysisContext(this.state.analysisContext),
-          conversationEvidence: primaryOutcome.evidence,
+          conversationEvidence: turnOutcome.evidence,
           answerVerification: undefined,
           answerDraft: undefined,
         };
@@ -10643,40 +10468,26 @@ Click ⚙️ to configure backend connection.`,
         // no pending or unfinished copy of it is left behind.
         if (existing) this.updateMessage(messageId, assistantMessage);
         else this.addMessage(assistantMessage);
-        conversationAssistantMessage = this.state.messages.find(message => message.id === messageId) ?? assistantMessage;
-        // The verdict landed: a waiting next question may start now, without
-        // waiting for source enrichment to finish.
+        // The verdict landed: a waiting next question may start now.
         settlement?.resolve();
         appendConversationMessage(config.backendUrl, {
           id: assistantMessage.id,
           role: 'assistant',
-          content: primaryOutcome.message,
+          content: turnOutcome.message,
           timestamp: assistantMessage.timestamp,
           privateContent: assistantMessage.privateContent,
-          turn: conversationOutcomeTurn(primaryOutcome, receipt.runId),
-          recoveryStatus: primaryOutcome.recoveryStatus,
-          evidence: primaryOutcome.evidence,
-          outcomeKind: primaryOutcome.kind,
-          ...(primaryOutcome.kind === 'recommend_full'
-            ? {fullHandoff: primaryOutcome.handoff}
+          turn: conversationOutcomeTurn(turnOutcome, receipt.runId),
+          recoveryStatus: turnOutcome.recoveryStatus,
+          evidence: turnOutcome.evidence,
+          outcomeKind: turnOutcome.kind,
+          ...(turnOutcome.kind === 'recommend_full'
+            ? {fullHandoff: turnOutcome.handoff}
             : {}),
         }, receipt.sessionId);
-        this.pendingFullAnalysisHandoff = primaryOutcome.kind === 'recommend_full'
-          ? primaryOutcome.handoff
+        this.pendingFullAnalysisHandoff = turnOutcome.kind === 'recommend_full'
+          ? turnOutcome.handoff
           : undefined;
         this.setLoadingState(false);
-        m.redraw();
-      },
-      onSourceEnrichment: (sourceEnrichment: ConversationSourceEnrichmentUpdate) => {
-        if (!isCurrentStream()) return;
-        const assistantMessage = conversationAssistantMessage;
-        if (!assistantMessage) return;
-        assistantMessage.conversationSourceEnrichment = sourceEnrichment;
-        updateConversationMessageSourceEnrichment(
-          config.backendUrl,
-          assistantMessage.id,
-          sourceEnrichment,
-        );
         m.redraw();
       },
       onEvent: (event) => {
@@ -10776,17 +10587,8 @@ Click ⚙️ to configure backend connection.`,
   }
 
   /** A conversation run is executing (or starting) and has not delivered its verdict. */
-  private conversationPrimaryRunning(): boolean {
+  private conversationRunning(): boolean {
     return this.state.isLoading && this.isConversationExecutionActive();
-  }
-
-  /** The verdict landed and the run's stream still carries its source enrichment. */
-  private conversationEnrichmentRunning(): boolean {
-    const active = this.activeConversationRun;
-    if (this.state.isLoading || !active) return false;
-    const messageId = conversationMessageId(active.sessionId, active.runId, 'assistant');
-    return this.state.messages.some(
-      (message) => message.id === messageId && message.conversationSourceEnrichment?.status === 'running');
   }
 
   /** A stop for the current conversation run is already on its way; another press would be a second stop. */
@@ -10844,12 +10646,6 @@ Click ⚙️ to configure backend connection.`,
       return;
     }
     if (this.conversationStopPending()) return;
-    if (this.conversationEnrichmentRunning()) {
-      // The backend cancels the finished run's enrichment; the stream reports it and ends.
-      await this.requestConversationStop(active);
-      if (this.activeConversationRun === active) m.redraw();
-      return;
-    }
     const controller = this.conversationAbortController;
     // After a provisional answer the stop ends only the review. Before it, the
     // backend decides: when its provisional answer is already on the way the
@@ -11246,6 +11042,7 @@ Click ⚙️ to configure backend connection.`,
           `Smart Analysis: ${boundSelection?.label || 'selected scenes'}`,
         ),
         timestamp: Date.now(),
+        ...this.submittedContext(),
       });
     }
 
@@ -11540,15 +11337,6 @@ Click ⚙️ to configure backend connection.`,
     this.analysisCancellationPending = false;
     this.setLoadingState(false);
     this.consumeRedirectIntent();
-    if (status === 'source_enrichment_cancelled') {
-      this.handleSSEEvent('analysis_source_enrichment_cancelled', {
-        reason,
-      });
-      updateAISharedState({status: 'completed', currentPhase: ''});
-      this.saveCurrentSession();
-      m.redraw();
-      return;
-    }
     if (status !== 'cancelled') {
       updateAISharedState({
         status: status === 'completed' ? 'completed' : 'error',
@@ -11912,20 +11700,7 @@ Click ⚙️ to configure backend connection.`,
                     }
                     this.handleSSEEvent(eventType, data);
 
-                    const sourceEnrichmentPending =
-                      eventType === 'analysis_completed' &&
-                      data?.data?.sourceEnrichmentPending === true;
-                    // Primary completion may be followed by a detached source
-                    // supplement. Keep the stream open only for that explicit case.
-                    if (
-                      (eventType === 'analysis_completed' && !sourceEnrichmentPending) ||
-                      eventType === 'analysis_source_enrichment_completed' ||
-                      eventType === 'analysis_source_enrichment_failed' ||
-                      eventType === 'analysis_source_enrichment_cancelled' ||
-                      eventType === 'analysis_cancelled' ||
-                      eventType === 'error' ||
-                      eventType === 'end'
-                    ) {
+                    if (isAgentSseTerminalEvent(eventType)) {
                       this.flushSessionSave();
                       this.cancelSSEConnection();
                       m.redraw();
@@ -15103,6 +14878,7 @@ Click ⚙️ to configure backend connection.`,
         typeof item.createdBy === 'string' ? item.createdBy : undefined,
       visibility:
         typeof item.visibility === 'string' ? item.visibility : 'private',
+      privateContext: parseAnalysisResultPrivateContext(item.privateContext),
       sceneType:
         typeof item.sceneType === 'string' ? item.sceneType : 'general',
       title: typeof item.title === 'string' ? item.title : item.id,
@@ -15189,12 +14965,19 @@ Click ⚙️ to configure backend connection.`,
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({visibility}),
       });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      let snapshot: unknown;
+      try {
+        snapshot = await readAnalysisResultVisibilityResponse(response);
+      } catch (error) {
+        if (error instanceof PrivateContextNotShareableError) {
+          // The backend knows the run read private material: keep it local and hide Share.
+          this.availableAnalysisResults = this.availableAnalysisResults.map(
+            (item) => item.id === snapshotId ? {...item, privateContext: 'unknown'} : item,
+          );
+        }
+        throw error;
       }
-
-      const data = await response.json();
-      const updated = this.normalizeAnalysisResultItem(data.snapshot);
+      const updated = this.normalizeAnalysisResultItem(snapshot);
       if (!updated) {
         await this.fetchAnalysisResults();
         return;
@@ -16037,7 +15820,7 @@ Click ⚙️ to configure backend connection.`,
               isSimilarityLoading ? 'hourglass_empty' : 'travel_explore',
             ),
           ),
-          item.visibility === 'private'
+          analysisResultShareable(item)
             ? m(
                 'button.ai-result-picker-role-btn',
                 {
@@ -16051,7 +15834,16 @@ Click ⚙️ to configure backend connection.`,
                 },
                 isVisibilityUpdating ? '…' : uiText('共享', 'Share'),
               )
-            : null,
+            : item.visibility === 'private'
+              ? m(
+                  'span.ai-result-picker-pill',
+                  {title: uiText(
+                    '读取过私有源码或知识库（或无法确认）的分析只对创建者可见',
+                    'An analysis that read (or may have read) private source or knowledge stays with its creator',
+                  )},
+                  uiText('仅自己可见', 'Only you'),
+                )
+              : null,
         ]),
       ],
     );

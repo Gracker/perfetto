@@ -7,7 +7,6 @@ import {uiText} from './ui_language';
 export interface PrivateMessageStorageMarker {
   content: string;
   privateContent?: boolean;
-  analysisSourceEnrichment?: {status: string};
   serverVerificationDetails?: string;
   serverVerificationNotice?: string;
   serverVerificationBinding?: unknown;
@@ -41,13 +40,7 @@ export function projectMessageForStorage<T extends PrivateMessageStorageMarker>(
       }
     : message;
   // A reload cannot resume a review; a stored answer is never still pending.
-  const settled = projected.answerVerification === 'pending'
+  return projected.answerVerification === 'pending'
     ? {...projected, answerVerification: 'unfinished' as const}
     : projected;
-  return settled.analysisSourceEnrichment?.status === 'running'
-    ? {
-        ...settled,
-        analysisSourceEnrichment: {status: 'cancelled'},
-      } as T
-    : settled;
 }

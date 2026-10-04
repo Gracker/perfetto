@@ -8,8 +8,11 @@ const apiMocks = vi.hoisted(() => ({
   acceptPending: vi.fn(),
   listCodebases: vi.fn(),
   listKnowledge: vi.fn(),
-  authorizeExtensions: vi.fn(),
-  authorizeSelection: vi.fn(),
+  listKnowledgeBases: vi.fn(),
+  authorizeContent: vi.fn(),
+  getCodebase: vi.fn(),
+  revokeContent: vi.fn(),
+  reindexKnowledge: vi.fn(),
   reindexCodebase: vi.fn(),
   rejectPending: vi.fn(),
 }));
@@ -21,29 +24,35 @@ vi.mock('./codebase_api', async (importOriginal) => {
     acceptPendingCodebaseGeneration: apiMocks.acceptPending,
     listCodebases: apiMocks.listCodebases,
     listExternalKnowledgeSources: apiMocks.listKnowledge,
-    authorizeAvailableCodebaseExtensions: apiMocks.authorizeExtensions,
-    authorizeCurrentCodebaseSelection: apiMocks.authorizeSelection,
+    listKnowledgeBases: apiMocks.listKnowledgeBases,
+    authorizeCodebaseContent: apiMocks.authorizeContent,
+    getCodebase: apiMocks.getCodebase,
+    revokeCodebaseContentConsent: apiMocks.revokeContent,
+    reindexExternalKnowledgeSource: apiMocks.reindexKnowledge,
     reindexCodebase: apiMocks.reindexCodebase,
     rejectPendingCodebaseGeneration: apiMocks.rejectPending,
   };
 });
 
-import {CodebaseApiError} from './codebase_api';
-import type {CodebaseSummary, ExternalKnowledgeSourceSummary} from './codebase_api';
+import {
+  CodebaseApiError,
+  codebaseUnavailableReasonText,
+  codebaseUsableInMode,
+  knowledgeBaseSelectable,
+} from './codebase_api';
+import type {CodebaseSummary, ExternalKnowledgeSourceSummary, KnowledgeBaseSummary} from './codebase_api';
 import {
   analysisContextAfterCodebaseDelete,
   analysisContextAfterCodebaseRegistration,
   codebaseIndexFailureMessage,
   analysisContextForFeatureAvailability,
-  codebaseAvailableForOnDemandAccess,
   codebaseDeletionPending,
-  codebaseCanAuthorizeAvailableExtensions,
-  codebaseCanAuthorizeCurrentSelection,
   codebaseHasActiveIndex,
+  codebaseNeedsContentAuthorization,
   CodebasePanel,
-  externalKnowledgeSourceHasActiveIndex,
   optionalIndexCopyForActiveRoot,
 } from './codebase_panel';
+import {ContentDisclosureReview} from './content_disclosure_review';
 
 function codebase(overrides: Partial<CodebaseSummary> = {}): CodebaseSummary {
   return {
@@ -80,6 +89,14 @@ function source(
   };
 }
 
+/** A `/knowledge` row: the one list every knowledge base's selectability is read from. */
+function knowledgeRow(overrides: Partial<KnowledgeBaseSummary> = {}): KnowledgeBaseSummary {
+  return {
+    sourceId: 'wiki', kind: 'android_internals_wiki', displayName: 'Android Internals', rightsAcknowledged: true,
+    sendToProvider: true, indexGeneration: 1, documentCount: 3, hasActiveIndex: true, ...overrides,
+  };
+}
+
 function collectText(node: any): string {
   if (node === null || node === undefined) return '';
   if (typeof node === 'string') return node;
@@ -103,9 +120,12 @@ function findNode(node: any, predicate: (candidate: any) => boolean): any {
 beforeEach(() => {
   apiMocks.listCodebases.mockReset().mockResolvedValue({featureEnabled: true, codebases: []});
   apiMocks.listKnowledge.mockReset().mockResolvedValue([]);
+  apiMocks.listKnowledgeBases.mockReset().mockResolvedValue([]);
   apiMocks.acceptPending.mockReset().mockResolvedValue(codebase());
-  apiMocks.authorizeExtensions.mockReset().mockResolvedValue(codebase());
-  apiMocks.authorizeSelection.mockReset().mockResolvedValue(codebase());
+  apiMocks.authorizeContent.mockReset().mockResolvedValue(codebase());
+  apiMocks.getCodebase.mockReset();
+  apiMocks.revokeContent.mockReset().mockResolvedValue(codebase());
+  apiMocks.reindexKnowledge.mockReset().mockResolvedValue(undefined);
   apiMocks.rejectPending.mockReset().mockResolvedValue(codebase());
   apiMocks.reindexCodebase.mockReset().mockResolvedValue({
     chunksAdded: 1,
@@ -114,18 +134,17 @@ beforeEach(() => {
 });
 
 describe('external knowledge active-index contract', () => {
-  it('requires consent, active generation, fingerprint, and indexed chunks', () => {
-    expect(externalKnowledgeSourceHasActiveIndex(source())).toBe(true);
-    expect(externalKnowledgeSourceHasActiveIndex(source({contentFingerprint: ''}))).toBe(false);
-    expect(externalKnowledgeSourceHasActiveIndex(source({indexedChunkCount: 0}))).toBe(false);
-    expect(externalKnowledgeSourceHasActiveIndex(source({activeGeneration: undefined}))).toBe(false);
-    expect(externalKnowledgeSourceHasActiveIndex(source({sendToProvider: false}))).toBe(false);
+  it('reads the Wiki through the same predicate as every knowledge base', () => {
+    expect(knowledgeBaseSelectable(knowledgeRow())).toBe(true);
+    expect(knowledgeBaseSelectable(knowledgeRow({hasActiveIndex: false}))).toBe(false);
+    expect(knowledgeBaseSelectable(knowledgeRow({sendToProvider: false}))).toBe(false);
+    expect(knowledgeBaseSelectable(knowledgeRow({rightsAcknowledged: false}))).toBe(false);
   });
 
   it('removes a stale persisted selection before a run can reach the backend', () => {
     const panel = new CodebasePanel() as any;
     const onSelectionChange = vi.fn();
-    panel.knowledgeSources = [source({indexedChunkCount: 0})];
+    panel.knowledgeBases = [knowledgeRow({hasActiveIndex: false})];
     panel.selection = {
       codeAwareMode: 'off',
       codebaseIds: [],
@@ -139,13 +158,14 @@ describe('external knowledge active-index contract', () => {
       codeAwareMode: 'off',
       codebaseIds: [],
       knowledgeSourceIds: [],
+      sourceDepth: 'auto',
     });
   });
 
   it('does not clear source selection when only the codebase request failed', () => {
     const panel = new CodebasePanel() as any;
     const onSelectionChange = vi.fn();
-    panel.knowledgeSources = [source()];
+    panel.knowledgeBases = [knowledgeRow()];
     panel.selection = {
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-a'],
@@ -159,6 +179,7 @@ describe('external knowledge active-index contract', () => {
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-a'],
       knowledgeSourceIds: [],
+      sourceDepth: 'auto',
     });
   });
 
@@ -180,7 +201,47 @@ describe('external knowledge active-index contract', () => {
       codeAwareMode: 'provider_send',
       codebaseIds: [],
       knowledgeSourceIds: ['wiki'],
+      sourceDepth: 'auto',
     });
+  });
+});
+
+describe('document knowledge base selection', () => {
+  it('keeps selectable document collections and drops unusable ones on reconcile', async () => {
+    apiMocks.listKnowledgeBases.mockResolvedValue([
+      {sourceId: 'kb-ready', kind: 'document_collection', displayName: 'Ready', rightsAcknowledged: true,
+        sendToProvider: true, indexGeneration: 1, documentCount: 2, hasActiveIndex: true},
+      {sourceId: 'kb-no-consent', kind: 'document_collection', displayName: 'No consent', rightsAcknowledged: true,
+        sendToProvider: false, indexGeneration: 1, documentCount: 2, hasActiveIndex: true},
+      {sourceId: 'wiki', kind: 'android_internals_wiki', displayName: 'Wiki', rightsAcknowledged: true,
+        sendToProvider: true, indexGeneration: 1, documentCount: 2, hasActiveIndex: true},
+    ]);
+    apiMocks.listKnowledge.mockResolvedValue([source()]);
+    const panel = new CodebasePanel() as any;
+    const onSelectionChange = vi.fn();
+    panel.backendUrl = 'http://backend';
+    panel.onSelectionChange = onSelectionChange;
+    panel.selection = {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['kb-ready', 'kb-no-consent', 'wiki']};
+
+    await panel.load();
+
+    expect(panel.knowledgeBases.map((item: any) => item.sourceId)).toEqual(['kb-ready', 'kb-no-consent', 'wiki']);
+    // The Wiki row stays in its legacy section; the document section gets collections only.
+    const section = findNode(panel.view({attrs: {}}), (node: any) => Array.isArray(node.attrs?.sources));
+    expect(section.attrs.sources.map((item: any) => item.sourceId)).toEqual(['kb-ready', 'kb-no-consent']);
+    expect(onSelectionChange).toHaveBeenCalledWith(expect.objectContaining({knowledgeSourceIds: ['kb-ready', 'wiki']}));
+  });
+
+  it('keeps every knowledge selection when the collection list fails to load', async () => {
+    apiMocks.listKnowledgeBases.mockRejectedValue(new Error('knowledge list failed'));
+    const panel = new CodebasePanel() as any;
+    const onSelectionChange = vi.fn();
+    panel.backendUrl = 'http://backend';
+    panel.onSelectionChange = onSelectionChange;
+    panel.selection = {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['kb-ready']};
+    await panel.load();
+    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(panel.error).toContain('knowledge list failed');
   });
 });
 
@@ -199,40 +260,42 @@ describe('codebase lifecycle contract', () => {
 
   it('never selects a registration that has entered deletion', () => {
     expect(codebaseHasActiveIndex(codebase())).toBe(true);
-    expect(codebaseAvailableForOnDemandAccess(codebase())).toBe(true);
-    expect(codebaseAvailableForOnDemandAccess(codebase({chunkCount: 0}))).toBe(true);
-    expect(codebaseAvailableForOnDemandAccess(codebase({rootAvailable: false}))).toBe(false);
-    expect(codebaseAvailableForOnDemandAccess(codebase({lifecycleState: 'deleting'}))).toBe(false);
+    expect(codebaseUsableInMode(codebase(), 'metadata_only')).toBe(true);
+    expect(codebaseUsableInMode(codebase({chunkCount: 0}), 'metadata_only')).toBe(true);
+    expect(codebaseUsableInMode(codebase({rootAvailable: false}), 'metadata_only')).toBe(false);
+    expect(codebaseUsableInMode(codebase({lifecycleState: 'deleting'}), 'metadata_only')).toBe(false);
+    expect(codebaseUsableInMode(codebase(), 'provider_send')).toBe(false);
+    expect(codebaseUsableInMode(codebase({eligibleForSendToProvider: true}), 'provider_send')).toBe(true);
     expect(codebaseDeletionPending(codebase({lifecycleState: 'deleting'}))).toBe(true);
     expect(codebaseDeletionPending(codebase())).toBe(false);
     expect(codebaseHasActiveIndex(codebase({chunkCount: 0}))).toBe(false);
   });
 
-  it('offers new-language authorization only after provider-send consent exists', () => {
-    expect(codebaseCanAuthorizeAvailableExtensions(codebase({
-      eligibleForSendToProvider: false,
-      availableNotConsentedExtensions: ['.dart'],
-    }))).toBe(false);
-    expect(codebaseCanAuthorizeAvailableExtensions(codebase({
-      eligibleForSendToProvider: true,
-      availableNotConsentedExtensions: ['.dart'],
-    }))).toBe(true);
+  it('offers the one content action only when granting would change consent', () => {
+    const disclosure = {token: 't1', includePrefixes: [], excludeGlobs: [], extensions: ['.kt']};
+    expect(codebaseNeedsContentAuthorization(codebase({contentDisclosure: disclosure}))).toBe(true);
+    expect(codebaseNeedsContentAuthorization(codebase({contentDisclosure: disclosure,
+      eligibleForSendToProvider: true, providerGrantScopeCurrent: true}))).toBe(false);
+    expect(codebaseNeedsContentAuthorization(codebase({contentDisclosure: disclosure,
+      eligibleForSendToProvider: true, providerGrantScopeCurrent: false}))).toBe(true);
+    expect(codebaseNeedsContentAuthorization(codebase({contentDisclosure: disclosure,
+      eligibleForSendToProvider: true, availableNotConsentedExtensions: ['.dart']}))).toBe(true);
+    expect(codebaseNeedsContentAuthorization(codebase({contentDisclosure: disclosure,
+      lifecycleState: 'deleting'}))).toBe(false);
+    // Without the server's disclosure there is nothing truthful to show.
+    expect(codebaseNeedsContentAuthorization(codebase())).toBe(false);
   });
 
-  it('offers current-selection authorization only for an active consented mismatch', () => {
-    expect(codebaseCanAuthorizeCurrentSelection(codebase({
-      eligibleForSendToProvider: true,
-      providerGrantScopeCurrent: false,
-    }))).toBe(true);
-    expect(codebaseCanAuthorizeCurrentSelection(codebase({
-      eligibleForSendToProvider: false,
-      providerGrantScopeCurrent: false,
-    }))).toBe(false);
-    expect(codebaseCanAuthorizeCurrentSelection(codebase({
-      lifecycleState: 'deleting',
-      eligibleForSendToProvider: true,
-      providerGrantScopeCurrent: false,
-    }))).toBe(false);
+  it('maps every unavailable-root reason to its own wording without paths', () => {
+    const reasons = ['deleting', 'root_missing', 'root_identity_changed', 'root_not_directory',
+      'outside_allowlist', 'unreadable'] as const;
+    const texts = reasons.map(reason => codebaseUnavailableReasonText(reason));
+    expect(new Set(texts).size).toBe(reasons.length);
+    expect(codebaseUnavailableReasonText(undefined)).toMatch(/unavailable|不可访问/);
+    const panel = new CodebasePanel() as any;
+    panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: [], knowledgeSourceIds: []};
+    expect(collectText(panel.renderCodebase(codebase({rootAvailable: false, unavailableReason: 'root_identity_changed'}))))
+      .toContain(codebaseUnavailableReasonText('root_identity_changed'));
   });
 
   it('keeps an unindexed but available source selected for on-demand access', () => {
@@ -270,6 +333,7 @@ describe('codebase lifecycle contract', () => {
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-b'],
       knowledgeSourceIds: ['wiki-a'],
+      sourceDepth: 'auto',
       authorizationEpoch: 5,
     });
   });
@@ -291,11 +355,12 @@ describe('codebase lifecycle contract', () => {
       codeAwareMode: 'provider_send',
       codebaseIds: ['codebase-a'],
       knowledgeSourceIds: [],
+      sourceDepth: 'auto',
       authorizationEpoch: 10,
     });
   });
 
-  it('clears pending and authorization busy state before reloading', async () => {
+  it('clears pending busy state before reloading', async () => {
     vi.stubGlobal('window', {confirm: vi.fn(() => true)});
     const panel = new CodebasePanel() as any;
     panel.backendUrl = 'http://backend';
@@ -331,76 +396,115 @@ describe('codebase lifecycle contract', () => {
     await panel.resolvePendingGeneration(pending, true);
     expect(panel.pendingAction).toBeNull();
     expect(panel.reindexingId).toBeNull();
-
-    await panel.authorizeAvailableExtensions(codebase({
-      eligibleForSendToProvider: true,
-      availableNotConsentedExtensions: ['.dart'],
-    }));
-    expect(panel.extensionAuthorizationId).toBeNull();
-    expect(panel.updatingConsentId).toBeNull();
     vi.unstubAllGlobals();
   });
 
-  it('requires informed confirmation before authorizing named extensions', async () => {
-    const confirm = vi.fn(() => false);
-    vi.stubGlobal('window', {confirm});
-    const panel = new CodebasePanel() as any;
-    panel.backendUrl = 'http://backend';
-    panel.loadEpoch = 1;
-
-    await panel.authorizeAvailableExtensions(codebase({
-      eligibleForSendToProvider: true,
-      availableNotConsentedExtensions: ['.dart', '.swift'],
-    }));
-
-    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/\.dart.*\.swift|\.swift.*\.dart/s));
-    expect(apiMocks.authorizeExtensions).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
-
-  it('requires informed confirmation before authorizing the current path scope', async () => {
-    const confirm = vi.fn(() => false);
-    vi.stubGlobal('window', {confirm});
-    const panel = new CodebasePanel() as any;
-    panel.backendUrl = 'http://backend';
-    panel.loadEpoch = 1;
-
-    await panel.authorizeCurrentSelection(codebase({
-      eligibleForSendToProvider: true,
-      providerGrantScopeCurrent: false,
-      pathFilters: ['app', 'lib'],
-      excludeGlobs: ['**/generated/**'],
-    }));
-
-    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/app.*lib.*generated/s));
-    expect(apiMocks.authorizeSelection).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
-
-  it('emits the explicit parent authorization callback after the real mutation succeeds', async () => {
+  it('starts no new session for index-only changes: reindex, accepted candidate, knowledge reindex', async () => {
     vi.stubGlobal('window', {confirm: vi.fn(() => true)});
     const panel = new CodebasePanel() as any;
     const onAuthorizationChange = vi.fn();
+    const onSelectionChange = vi.fn();
     panel.backendUrl = 'http://backend';
-    panel.scopeKey = 'scope';
-    panel.selection = {
-      codeAwareMode: 'provider_send',
-      codebaseIds: ['codebase-a'],
-      knowledgeSourceIds: [],
-      authorizationEpoch: 2,
-    };
     panel.onAuthorizationChange = onAuthorizationChange;
-    panel.load = vi.fn(async () => {});
+    panel.onSelectionChange = onSelectionChange;
+    panel.load = vi.fn(async () => true);
 
-    await panel.authorizeCurrentSelection(codebase({
-      eligibleForSendToProvider: true,
-      providerGrantScopeCurrent: false,
-      pathFilters: ['src'],
-    }));
+    await panel.reindex(codebase());
+    await panel.resolvePendingGeneration(codebase({pendingGeneration: {
+      candidateGenerationId: 'candidate', chunkCount: 1, createdAt: 1,
+      coverage: {selectionPolicyRevision: 1, enumerationBackend: 'ripgrep', backendFidelity: 'exact',
+        enumerationComplete: true, deterministic: true, filesEnumerated: 2, filesSelected: 1,
+        bytesSelected: 10, chunksIndexed: 1, truncated: true, complete: false},
+    }}), true);
+    apiMocks.reindexKnowledge.mockResolvedValueOnce(undefined);
+    await panel.reindexKnowledgeSource(source());
 
-    expect(apiMocks.authorizeSelection).toHaveBeenCalledOnce();
-    expect(onAuthorizationChange).toHaveBeenCalledOnce();
+    expect(apiMocks.reindexCodebase).toHaveBeenCalledOnce();
+    expect(apiMocks.acceptPending).toHaveBeenCalledOnce();
+    expect(apiMocks.reindexKnowledge).toHaveBeenCalledOnce();
+    expect(onAuthorizationChange).not.toHaveBeenCalled();
+    expect(onSelectionChange).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  describe('content disclosure review', () => {
+    const disclosure = (token: string, extensions = ['.kt']) =>
+      ({token, includePrefixes: ['app'], excludeGlobs: ['**/generated/**'], extensions});
+    function reviewPanel() {
+      const panel = new CodebasePanel() as any;
+      panel.backendUrl = 'http://backend';
+      panel.scopeKey = 'scope';
+      panel.selection = {codeAwareMode: 'provider_send', codebaseIds: [], knowledgeSourceIds: []};
+      panel.onAuthorizationChange = vi.fn();
+      return panel;
+    }
+
+    /** Open the review from the card's button and mount its component as the panel renders it. */
+    function openReview(panel: any, shown: CodebaseSummary) {
+      findNode(panel.renderCodebase(shown), (node: any) =>
+        node.tag === 'button' && /Allow source text|允许发送正文/.test(collectText(node))).attrs.onclick();
+      const vnode = findNode(panel.renderCodebase(shown), (node: any) => typeof node.attrs?.onGranted === 'function');
+      const review = new ContentDisclosureReview() as any;
+      review.oninit({attrs: vnode.attrs});
+      const confirm = () => findNode(review.view({attrs: vnode.attrs}), (node: any) =>
+        node.tag === 'button' && /^\s*Allow\s*$|确认允许/.test(collectText(node))).attrs.onclick();
+      return {review, vnode, confirm};
+    }
+
+    it('grants with the token of the snapshot shown, even after the list refreshes', async () => {
+      const panel = reviewPanel();
+      const original = codebase({contentDisclosure: disclosure('token-shown')});
+      panel.codebases = [original];
+      panel.load = vi.fn(async () => true);
+      const {review, vnode, confirm} = openReview(panel, original);
+      const shown = collectText(review.view({attrs: vnode.attrs}));
+      expect(shown).toMatch(/app/);
+      expect(shown).toMatch(/generated/);
+      expect(shown).toMatch(/\.kt/);
+      // A background refresh brings a newer disclosure; the review keeps what was shown.
+      panel.codebases = [codebase({contentDisclosure: disclosure('token-newer', ['.kt', '.dart'])})];
+      original.contentDisclosure!.token = 'mutated-after-open';
+
+      await confirm();
+
+      expect(apiMocks.authorizeContent).toHaveBeenCalledWith('http://backend', 'codebase-a', 'token-shown', undefined);
+      expect(panel.onAuthorizationChange).toHaveBeenCalledOnce();
+      expect(panel.reviewingCodebaseId).toBeNull();
+      expect(panel.load).toHaveBeenCalled();
+    });
+
+    it('re-shows the refreshed disclosure after a stale refusal and never retries on its own', async () => {
+      const panel = reviewPanel();
+      const original = codebase({contentDisclosure: disclosure('token-old')});
+      panel.codebases = [original];
+      const {review, vnode, confirm} = openReview(panel, original);
+      apiMocks.authorizeContent.mockRejectedValueOnce(
+        new CodebaseApiError('stale', 'CODEBASE_CONSENT_DISCLOSURE_STALE', undefined, 409));
+      apiMocks.getCodebase.mockResolvedValue(codebase({contentDisclosure: disclosure('token-fresh', ['.kt', '.dart'])}));
+
+      await confirm();
+
+      expect(apiMocks.authorizeContent).toHaveBeenCalledOnce();
+      expect(panel.onAuthorizationChange).not.toHaveBeenCalled();
+      expect(review.disclosure).toMatchObject({token: 'token-fresh'});
+      const shown = collectText(review.view({attrs: vnode.attrs}));
+      expect(shown).toMatch(/\.dart/);
+      expect(shown).toMatch(/changed|变化/);
+      expect(panel.reviewingCodebaseId).toBe('codebase-a');
+    });
+
+    it('revokes with an explicit false and shows no grant action without a disclosure', async () => {
+      const panel = reviewPanel();
+      panel.load = vi.fn(async () => true);
+      const consented = codebase({eligibleForSendToProvider: true, providerGrantScopeCurrent: true,
+        contentDisclosure: disclosure('t')});
+      const text = collectText(panel.renderCodebase(consented));
+      expect(text).toMatch(/Revoke source text|撤销正文授权/);
+      expect(text).not.toMatch(/Allow source text|允许发送正文/);
+      await panel.revokeCodebaseContent(consented);
+      expect(apiMocks.revokeContent).toHaveBeenCalledWith('http://backend', 'codebase-a', undefined);
+      expect(panel.onAuthorizationChange).toHaveBeenCalledOnce();
+    });
   });
 
   it('renders degraded coverage, maintenance guidance, extension names, and live feedback', () => {
@@ -434,7 +538,7 @@ describe('codebase lifecycle contract', () => {
 
     expect(renderedText).toContain('.dart');
     expect(renderedText).toContain('.swift');
-    expect(renderedText).toMatch(/current selection|当前选择/i);
+    expect(renderedText).toMatch(/current scope|当前源码范围/i);
     expect(renderedText).toMatch(/1\s*\/\s*2/);
     expect(renderedText).toMatch(/file_budget/);
     expect(renderedText).toMatch(/rebuild|重建/i);
@@ -478,7 +582,7 @@ describe('codebase lifecycle contract', () => {
 
     expect(renderedText).not.toMatch(/Accept limited index|接受受限索引/);
     expect(renderedText).not.toMatch(/Reject candidate|丢弃候选/);
-    expect(renderedText).not.toMatch(/Authorize languages|授权新语言/);
+    expect(renderedText).not.toMatch(/Allow source text|允许发送正文/);
   });
 
   it('describes a staged candidate instead of claiming reindex activation', async () => {
@@ -574,7 +678,7 @@ describe('codebase lifecycle contract', () => {
       },
     }));
 
-    for (const label of ['Update optional index', 'Revoke content access', 'Delete codebase']) {
+    for (const label of ['Update optional index', 'Revoke source text', 'Delete codebase']) {
       expect(findNode(rendered, node =>
         node.tag === 'button' && collectText(node).includes(label))?.attrs.disabled).toBe(true);
     }
@@ -647,6 +751,7 @@ describe('add and use source selection', () => {
       codeAwareMode: 'off', codebaseIds: ['codebase-a'], knowledgeSourceIds: ['wiki'],
     }, newSource(), previous())).toEqual({
       codeAwareMode: 'provider_send', codebaseIds: ['new-source'], knowledgeSourceIds: ['wiki'],
+      sourceDepth: 'auto',
     });
   });
   it('retains valid authorized selection in provider-send mode', () => {
@@ -659,6 +764,7 @@ describe('add and use source selection', () => {
       codeAwareMode: 'metadata_only', codebaseIds: ['no-consent'], knowledgeSourceIds: [],
     }, codebase({codebaseId: 'new-source', eligibleForSendToProvider: false}), previous())).toEqual({
       codeAwareMode: 'metadata_only', codebaseIds: ['new-source', 'no-consent'], knowledgeSourceIds: [],
+      sourceDepth: 'auto',
     });
   });
   it('does not claim provider access when registration did not receive consent', () => {
@@ -760,8 +866,7 @@ it('fails closed after permission loss even when refreshing the list also fails'
   panel.selection = {codeAwareMode: 'metadata_only', codebaseIds: ['codebase-a'], knowledgeSourceIds: []};
   await panel.reindex(codebase());
   expect(panel.selection.codebaseIds).toEqual([]);
-  const checkbox = findNode(panel.renderCodebase(codebase()), node => node.tag === 'input');
-  expect(checkbox.attrs.disabled).toBe(true);
+  expect(collectText(panel.renderCodebase(codebase()))).toMatch(/currently unavailable|不可访问/);
   expect(panel.error).toContain('unavailable');
   apiMocks.listCodebases.mockResolvedValue({featureEnabled: true, codebases: [codebase()]});
   await panel.load();

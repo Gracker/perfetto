@@ -4,7 +4,11 @@
 
 import {describe, expect, it} from 'vitest';
 
-import {latestSnapshotFromAnalysisCompletedEvent} from './analysis_result_snapshot_state';
+import {
+  analysisResultShareable,
+  latestSnapshotFromAnalysisCompletedEvent,
+  parseAnalysisResultPrivateContext,
+} from './analysis_result_snapshot_state';
 import type {LatestAnalysisSnapshot} from './types';
 
 describe('analysis result snapshot state', () => {
@@ -75,5 +79,25 @@ describe('analysis result snapshot state', () => {
         current,
       }),
     ).toBeNull();
+  });
+});
+
+describe('analysis result private context', () => {
+  it('reads a marker and treats anything else as unknown', () => {
+    expect(parseAnalysisResultPrivateContext({codebase: false, knowledge: true}))
+      .toEqual({codebase: false, knowledge: true});
+    expect(parseAnalysisResultPrivateContext('unknown')).toBe('unknown');
+    expect(parseAnalysisResultPrivateContext(undefined)).toBe('unknown');
+    expect(parseAnalysisResultPrivateContext({codebase: 'no', knowledge: false})).toBe('unknown');
+  });
+
+  it('offers sharing only for a private snapshot proven to read no private material', () => {
+    const none = {codebase: false, knowledge: false};
+    expect(analysisResultShareable({visibility: 'private', privateContext: none})).toBe(true);
+    expect(analysisResultShareable({visibility: 'workspace', privateContext: none})).toBe(false);
+    expect(analysisResultShareable({visibility: 'private', privateContext: {codebase: true, knowledge: false}})).toBe(false);
+    expect(analysisResultShareable({visibility: 'private', privateContext: {codebase: false, knowledge: true}})).toBe(false);
+    expect(analysisResultShareable({visibility: 'private', privateContext: 'unknown'})).toBe(false);
+    expect(analysisResultShareable({visibility: 'private'})).toBe(false);
   });
 });

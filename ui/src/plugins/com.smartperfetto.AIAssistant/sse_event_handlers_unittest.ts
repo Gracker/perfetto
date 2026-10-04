@@ -38,7 +38,7 @@ import {
   handleSkillDiagnosticsEvent,
   handleSkillLayeredResultEvent,
   handleAnalysisCompletedEvent,
-  handleAnalysisSourceEnrichmentEvent,
+  isAgentSseTerminalEvent,
   handleHypothesisGeneratedEvent,
   handleRoundStartEvent,
   handleAgentTaskDispatchedEvent,
@@ -709,46 +709,19 @@ describe('handleAnalysisCompletedEvent', () => {
     expect(result.stopLoading).toBe(true);
   });
 
-  it('keeps the primary result usable while a deep source supplement is pending', () => {
+  it('is terminal without any pending field, and ignores a retired one', () => {
     const result = handleAnalysisCompletedEvent({
       data: {
         conclusion: 'Primary trace conclusion.',
+        // A retired field from an older backend no longer keeps the run open.
         sourceEnrichmentPending: true,
       },
     }, ctx);
 
-    expect(result.isTerminal).toBe(false);
+    expect(result.isTerminal).toBe(true);
     expect(result.stopLoading).toBe(true);
     expect(ctx.messages[0].content).toContain('Primary trace conclusion');
-    expect(ctx.messages[0].analysisSourceEnrichment).toEqual({status: 'running'});
-
-    const supplement = handleAnalysisSourceEnrichmentEvent(
-      'analysis_source_enrichment_completed',
-      {
-        message: 'Foo.kt:L10-L20 implements the traced path.',
-        metrics: {searchCalls: 3, readCalls: 7, durationMs: 9000},
-      },
-      ctx,
-    );
-    expect(supplement.isTerminal).toBe(true);
-    expect(ctx.messages[0].analysisSourceEnrichment).toEqual({
-      status: 'completed',
-      message: 'Foo.kt:L10-L20 implements the traced path.',
-      metrics: {searchCalls: 3, readCalls: 7, durationMs: 9000},
-    });
-
-    handleAnalysisCompletedEvent({
-      data: {
-        conclusion: 'Second primary trace conclusion.',
-        sourceEnrichmentPending: true,
-      },
-    }, ctx);
-    handleAnalysisSourceEnrichmentEvent(
-      'analysis_source_enrichment_cancelled',
-      {reason: 'user cancelled'},
-      ctx,
-    );
-    expect(ctx.messages[0].analysisSourceEnrichment).toEqual({status: 'cancelled'});
+    expect(ctx.messages[0]).not.toHaveProperty('analysisSourceEnrichment');
   });
 
   it('should support legacy answer field', () => {
@@ -1432,6 +1405,56 @@ describe('per-run source-use receipt projection', () => {
     expect(JSON.stringify(ctx.messages[0].sourceUseReceipt)).not.toContain(
       'PRIVATE_/Users/me/Main.kt',
     );
+  });
+
+  it('reads the top-level decision, @2 verification and knowledge use as counts only', () => {
+    const ctx = createMockContext();
+    const pathCanary = 'app/src/私有 Path/Secret.kt';
+    handleAnalysisCompletedEvent({
+      runId: 'run-a',
+      data: {
+        conclusion: 'Current run answer.',
+        sourceUseDecision: {
+          schemaVersion: 'source_use_decision@1', codeAwareMode: 'provider_send',
+          selectedCodebaseIds: ['cb-a'], queriedCodebaseIds: ['cb-a'], usedCodebaseIds: ['cb-a'],
+          status: 'corroborated', coverageComplete: true,
+          references: [
+            {id: 'ref-hit', codebaseId: 'cb-a', lookupKind: 'search_hit', filePath: pathCanary,
+              lineRange: {start: 12, end: 14}, sourceGeneration: 'live-1'},
+            {id: 'ref-body', codebaseId: 'cb-a', lookupKind: 'body', filePath: pathCanary,
+              lineRange: {start: 1, end: 40}, sourceGeneration: 'live-1'},
+          ],
+          referenceCounts: {located: 2, read: 2},
+          depth: {requested: 'auto', effective: 'mechanism', origin: 'intent'},
+        },
+        sourceClaimVerificationResult: {
+          schemaVersion: 'source_claim_verifier@2', status: 'partial', bindings: [],
+          claims: [{claimId: 'C1', status: 'trace_linked', sourceReferenceIds: ['ref-body'], traceEvidenceRefIds: ['t1']}],
+          citations: [{citation: `${pathCanary}:L12-L14`, filePath: pathCanary,
+            lineRange: {start: 12, end: 14}, status: 'verified_body', sourceReferenceId: 'ref-body'}],
+          issues: [],
+        },
+        knowledgeUse: {
+          schemaVersion: 'knowledge_use@1',
+          sources: [{knowledgeBaseId: 'kb-a', kind: 'document_collection', generation: 'g1', deliveredReferenceCount: 3}],
+          citations: [{citation: `kb-a:${pathCanary}#L1-L2`, relativePath: pathCanary, status: 'unmatched'}],
+        },
+      },
+    }, ctx);
+
+    expect(ctx.messages[0].sourceUseReceipt).toMatchObject({
+      claimVerifier: 'source_claim_verifier@2',
+      referenceCounts: {located: 2, read: 2},
+      claimStatusCounts: {trace_linked: 1},
+      citationStatusCounts: {verified_body: 1},
+      depth: {requested: 'auto', effective: 'mechanism', origin: 'intent'},
+    });
+    expect(ctx.messages[0].knowledgeUseReceipt).toEqual({
+      schemaVersion: 'knowledge_use_receipt@1', sourceCount: 1, deliveredReferenceCount: 3,
+      citationStatusCounts: {unmatched: 1},
+    });
+    const stored = JSON.stringify([ctx.messages[0].sourceUseReceipt, ctx.messages[0].knowledgeUseReceipt]);
+    expect(stored).not.toMatch(/Secret|私有|ref-hit|ref-body|kb-a|C1/);
   });
 
   it('does not attach receipt metadata to an arbitrary prior assistant message', () => {
@@ -4803,6 +4826,9 @@ describe('handleSSEEvent', () => {
     ]}},
     {claimSupport: [{claimId: 'Q1', bindingEligibility: 'ineligible'}]},
     {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@1', status: 'failed', bindings: []}},
+    {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@2', status: 'failed', bindings: [],
+      claims: [{claimId: 'Q1', status: 'invalid', sourceReferenceIds: ['x'], traceEvidenceRefIds: []}],
+      citations: [], issues: []}},
   ])('uses structured incomplete metadata consistently for terminal UI: %j', metadata => {
     handleSSEEvent('progress', {data: {message: '正在核验分析结果'}}, ctx);
     handleSSEEvent('analysis_completed', {data: {
@@ -5473,5 +5499,21 @@ describe('display-only answer draft', () => {
     handleSSEEvent('answer_token', token('Unconfirmed draft'), ctx);
     handleSSEEvent(eventType, payload, ctx);
     expect(ctx.messages.some((message) => message.content.includes('Unconfirmed draft'))).toBe(false);
+  });
+});
+
+describe('Agent SSE terminal events', () => {
+  it('treats analysis_completed as terminal on its own', () => {
+    expect(isAgentSseTerminalEvent('analysis_completed')).toBe(true);
+    expect(isAgentSseTerminalEvent('analysis_cancelled')).toBe(true);
+    expect(isAgentSseTerminalEvent('error')).toBe(true);
+    expect(isAgentSseTerminalEvent('end')).toBe(true);
+  });
+
+  it('keeps the stream open for non-terminal and retired supplement events', () => {
+    for (const eventType of ['conclusion', 'progress', 'answer_token',
+      'analysis_source_enrichment_completed', 'analysis_source_enrichment_cancelled']) {
+      expect(isAgentSseTerminalEvent(eventType)).toBe(false);
+    }
   });
 });

@@ -23,18 +23,23 @@ import type {
   CodebaseDirectoryPickerCapability,
   CodebaseKind,
   CodebasePreview,
+  CodebaseSelectionPreview,
   CodebaseSummary,
   RegisterCodebaseInput,
   UpdateCodebaseSelectionInput,
 } from './codebase_api';
 import {
+  CodebaseApiError,
+  codebaseUnavailableReasonText,
   getCodebaseDirectoryPickerCapability,
   previewCodebaseRoot,
+  previewCodebaseSelection,
   registerCodebase,
-  selectCodebaseDirectory,
+  selectDirectory,
   updateCodebaseSelection,
 } from './codebase_api';
 import {uiText as text} from './ui_language';
+import {ContentDisclosureReview} from './content_disclosure_review';
 import {sourceAnalysisDisclosure} from './source_analysis_disclosure';
 import type {CodeAwareAnalysisMode} from './types';
 
@@ -57,7 +62,12 @@ export interface CodebaseSelectionImpact {
   replacement: UpdateCodebaseSelectionInput;
   selectionPolicyRevision: {current: number; next: number};
   invalidatesActiveIndex: boolean;
-  providerGrantMayMismatch: boolean;
+  /**
+   * Text sending is allowed, so saving a changed scope changes the grant: the
+   * backend narrows it when the new scope lies provably inside it and revokes
+   * it otherwise. Only the backend can tell which.
+   */
+  providerGrantAffected: boolean;
 }
 
 const CODEBASE_KINDS: CodebaseKind[] = [
@@ -280,8 +290,64 @@ export function buildCodebaseSelectionImpact(
     },
     invalidatesActiveIndex: codebase.activeIndexState === 'active' ||
       Boolean(codebase.activeGeneration),
-    providerGrantMayMismatch: codebase.eligibleForSendToProvider === true,
+    providerGrantAffected: codebase.eligibleForSendToProvider === true,
   };
+}
+
+/**
+ * A selection preview belongs to one codebase and one edited selection. Any
+ * edit changes the key, so a preview (or a late response) for an earlier
+ * edit is never shown or saved against the current one.
+ */
+export function selectionPreviewKey(
+  codebaseId: string,
+  replacement: UpdateCodebaseSelectionInput,
+): string {
+  return JSON.stringify([codebaseId, replacement.pathFilters, replacement.excludeGlobs]);
+}
+
+export interface SelectionPreviewState {
+  key: string;
+  replacement: UpdateCodebaseSelectionInput;
+  result?: CodebaseSelectionPreview;
+  error?: string;
+}
+
+/** The preview to show and save with: only a finished one for the current edit. */
+export function currentSelectionPreview(
+  state: SelectionPreviewState | null,
+  key: string,
+): (SelectionPreviewState & {result: CodebaseSelectionPreview}) | undefined {
+  return state && state.key === key && state.result
+    ? state as SelectionPreviewState & {result: CodebaseSelectionPreview}
+    : undefined;
+}
+
+/** A complete enumeration that admits nothing is the one result a save refuses. */
+export function selectionPreviewBlocksSave(result: CodebaseSelectionPreview): boolean {
+  return result.status === 'complete' && (result.preview?.acceptedFileCount ?? 0) === 0;
+}
+
+export function selectionPreviewText(result: CodebaseSelectionPreview): string {
+  const count = result.preview?.acceptedFileCount ?? 0;
+  if (result.status === 'complete') {
+    return count === 0
+      ? text('该范围没有匹配的文件，不能保存。', 'No file matches this scope; it cannot be saved.')
+      : text(`该范围包含 ${count} 个文件。`, `This scope contains ${count} files.`);
+  }
+  if (result.status === 'partial') {
+    return text(
+      `至少 ${count} 个文件（扫描未完成，实际可能更多）。`,
+      `At least ${count} files (the scan did not finish; there may be more).`,
+    );
+  }
+  const reason = result.unavailableReason === 'enumeration_failed'
+    ? text('扫描失败。', 'The scan failed.')
+    : codebaseUnavailableReasonText(result.unavailableReason);
+  return text(
+    `无法统计该范围的文件：${reason}这不表示零个文件。`,
+    `Files in this scope could not be counted: ${reason} This does not mean zero files.`,
+  );
 }
 
 function optionalString(value: string): string | undefined {
@@ -336,6 +402,14 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private scopeApplicationNotice: string | null = null;
   private excludeGlobs = '';
   private registeredCodebase: CodebaseSummary | null = null;
+  /**
+   * "Add and use" registered without consent; the server's disclosure for the
+   * new codebase is under review. Text is granted only by confirming it.
+   */
+  private pendingGrant: {
+    codebase: CodebaseSummary;
+    onRegistered: CodebaseFormAttrs['onRegistered'];
+  } | null = null;
   private preview: CodebasePreview | null = null;
   private loading = false;
   private choosingDirectory = false;
@@ -348,6 +422,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
   private apiKey?: string;
   private scopeKey = '';
   private editingIdentity = '';
+  private selectionPreview: SelectionPreviewState | null = null;
+  private selectionPreviewRequest = 0;
+  private selectionNotice: string | null = null;
   private onUpdated: NonNullable<CodebaseFormAttrs['onUpdated']> = () => {};
 
   oninit(vnode: m.Vnode<CodebaseFormAttrs>) {
@@ -383,6 +460,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       this.choosingDirectory = false;
       this.preview = null;
       this.registeredCodebase = null;
+      this.pendingGrant = null;
       this.error = null;
       this.directoryPickerCapability = null;
       if (this.directorySelectionId) {
@@ -409,6 +487,8 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       this.error = null;
       this.preview = null;
       this.scopeApplicationNotice = null;
+      this.selectionPreview = null;
+      this.selectionNotice = null;
       if (attrs.codebase) {
         this.kind = attrs.codebase.kind;
         this.pathFilters = canonicalSelectionLines(attrs.codebase.pathFilters)
@@ -470,7 +550,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     this.error = null;
     m.redraw();
     try {
-      const result = await selectCodebaseDirectory(backendUrl, apiKey);
+      const result = await selectDirectory(backendUrl, 'codebase', apiKey);
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       if (!result.selected) return;
       this.rootPath = result.rootPath;
@@ -543,7 +623,9 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     const input: RegisterCodebaseInput = {
       kind: this.kind,
       rootPath: this.rootPath.trim(),
-      sendToProvider: useForAnalysis && attrs.codeAwareMode !== 'metadata_only',
+      // Consent is never part of registration: source text is granted only
+      // through the disclosure the server returns for the new codebase.
+      sendToProvider: false,
       ...(this.directorySelectionId
         ? {directorySelectionId: this.directorySelectionId}
         : {}),
@@ -571,7 +653,11 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       // Registration is complete even if the subsequent list refresh fails.
       this.registeredCodebase = result.codebase;
-      onRegistered(result.codebase, useForAnalysis);
+      if (useForAnalysis && attrs.codeAwareMode !== 'metadata_only') {
+        this.pendingGrant = {codebase: result.codebase, onRegistered};
+      } else {
+        onRegistered(result.codebase, useForAnalysis);
+      }
     } catch (e: unknown) {
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.error = e instanceof Error ? e.message : text('注册失败', 'Registration failed');
@@ -580,6 +666,43 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         this.loading = false;
         m.redraw();
       }
+    }
+  }
+
+  /** The disclosure review of "Add and use" ended: granted (select it for text) or declined (added only). */
+  private settlePendingGrant(updated: CodebaseSummary | undefined, granted: boolean): void {
+    const pending = this.pendingGrant;
+    if (!pending) return;
+    this.pendingGrant = null;
+    pending.onRegistered(updated ?? pending.codebase, granted);
+  }
+
+  /** Enumerate the edited selection as a save would; any later edit discards the answer. */
+  private async previewSelection(attrs: CodebaseFormAttrs): Promise<void> {
+    const codebase = attrs.codebase;
+    if (!codebase || attrs.readOnly) return;
+    const impact = buildCodebaseSelectionImpact(codebase, this.pathFilters, this.excludeGlobs);
+    if (!impact.changed) return;
+    const key = selectionPreviewKey(codebase.codebaseId, impact.replacement);
+    const request = ++this.selectionPreviewRequest;
+    const {backendUrl, apiKey, scopeKey} = attrs;
+    this.selectionPreview = {key, replacement: impact.replacement};
+    this.selectionNotice = null;
+    this.error = null;
+    m.redraw();
+    const isCurrent = () => this.mounted && request === this.selectionPreviewRequest &&
+      this.selectionPreview?.key === key && backendUrl === this.backendUrl &&
+      apiKey === this.apiKey && scopeKey === this.scopeKey;
+    try {
+      const result = await previewCodebaseSelection(backendUrl, codebase.codebaseId, impact.replacement, apiKey);
+      if (!isCurrent()) return;
+      this.selectionPreview = {key, replacement: impact.replacement, result};
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.selectionPreview = {key, replacement: impact.replacement,
+        error: error instanceof Error ? error.message : text('预览源码范围失败', 'Failed to preview the source scope')};
+    } finally {
+      if (isCurrent()) m.redraw();
     }
   }
 
@@ -592,27 +715,51 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
       this.excludeGlobs,
     );
     if (!impact.changed) return;
+    // Save exactly the previewed selection, at the revision the preview read.
+    const previewed = currentSelectionPreview(
+      this.selectionPreview,
+      selectionPreviewKey(codebase.codebaseId, impact.replacement),
+    );
+    if (!previewed || selectionPreviewBlocksSave(previewed.result)) return;
     const epoch = ++this.requestEpoch;
     const backendUrl = attrs.backendUrl;
     const apiKey = attrs.apiKey;
     const scopeKey = attrs.scopeKey;
     this.loading = true;
     this.error = null;
+    this.selectionNotice = null;
     m.redraw();
     try {
       const updated = await updateCodebaseSelection(
         backendUrl,
         codebase.codebaseId,
-        impact.replacement,
+        {
+          ...previewed.replacement,
+          expectedSelectionPolicyRevision: previewed.result.selectionPolicyRevision,
+        },
         apiKey,
       );
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
       this.onUpdated(updated);
     } catch (error) {
       if (!this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return;
-      this.error = error instanceof Error
-        ? error.message
-        : text('保存源码范围失败', 'Failed to save source scope');
+      const code = error instanceof CodebaseApiError ? error.code : undefined;
+      if (code === 'CODEBASE_SELECTION_STALE') {
+        this.selectionPreview = null;
+        this.error = text(
+          '源码范围已被其他操作修改，请重新预览后再保存。',
+          'The source scope was changed elsewhere. Preview again before saving.',
+        );
+      } else if (code === 'CODEBASE_SELECTION_EMPTY_MATCH') {
+        this.error = text('该范围没有匹配的文件，未保存。', 'No file matches this scope; nothing was saved.');
+      } else if (code === 'CODEBASE_SELECTION_UNCHANGED') {
+        // Nothing changed on the server: no authorization boundary, no new session.
+        this.selectionNotice = text('范围没有变化，无需保存。', 'The scope is unchanged; nothing to save.');
+      } else {
+        this.error = error instanceof Error
+          ? error.message
+          : text('保存源码范围失败', 'Failed to save source scope');
+      }
     } finally {
       if (this.requestIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
         this.loading = false;
@@ -836,20 +983,23 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
           `排除规则：${scopeText(impact.previous.excludeGlobs, '无')} → ${scopeText(impact.replacement.excludeGlobs, '无')}`,
           `Exclude globs: ${scopeText(impact.previous.excludeGlobs, 'none')} → ${scopeText(impact.replacement.excludeGlobs, 'none')}`,
         )),
-        m('div', {style: STYLES.hint}, text(
-          `选择修订：${impact.selectionPolicyRevision.current} → ${impact.selectionPolicyRevision.next}`,
-          `Selection revision: ${impact.selectionPolicyRevision.current} → ${impact.selectionPolicyRevision.next}`,
-        )),
-        impact.invalidatesActiveIndex
+        // What saving would do: nothing to say while nothing changed.
+        impact.changed
+          ? m('div', {style: STYLES.hint}, text(
+              `选择修订：${impact.selectionPolicyRevision.current} → ${impact.selectionPolicyRevision.next}`,
+              `Selection revision: ${impact.selectionPolicyRevision.current} → ${impact.selectionPolicyRevision.next}`,
+            ))
+          : null,
+        impact.changed && impact.invalidatesActiveIndex
           ? m('div', {style: STYLES.error}, text(
               '保存后当前可选索引将失效，并标记为需要重建。按需源码读取仍使用新范围。',
               'Saving invalidates the active optional index and marks it for reindex. On-demand source access immediately uses the new scope.',
             ))
           : null,
-        impact.providerGrantMayMismatch
+        impact.changed && impact.providerGrantAffected
           ? m('div', {style: STYLES.error}, text(
-              'provider 内容授权可能与新范围不一致；保存后请检查“授权当前范围”，并在需要时重建索引。',
-              'Provider content consent may not match the replacement scope. After saving, review “Authorize current scope” and reindex when needed.',
+              '已允许发送源码正文：新范围完全落在已授权范围内时，授权随之收窄到新范围；否则保存会撤销发送正文的授权，需要重新允许。',
+              'Sending source text is allowed: if the new scope lies entirely inside the granted scope, the grant narrows to it; otherwise saving revokes text sending, and it must be allowed again.',
             ))
           : null,
         !impact.changed
@@ -873,13 +1023,17 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
     );
     const pathFiltersRequired = codebaseFieldRequirements(codebase.kind).pathFilters;
     const pathFilters = impact.replacement.pathFilters;
-    const saveDisabled = this.loading ||
-      attrs.readOnly || !impact.changed ||
-      (pathFiltersRequired && pathFilters.length === 0);
+    const previewKey = selectionPreviewKey(codebase.codebaseId, impact.replacement);
+    const preview = this.selectionPreview?.key === previewKey ? this.selectionPreview : null;
+    const previewed = currentSelectionPreview(this.selectionPreview, previewKey);
+    const editable = !this.loading && !attrs.readOnly && impact.changed &&
+      !(pathFiltersRequired && pathFilters.length === 0);
+    const previewLoading = Boolean(preview && !preview.result && !preview.error);
+    const saveDisabled = !editable || !previewed || selectionPreviewBlocksSave(previewed.result);
     return m('div', [
       m('div', {style: STYLES.intro}, text(
-        `编辑 ${codebase.displayName} 的相对路径选择。后端不会披露注册根路径，因此这里不会重新扫描或显示文件数量。`,
-        `Edit the relative path selection for ${codebase.displayName}. The backend does not disclose the registered root, so this form does not rescan it or show file counts.`,
+        `编辑 ${codebase.displayName} 的相对路径选择。保存前先预览，确认新范围包含多少文件。`,
+        `Edit the relative path selection for ${codebase.displayName}. Preview first to see how many files the new scope contains.`,
       )),
       this.renderField(
         'smartperfetto-codebase-path-filters',
@@ -888,6 +1042,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         (value) => {
           this.pathFilters = value;
           this.error = null;
+          this.selectionNotice = null;
         },
         {
           required: pathFiltersRequired,
@@ -909,6 +1064,7 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         (value) => {
           this.excludeGlobs = value;
           this.error = null;
+          this.selectionNotice = null;
         },
         {
           hint: text(
@@ -918,6 +1074,16 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         },
       ),
       this.renderSelectionImpact(impact),
+      impact.changed
+        ? m('div', {style: STYLES.preview, 'aria-live': 'polite'}, previewLoading
+          ? text('正在统计新范围的文件…', 'Counting files in the new scope…')
+          : preview?.error
+            ? m('span', {style: {color: 'var(--chat-error)'}}, preview.error)
+            : previewed
+              ? selectionPreviewText(previewed.result)
+              : text('尚未预览当前编辑的范围。', 'The edited scope has not been previewed.'))
+        : null,
+      this.selectionNotice ? m('div', {style: STYLES.hint, role: 'status'}, this.selectionNotice) : null,
       this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,
       m('div', {style: STYLES.actions}, [
         m('button', {
@@ -926,6 +1092,13 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
           disabled: this.loading,
           onclick: () => attrs.onCancel(),
         }, text('取消', 'Cancel')),
+        m('button', {
+          type: 'button',
+          style: STYLES.button,
+          disabled: !editable || previewLoading,
+          'aria-busy': previewLoading ? 'true' : 'false',
+          onclick: () => this.previewSelection(attrs),
+        }, text('预览范围', 'Preview scope')),
         m('button', {
           type: 'button',
           style: {...STYLES.button, ...STYLES.primary},
@@ -1168,8 +1341,8 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
             'Locate-only mode is active. Adding this folder supplies file, symbol, and line references without granting source-text access.',
           )
         : text(
-            '点击“添加并用于分析”，即允许分析时使用的模型按需接收此文件夹中未排除的脱敏源码片段。可随时取消选择或撤销授权。',
-            '“Add and use for analysis” allows the model used for analysis to receive redacted snippets from this folder on demand, excluding the paths above. You can deselect it or revoke access at any time.',
+            '“添加并用于分析”会先添加文件夹，再显示服务端确认的正文授权范围；你确认后才允许模型按需接收其中的脱敏源码片段。可随时取消选择或撤销授权。',
+            '“Add and use for analysis” adds the folder first, then shows the source-text scope the server would grant; only your confirmation lets the model receive redacted snippets from it. You can deselect it or revoke access at any time.',
           )),
       m('div', {style: STYLES.intro}, locateOnly
         ? text(
@@ -1181,12 +1354,21 @@ export class CodebaseForm implements m.ClassComponent<CodebaseFormAttrs> {
         ? m('div', {style: STYLES.hint, role: 'status'}, this.scopeApplicationNotice)
         : null,
       this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,
-      this.registeredCodebase
-        ? m('div', {style: STYLES.hint, role: 'status'}, text(
-            '源码库已添加。请返回列表查看，无需重复添加。',
-            'The source folder was added. Return to the list; no repeat registration is needed.',
-          ))
-        : null,
+      this.pendingGrant
+        ? m(ContentDisclosureReview, {
+            backendUrl: attrs.backendUrl,
+            apiKey: attrs.apiKey,
+            readOnly: attrs.readOnly === true,
+            codebase: this.pendingGrant.codebase,
+            onGranted: (updated: CodebaseSummary) => this.settlePendingGrant(updated, true),
+            onCancel: () => this.settlePendingGrant(undefined, false),
+          })
+        : this.registeredCodebase
+          ? m('div', {style: STYLES.hint, role: 'status'}, text(
+              '源码库已添加。请返回列表查看，无需重复添加。',
+              'The source folder was added. Return to the list; no repeat registration is needed.',
+            ))
+          : null,
       m('div', {style: STYLES.actions}, [
         m('button', {
           type: 'button', style: STYLES.button,

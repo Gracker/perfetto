@@ -1074,7 +1074,8 @@ async function startViteDevServer() {
         `<title>${cfg.titleOverride}</title>`,
       );
     }
-    if (!smartPerfettoRuntimeConfig().oidcEnabled) return html;
+    // Like the static server, always inject: the runtime config carries the
+    // backend port the page's CSP and default backend URL are built from.
     return injectSmartPerfettoRuntimeConfig(
       indexSrc,
       Buffer.from(html),

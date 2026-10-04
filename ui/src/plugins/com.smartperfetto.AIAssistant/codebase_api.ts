@@ -17,9 +17,61 @@
 // limitations under the License.
 
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
-import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
+import {
+  buildSmartPerfettoContextHeaders,
+  type SmartPerfettoRequestContext,
+} from '../../core/smartperfetto_request_context';
+import {uiText as text} from './ui_language';
 
 export type CodebaseKind = 'app_source' | 'aosp' | 'kernel_source' | 'oem_sdk';
+
+/** Why a registered root cannot be read (fixed codes; never a path). */
+export type CodebaseUnavailableReason =
+  | 'deleting'
+  | 'root_missing'
+  | 'root_identity_changed'
+  | 'root_not_directory'
+  | 'outside_allowlist'
+  | 'unreadable';
+
+export function codebaseUnavailableReasonText(reason: CodebaseUnavailableReason | undefined): string {
+  switch (reason) {
+    case 'deleting':
+      return text('正在删除，已停止检索。', 'Being deleted; retrieval is stopped.');
+    case 'root_missing':
+      return text('源码文件夹不存在或已被移动。', 'The source folder is missing or was moved.');
+    case 'root_identity_changed':
+      return text('源码文件夹已被替换，与登记时不是同一个目录。', 'The source folder was replaced; it is not the registered directory.');
+    case 'root_not_directory':
+      return text('登记的路径已不是文件夹。', 'The registered path is no longer a folder.');
+    case 'outside_allowlist':
+      return text('源码文件夹不在后端允许访问的范围内。', 'The source folder is outside what the backend may access.');
+    case 'unreadable':
+      return text('后端没有读取该文件夹的权限。', 'The backend cannot read this folder.');
+    default:
+      return text('源码当前不可访问。', 'Source is currently unavailable.');
+  }
+}
+
+/** Whether a codebase can serve a run in this source mode: live root, and text consent for sending text. */
+export function codebaseUsableInMode(
+  codebase: CodebaseSummary,
+  mode: 'off' | 'metadata_only' | 'provider_send',
+): boolean {
+  return (codebase.lifecycleState ?? 'active') === 'active' && codebase.rootAvailable !== false &&
+    (mode !== 'provider_send' || codebase.eligibleForSendToProvider === true);
+}
+
+/**
+ * What granting source text would authorize now, computed by the server with
+ * its token: show exactly these lists, then grant with this token.
+ */
+export interface ContentDisclosure {
+  token: string;
+  includePrefixes: string[];
+  excludeGlobs: string[];
+  extensions: string[];
+}
 
 export interface CodebaseSummary {
   codebaseId: string;
@@ -27,6 +79,8 @@ export interface CodebaseSummary {
   kind: CodebaseKind;
   displayName: string;
   rootAvailable?: boolean;
+  unavailableReason?: CodebaseUnavailableReason;
+  contentDisclosure?: ContentDisclosure;
   commitHash?: string;
   vendor?: string;
   buildId?: string;
@@ -152,17 +206,6 @@ export interface CodebaseAudit {
   redactionHitCount: number;
 }
 
-export interface CodeExcerpt {
-  chunkId: string;
-  codebaseId: string;
-  filePath?: string;
-  lineRange?: {start?: number; end?: number};
-  symbol?: string;
-  language?: string;
-  text: string;
-  truncated: boolean;
-}
-
 export interface RegisterCodebaseInput {
   kind: CodebaseKind;
   displayName?: string;
@@ -182,6 +225,18 @@ export interface RegisterCodebaseInput {
 export interface UpdateCodebaseSelectionInput {
   pathFilters: string[];
   excludeGlobs: string[];
+}
+
+/**
+ * A proposed selection enumerated as the save enumerates it. `complete`
+ * counts are exact; `partial` is a lower bound; `unavailable` enumerated
+ * nothing (not zero files).
+ */
+export interface CodebaseSelectionPreview {
+  status: 'complete' | 'partial' | 'unavailable';
+  selectionPolicyRevision: number;
+  unavailableReason?: CodebaseUnavailableReason | 'enumeration_failed';
+  preview?: {acceptedFileCount: number; truncationReason?: string};
 }
 
 export interface CodebaseDirectoryPickerCapability {
@@ -240,9 +295,14 @@ export function buildCodebaseApiUrl(backendUrl: string, path: string): string {
   return `${trimTrailingSlash(backendUrl)}/api/rag${ensureLeadingSlash(path)}`;
 }
 
-function buildHeaders(apiKey?: string): Record<string, string> {
+function buildHeaders(apiKey?: string, context?: SmartPerfettoRequestContext): Record<string, string> {
   const headers: Record<string, string> = {'Content-Type': 'application/json'};
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (context) {
+    headers['X-Tenant-Id'] = context.tenantId;
+    headers['X-Workspace-Id'] = context.workspaceId;
+    headers['X-Window-Id'] = context.windowId;
+  }
   return buildSmartPerfettoContextHeaders(headers);
 }
 
@@ -412,10 +472,12 @@ export async function rejectPendingCodebaseGeneration(
 export async function getCodebaseDirectoryPickerCapability(
   backendUrl: string,
   apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
 ): Promise<CodebaseDirectoryPickerCapability> {
   const res = await smartPerfettoFetch(
     buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
-    {headers: buildHeaders(apiKey)},
+    {headers: buildHeaders(apiKey, context)},
   );
   const body = await readJsonOrThrow<{
     capability: CodebaseDirectoryPickerCapability;
@@ -423,16 +485,20 @@ export async function getCodebaseDirectoryPickerCapability(
   return body.capability;
 }
 
-export async function selectCodebaseDirectory(
+/** Open the local folder picker (local UI only) for a codebase or a documents folder. */
+export async function selectDirectory(
   backendUrl: string,
+  purpose: 'codebase' | 'knowledge',
   apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
 ): Promise<CodebaseDirectoryPickerResult> {
   const res = await smartPerfettoFetch(
     buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
     {
       method: 'POST',
-      headers: buildHeaders(apiKey),
-      body: JSON.stringify({}),
+      headers: buildHeaders(apiKey, context),
+      body: JSON.stringify({purpose}),
     },
   );
   return readJsonOrThrow<CodebaseDirectoryPickerResult>(res);
@@ -490,10 +556,10 @@ export async function deleteCodebase(
   }>(res);
 }
 
-export async function updateCodebaseConsent(
+/** Withdraw provider-send consent. Granting goes through `authorizeCodebaseContent`. */
+export async function revokeCodebaseContentConsent(
   backendUrl: string,
   codebaseId: string,
-  sendToProvider: boolean,
   apiKey?: string,
 ): Promise<CodebaseSummary> {
   const res = await smartPerfettoFetch(
@@ -501,17 +567,63 @@ export async function updateCodebaseConsent(
     {
       method: 'PATCH',
       headers: buildHeaders(apiKey),
-      body: JSON.stringify({sendToProvider}),
+      body: JSON.stringify({sendToProvider: false}),
     },
   );
   const body = await readJsonOrThrow<{codebase: CodebaseSummary}>(res);
   return body.codebase;
 }
 
-export async function updateCodebaseSelection(
+/**
+ * Grant source text for the disclosed scope: the current selection and every
+ * language, bound to the token of the disclosure the user saw. A stale token
+ * is refused (`CODEBASE_CONSENT_DISCLOSURE_STALE`) and changes nothing.
+ */
+export async function authorizeCodebaseContent(
+  backendUrl: string,
+  codebaseId: string,
+  contentDisclosureToken: string,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
+    {
+      method: 'PATCH',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({authorizeContent: true, contentDisclosureToken}),
+    },
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
+}
+
+/** Enumerate a proposed selection without saving it (relative counts only). */
+export async function previewCodebaseSelection(
   backendUrl: string,
   codebaseId: string,
   input: UpdateCodebaseSelectionInput,
+  apiKey?: string,
+): Promise<CodebaseSelectionPreview> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(
+      backendUrl,
+      `/codebases/${encodeURIComponent(codebaseId)}/selection/preview`,
+    ),
+    {
+      method: 'POST',
+      headers: buildHeaders(apiKey),
+      body: JSON.stringify({
+        pathFilters: [...input.pathFilters],
+        excludeGlobs: [...input.excludeGlobs],
+      }),
+    },
+  );
+  return (await readJsonOrThrow<{selectionPreview: CodebaseSelectionPreview}>(res)).selectionPreview;
+}
+
+export async function updateCodebaseSelection(
+  backendUrl: string,
+  codebaseId: string,
+  input: UpdateCodebaseSelectionInput & {expectedSelectionPolicyRevision?: number},
   apiKey?: string,
 ): Promise<CodebaseSummary> {
   const res = await smartPerfettoFetch(
@@ -525,39 +637,10 @@ export async function updateCodebaseSelection(
       body: JSON.stringify({
         pathFilters: [...input.pathFilters],
         excludeGlobs: [...input.excludeGlobs],
+        ...(input.expectedSelectionPolicyRevision !== undefined
+          ? {expectedSelectionPolicyRevision: input.expectedSelectionPolicyRevision}
+          : {}),
       }),
-    },
-  );
-  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
-}
-
-export async function authorizeAvailableCodebaseExtensions(
-  backendUrl: string,
-  codebaseId: string,
-  apiKey?: string,
-): Promise<CodebaseSummary> {
-  const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
-    {
-      method: 'PATCH',
-      headers: buildHeaders(apiKey),
-      body: JSON.stringify({authorizeAvailableExtensions: true}),
-    },
-  );
-  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
-}
-
-export async function authorizeCurrentCodebaseSelection(
-  backendUrl: string,
-  codebaseId: string,
-  apiKey?: string,
-): Promise<CodebaseSummary> {
-  const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}/consent`),
-    {
-      method: 'PATCH',
-      headers: buildHeaders(apiKey),
-      body: JSON.stringify({authorizeCurrentSelection: true}),
     },
   );
   return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
@@ -597,20 +680,191 @@ export async function loadCodebaseAudit(
   return body.audit;
 }
 
-export async function loadCodeExcerpt(
+
+// ---------------------------------------------------------------------------
+// Knowledge bases (`/api/rag/knowledge`): document collections and the Wiki.
+// Responses never carry a registered root.
+// ---------------------------------------------------------------------------
+
+export type KnowledgeBaseKind = 'document_collection' | 'android_internals_wiki';
+
+export interface KnowledgeBaseSummary {
+  sourceId: string;
+  kind: KnowledgeBaseKind;
+  displayName: string;
+  description?: string;
+  attribution?: string;
+  license?: string;
+  rightsAcknowledged: boolean;
+  sendToProvider: boolean;
+  activeGeneration?: string;
+  indexGeneration: number;
+  indexedChunkCount?: number;
+  documentCount: number;
+  hasActiveIndex: boolean;
+  lifecycleState?: 'active' | 'deleting';
+}
+
+export interface KnowledgeCollectionPreview {
+  documentCount: number;
+  sectionCount: number;
+  chunkCount: number;
+  skipped: Record<string, number>;
+}
+
+export interface KnowledgeSearchHit {
+  chunkId: string;
+  relativePath: string;
+  title: string;
+  heading: string;
+  startLine: number;
+  endLine: number;
+  snippet: string;
+}
+
+export interface KnowledgeCollectionSelection {
+  rootPath: string;
+  directorySelectionId?: string;
+}
+
+export interface RegisterKnowledgeCollectionInput extends KnowledgeCollectionSelection {
+  displayName?: string;
+  description?: string;
+  rightsAcknowledged: true;
+  sendToProvider: boolean;
+}
+
+/** A document collection the model may search this run: indexed, rights acknowledged, text consented. */
+export function knowledgeBaseSelectable(source: KnowledgeBaseSummary): boolean {
+  return (source.lifecycleState ?? 'active') === 'active' &&
+    source.rightsAcknowledged === true &&
+    source.sendToProvider === true &&
+    source.hasActiveIndex === true;
+}
+
+export async function listKnowledgeBases(
   backendUrl: string,
-  codebaseId: string,
-  chunkId: string,
   apiKey?: string,
-): Promise<CodeExcerpt> {
-  const params = new URLSearchParams({chunkId});
+): Promise<KnowledgeBaseSummary[]> {
   const res = await smartPerfettoFetch(
-    buildCodebaseApiUrl(
-      backendUrl,
-      `/codebases/${encodeURIComponent(codebaseId)}/excerpt?${params.toString()}`,
-    ),
+    buildCodebaseApiUrl(backendUrl, '/knowledge'),
     {headers: buildHeaders(apiKey)},
   );
-  const body = await readJsonOrThrow<{excerpt: CodeExcerpt}>(res);
-  return body.excerpt;
+  const body = await readJsonOrThrow<{sources?: KnowledgeBaseSummary[]}>(res);
+  return body.sources || [];
+}
+
+function knowledgeSelectionBody(input: KnowledgeCollectionSelection): Record<string, string> {
+  return {
+    rootPath: input.rootPath,
+    ...(input.directorySelectionId ? {directorySelectionId: input.directorySelectionId} : {}),
+  };
+}
+
+export async function previewKnowledgeCollection(
+  backendUrl: string,
+  input: KnowledgeCollectionSelection,
+  apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
+): Promise<KnowledgeCollectionPreview> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, '/knowledge/preview'),
+    {method: 'POST', headers: buildHeaders(apiKey, context), body: JSON.stringify(knowledgeSelectionBody(input))},
+  );
+  return (await readJsonOrThrow<{preview: KnowledgeCollectionPreview}>(res)).preview;
+}
+
+export async function registerKnowledgeCollection(
+  backendUrl: string,
+  input: RegisterKnowledgeCollectionInput,
+  apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
+): Promise<KnowledgeBaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, '/knowledge/register'),
+    {
+      method: 'POST',
+      headers: buildHeaders(apiKey, context),
+      body: JSON.stringify({
+        ...knowledgeSelectionBody(input),
+        ...(input.displayName ? {displayName: input.displayName} : {}),
+        ...(input.description ? {description: input.description} : {}),
+        rightsAcknowledged: true,
+        sendToProvider: input.sendToProvider,
+      }),
+    },
+  );
+  return (await readJsonOrThrow<{source: KnowledgeBaseSummary}>(res)).source;
+}
+
+export async function reindexKnowledgeCollection(
+  backendUrl: string,
+  sourceId: string,
+  apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
+): Promise<{documentCount: number; chunkCount: number}> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/knowledge/${encodeURIComponent(sourceId)}/reindex`),
+    {method: 'POST', headers: buildHeaders(apiKey, context), body: JSON.stringify({})},
+  );
+  return (await readJsonOrThrow<{result: {documentCount: number; chunkCount: number}}>(res)).result;
+}
+
+export async function setKnowledgeBaseConsent(
+  backendUrl: string,
+  sourceId: string,
+  sendToProvider: boolean,
+  apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
+): Promise<KnowledgeBaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/knowledge/${encodeURIComponent(sourceId)}/consent`),
+    {method: 'PATCH', headers: buildHeaders(apiKey, context), body: JSON.stringify({sendToProvider})},
+  );
+  return (await readJsonOrThrow<{source: KnowledgeBaseSummary}>(res)).source;
+}
+
+export async function searchKnowledgeCollection(
+  backendUrl: string,
+  sourceId: string,
+  query: string,
+  apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
+): Promise<KnowledgeSearchHit[]> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/knowledge/${encodeURIComponent(sourceId)}/search`),
+    {method: 'POST', headers: buildHeaders(apiKey, context), body: JSON.stringify({query, topK: 5})},
+  );
+  return (await readJsonOrThrow<{hits?: KnowledgeSearchHit[]}>(res)).hits || [];
+}
+
+export async function deleteKnowledgeBase(
+  backendUrl: string,
+  sourceId: string,
+  apiKey?: string,
+  /** The scope an operation pinned when it started; headers name it, not a later global scope. */
+  context?: SmartPerfettoRequestContext,
+): Promise<void> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/knowledge/${encodeURIComponent(sourceId)}`),
+    {method: 'DELETE', headers: buildHeaders(apiKey, context)},
+  );
+  await readJsonOrThrow(res);
+}
+
+export async function getCodebase(
+  backendUrl: string,
+  codebaseId: string,
+  apiKey?: string,
+): Promise<CodebaseSummary> {
+  const res = await smartPerfettoFetch(
+    buildCodebaseApiUrl(backendUrl, `/codebases/${encodeURIComponent(codebaseId)}`),
+    {headers: buildHeaders(apiKey)},
+  );
+  return (await readJsonOrThrow<{codebase: CodebaseSummary}>(res)).codebase;
 }

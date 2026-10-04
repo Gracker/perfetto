@@ -44,6 +44,7 @@ import {persistTracePairWorkspace} from './trace_pair_workspace_persistence';
 import {TracePairWorkspaceController as ConcreteTracePairWorkspaceController} from './trace_pair_workspace_state';
 import {RUN_CONFLICT_RETRY_INTERVAL_MS} from './analysis_run_conflict';
 import {cancelConversationRun} from './conversation_client';
+import {analysisCatalog, catalogIdentityKey} from './analysis_catalog';
 
 beforeEach(() => {
   setUiLanguagePreference('zh-CN');
@@ -850,7 +851,7 @@ describe('AIPanel per-turn analysis mode', () => {
     expect(bodies[1].options).not.toHaveProperty('codebaseIds');
     expect(panel.state.isLoading).toBe(true);
     const clearedContext = {
-      codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: [],
+      codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: [], sourceDepth: 'auto',
     };
     expect(panel.state.analysisContext).toEqual(clearedContext);
     expect(loadAnalysisContext(
@@ -935,7 +936,7 @@ describe('AIPanel per-turn analysis mode', () => {
     expect(panel.state.agentSessionId).toBeNull();
     expect(panel.state.analysisContext).toEqual({
       codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: ['knowledge-a'],
-      authorizationEpoch: 3,
+      sourceDepth: 'auto', authorizationEpoch: 3,
     });
     expect(panel.state.analysisMode).toBe('conversation');
     expect(panel.state.isLoading).toBe(true);
@@ -1008,6 +1009,50 @@ describe('AIPanel per-turn analysis mode', () => {
     await panel.handleChatMessage('继续普通分析');
     expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)).options
       .analysisMode).toBe(mode);
+  });
+
+  it('keeps the session for a depth-only change and sends the new depth on the Agent exit', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.onAnalysisModeChange('full');
+    panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+    panel.onAnalysisContextChange({codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: []});
+    await panel.handleChatMessage('first');
+    expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)).options.sourceDepth).toBe('auto');
+    const retire = vi.spyOn(panel, 'retireBackendAgentSession');
+    const messagesBefore = panel.state.messages.length;
+
+    panel.onAnalysisContextChange({codeAwareMode: 'provider_send', codebaseIds: ['source-a'], knowledgeSourceIds: [],
+      sourceDepth: 'mechanism'});
+
+    expect(retire).not.toHaveBeenCalled();
+    expect(panel.state.agentSessionId).toBe('agent-mode-session');
+    expect(panel.state.messages.length).toBe(messagesBefore);
+    expect(loadAnalysisContext(panel.state.settings.backendUrl, getSmartPerfettoRequestContext()).sourceDepth)
+      .toBe('mechanism');
+    await panel.handleChatMessage('deeper');
+    expect(JSON.parse(String(panel.fetchBackend.mock.lastCall[1].body)))
+      .toMatchObject({sessionId: 'agent-mode-session', options: {sourceDepth: 'mechanism', codebaseIds: ['source-a']}});
+  });
+
+  it('records the submitted context on the user message, not the later setting', () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'full';
+    panel.ensureAnalysisContextCodebaseLabels = vi.fn();
+    panel.handleChatMessage = vi.fn(async () => undefined);
+    const catalog = analysisCatalog.read(panel.analysisCatalogIdentity());
+    vi.spyOn(analysisCatalog, 'read').mockReturnValue({...catalog, status: 'ready',
+      codebases: [{codebaseId: 'source-a', displayName: 'Launcher', kind: 'app_source', indexGeneration: 1}]});
+    panel.onAnalysisContextChange({codeAwareMode: 'metadata_only', codebaseIds: ['source-a'],
+      knowledgeSourceIds: ['kb-a'], sourceDepth: 'locate'});
+    panel.state.input = 'why is startup slow';
+    void panel.sendMessage();
+    const user = panel.state.messages.find((message: any) => message.role === 'user');
+    expect(user.submittedAnalysisContext).toEqual({codeAwareMode: 'metadata_only', codebaseLabels: ['Launcher'],
+      knowledgeSourceCount: 1, sourceDepth: 'locate'});
+    panel.onAnalysisContextChange({codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: []});
+    expect(user.submittedAnalysisContext.codebaseLabels).toEqual(['Launcher']);
+    expect(JSON.stringify(user.submittedAnalysisContext)).not.toContain('source-a');
   });
 
   it.each(['fast', 'full', 'auto'] as const)('keeps %s with a trace pair and private context through comparison exit', async (mode) => {
@@ -1239,11 +1284,11 @@ describe('AIPanel per-turn analysis mode', () => {
     expect(panel.state.analysisMode).toBe('conversation');
   });
 
-  it('hands Stop to a new Conversation while an older Agent supplement is finishing', async () => {
+  it('hands Stop to a new Conversation while an older Agent request is still attached', async () => {
     const panel = createModePanel();
     panel.state.analysisMode = 'conversation';
-    panel.state.agentSessionId = 'supplement-agent';
-    panel.state.agentRunId = 'supplement-run';
+    panel.state.agentSessionId = 'older-agent';
+    panel.state.agentRunId = 'older-run';
     const oldRequest = panel.analysisRequestCoordinator.begin();
     panel.activeAgentRequest = oldRequest;
     panel.analysisRequestCoordinator.finish(oldRequest);
@@ -1291,6 +1336,40 @@ describe('AIPanel per-turn analysis mode', () => {
     await panel.handleConversationMessage('test configuration');
     expect(panel.state.messages.length).toBeGreaterThan(0);
     expect(panel.state.messages.every((message: any) => message.configurationAction === undefined)).toBe(true);
+  });
+
+  it('restarts a conversation whose authorization changed and resends the question once', async () => {
+    const panel = createModePanel();
+    panel.state.analysisMode = 'conversation';
+    panel.serverStatus = {connected: true, configured: true};
+    // The saved conversation is already restored; only its start is under test.
+    panel.hydrateConversationHistory = vi.fn(async () => undefined);
+    const backendUrl = panel.state.settings.backendUrl;
+    saveConversationStore({...loadConversationStoreForUpdate(backendUrl), sessionId: 'old-chat',
+      conversationId: 'old-chat', traceId: panel.state.backendTraceId ?? undefined});
+    const posts: any[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      if (init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)));
+        return posts.length === 1
+          ? new Response(JSON.stringify({success: false, code: 'ANALYSIS_CONTEXT_CHANGED_RESTART_REQUIRED',
+              error: 'Start a new conversation after changing authorized sources'}), {status: 409})
+          : new Response(JSON.stringify({sessionId: 'new-chat', runId: 'new-run', isNewSession: true,
+              traceContextAttached: false}), {status: 200});
+      }
+      return new Response(`event: run_completed\ndata: ${JSON.stringify({outcome: {kind: 'answered', message: 'fresh answer'}})}\n\n`,
+        {status: 200, headers: {'Content-Type': 'text/event-stream'}});
+    });
+
+    await panel.handleConversationMessage('same question');
+
+    expect(posts.map(body => [body.query, body.sessionId])).toEqual([
+      ['same question', 'old-chat'], ['same question', undefined],
+    ]);
+    expect(posts.every(body => body.options.sourceDepth === 'auto')).toBe(true);
+    expect(panel.state.messages.some((message: any) => message.role === 'system' &&
+      message.content.includes(uiText('已用当前选择开始新对话', 'A new conversation started with the current selection')))).toBe(true);
+    expect(loadConversationStoreForUpdate(backendUrl).sessionId).toBe('new-chat');
   });
 
   it('keeps ordinary Conversation cancellation on its own API despite an old Agent session', async () => {
@@ -1363,27 +1442,14 @@ describe('AIPanel per-turn analysis mode', () => {
       expect(stopButtons(panel.view({attrs: {}}))).toHaveLength(0);
     });
 
-    it('offers only the enrichment Stop once the verdict landed while source enrichment runs', async () => {
+    it('offers no Stop once the verdict landed: the run is over', async () => {
       const panel = await conversationPanel();
       panel.state.isLoading = false;
       panel.conversationAbortController = new AbortController();
       panel.activeConversationRun = {sessionId: 'chat-session', runId: 'chat-run'};
       panel.state.messages.push({id: 'conversation-chat-session-chat-run-assistant', role: 'assistant',
-        content: 'answer', timestamp: 1, conversationSourceEnrichment: {status: 'running'}});
-      const ordinal = panel.conversationRequestOrdinal;
-      const fetch = vi.spyOn(globalThis, 'fetch')
-        .mockResolvedValue(new Response('{"success":true,"status":"answered"}', {status: 200}));
-      const stops = stopButtons(panel.view({attrs: {}}));
-      expect(stops).toHaveLength(1);
-      expect(stops[0].attrs.title).toBe('停止深度源码补充');
-
-      await stops[0].attrs.onclick();
-
-      expect(cancelBodies(fetch)).toEqual(['chat-run']);
-      expect(panel.state.isLoading).toBe(false);
-      expect(panel.state.loadingPhase).toBe('');
-      expect(panel.conversationRequestOrdinal).toBe(ordinal);
-      expect(panel.activeConversationRun?.runId).toBe('chat-run');
+        content: 'answer', timestamp: 1});
+      expect(stopButtons(panel.view({attrs: {}}))).toHaveLength(0);
     });
 
     it('sends a Stop pressed before the run receipt once it arrives, exactly once', async () => {
@@ -1495,7 +1561,7 @@ describe('AIPanel backend binding reset', () => {
     sessionStorage.clear();
   });
 
-  it('does not include the backend credential in codebase label cache identity', () => {
+  it('keys the shared catalog by backend, credential tag and scope, never the secret', () => {
     const panel = new AIPanel() as any;
     panel.state.settings = {
       ...panel.state.settings,
@@ -1503,16 +1569,16 @@ describe('AIPanel backend binding reset', () => {
       backendApiKey: 'secret-token',
     };
 
-    const firstKey = panel.analysisContextCodebaseScopeKey();
+    const firstKey = catalogIdentityKey(panel.analysisCatalogIdentity());
     panel.state.settings = {
       ...panel.state.settings,
       backendApiKey: 'rotated-secret-token',
     };
-    const rotatedCredentialKey = panel.analysisContextCodebaseScopeKey();
+    const rotatedCredentialKey = catalogIdentityKey(panel.analysisCatalogIdentity());
 
-    expect(rotatedCredentialKey).toBe(firstKey);
+    expect(rotatedCredentialKey).not.toBe(firstKey);
     expect(firstKey).not.toContain('secret-token');
-    expect(firstKey).not.toContain('rotated-secret-token');
+    expect(rotatedCredentialKey).not.toContain('rotated-secret-token');
     expect(firstKey.split('\0')[0]).toBe('http://backend.example');
   });
 
@@ -1540,6 +1606,7 @@ describe('AIPanel backend binding reset', () => {
       codeAwareMode: 'metadata_only',
       codebaseIds: ['new-backend-source'],
       knowledgeSourceIds: [],
+      sourceDepth: 'auto',
     });
   });
 
@@ -1575,6 +1642,7 @@ describe('AIPanel backend binding reset', () => {
       codeAwareMode: 'off',
       codebaseIds: [],
       knowledgeSourceIds: [],
+      sourceDepth: 'auto',
     });
   });
 });
@@ -3582,8 +3650,7 @@ describe('AIPanel conversation restoration', () => {
     else {
       oldStream.enqueue(new TextEncoder().encode(
         'event: runtime_update\ndata: {"update":{"content":"stale-phase"}}\n\n' +
-        'event: run_completed\ndata: {"enrichmentPending":true,"outcome":{"kind":"answered","message":"stale-answer"}}\n\n' +
-        'event: source_enrichment_completed\ndata: {"message":"stale-source","evidence":[],"metrics":{"searchCalls":1,"readCalls":1,"durationMs":1}}\n\n'));
+        'event: run_completed\ndata: {"outcome":{"kind":"answered","message":"stale-answer"}}\n\n'));
       oldStream.close();
     }
     await oldRun;
@@ -3601,4 +3668,43 @@ describe('AIPanel conversation restoration', () => {
     await newRun;
   });
 
+});
+
+describe('AIPanel analysis-result sharing', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const item = (privateContext: unknown) => (new AIPanel() as any).normalizeAnalysisResultItem({
+    id: 'snapshot-a', traceId: 'trace-a', visibility: 'private', privateContext,
+  });
+
+  it('hides Share for private, unknown and unmarked snapshots and shows it only for a public one', () => {
+    const panel = new AIPanel() as any;
+    const share = (value: unknown) =>
+      findVNodeByTitle(panel.renderResultPickerItem(item(value)), uiText('设为 workspace 可见', 'Make visible to workspace'));
+    expect(share({codebase: false, knowledge: false})).toBeDefined();
+    expect(share({codebase: true, knowledge: false})).toBeUndefined();
+    expect(share({codebase: false, knowledge: true})).toBeUndefined();
+    expect(share('unknown')).toBeUndefined();
+    expect(share(undefined)).toBeUndefined();
+    expect(collectVNodeText(panel.renderResultPickerItem(item({codebase: true, knowledge: false}))))
+      .toContain(uiText('仅自己可见', 'Only you'));
+  });
+
+  it('maps PRIVATE_CONTEXT_NOT_SHAREABLE to an explanation and stops offering Share', async () => {
+    const panel = new AIPanel() as any;
+    panel.availableAnalysisResults = [item({codebase: false, knowledge: false})];
+    panel.fetchBackend = vi.fn(async () => new Response(JSON.stringify({
+      success: false, code: 'PRIVATE_CONTEXT_NOT_SHAREABLE', error: 'An analysis that read private source',
+    }), {status: 409}));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    panel.addMessage = vi.fn();
+
+    await panel.updateAnalysisResultVisibility('snapshot-a', 'workspace');
+
+    expect(panel.addMessage.mock.calls[0][0].content).toContain(
+      uiText('只对创建者可见，不能共享', 'stays with its creator and cannot be shared'));
+    expect(panel.availableAnalysisResults[0].privateContext).toBe('unknown');
+    expect(findVNodeByTitle(panel.renderResultPickerItem(panel.availableAnalysisResults[0]),
+      uiText('设为 workspace 可见', 'Make visible to workspace'))).toBeUndefined();
+  });
 });

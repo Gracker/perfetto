@@ -4,14 +4,23 @@
 
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
-const apiMocks = vi.hoisted(() => ({register: vi.fn()}));
+const apiMocks = vi.hoisted(() => ({register: vi.fn(), previewSelection: vi.fn(), updateSelection: vi.fn(),
+  authorizeContent: vi.fn(), getCodebase: vi.fn()}));
 vi.mock('./codebase_api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./codebase_api')>(),
   registerCodebase: apiMocks.register,
+  authorizeCodebaseContent: apiMocks.authorizeContent,
+  getCodebase: apiMocks.getCodebase,
+  previewCodebaseSelection: apiMocks.previewSelection,
+  updateCodebaseSelection: apiMocks.updateSelection,
 }));
 
 beforeEach(() => {
   apiMocks.register.mockReset();
+  apiMocks.previewSelection.mockReset();
+  apiMocks.updateSelection.mockReset();
+  apiMocks.authorizeContent.mockReset();
+  apiMocks.getCodebase.mockReset();
 });
 
 import type {CodebaseFormAttrs} from './codebase_form';
@@ -20,7 +29,8 @@ import {
   codebaseFieldRequirements,
   CodebaseForm,
 } from './codebase_form';
-import type {CodebaseSummary} from './codebase_api';
+import {CodebaseApiError, type CodebaseSummary} from './codebase_api';
+import {ContentDisclosureReview} from './content_disclosure_review';
 
 function collectText(node: any): string {
   if (node === null || node === undefined) return '';
@@ -131,7 +141,7 @@ describe('CodebaseForm', () => {
       },
       selectionPolicyRevision: {current: 7, next: 8},
       invalidatesActiveIndex: true,
-      providerGrantMayMismatch: true,
+      providerGrantAffected: true,
     });
     expect(JSON.stringify(impact)).not.toMatch(/fileCount|acceptedFile|rootPath/);
   });
@@ -165,11 +175,19 @@ describe('CodebaseForm', () => {
     expect(renderedText).toMatch(/src.*lib/s);
     expect(renderedText).toMatch(/revision.*3.*4|修订.*3.*4/is);
     expect(renderedText).toMatch(/reindex|重建/i);
-    expect(renderedText).toMatch(/provider.*authoriz|provider.*授权/i);
+    // The grant narrows when the new scope is provably inside it, and is revoked otherwise.
+    expect(renderedText).toMatch(/grant narrows to it; otherwise saving revokes text sending|授权随之收窄到新范围；否则保存会撤销/);
+    expect(renderedText).not.toMatch(/Authorize current scope|授权当前范围|may not match|可能与新范围不一致/);
     expect(renderedText).not.toMatch(/Source folder|源码文件夹|Accepted files|可接受文件/);
+    expect(renderedText).not.toMatch(/does not rescan|不会重新扫描/);
+    // A changed selection is saved only after it was previewed.
     expect(findNode(
       rendered,
       node => node.tag === 'button' && /Save selection|保存范围/.test(collectText(node)),
+    )?.attrs.disabled).toBe(true);
+    expect(findNode(
+      rendered,
+      node => node.tag === 'button' && /Preview scope|预览范围/.test(collectText(node)),
     )?.attrs.disabled).toBe(false);
   });
 
@@ -180,6 +198,9 @@ describe('CodebaseForm', () => {
       kind: 'app_source',
       displayName: 'App',
       indexGeneration: 2,
+      activeGeneration: 'generation-2',
+      activeIndexState: 'active',
+      eligibleForSendToProvider: true,
       selectionPolicyRevision: 2,
       pathFilters: ['src'],
       excludeGlobs: ['**/generated/**'],
@@ -200,6 +221,10 @@ describe('CodebaseForm', () => {
     );
 
     expect(save.attrs.disabled).toBe(true);
+    // Nothing would change, so nothing about what saving does is shown.
+    const renderedText = collectText(rendered);
+    expect(renderedText).toMatch(/no selection changes|没有范围变化/);
+    expect(renderedText).not.toMatch(/revision|修订|reindex|重建|grant|授权/i);
     cancel.attrs.onclick();
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onUpdated).not.toHaveBeenCalled();
@@ -344,23 +369,91 @@ describe('explicit registration consent', () => {
     rootAvailable: true, indexGeneration: 0, eligibleForSendToProvider: true,
   };
 
+  const unconsented: CodebaseSummary = {
+    ...registered, eligibleForSendToProvider: false,
+    contentDisclosure: {token: 'disclosure-of-new-source', includePrefixes: [], excludeGlobs: ['private/**'],
+      extensions: ['.kt', '.java']},
+  };
+
   it.each([
-    ['off', true, true],
-    ['provider_send', true, true],
-    ['metadata_only', true, false],
-    ['provider_send', false, false],
-  ] as const)('binds %s / use=%s to explicit body consent', async (mode, use, consent) => {
+    ['off', true], ['provider_send', true], ['metadata_only', true], ['provider_send', false],
+  ] as const)('never asks registration for body consent (%s / use=%s)', async (mode, use) => {
     const {form, attrs} = formHarness();
     attrs.codeAwareMode = mode;
     form.rootPath = '/source/app';
     form.excludeGlobs = 'private/**, **/secrets/**';
-    apiMocks.register.mockResolvedValue({codebase: registered});
+    apiMocks.register.mockResolvedValue({codebase: unconsented});
     await form.register(attrs, use);
     expect(apiMocks.register).toHaveBeenCalledWith('http://backend', expect.objectContaining({
-      sendToProvider: consent,
+      sendToProvider: false,
       excludeGlobs: ['private/**', '**/secrets/**'],
     }), 'key');
-    expect(attrs.onRegistered).toHaveBeenCalledWith(registered, use);
+  });
+
+  it.each([['metadata_only', true], ['provider_send', false]] as const)(
+    'completes at once when no source text is wanted (%s / use=%s)', async (mode, use) => {
+      const {form, attrs} = formHarness();
+      attrs.codeAwareMode = mode;
+      form.rootPath = '/source/app';
+      apiMocks.register.mockResolvedValue({codebase: unconsented});
+      await form.register(attrs, use);
+      expect(attrs.onRegistered).toHaveBeenCalledWith(unconsented, use);
+      expect(form.pendingGrant).toBeNull();
+    });
+
+  async function addAndUse() {
+    const {form, attrs} = formHarness();
+    attrs.codeAwareMode = 'off';
+    form.rootPath = '/source/app';
+    apiMocks.register.mockResolvedValue({codebase: unconsented});
+    await form.register(attrs, true);
+    const reviewVnode = findNode(form.view({attrs} as any),
+      node => node.attrs?.codebase?.codebaseId === 'new-source' && typeof node.attrs?.onGranted === 'function');
+    // Registration alone selects nothing for text: the disclosure review comes first.
+    expect(attrs.onRegistered).not.toHaveBeenCalled();
+    expect(reviewVnode).toBeDefined();
+    const review = new ContentDisclosureReview() as any;
+    review.oninit({attrs: reviewVnode.attrs});
+    const button = (label: RegExp) => findNode(review.view({attrs: reviewVnode.attrs}),
+      (node: any) => node.tag === 'button' && label.test(collectText(node)));
+    return {form, attrs, review, reviewVnode, button};
+  }
+
+  it('shows the returned disclosure and grants only that snapshot\'s token before selecting text', async () => {
+    const {attrs, review, reviewVnode, button} = await addAndUse();
+    // Nothing is selected for analysis until the disclosure is confirmed.
+    expect(attrs.onRegistered).not.toHaveBeenCalled();
+    const shown = collectText(review.view({attrs: reviewVnode.attrs}));
+    expect(shown).toMatch(/private\/\*\*/);
+    expect(shown).toMatch(/\.kt, \.java/);
+    const granted = {...unconsented, eligibleForSendToProvider: true};
+    apiMocks.authorizeContent.mockResolvedValue(granted);
+    await button(/^\s*Allow\s*$|确认允许/).attrs.onclick();
+    expect(apiMocks.authorizeContent).toHaveBeenCalledWith('http://backend', 'new-source', 'disclosure-of-new-source', 'key');
+    expect(attrs.onRegistered).toHaveBeenCalledWith(granted, true);
+  });
+
+  it('adds without using it when the disclosure is declined', async () => {
+    const {attrs, button} = await addAndUse();
+    button(/Cancel|取消/).attrs.onclick();
+    expect(apiMocks.authorizeContent).not.toHaveBeenCalled();
+    expect(attrs.onRegistered).toHaveBeenCalledWith(unconsented, false);
+  });
+
+  it('re-shows a changed disclosure after a stale refusal and never selects text on its own', async () => {
+    const {attrs, review, reviewVnode, button} = await addAndUse();
+    apiMocks.authorizeContent.mockRejectedValueOnce(
+      new CodebaseApiError('stale', 'CODEBASE_CONSENT_DISCLOSURE_STALE', undefined, 409));
+    apiMocks.getCodebase.mockResolvedValue({...unconsented, contentDisclosure: {
+      token: 'disclosure-fresh', includePrefixes: ['app'], excludeGlobs: [], extensions: ['.kt']}});
+    await button(/^\s*Allow\s*$|确认允许/).attrs.onclick();
+    expect(apiMocks.authorizeContent).toHaveBeenCalledOnce();
+    expect(attrs.onRegistered).not.toHaveBeenCalled();
+    expect(collectText(review.view({attrs: reviewVnode.attrs}))).toMatch(/updated; confirm again/);
+    apiMocks.authorizeContent.mockResolvedValue({...unconsented, eligibleForSendToProvider: true});
+    await button(/^\s*Allow\s*$|确认允许/).attrs.onclick();
+    expect(apiMocks.authorizeContent).toHaveBeenLastCalledWith('http://backend', 'new-source', 'disclosure-fresh', 'key');
+    expect(attrs.onRegistered).toHaveBeenCalledWith(expect.objectContaining({eligibleForSendToProvider: true}), true);
   });
 
   it('keeps source kind and metadata in advanced settings and exclusions in the main flow', () => {
@@ -407,5 +500,112 @@ describe('explicit registration consent', () => {
     form.rootPath = '/source/app';
     await form.register(attrs, true);
     expect(apiMocks.register).not.toHaveBeenCalled();
+  });
+});
+
+describe('CodebaseForm selection preview', () => {
+  const editing: CodebaseSummary = {
+    codebaseId: 'codebase-a', kind: 'app_source', displayName: 'App', indexGeneration: 2,
+    selectionPolicyRevision: 3, pathFilters: ['src'], excludeGlobs: [],
+  };
+  function editor() {
+    const {form, attrs} = formHarness();
+    const onUpdated = vi.fn();
+    const editAttrs = {...attrs, codebase: editing, onUpdated};
+    form.onbeforeupdate({attrs: editAttrs} as any);
+    const button = (label: RegExp) => findNode(form.view({attrs: editAttrs} as any),
+      node => node.tag === 'button' && label.test(collectText(node)));
+    return {form, editAttrs, onUpdated, save: () => button(/Save selection|保存范围/),
+      text: () => collectText(form.view({attrs: editAttrs} as any))};
+  }
+  const result = (status: 'complete' | 'partial' | 'unavailable', count?: number, extra: object = {}) => ({
+    status, selectionPolicyRevision: 3,
+    ...(count === undefined ? {} : {preview: {acceptedFileCount: count}}), ...extra,
+  });
+
+  it('ignores a preview answered for an earlier edit, and an edit voids a finished preview', async () => {
+    const {form, editAttrs, save, text} = editor();
+    let resolve!: (value: unknown) => void;
+    apiMocks.previewSelection.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    form.pathFilters = 'src\nlib';
+    const pending = form.previewSelection(editAttrs);
+    form.pathFilters = 'src\napp';
+    resolve(result('complete', 9));
+    await pending;
+    expect(text()).not.toMatch(/9/);
+    expect(save().attrs.disabled).toBe(true);
+
+    apiMocks.previewSelection.mockResolvedValueOnce(result('complete', 7));
+    await form.previewSelection(editAttrs);
+    expect(text()).toMatch(/7/);
+    expect(save().attrs.disabled).toBe(false);
+    form.excludeGlobs = '**/test/**';
+    expect(text()).not.toMatch(/contains 7|包含 7/);
+    expect(save().attrs.disabled).toBe(true);
+  });
+
+  it('does not let a late answer for an earlier edit replace the current preview', async () => {
+    const {form, editAttrs, save, text} = editor();
+    let resolveFirst!: (value: unknown) => void;
+    apiMocks.previewSelection
+      .mockImplementationOnce(() => new Promise(done => { resolveFirst = done; }))
+      .mockResolvedValueOnce(result('complete', 5));
+    form.pathFilters = 'lib';
+    const first = form.previewSelection(editAttrs);
+    form.pathFilters = 'app';
+    await form.previewSelection(editAttrs);
+    resolveFirst(result('complete', 99));
+    await first;
+    expect(text()).toMatch(/contains 5|包含 5/);
+    expect(text()).not.toMatch(/99/);
+    expect(save().attrs.disabled).toBe(false);
+  });
+
+  it('saves exactly the previewed snapshot at the previewed revision', async () => {
+    const {form, editAttrs, onUpdated, save} = editor();
+    apiMocks.previewSelection.mockResolvedValueOnce(result('partial', 40, {selectionPolicyRevision: 5}));
+    apiMocks.updateSelection.mockResolvedValueOnce({...editing, selectionPolicyRevision: 6});
+    form.pathFilters = 'lib\nsrc';
+    await form.previewSelection(editAttrs);
+    await save().attrs.onclick();
+    expect(apiMocks.updateSelection).toHaveBeenCalledWith('http://backend', 'codebase-a',
+      {pathFilters: ['lib', 'src'], excludeGlobs: [], expectedSelectionPolicyRevision: 5}, 'key');
+    expect(onUpdated).toHaveBeenCalledOnce();
+  });
+
+  it('reads complete as exact, partial as a lower bound and unavailable as not zero', async () => {
+    const {form, editAttrs, save, text} = editor();
+    form.pathFilters = 'none';
+    apiMocks.previewSelection.mockResolvedValueOnce(result('complete', 0));
+    await form.previewSelection(editAttrs);
+    expect(text()).toMatch(/cannot be saved|不能保存/);
+    expect(save().attrs.disabled).toBe(true);
+
+    form.pathFilters = 'big';
+    apiMocks.previewSelection.mockResolvedValueOnce(result('partial', 120));
+    await form.previewSelection(editAttrs);
+    expect(text()).toMatch(/At least 120|至少 120/);
+
+    form.pathFilters = 'gone';
+    apiMocks.previewSelection.mockResolvedValueOnce(result('unavailable', undefined, {unavailableReason: 'root_missing'}));
+    await form.previewSelection(editAttrs);
+    expect(text()).toMatch(/does not mean zero files|不表示零个文件/);
+    expect(save().attrs.disabled).toBe(false);
+  });
+
+  it.each([
+    ['CODEBASE_SELECTION_STALE', /Preview again|重新预览/, true],
+    ['CODEBASE_SELECTION_EMPTY_MATCH', /nothing was saved|未保存/, false],
+    ['CODEBASE_SELECTION_UNCHANGED', /unchanged|没有变化/, false],
+  ])('handles %s without reporting an update', async (code, message, clearsPreview) => {
+    const {form, editAttrs, onUpdated, save, text} = editor();
+    form.pathFilters = 'lib';
+    apiMocks.previewSelection.mockResolvedValueOnce(result('complete', 3));
+    apiMocks.updateSelection.mockRejectedValueOnce(new CodebaseApiError('refused', code, undefined, 409));
+    await form.previewSelection(editAttrs);
+    await save().attrs.onclick();
+    expect(onUpdated).not.toHaveBeenCalled();
+    expect(text()).toMatch(message);
+    expect(save().attrs.disabled).toBe(clearsPreview);
   });
 });

@@ -8,16 +8,48 @@ import {
   CodebaseApiError,
   acceptPendingCodebaseGeneration,
   reindexCodebase,
-  authorizeCurrentCodebaseSelection,
+  authorizeCodebaseContent,
+  previewCodebaseSelection,
+  revokeCodebaseContentConsent,
   deleteCodebase,
   getCodebaseDirectoryPickerCapability,
   previewCodebaseRoot,
   registerExternalKnowledgeSource,
   reindexExternalKnowledgeSource,
   rejectPendingCodebaseGeneration,
-  selectCodebaseDirectory,
+  searchKnowledgeCollection,
+  selectDirectory,
   updateCodebaseSelection,
 } from './codebase_api';
+import {
+  setSmartPerfettoWorkspaceId,
+  tryGetSmartPerfettoRequestContext,
+} from '../../core/smartperfetto_request_context';
+
+describe('requests pinned to a scope', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it('names the scope an operation pinned, not the scope the window switched to since', async () => {
+    setSmartPerfettoWorkspaceId('workspace-a');
+    const pinned = tryGetSmartPerfettoRequestContext()!;
+    setSmartPerfettoWorkspaceId('workspace-b');
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      ({ok: true, status: 200, json: async () => ({success: true, hits: []})} as Response));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await searchKnowledgeCollection('http://backend', 'kb-a', 'binder', undefined, pinned);
+    await searchKnowledgeCollection('http://backend', 'kb-a', 'binder');
+
+    const sent = fetchMock.mock.calls.map(call => call[1]?.headers as Record<string, string>);
+    expect(sent[0]).toMatchObject({'X-Workspace-Id': 'workspace-a', 'X-Tenant-Id': pinned.tenantId,
+      'X-Window-Id': pinned.windowId});
+    // Without a pinned scope the request names the current one.
+    expect(sent[1]).toMatchObject({'X-Workspace-Id': 'workspace-b'});
+  });
+});
 
 describe('codebase selection policy API', () => {
   it('PATCHes the complete repeated filter replacement without changing request conventions', async () => {
@@ -71,27 +103,38 @@ describe('codebase selection policy API', () => {
   });
 });
 
-describe('codebase selection consent API', () => {
-  it('uses the explicit current-selection authorization action', async () => {
-    const fetchMock = vi.fn(async (
-      _input: RequestInfo | URL,
-      _init?: RequestInit,
-    ) => ({
-      ok: true,
-      status: 200,
-      json: async () => ({success: true, codebase: {codebaseId: 'codebase/a'}}),
+describe('codebase content consent and selection preview API', () => {
+  function stubFetch(body: unknown) {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
+      ok: true, status: 200, json: async () => body,
     } as Response));
     vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
 
-    await authorizeCurrentCodebaseSelection('http://backend', 'codebase/a', 'key');
+  it('grants content only with the disclosed token, and revokes with an explicit false', async () => {
+    const fetchMock = stubFetch({success: true, codebase: {codebaseId: 'codebase/a'}});
+    await authorizeCodebaseContent('http://backend', 'codebase/a', 'disclosure-token-1', 'key');
+    await revokeCodebaseContentConsent('http://backend', 'codebase/a', 'key');
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method, init?.body])).toEqual([
+      ['http://backend/api/rag/codebases/codebase%2Fa/consent', 'PATCH',
+        JSON.stringify({authorizeContent: true, contentDisclosureToken: 'disclosure-token-1'})],
+      ['http://backend/api/rag/codebases/codebase%2Fa/consent', 'PATCH', JSON.stringify({sendToProvider: false})],
+    ]);
+  });
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      'http://backend/api/rag/codebases/codebase%2Fa/consent',
-      expect.objectContaining({
-        method: 'PATCH',
-        body: JSON.stringify({authorizeCurrentSelection: true}),
-      }),
-    );
+  it('previews a proposed selection and saves with the previewed revision', async () => {
+    const fetchMock = stubFetch({success: true, selectionPreview: {status: 'partial', selectionPolicyRevision: 4,
+      preview: {acceptedFileCount: 12}}, codebase: {codebaseId: 'codebase/a'}});
+    const preview = await previewCodebaseSelection('http://backend', 'codebase/a',
+      {pathFilters: ['app'], excludeGlobs: []});
+    expect(preview).toEqual({status: 'partial', selectionPolicyRevision: 4, preview: {acceptedFileCount: 12}});
+    await updateCodebaseSelection('http://backend', 'codebase/a',
+      {pathFilters: ['app'], excludeGlobs: [], expectedSelectionPolicyRevision: 4});
+    expect(fetchMock.mock.calls[0][0]).toBe('http://backend/api/rag/codebases/codebase%2Fa/selection/preview');
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      pathFilters: ['app'], excludeGlobs: [], expectedSelectionPolicyRevision: 4,
+    });
   });
 });
 
@@ -230,8 +273,9 @@ describe('codebase directory picker API', () => {
       available: true,
       provider: 'macos',
     });
-    await expect(selectCodebaseDirectory(
+    await expect(selectDirectory(
       'http://backend/',
+      'codebase',
       'secret-key',
     )).resolves.toMatchObject({
       selected: true,
@@ -252,7 +296,7 @@ describe('codebase directory picker API', () => {
       'http://backend/api/rag/codebases/directory-picker',
       expect.objectContaining({
         method: 'POST',
-        body: '{}',
+        body: JSON.stringify({purpose: 'codebase'}),
       }),
     );
   });

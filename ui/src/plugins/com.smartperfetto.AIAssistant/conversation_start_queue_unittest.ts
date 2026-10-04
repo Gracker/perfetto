@@ -178,3 +178,52 @@ describe('ConversationStartQueue', () => {
     expect(start).not.toHaveBeenCalled();
   });
 });
+
+describe('ConversationStartQueue analysis-context restart', () => {
+  const restartRequired = () => new ConversationClientError(
+    'Start a new conversation after changing authorized sources', 409,
+    'ANALYSIS_CONTEXT_CHANGED_RESTART_REQUIRED');
+
+  it('drops the old descriptor and resends the same question in a new conversation once', async () => {
+    let sessionId: string | undefined = 'old-session';
+    const writes: Array<string | undefined> = [];
+    const start = vi.fn()
+      .mockRejectedValueOnce(restartRequired())
+      .mockResolvedValueOnce(receipt('new-session', 'run-1'));
+    const queue = new ConversationStartQueue(
+      () => sessionId,
+      (value) => { sessionId = value; writes.push(value); },
+      start,
+    );
+    const input = {query: 'same question', analysisContext: {
+      codeAwareMode: 'off' as const, codebaseIds: [], knowledgeSourceIds: ['kb-a'], sourceDepth: 'auto' as const}};
+
+    const result = await queue.enqueue({backendUrl: 'http://backend'}, input);
+
+    expect(start).toHaveBeenNthCalledWith(1, {backendUrl: 'http://backend'}, {...input, sessionId: 'old-session'});
+    expect(start).toHaveBeenNthCalledWith(2, {backendUrl: 'http://backend'}, input);
+    expect(result).toEqual({...receipt('new-session', 'run-1'), restartedAfterContextChange: true});
+    expect(writes).toEqual([undefined, 'new-session']);
+  });
+
+  it('does not restart for other conflicts, without a saved session, or after a reset', async () => {
+    const traceChanged = new ConversationClientError('trace', 409, 'CONVERSATION_TRACE_CHANGED');
+    const otherConflict = new ConversationStartQueue(() => 'old', () => {}, vi.fn().mockRejectedValue(traceChanged));
+    await expect(otherConflict.enqueue({backendUrl: 'b'}, {query: 'q'})).rejects.toBe(traceChanged);
+
+    const noSession = vi.fn().mockRejectedValue(restartRequired());
+    await expect(new ConversationStartQueue(() => undefined, () => {}, noSession)
+      .enqueue({backendUrl: 'b'}, {query: 'q'})).rejects.toMatchObject({status: 409});
+    expect(noSession).toHaveBeenCalledOnce();
+
+    let rejectStart!: (error: unknown) => void;
+    const reset = vi.fn().mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectStart = reject; }));
+    const queue = new ConversationStartQueue(() => 'old', () => {}, reset);
+    const pending = queue.enqueue({backendUrl: 'b'}, {query: 'q'});
+    await vi.waitFor(() => expect(reset).toHaveBeenCalledOnce());
+    queue.reset();
+    rejectStart(restartRequired());
+    await expect(pending).rejects.toMatchObject({status: 409});
+    expect(reset).toHaveBeenCalledOnce();
+  });
+});

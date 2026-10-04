@@ -18,27 +18,24 @@
 
 import m from 'mithril';
 
-import type {
-  AnalysisContextSelection,
-  CodeAwareAnalysisMode,
-} from './types';
+import type {AnalysisContextSelection} from './types';
 import type {
   CodebaseSummary,
   ExternalKnowledgeSourceSummary,
+  KnowledgeBaseSummary,
 } from './codebase_api';
 import {
   CodebaseApiError,
   acceptPendingCodebaseGeneration,
-  authorizeAvailableCodebaseExtensions,
-  authorizeCurrentCodebaseSelection,
+  codebaseUnavailableReasonText,
+  codebaseUsableInMode,
   deleteCodebase,
-  listCodebases,
-  listExternalKnowledgeSources,
+  knowledgeBaseSelectable,
   registerExternalKnowledgeSource,
   rejectPendingCodebaseGeneration,
   reindexCodebase,
   reindexExternalKnowledgeSource,
-  updateCodebaseConsent,
+  revokeCodebaseContentConsent,
   updateExternalKnowledgeSourceConsent,
 } from './codebase_api';
 import {
@@ -47,10 +44,13 @@ import {
   sameAnalysisContext,
 } from './analysis_context';
 import {CodebaseAuditView} from './codebase_audit_view';
+import {KnowledgeBaseSection} from './knowledge_base_section';
 import {CodebaseForm} from './codebase_form';
-import {codebaseExcerptCache} from './codebase_excerpt_cache';
+import {ContentDisclosureReview} from './content_disclosure_review';
+import {analysisCatalog} from './analysis_catalog';
 import {uiText as text} from './ui_language';
-import {sourceAnalysisDisclosure} from './source_analysis_disclosure';
+import {MANAGEMENT_STYLES} from './management_ui';
+import {knowledgeConsentQuestion} from './source_analysis_disclosure';
 
 export interface CodebasePanelAttrs {
   backendUrl: string;
@@ -66,151 +66,13 @@ export interface CodebasePanelAttrs {
 
 type ViewMode = 'list' | 'add-codebase' | 'edit-codebase' | 'add-knowledge';
 
-export function externalKnowledgeSourceHasActiveIndex(
-  source: ExternalKnowledgeSourceSummary,
-): boolean {
-  return source.rightsAcknowledged === true &&
-    source.sendToProvider === true &&
-    Boolean(source.activeGeneration) &&
-    Boolean(source.contentFingerprint?.trim()) &&
-    (source.indexedChunkCount ?? 0) > 0;
-}
-
-const STYLES = {
-  shell: {
-    padding: '18px',
-    minHeight: '420px',
-  },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: '12px',
-    marginBottom: '14px',
-  },
-  title: {
-    margin: 0,
-    color: 'var(--chat-text)',
-    fontSize: '15px',
-    fontWeight: 700,
-  },
-  subtitle: {
-    color: 'var(--chat-text-secondary)',
-    fontSize: '12px',
-    marginTop: '4px',
-  },
-  button: {
-    minHeight: '40px',
-    border: '1px solid var(--chat-border)',
-    borderRadius: '8px',
-    background: 'var(--chat-bg-secondary)',
-    color: 'var(--chat-text)',
-    padding: '8px 11px',
-    cursor: 'pointer',
-    fontSize: '12px',
-  },
-  primary: {
-    background: 'var(--chat-primary)',
-    borderColor: 'var(--chat-primary)',
-    color: 'white',
-  },
-  list: {
-    display: 'grid',
-    gap: '10px',
-  },
-  card: {
-    border: '1px solid var(--chat-border)',
-    borderRadius: '8px',
-    background: 'var(--chat-bg)',
-    padding: '12px',
-  },
-  cardHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: '12px',
-  },
-  name: {
-    color: 'var(--chat-text)',
-    fontSize: '13px',
-    fontWeight: 700,
-  },
-  meta: {
-    color: 'var(--chat-text-secondary)',
-    fontSize: '11px',
-    fontFamily: 'monospace',
-    overflowWrap: 'anywhere',
-  },
-  chips: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: '6px',
-    marginTop: '8px',
-  },
-  chip: {
-    border: '1px solid var(--chat-border)',
-    borderRadius: '999px',
-    padding: '2px 7px',
-    color: 'var(--chat-text-secondary)',
-    fontSize: '11px',
-  },
-  actions: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: '6px',
-    marginTop: '10px',
-  },
-  context: {
-    border: '1px solid var(--chat-border)',
-    borderRadius: '10px',
-    background: 'var(--chat-bg-secondary)',
-    padding: '12px',
-    marginBottom: '14px',
-  },
-  modeRow: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: '6px',
-    marginTop: '9px',
-  },
-  check: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    gap: '8px',
-    color: 'var(--chat-text)',
-    cursor: 'pointer',
-  },
-  empty: {
-    border: '1px dashed var(--chat-border)',
-    borderRadius: '8px',
-    padding: '22px',
-    textAlign: 'center',
-    color: 'var(--chat-text-secondary)',
-  },
-  error: {
-    color: 'var(--chat-error)',
-    fontSize: '12px',
-    marginBottom: '10px',
-  },
-  success: {
-    color: 'var(--chat-success)',
-    fontSize: '12px',
-    marginBottom: '10px',
-  },
-} as const;
+const STYLES = MANAGEMENT_STYLES;
 
 export function codebaseHasActiveIndex(codebase: CodebaseSummary): boolean {
   return (codebase.lifecycleState ?? 'active') === 'active' &&
     Boolean(codebase.activeGeneration) &&
     Boolean(codebase.contentFingerprint) &&
     (codebase.chunkCount ?? 0) > 0;
-}
-
-export function codebaseAvailableForOnDemandAccess(
-  codebase: CodebaseSummary,
-): boolean {
-  return (codebase.lifecycleState ?? 'active') === 'active' &&
-    codebase.rootAvailable !== false;
 }
 
 export function optionalIndexCopyForActiveRoot(): string {
@@ -226,13 +88,11 @@ export function analysisContextAfterCodebaseRegistration(
   codebase: CodebaseSummary,
   codebases: readonly CodebaseSummary[],
 ): AnalysisContextSelection {
-  if (!codebaseAvailableForOnDemandAccess(codebase)) return selection;
   const mode = selection.codeAwareMode === 'off' ? 'provider_send' : selection.codeAwareMode;
-  if (mode === 'provider_send' && codebase.eligibleForSendToProvider !== true) return selection;
+  if (!codebaseUsableInMode(codebase, mode)) return selection;
   const retained = selection.codeAwareMode === 'off' ? [] : selection.codebaseIds.filter(id => {
     const source = codebases.find(candidate => candidate.codebaseId === id);
-    return source && codebaseAvailableForOnDemandAccess(source) &&
-      (mode !== 'provider_send' || source.eligibleForSendToProvider === true);
+    return source !== undefined && codebaseUsableInMode(source, mode);
   });
   return normalizeAnalysisContext({
     ...selection,
@@ -267,16 +127,16 @@ export function codebaseDeletionPending(codebase: CodebaseSummary): boolean {
   return codebase.lifecycleState === 'deleting';
 }
 
-export function codebaseCanAuthorizeAvailableExtensions(codebase: CodebaseSummary): boolean {
+/**
+ * Whether granting source text would change anything: no consent yet, a grant
+ * that no longer equals the current selection, or languages it lacks.
+ */
+export function codebaseNeedsContentAuthorization(codebase: CodebaseSummary): boolean {
   return (codebase.lifecycleState ?? 'active') === 'active' &&
-    codebase.eligibleForSendToProvider === true &&
-    (codebase.availableNotConsentedExtensions?.length ?? 0) > 0;
-}
-
-export function codebaseCanAuthorizeCurrentSelection(codebase: CodebaseSummary): boolean {
-  return (codebase.lifecycleState ?? 'active') === 'active' &&
-    codebase.eligibleForSendToProvider === true &&
-    codebase.providerGrantScopeCurrent === false;
+    Boolean(codebase.contentDisclosure?.token) &&
+    (codebase.eligibleForSendToProvider !== true ||
+      codebase.providerGrantScopeCurrent === false ||
+      (codebase.availableNotConsentedExtensions?.length ?? 0) > 0);
 }
 
 export function analysisContextForFeatureAvailability(
@@ -315,7 +175,11 @@ function compactIdentity(value: string | undefined, maxLength = 18): string {
 export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private codebases: CodebaseSummary[] = [];
   private knowledgeSources: ExternalKnowledgeSourceSummary[] = [];
+  /** Document collections from `/knowledge`; the Wiki keeps its legacy list. */
+  private knowledgeBases: KnowledgeBaseSummary[] = [];
   private loading = true;
+  /** A first load finished: later refreshes keep the lists (and their children) mounted. */
+  private loaded = false;
   private error: string | null = null;
   private success: string | null = null;
   private featureEnabled = true;
@@ -326,8 +190,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   private pendingAction: {codebaseId: string; action: 'accept' | 'reject'} | null = null;
   private deletingId: string | null = null;
   private updatingConsentId: string | null = null;
-  private extensionAuthorizationId: string | null = null;
-  private selectionAuthorizationId: string | null = null;
+  /** The codebase whose source-text disclosure is under review. */
+  private reviewingCodebaseId: string | null = null;
   private reindexingKnowledgeId: string | null = null;
   private registeringKnowledge = false;
   private knowledgeRootPath = '';
@@ -366,22 +230,22 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.loadEpoch++;
       this.identityEpoch++;
       this.codebases = [];
+      this.loaded = false;
       this.unavailableCodebaseIds.clear();
       this.knowledgeSources = [];
+      this.knowledgeBases = [];
       this.error = null;
       this.reindexingId = null;
       this.pendingAction = null;
       this.deletingId = null;
       this.updatingConsentId = null;
-      this.extensionAuthorizationId = null;
-      this.selectionAuthorizationId = null;
+      this.reviewingCodebaseId = null;
       this.reindexingKnowledgeId = null;
       this.registeringKnowledge = false;
       this.success = null;
       this.expandedAuditId = null;
       this.editingCodebaseId = null;
       this.viewMode = 'list';
-      codebaseExcerptCache.clearForPanelUnmount();
       this.load();
     }
   }
@@ -406,7 +270,25 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
   onremove() {
     this.loadEpoch++;
     this.identityEpoch++;
-    codebaseExcerptCache.clearForPanelUnmount();
+  }
+
+  private catalogIdentity() {
+    return {backendUrl: this.backendUrl, apiKey: this.apiKey, scopeKey: this.scopeKey};
+  }
+
+  /**
+   * Copy the lists the shared catalog's latest refresh actually read (a
+   * refresh by any view lands here); a list it failed to read keeps what this
+   * view holds, such as a codebase it just registered.
+   */
+  private syncFromCatalog(): void {
+    const state = analysisCatalog.read(this.catalogIdentity());
+    if (state.loaded.codebases) {
+      this.featureEnabled = state.featureEnabled;
+      this.codebases = state.codebases;
+    }
+    if (state.loaded.wikiSources) this.knowledgeSources = state.wikiSources;
+    if (state.loaded.knowledgeBases) this.knowledgeBases = state.knowledgeBases;
   }
 
   private async load(): Promise<boolean> {
@@ -417,60 +299,29 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     this.loading = true;
     this.error = null;
     m.redraw();
-    try {
-      const [codebaseResult, knowledgeResult] = await Promise.allSettled([
-        listCodebases(backendUrl, apiKey),
-        listExternalKnowledgeSources(backendUrl, apiKey),
-      ]);
-      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return false;
-      const failures: string[] = [];
-      if (codebaseResult.status === 'fulfilled') {
-        this.unavailableCodebaseIds.clear();
-        this.featureEnabled = codebaseResult.value.featureEnabled;
-        this.codebases = codebaseResult.value.codebases;
-      } else {
-        failures.push(codebaseResult.reason instanceof Error
-          ? codebaseResult.reason.message
-          : text('源码列表加载失败', 'Failed to load codebases'));
-      }
-      if (knowledgeResult.status === 'fulfilled') {
-        this.knowledgeSources = knowledgeResult.value;
-      } else {
-        failures.push(knowledgeResult.reason instanceof Error
-          ? knowledgeResult.reason.message
-          : text('外部知识源加载失败', 'Failed to load external knowledge sources'));
-      }
-      this.error = failures.length > 0 ? failures.join(' · ') : null;
-      this.reconcileSelection({
-        codebasesLoaded: codebaseResult.status === 'fulfilled',
-        knowledgeLoaded: knowledgeResult.status === 'fulfilled',
-      });
-      return codebaseResult.status === 'fulfilled';
-    } catch (e: unknown) {
-      if (!this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return false;
-      this.error = e instanceof Error ? e.message : text('加载分析上下文失败', 'Failed to load analysis context');
-      return false;
-    } finally {
-      if (this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) {
-        this.loading = false;
-        m.redraw();
-      }
-    }
+    const state = await analysisCatalog.refresh(this.catalogIdentity());
+    if (!state || !this.requestIdentityIsCurrent(epoch, backendUrl, apiKey, scopeKey)) return false;
+    if (state.loaded.codebases) this.unavailableCodebaseIds.clear();
+    this.syncFromCatalog();
+    this.loaded = true;
+    this.loading = false;
+    this.error = state.errors.length > 0 ? state.errors.join(' · ') : null;
+    this.reconcileSelection({
+      codebasesLoaded: state.loaded.codebases,
+      knowledgeLoaded: state.loaded.knowledgeBases,
+    });
+    m.redraw();
+    return state.loaded.codebases;
   }
 
   private confirmProviderConsent(displayName: string): boolean {
-    return typeof window === 'undefined' || window.confirm(text(
-      `确认授权将 ${displayName} 的脱敏内容发送给已配置的模型提供商？此授权在切换提供商后仍然有效。`,
-      `Allow redacted content from ${displayName} to be sent to configured model providers? This consent remains active after switching providers.`,
-    ));
+    return typeof window === 'undefined' || window.confirm(knowledgeConsentQuestion(displayName));
   }
 
   private codebaseMutationInProgress(): boolean {
     return this.reindexingId !== null ||
       this.deletingId !== null ||
       this.pendingAction !== null ||
-      this.extensionAuthorizationId !== null ||
-      this.selectionAuthorizationId !== null ||
       this.updatingConsentId?.startsWith('codebase:') === true;
   }
 
@@ -498,12 +349,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       scopeKey === this.scopeKey;
   }
 
-  private async setCodebaseConsent(codebase: CodebaseSummary, sendToProvider: boolean) {
-    if (
-      this.readOnly ||
-      this.codebaseMutationInProgress() ||
-      (sendToProvider && !this.confirmProviderConsent(codebase.displayName))
-    ) return;
+  private async revokeCodebaseContent(codebase: CodebaseSummary) {
+    if (this.readOnly || this.codebaseMutationInProgress()) return;
     const operationId = `codebase:${codebase.codebaseId}`;
     const identityEpoch = this.identityEpoch;
     const backendUrl = this.backendUrl;
@@ -512,16 +359,9 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     this.error = null;
     this.success = null;
     try {
-      await updateCodebaseConsent(
-        backendUrl,
-        codebase.codebaseId,
-        sendToProvider,
-        apiKey,
-      );
+      await revokeCodebaseContentConsent(backendUrl, codebase.codebaseId, apiKey);
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.success = sendToProvider
-        ? text(`已授权 ${codebase.displayName}`, `Authorized ${codebase.displayName}`)
-        : text(`已撤销 ${codebase.displayName} 的内容发送权限`, `Revoked provider content access for ${codebase.displayName}`);
+      this.success = text(`已撤销 ${codebase.displayName} 的正文发送授权`, `Revoked source-text consent for ${codebase.displayName}`);
       this.emitAuthorizationChange();
       if (this.updatingConsentId === operationId) this.updatingConsentId = null;
       await this.load();
@@ -557,8 +397,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       );
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
       this.success = sendToProvider
-        ? text(`已授权 ${source.displayName}`, `Authorized ${source.displayName}`)
-        : text(`已撤销 ${source.displayName} 的内容发送权限`, `Revoked provider content access for ${source.displayName}`);
+        ? text(`已允许发送 ${source.displayName} 的正文`, `Allowed text from ${source.displayName}`)
+        : text(`已撤销 ${source.displayName} 的正文发送授权`, `Revoked text for ${source.displayName}`);
       this.emitAuthorizationChange();
       if (this.updatingConsentId === operationId) this.updatingConsentId = null;
       await this.load();
@@ -594,9 +434,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     knowledgeLoaded: boolean;
   }): void {
     const codebases = new Map(this.codebases.map((codebase) => [codebase.codebaseId, codebase]));
-    const usableSources = new Set(this.knowledgeSources
-      .filter(externalKnowledgeSourceHasActiveIndex)
-      .map((source) => source.sourceId));
+    // `/knowledge` lists every kind, the Wiki included: one predicate decides.
+    const usableSources = new Set(this.knowledgeBases.filter(knowledgeBaseSelectable).map((source) => source.sourceId));
     let next = normalizeAnalysisContext(this.selection);
     if (input.codebasesLoaded) {
       const availableSelection = analysisContextForFeatureAvailability(
@@ -608,9 +447,7 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         codebaseIds: availableSelection.codebaseIds.filter((id) => {
           const codebase = codebases.get(id);
           return !!codebase && !this.unavailableCodebaseIds.has(id) &&
-            codebaseAvailableForOnDemandAccess(codebase) &&
-            (availableSelection.codeAwareMode !== 'provider_send' ||
-              codebase.eligibleForSendToProvider === true);
+            codebaseUsableInMode(codebase, availableSelection.codeAwareMode);
         }),
       };
     }
@@ -621,44 +458,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       };
     }
     this.emitSelection(next);
-  }
-
-  private setCodeAwareMode(codeAwareMode: CodeAwareAnalysisMode): void {
-    if (this.readOnly) return;
-    this.emitSelection({
-      ...this.selection,
-      codeAwareMode,
-      codebaseIds: codeAwareMode === 'provider_send'
-        ? this.selection.codebaseIds.filter((id) =>
-            this.codebases.find((codebase) => codebase.codebaseId === id)
-              ?.eligibleForSendToProvider === true)
-        : this.selection.codebaseIds,
-    });
-  }
-
-  private toggleCodebase(codebase: CodebaseSummary): void {
-    if (
-      this.readOnly ||
-      this.selection.codeAwareMode === 'off' ||
-      this.unavailableCodebaseIds.has(codebase.codebaseId) ||
-      !codebaseAvailableForOnDemandAccess(codebase) ||
-      (this.selection.codeAwareMode === 'provider_send' && !codebase.eligibleForSendToProvider)
-    ) return;
-    const selected = new Set(this.selection.codebaseIds);
-    selected.has(codebase.codebaseId)
-      ? selected.delete(codebase.codebaseId)
-      : selected.add(codebase.codebaseId);
-    this.emitSelection({...this.selection, codebaseIds: [...selected]});
-  }
-
-  private toggleKnowledgeSource(source: ExternalKnowledgeSourceSummary): void {
-    const usable = externalKnowledgeSourceHasActiveIndex(source);
-    if (this.readOnly || !usable) return;
-    const selected = new Set(this.selection.knowledgeSourceIds);
-    selected.has(source.sourceId)
-      ? selected.delete(source.sourceId)
-      : selected.add(source.sourceId);
-    this.emitSelection({...this.selection, knowledgeSourceIds: [...selected]});
   }
 
   private async registerKnowledgeSource(): Promise<void> {
@@ -710,8 +509,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     try {
       await reindexExternalKnowledgeSource(backendUrl, source.sourceId, apiKey);
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
+      // An index rebuild changes no authorization: sessions continue (runs pin their generation).
       this.success = text(`已重新索引 ${source.displayName}`, `Reindexed ${source.displayName}`);
-      this.emitAuthorizationChange();
       this.reindexingKnowledgeId = null;
       await this.load();
     } catch (error) {
@@ -742,15 +541,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       );
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
       if (result.activationDisposition === 'active') {
-        codebaseExcerptCache.clearForCodebaseReindex(
-          codebase.codebaseId,
-          codebase.indexGeneration + 1,
-        );
         this.success = text(
           `已更新 ${codebase.displayName} 的可选索引：${result.chunksAdded ?? 0} 个分片`,
           `Updated the optional index for ${codebase.displayName}: ${result.chunksAdded ?? 0} chunks`,
         );
-        this.emitAuthorizationChange();
       } else if (result.activationDisposition === 'pending') {
         this.success = text(
           `已生成受限索引候选（${result.coverage?.filesSelected ?? 0}/${result.coverage?.filesEnumerated ?? 0} 个文件），等待确认；当前完整索引仍保持启用。`,
@@ -816,7 +610,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       this.success = accept
         ? text('已启用受限索引候选。', 'Accepted the limited index candidate.')
         : text('已丢弃受限索引候选。', 'Rejected the limited index candidate.');
-      if (accept) this.emitAuthorizationChange();
       if (
         this.pendingAction?.codebaseId === codebase.codebaseId &&
         this.pendingAction.action === action
@@ -831,86 +624,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           this.pendingAction?.codebaseId === codebase.codebaseId &&
           this.pendingAction.action === action
         ) this.pendingAction = null;
-        m.redraw();
-      }
-    }
-  }
-
-  private async authorizeAvailableExtensions(codebase: CodebaseSummary) {
-    if (this.readOnly || this.codebaseMutationInProgress()) return;
-    const extensions = codebase.availableNotConsentedExtensions ?? [];
-    if (extensions.length === 0) return;
-    const confirmed = typeof window === 'undefined' || window.confirm(text(
-      `确认把以下新语言扩展加入 ${codebase.displayName} 的 provider 内容授权：${extensions.join(', ')}？`,
-      `Add these newly available extensions to provider content consent for ${codebase.displayName}: ${extensions.join(', ')}?`,
-    ));
-    if (!confirmed) return;
-    const identityEpoch = this.identityEpoch;
-    const backendUrl = this.backendUrl;
-    const apiKey = this.apiKey;
-    this.extensionAuthorizationId = codebase.codebaseId;
-    this.error = null;
-    this.success = null;
-    try {
-      await authorizeAvailableCodebaseExtensions(backendUrl, codebase.codebaseId, apiKey);
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.success = text('已授权新语言范围。', 'Authorized the newly available languages.');
-      this.emitAuthorizationChange();
-      if (this.extensionAuthorizationId === codebase.codebaseId) {
-        this.extensionAuthorizationId = null;
-      }
-      await this.load();
-    } catch (error) {
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.error = error instanceof Error ? error.message : text('授权新语言失败', 'Failed to authorize new languages');
-    } finally {
-      if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
-        if (this.extensionAuthorizationId === codebase.codebaseId) {
-          this.extensionAuthorizationId = null;
-        }
-        m.redraw();
-      }
-    }
-  }
-
-  private async authorizeCurrentSelection(codebase: CodebaseSummary) {
-    if (this.readOnly || this.codebaseMutationInProgress()) return;
-    const includeScope = codebase.pathFilters?.length
-      ? codebase.pathFilters.join(', ')
-      : text('全部已选源码', 'all selected source');
-    const excludeScope = codebase.excludeGlobs?.length
-      ? codebase.excludeGlobs.join(', ')
-      : text('无', 'none');
-    const confirmed = typeof window === 'undefined' || window.confirm(text(
-      `确认把 ${codebase.displayName} 的当前路径选择加入 provider 内容授权？包含范围：${includeScope}；排除规则：${excludeScope}。`,
-      `Authorize the current path selection for provider content from ${codebase.displayName}? Included scope: ${includeScope}; exclusions: ${excludeScope}.`,
-    ));
-    if (!confirmed) return;
-    const identityEpoch = this.identityEpoch;
-    const backendUrl = this.backendUrl;
-    const apiKey = this.apiKey;
-    this.selectionAuthorizationId = codebase.codebaseId;
-    this.error = null;
-    this.success = null;
-    try {
-      await authorizeCurrentCodebaseSelection(backendUrl, codebase.codebaseId, apiKey);
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.success = text('已授权当前路径范围。', 'Authorized the current path scope.');
-      this.emitAuthorizationChange();
-      if (this.selectionAuthorizationId === codebase.codebaseId) {
-        this.selectionAuthorizationId = null;
-      }
-      await this.load();
-    } catch (error) {
-      if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      this.error = error instanceof Error
-        ? error.message
-        : text('授权当前路径范围失败', 'Failed to authorize the current path scope');
-    } finally {
-      if (this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) {
-        if (this.selectionAuthorizationId === codebase.codebaseId) {
-          this.selectionAuthorizationId = null;
-        }
         m.redraw();
       }
     }
@@ -937,7 +650,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         apiKey,
       );
       if (!this.operationIdentityIsCurrent(identityEpoch, backendUrl, apiKey)) return;
-      codebaseExcerptCache.clearForCodebaseDelete(codebase.codebaseId);
       this.emitSelection(analysisContextAfterCodebaseDelete(
         this.selection,
         codebase.codebaseId,
@@ -966,34 +678,19 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     const pendingAction = this.pendingAction?.codebaseId === codebase.codebaseId
       ? this.pendingAction.action
       : undefined;
-    const authorizingExtensions = this.extensionAuthorizationId === codebase.codebaseId;
-    const authorizingSelection = this.selectionAuthorizationId === codebase.codebaseId;
+    const reviewing = this.reviewingCodebaseId === codebase.codebaseId;
     const mutationBusy = this.codebaseMutationInProgress();
     const isDeleting = this.deletingId === codebase.codebaseId;
     const deletionPending = codebaseDeletionPending(codebase);
     const selected = this.selection.codebaseIds.includes(codebase.codebaseId);
     const hasActiveIndex = codebaseHasActiveIndex(codebase);
-    const availableForOnDemandAccess = codebaseAvailableForOnDemandAccess(codebase) &&
+    const availableForOnDemandAccess = codebaseUsableInMode(codebase, 'metadata_only') &&
       !this.unavailableCodebaseIds.has(codebase.codebaseId);
-    const selectionDisabled = this.readOnly ||
-      this.selection.codeAwareMode === 'off' ||
-      !availableForOnDemandAccess ||
-      (this.selection.codeAwareMode === 'provider_send' && !codebase.eligibleForSendToProvider);
+    // Which codebases a turn uses is chosen beside the input box; this view manages them.
     return m('div', {style: STYLES.card}, [
-      m('div', {style: STYLES.cardHeader}, [
-        m('label', {style: STYLES.check}, [
-          m('input[type=checkbox]', {
-            checked: selected,
-            disabled: selectionDisabled,
-            onchange: () => this.toggleCodebase(codebase),
-          }),
-          m('span', [
-            m('div', {style: STYLES.name}, codebase.displayName),
-          ]),
-        ]),
-      ]),
+      m('div', {style: STYLES.name}, codebase.displayName),
       m('div', {style: STYLES.subtitle}, !availableForOnDemandAccess
-        ? text('源码当前不可访问', 'Source is currently unavailable')
+        ? codebaseUnavailableReasonText(codebase.unavailableReason)
         : selected && this.selection.codeAwareMode !== 'off'
           ? this.selection.codeAwareMode === 'metadata_only'
             ? text('已选中 · 仅定位文件和符号', 'Selected · file and symbol locations only')
@@ -1058,43 +755,17 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
             `Optional index rebuild required: ${codebase.reindexRequired}`,
           ))
         : null,
-      (codebase.availableNotConsentedExtensions?.length ?? 0) > 0
-        ? m('div', {style: {...STYLES.meta, marginTop: '8px'}}, [
-            text(
-              `新语言可用但尚未授权发送：${codebase.availableNotConsentedExtensions!.join(', ')}。`,
-              `Newly available languages are not consented for provider send: ${codebase.availableNotConsentedExtensions!.join(', ')}.`,
-            ),
-            codebaseCanAuthorizeAvailableExtensions(codebase)
-              ? m('button', {
-                  type: 'button',
-                  style: {...STYLES.button, marginLeft: '8px'},
-                  disabled: this.readOnly || mutationBusy,
-                  'aria-busy': authorizingExtensions ? 'true' : 'false',
-                  onclick: () => this.authorizeAvailableExtensions(codebase),
-                }, authorizingExtensions
-                  ? text('授权中…', 'Authorizing…')
-                  : text('授权新语言', 'Authorize languages'))
-              : null,
-          ])
+      (codebase.availableNotConsentedExtensions?.length ?? 0) > 0 && codebase.eligibleForSendToProvider
+        ? m('div', {style: {...STYLES.meta, marginTop: '8px'}}, text(
+            `这些语言尚未允许发送正文，只用于定位：${codebase.availableNotConsentedExtensions!.join(', ')}。`,
+            `These languages are not allowed to send source text and are used for locating only: ${codebase.availableNotConsentedExtensions!.join(', ')}.`,
+          ))
         : null,
-      codebase.providerGrantScopeCurrent === false
-        ? m('div', {style: {...STYLES.meta, marginTop: '8px'}}, [
-            text(
-              '当前选择范围与 provider 内容授权不一致；只有二者交集可发送正文，其余路径仅用于元数据定位。',
-              'The current selection differs from provider content consent; only their intersection can send source text, and other paths remain metadata-only.',
-            ),
-            codebaseCanAuthorizeCurrentSelection(codebase)
-              ? m('button', {
-                  type: 'button',
-                  style: {...STYLES.button, marginLeft: '8px'},
-                  disabled: this.readOnly || mutationBusy,
-                  'aria-busy': authorizingSelection ? 'true' : 'false',
-                  onclick: () => this.authorizeCurrentSelection(codebase),
-                }, authorizingSelection
-                  ? text('授权中…', 'Authorizing…')
-                  : text('授权当前范围', 'Authorize current scope'))
-              : null,
-          ])
+      codebase.providerGrantScopeCurrent === false && codebase.eligibleForSendToProvider
+        ? m('div', {style: {...STYLES.meta, marginTop: '8px'}}, text(
+            '正文发送授权与当前源码范围不一致：授权外的文件只用于定位，不发送正文。重新“允许发送正文”即按当前范围授权；超出原授权的范围编辑会撤销授权。',
+            'Source-text consent does not match the current scope: files outside it are used for locating only. Allow source text again to grant the current scope; a scope edit beyond the original grant revokes it.',
+          ))
         : null,
       codebase.pendingGeneration && !deletionPending
         ? m('div', {style: STYLES.error}, text(
@@ -1115,10 +786,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         ? m(
             'div',
             {style: STYLES.error},
-            text(
-              '已注册的源码路径当前不可用，请恢复该路径后再选择。',
-              'The registered source path is unavailable. Restore it before selecting this codebase.',
-            ),
+            `${codebaseUnavailableReasonText(codebase.unavailableReason)} ${text(
+              '恢复后才能选择该源码库。',
+              'Restore it before selecting this codebase.',
+            )}`,
           )
         : !hasActiveIndex
         ? m(
@@ -1184,23 +855,28 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
               ? text('更新可选索引', 'Update optional index')
               : text('构建可选索引', 'Build optional index'),
         ),
-        m(
-          'button',
-          {
-            type: 'button',
-            style: STYLES.button,
-            disabled: this.readOnly || mutationBusy || deletionPending,
-            onclick: () => this.setCodebaseConsent(
-              codebase,
-              !codebase.eligibleForSendToProvider,
-            ),
-          },
-          this.updatingConsentId === `codebase:${codebase.codebaseId}`
-            ? text('更新中…', 'Updating...')
-            : codebase.eligibleForSendToProvider
-              ? text('撤销内容授权', 'Revoke content access')
-              : text('授权脱敏内容', 'Authorize redacted content'),
-        ),
+        codebaseNeedsContentAuthorization(codebase)
+          ? m('button', {
+              type: 'button',
+              style: STYLES.button,
+              disabled: this.readOnly || mutationBusy || deletionPending || reviewing,
+              onclick: () => {
+                this.reviewingCodebaseId = codebase.codebaseId;
+                this.error = null;
+                this.success = null;
+              },
+            }, text('允许发送正文', 'Allow source text'))
+          : null,
+        codebase.eligibleForSendToProvider
+          ? m('button', {
+              type: 'button',
+              style: STYLES.button,
+              disabled: this.readOnly || mutationBusy || deletionPending,
+              onclick: () => this.revokeCodebaseContent(codebase),
+            }, this.updatingConsentId === `codebase:${codebase.codebaseId}`
+              ? text('更新中…', 'Updating...')
+              : text('撤销正文授权', 'Revoke source text'))
+          : null,
         m(
           'button',
           {
@@ -1215,9 +891,26 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       m('div', {'aria-live': 'polite', style: STYLES.meta}, [
         pendingAction === 'accept' ? text('正在接受索引候选。', 'Accepting index candidate.') : null,
         pendingAction === 'reject' ? text('正在丢弃索引候选。', 'Rejecting index candidate.') : null,
-        authorizingExtensions ? text('正在更新语言授权。', 'Updating language consent.') : null,
-        authorizingSelection ? text('正在更新路径授权。', 'Updating path consent.') : null,
       ]),
+      reviewing
+        ? m(ContentDisclosureReview, {
+            backendUrl: this.backendUrl,
+            apiKey: this.apiKey,
+            readOnly: this.readOnly,
+            codebase,
+            onGranted: (updated: CodebaseSummary) => {
+              this.reviewingCodebaseId = null;
+              this.success = text(`已允许发送 ${updated.displayName} 的源码正文`,
+                `Allowed source text from ${updated.displayName}`);
+              // The server confirmed the grant: notify before refreshing the list.
+              this.emitAuthorizationChange();
+              void this.load();
+            },
+            onCancel: () => {
+              this.reviewingCodebaseId = null;
+            },
+          })
+        : null,
       isExpanded
         ? m(CodebaseAuditView, {
             backendUrl: this.backendUrl,
@@ -1230,48 +923,10 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
     ]);
   }
 
-  private renderContextControls(): m.Children {
-    const modes: Array<{id: CodeAwareAnalysisMode; label: string; detail: string}> = [
-      {
-        id: 'off',
-        label: text('关闭源码', 'Source off'),
-        detail: text('不向本轮分析提供已注册源码。', 'Do not use registered source trees.'),
-      },
-      {
-        id: 'metadata_only',
-        label: text('仅定位', 'Locate only'),
-        detail: text('只提供文件、符号与行号引用，不发送源码正文。源码定位会增加检索步骤，分析耗时可能增加。', 'Use file, symbol, and line references without source text. Locating source adds search steps and may increase analysis time.'),
-      },
-      {
-        id: 'provider_send',
-        label: text('按需读取源码', 'Read source on demand'),
-        detail: sourceAnalysisDisclosure(),
-      },
-    ];
-    const current = modes.find((mode) => mode.id === this.selection.codeAwareMode) ?? modes[0];
-    return m('div', {style: STYLES.context}, [
-      m('div', {style: STYLES.name}, text('源码使用方式', 'Source access mode')),
-      m('div', {style: STYLES.subtitle}, current.detail),
-      m('div', {style: STYLES.modeRow}, modes.map((mode) =>
-        m('button', {
-          type: 'button',
-          style: {
-            ...STYLES.button,
-            ...(mode.id === this.selection.codeAwareMode ? STYLES.primary : {}),
-          },
-          disabled: this.readOnly || !this.featureEnabled,
-          onclick: () => this.setCodeAwareMode(mode.id),
-        }, mode.label))),
-      this.readOnly
-        ? m('div', {style: STYLES.subtitle}, text('分析运行中，上下文保持只读。', 'Context is read-only while analysis is running.'))
-        : null,
-    ]);
-  }
-
   private renderKnowledgeSources(): m.Children {
     return m('div', {style: {marginTop: '18px'}}, [
       m('div', {style: STYLES.header}, [
-        m('h4', {style: STYLES.title}, text('外部知识 RAG', 'External knowledge RAG')),
+        m('h4', {style: STYLES.title}, text('Android Internals Wiki', 'Android Internals Wiki')),
         m('button', {
           type: 'button',
           style: STYLES.button,
@@ -1280,8 +935,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
         }, text('新增知识源', 'Add knowledge source')),
       ]),
       m('div', {style: STYLES.subtitle}, text(
-        '可与源码单独或叠加使用；只有已授权并完成索引的知识源可选。',
-        'Can be used alone or with source context; only consented, indexed sources are selectable.',
+        '建好索引并允许发送正文后，可在输入框旁的上下文选择中用于分析。',
+        'Once indexed and its text allowed, choose it for a turn beside the input box.',
       )),
       this.knowledgeSources.length === 0
         ? m('div', {style: {...STYLES.empty, marginTop: '10px'}}, text(
@@ -1290,20 +945,12 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           ))
         : m('div', {style: {...STYLES.list, marginTop: '10px'}},
         this.knowledgeSources.map((source) => {
-          const usable = externalKnowledgeSourceHasActiveIndex(source);
-          const selected = this.selection.knowledgeSourceIds.includes(source.sourceId);
+          // The `/knowledge` row of the same source decides, as for every knowledge base.
+          const listed = this.knowledgeBases.find(candidate => candidate.sourceId === source.sourceId);
+          const usable = listed !== undefined && knowledgeBaseSelectable(listed);
           return m('div', {style: STYLES.card}, [
-            m('label', {style: STYLES.check}, [
-              m('input[type=checkbox]', {
-                checked: selected,
-                disabled: this.readOnly || !usable,
-                onchange: () => this.toggleKnowledgeSource(source),
-              }),
-              m('span', [
-                m('div', {style: STYLES.name}, source.displayName),
-                m('div', {style: STYLES.meta}, source.sourceId),
-              ]),
-            ]),
+            m('div', {style: STYLES.name}, source.displayName),
+            m('div', {style: STYLES.meta}, source.sourceId),
             m('div', {style: STYLES.chips}, [
               m('span', {style: STYLES.chip}, `${text('文章', 'articles')} ${source.indexedArticleCount ?? 0}`),
               m('span', {style: STYLES.chip}, `${text('分片', 'chunks')} ${source.indexedChunkCount ?? 0}`),
@@ -1346,8 +993,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
               }, this.updatingConsentId === `knowledge:${source.sourceId}`
                 ? text('更新中…', 'Updating...')
                 : source.sendToProvider
-                  ? text('撤销内容授权', 'Revoke content access')
-                  : text('授权脱敏内容', 'Authorize redacted content')),
+                  ? text('撤销正文授权', 'Revoke text')
+                  : text('允许发送正文', 'Allow text')),
             ]),
           ]);
         })),
@@ -1481,10 +1128,6 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
             codebase,
             onRegistered: () => {},
             onUpdated: (updated) => {
-              codebaseExcerptCache.clearForCodebaseReindex(
-                updated.codebaseId,
-                updated.indexGeneration,
-              );
               this.emitAuthorizationChange();
               this.success = text(
                 `已保存 ${updated.displayName} 的源码范围`,
@@ -1528,6 +1171,8 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
       ]);
     }
 
+    if (this.loaded) this.syncFromCatalog();
+    const initialLoading = this.loading && !this.loaded;
     return m('div', {style: STYLES.shell}, [
       m('div', {style: STYLES.header}, [
         m('div', [
@@ -1556,19 +1201,32 @@ export class CodebasePanel implements m.ClassComponent<CodebasePanelAttrs> {
           text('新增', 'Add'),
         ),
       ]),
-      this.renderContextControls(),
+      m('div', {style: STYLES.subtitle}, text(
+        '这里管理源码库与知识库；每轮用哪些，在输入框旁的上下文选择中设置。',
+        'Manage codebases and knowledge bases here; choose what each turn uses beside the input box.',
+      )),
       this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,
       this.success
         ? m('div', {style: STYLES.success, role: 'status', 'aria-live': 'polite'}, this.success)
         : null,
-      this.loading
+      initialLoading
         ? m('div', {style: STYLES.empty}, text('正在加载分析上下文…', 'Loading analysis context...'))
         : this.codebases.length === 0
           ? m('div', {style: STYLES.empty}, text('尚未注册源码库。', 'No codebases registered.'))
           : m('div', {style: STYLES.list}, this.codebases.map((codebase) =>
               this.renderCodebase(codebase)
             )),
-      this.loading ? null : this.renderKnowledgeSources(),
+      initialLoading ? null : m(KnowledgeBaseSection, {
+        backendUrl: this.backendUrl,
+        apiKey: this.apiKey,
+        scopeKey: this.scopeKey,
+        readOnly: this.readOnly,
+        sources: this.knowledgeBases.filter(source => source.kind === 'document_collection'),
+        selectedIds: this.selection.knowledgeSourceIds,
+        onChanged: () => this.load(),
+        onAuthorizationChange: () => this.emitAuthorizationChange(),
+      }),
+      initialLoading ? null : this.renderKnowledgeSources(),
     ]);
   }
 }

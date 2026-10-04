@@ -76,6 +76,25 @@ describe('startConversationTurn', () => {
   });
 });
 
+describe('startConversationTurn analysis context', () => {
+  it('sends the shared analysis-context fields, depth included, and never ids hidden by off', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
+      ok: true, status: 202,
+      json: async () => ({sessionId: 'c', runId: 'r', isNewSession: true, traceContextAttached: false}),
+    } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    await startConversationTurn({backendUrl: 'http://backend'}, {query: 'q', analysisContext: {
+      codeAwareMode: 'metadata_only', codebaseIds: ['cb-a'], knowledgeSourceIds: ['kb-a'], sourceDepth: 'mechanism'}});
+    await startConversationTurn({backendUrl: 'http://backend'}, {query: 'q', analysisContext: {
+      codeAwareMode: 'off', codebaseIds: ['cb-a'], knowledgeSourceIds: []}});
+    const options = fetchMock.mock.calls.map(call => JSON.parse(String(call[1]?.body)).options);
+    expect(options).toEqual([
+      {codeAwareMode: 'metadata_only', codebaseIds: ['cb-a'], knowledgeSourceIds: ['kb-a'], sourceDepth: 'mechanism'},
+      {codeAwareMode: 'off', sourceDepth: 'auto'},
+    ]);
+  });
+});
+
 describe('parseConversationSseFrames', () => {
   it('parses complete events and preserves an incomplete tail', () => {
     expect(parseConversationSseFrames(
@@ -94,12 +113,11 @@ describe('parseConversationSseFrames', () => {
   });
 });
 
-describe('streamConversationRun source enrichment', () => {
-  it('delivers the primary outcome immediately and continues to the source terminal event', async () => {
+describe('streamConversationRun terminal event', () => {
+  it('returns at run_completed, which carries no pending field, and reads nothing after it', async () => {
     const frames = [
-      'event: run_completed\ndata: {"type":"run_completed","enrichmentPending":true,"outcome":{"kind":"answered","message":"primary"}}\n\n',
-      'event: source_enrichment_started\ndata: {"type":"source_enrichment_started"}\n\n',
-      'event: source_enrichment_completed\ndata: {"type":"source_enrichment_completed","message":"supplement","evidence":[],"metrics":{"searchCalls":1,"readCalls":2,"durationMs":40}}\n\n',
+      'event: run_completed\ndata: {"type":"run_completed","outcome":{"kind":"answered","message":"primary"}}\n\n',
+      'event: run_failed\ndata: {"type":"run_failed","error":"late"}\n\n',
     ];
     const encoder = new TextEncoder();
     vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -112,23 +130,19 @@ describe('streamConversationRun source enrichment', () => {
         },
       }),
     } as Response)));
-    const order: string[] = [];
+    const events: string[] = [];
 
     const outcome = await streamConversationRun(
       {backendUrl: 'http://backend'},
       {sessionId: 'conversation-1', runId: 'run-1', isNewSession: true, traceContextAttached: true},
       {
-        onPrimaryOutcome: primary => order.push(`primary:${primary.message}`),
-        onSourceEnrichment: enrichment => order.push(`source:${enrichment.status}`),
+        onEvent: event => events.push(event.type),
+        onOutcome: primary => events.push(`primary:${primary.message}`),
       },
     );
 
     expect(outcome).toEqual({kind: 'answered', message: 'primary'});
-    expect(order).toEqual([
-      'primary:primary',
-      'source:running',
-      'source:completed',
-    ]);
+    expect(events).toEqual(['run_completed', 'primary:primary']);
   });
 });
 
@@ -136,7 +150,7 @@ describe('streamConversationRun provisional answer', () => {
   it('hands the provisional answer over before the verdict and ignores it afterwards', async () => {
     const frames = [
       'event: provisional_answer\ndata: {"type":"provisional_answer","message":"answer body","verification":"pending"}\n\n',
-      'event: run_completed\ndata: {"type":"run_completed","enrichmentPending":false,"outcome":{"kind":"answered","message":"answer body"}}\n\n',
+      'event: run_completed\ndata: {"type":"run_completed","outcome":{"kind":"answered","message":"answer body"}}\n\n',
       'event: provisional_answer\ndata: {"type":"provisional_answer","message":"late replay","verification":"pending"}\n\n',
     ];
     const encoder = new TextEncoder();
@@ -156,7 +170,7 @@ describe('streamConversationRun provisional answer', () => {
       {sessionId: 'conversation-1', runId: 'run-1', isNewSession: true, traceContextAttached: false},
       {
         onProvisionalAnswer: ({message}) => order.push(`provisional:${message}`),
-        onPrimaryOutcome: primary => order.push(`primary:${primary.message}`),
+        onOutcome: primary => order.push(`primary:${primary.message}`),
       },
     );
     expect(order).toEqual(['provisional:answer body', 'primary:answer body']);

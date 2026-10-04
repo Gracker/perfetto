@@ -20,7 +20,6 @@ import {
 } from './conversation_client';
 import {answerVerificationCueText} from './answer_verification';
 import {projectMessageForStorage} from './private_message_storage';
-import type {ConversationSourceEnrichmentUpdate} from './types';
 import {uiText} from './ui_language';
 
 const CONVERSATION_STORE_KEY = 'smartperfetto-conversation';
@@ -74,7 +73,6 @@ export interface StoredConversationMessage {
   evidence?: ConversationEvidenceRef[];
   outcomeKind?: ConversationOutcome['kind'];
   fullHandoff?: ConversationFullHandoff;
-  sourceEnrichment?: ConversationSourceEnrichmentUpdate;
   turn?: ConversationHistoryTurn;
   recoveryStatus?: 'unavailable';
 }
@@ -188,7 +186,7 @@ export function saveConversationStore(store: StoredConversation): void {
       historyUnavailableMessages: store.historyUnavailableMessages,
       messages: store.messages.slice(-200).map((message) => {
         const projected = projectMessageForStorage(message);
-        // Source-derived metadata and supplements can also contain private text.
+        // Source-derived metadata can also contain private text.
         return message.privateContent
           ? {id: projected.id, role: projected.role, content: projected.content,
               timestamp: projected.timestamp, privateContent: true}
@@ -403,20 +401,6 @@ export function appendConversationMessage(
     ? store.messages
     : [...store.messages, message];
   const next = {...store, messages, sessionId: sessionId ?? store.sessionId, updatedAt: Date.now()};
-  saveConversationStore(next);
-  return next;
-}
-
-export function updateConversationMessageSourceEnrichment(
-  backendUrl: string,
-  messageId: string,
-  sourceEnrichment: ConversationSourceEnrichmentUpdate,
-): StoredConversation {
-  const store = loadConversationStoreForUpdate(backendUrl);
-  const messages = store.messages.map(message => message.id === messageId
-    ? {...message, sourceEnrichment}
-    : message);
-  const next = {...store, messages, updatedAt: Date.now()};
   saveConversationStore(next);
   return next;
 }

@@ -68,37 +68,6 @@ function streamResponse(message = 'answer-a'): Response {
   });
 }
 
-function sourceEnrichmentStreamResponse(): {
-  response: Response;
-  completeSource(): void;
-} {
-  const encoder = new TextEncoder();
-  let streamController!: ReadableStreamDefaultController<Uint8Array>;
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      streamController = controller;
-      controller.enqueue(encoder.encode(
-        'event: run_completed\ndata: {"type":"run_completed","enrichmentPending":true,"outcome":{"kind":"answered","message":"primary answer"}}\n\n',
-      ));
-      controller.enqueue(encoder.encode(
-        'event: source_enrichment_started\ndata: {"type":"source_enrichment_started"}\n\n',
-      ));
-    },
-  });
-  return {
-    response: new Response(body, {
-      status: 200,
-      headers: {'content-type': 'text/event-stream'},
-    }),
-    completeSource() {
-      streamController.enqueue(encoder.encode(
-        'event: source_enrichment_completed\ndata: {"type":"source_enrichment_completed","message":"source supplement","evidence":[{"id":"source-1","label":"Foo.kt:L10-L12"}],"metrics":{"searchCalls":1,"readCalls":2,"durationMs":40}}\n\n',
-      ));
-      streamController.close();
-    },
-  };
-}
-
 function deferredResponse(): {
   promise: Promise<Response>;
   resolve: (response: Response) => void;
@@ -224,38 +193,6 @@ describe('ConversationPage OIDC lifecycle', () => {
       'trace-free answer',
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    page.onremove();
-  });
-
-  it('shows the primary answer before source enrichment completes', async () => {
-    const stream = sourceEnrichmentStreamResponse();
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(startResponse())
-      .mockResolvedValueOnce(stream.response);
-    vi.stubGlobal('fetch', fetchMock);
-    const page = createPage();
-    page.input = 'Analyze startup.';
-
-    const send = page.send();
-    await vi.waitFor(() => expect(page.store.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        role: 'assistant',
-        content: 'primary answer',
-        sourceEnrichment: {status: 'running'},
-      }),
-    ])));
-
-    stream.completeSource();
-    await send;
-    expect(page.store.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        content: 'primary answer',
-        sourceEnrichment: expect.objectContaining({
-          status: 'completed',
-          message: 'source supplement',
-        }),
-      }),
-    ]));
     page.onremove();
   });
 
@@ -575,15 +512,13 @@ describe('ConversationPage authorized restoration', () => {
     if (oldExit === 'rejected') oldStream.error(new Error('old stream failed'));
     else {
       oldStream.enqueue(new TextEncoder().encode(
-        'event: run_completed\ndata: {"enrichmentPending":true,"outcome":{"kind":"answered","message":"stale-answer"}}\n\n' +
-        'event: source_enrichment_completed\ndata: {"message":"stale-source","evidence":[],"metrics":{"searchCalls":1,"readCalls":1,"durationMs":1}}\n\n'));
+        'event: run_completed\ndata: {"outcome":{"kind":"answered","message":"stale-answer"}}\n\n'));
       oldStream.close();
     }
     await oldRun;
     expect(page.activeReceipt).toBe(replacementReceipt);
     expect(page.activeController).toBe(replacementController);
     expect(replacementController.signal.aborted).toBe(false);
-    expect(page.primaryConversationOutcomeReady).toBe(false);
     expect(page.error).toBe('');
     expect(page.store.messages).toEqual([]);
     await page.startNewConversation();
@@ -593,7 +528,30 @@ describe('ConversationPage authorized restoration', () => {
     page.onremove();
   });
 
-  it('blocks old source enrichment immediately while reauthorizing a changed source context', async () => {
+  it('keeps a running stream when only the source depth changes', async () => {
+    let oldStream!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({start(controller) { oldStream = controller; }}))));
+    const page = createPage();
+    await page.ensureConversationRestored();
+    const store = {backendUrl: 'http://backend', sessionId: 'saved-conversation', activeRunId: 'active-run', messages: [], updatedAt: 1};
+    saveConversationStore(store);
+    const run = page.resumeConversationRun(store, page.authLifecycle.capture());
+    const controller = page.activeController;
+    saveAnalysisContext('http://backend', getSmartPerfettoRequestContext(), {
+      codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: [], sourceDepth: 'mechanism',
+    });
+    await page.ensureConversationRestored();
+    expect(controller.signal.aborted).toBe(false);
+    oldStream.enqueue(new TextEncoder().encode(
+      'event: run_completed\ndata: {"outcome":{"kind":"answered","message":"same run"}}\n\n'));
+    oldStream.close();
+    await run;
+    expect(page.store.messages.map((message: any) => message.content)).toContain('same run');
+    page.onremove();
+  });
+
+  it('drops a still-running stream immediately while reauthorizing a changed source context', async () => {
     let oldStream!: ReadableStreamDefaultController<Uint8Array>;
     const pendingRestore = deferredResponse();
     const fetch = vi.fn()
@@ -606,20 +564,16 @@ describe('ConversationPage authorized restoration', () => {
     saveConversationStore(store);
     const oldRun = page.resumeConversationRun(store, page.authLifecycle.capture());
     const oldController = page.activeController;
-    oldStream.enqueue(new TextEncoder().encode(
-      'event: run_completed\ndata: {"enrichmentPending":true,"outcome":{"kind":"answered","message":"old primary"}}\n\n'));
-    await vi.waitFor(() => expect(page.primaryConversationOutcomeReady).toBe(true));
     saveAnalysisContext('http://backend', getSmartPerfettoRequestContext(), {
       codeAwareMode: 'metadata_only', codebaseIds: ['new-source'], knowledgeSourceIds: [],
     });
     const restore = page.ensureConversationRestored();
     expect(oldController.signal.aborted).toBe(true);
     oldStream.enqueue(new TextEncoder().encode(
-      'event: source_enrichment_completed\ndata: {"message":"stale-source","evidence":[],"metrics":{"searchCalls":1,"readCalls":1,"durationMs":1}}\n\n'));
+      'event: run_completed\ndata: {"outcome":{"kind":"answered","message":"old primary"}}\n\n'));
     oldStream.close();
     await oldRun;
     expect(page.store.messages).toEqual([]);
-    expect(page.primaryConversationOutcomeReady).toBe(false);
     expect(page.restorePromise).toBe(restore);
     const snapshot = await restoredPageConversation().json();
     snapshot.history = [];

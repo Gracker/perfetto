@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {
+  isAnalysisContextRestartRequired,
   startConversationTurn,
   type ConversationClientConfig,
   type ConversationRunReceipt,
@@ -54,10 +55,21 @@ export class ConversationStartQueue {
       }
       const sessionId = this.readSessionId();
       // A missing or incompatible saved session requires an explicit New Chat.
-      const receipt = await this.start(config, {
-        ...input,
-        ...(sessionId ? {sessionId} : {}),
-      });
+      let receipt: ConversationRunReceipt;
+      try {
+        receipt = await this.start(config, {
+          ...input,
+          ...(sessionId ? {sessionId} : {}),
+        });
+      } catch (error) {
+        if (!sessionId || !isAnalysisContextRestartRequired(error) ||
+            generation !== this.generation) throw error;
+        // The saved conversation was authorized for another context. Never
+        // continue it: drop its descriptor and ask the same question in a new
+        // conversation under the current selection.
+        this.writeSessionId(undefined);
+        receipt = {...await this.start(config, input), restartedAfterContextChange: true};
+      }
       if (generation === this.generation) {
         this.writeSessionId(receipt.sessionId);
       }

@@ -145,8 +145,6 @@ export interface ClaimSemanticsV1 {
   };
   /** The proposition value is distinct from a cited cell's value. */
   numeric?: {operator: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte'; value: number | string; unit: string};
-  /** Original claimed location, not metadata filled from a later lookup. */
-  source?: {sourceReferenceId: string; filePath: string; lineRange: {start: number; end: number}};
 }
 
 export interface ConclusionContractParseIssue {
@@ -165,7 +163,7 @@ export interface ConclusionContractParseIssue {
 export type ConclusionClaimDiagnosticCode = 'invalid_claim' | 'invalid_reference' | 'invalid_semantics' | 'duplicate_claim_id' | 'untrusted_parser_metadata';
 
 export type ConclusionClaimDiagnosticField =
-  'claim' | 'text' | 'id' | 'conclusionId' | 'kind' | 'references' | 'artifactRefs' | 'relationRefs' | 'semantics' | 'semantics.unknown_field' | 'semantics.schemaVersion' | 'semantics.predicate' | 'semantics.polarity' | 'semantics.discourse' | 'semantics.quantifier' | 'semantics.modality' | 'semantics.conditions' | 'semantics.scope' | 'semantics.scope.unknown_field' | 'semantics.scope.population' | 'semantics.scope.subjectRefs' | 'semantics.scope.objectRefs' | 'semantics.scope.timeRangeNs' | 'semantics.numeric' | 'semantics.source' | 'parser_metadata';
+  'claim' | 'text' | 'id' | 'conclusionId' | 'kind' | 'references' | 'artifactRefs' | 'relationRefs' | 'semantics' | 'semantics.unknown_field' | 'semantics.schemaVersion' | 'semantics.predicate' | 'semantics.polarity' | 'semantics.discourse' | 'semantics.quantifier' | 'semantics.modality' | 'semantics.conditions' | 'semantics.scope' | 'semantics.scope.unknown_field' | 'semantics.scope.population' | 'semantics.scope.subjectRefs' | 'semantics.scope.objectRefs' | 'semantics.scope.timeRangeNs' | 'semantics.numeric' | 'parser_metadata';
 
 /** The failing part of `semantics.numeric`: its object shape or keys, `operator`, `value` or `unit`. */
 export type ConclusionClaimNumericSubreason = 'shape' | 'operator' | 'value' | 'unit';
@@ -579,6 +577,7 @@ export interface ClaimReferenceVerificationResult {
 export type DeterministicClaimProofKind =
   | 'numeric_cell'
   | 'captured_cell'
+  /** Historical results only: no current rule produces a source-location proof. */
   | 'source_location'
   | 'interval_overlap'
   | 'comparison_delta'
@@ -2168,67 +2167,189 @@ export interface QuickRunReceipt {
   verifierStatus: 'passed' | 'issues' | 'not_checked' | 'failed';
 }
 
-export type AnalysisReceiptRuntime =
-  | 'claude-agent-sdk'
-  | 'openai-agents-sdk'
-  | 'pi-agent-core'
-  | 'opencode'
-  | 'qoder-agent-sdk';
-
-export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
-
-export interface AnalysisReceiptBase {
-  runId: string;
-  sessionId: string;
-  traceId: string;
-  mode: 'fast' | 'full' | 'auto';
-  resolvedMode: 'quick' | 'full';
-  runtime?: AnalysisReceiptRuntime;
-  providerId: string | null;
-  generatedAt: number;
-  traceEvidence: {
-    sqlCount: number;
-    skillCount: number;
-    dataEnvelopeCount: number;
-    artifactCount: number;
-    evidenceRefCount: number;
-  };
-  nonEvidenceContext: {
-    frontendPrequeryCount: number;
-    memoryHintCount: number;
-    conversationContextCount: number;
-    strategyHintCount: number;
-  };
-  claimAudit: {
-    totalClaims: number;
-    verifiedClaims: number;
-    unsupportedClaims: number;
-    uncertainClaims: number;
-  };
-  qualityGates: {
-    finalReportContract: AnalysisReceiptGateStatus;
-    claimVerification: AnalysisReceiptGateStatus;
-    identityResolution: AnalysisReceiptGateStatus;
-  };
-  outputs: {
-    reportId?: string;
-    reportUrl?: string;
-    resultSnapshotId?: string;
-    cliTurnPath?: string;
-    reportError?: string;
-  };
-}
+export type AnalysisReceipt = AnalysisReceiptV1 | AnalysisReceiptV2;
 
 export interface AnalysisReceiptV1 extends AnalysisReceiptBase {
-  schemaVersion: 1;
+    schemaVersion: 1;
 }
 
 export interface AnalysisReceiptV2 extends AnalysisReceiptBase {
-  schemaVersion: 2;
-  runManifestId: string;
+    schemaVersion: 2;
+    runManifestId: string;
 }
 
-export type AnalysisReceipt = AnalysisReceiptV1 | AnalysisReceiptV2;
+export interface AnalysisReceiptBase {
+    runId: string;
+    sessionId: string;
+    traceId: string;
+    mode: 'fast' | 'full' | 'auto';
+    resolvedMode: 'quick' | 'full';
+    adaptiveRouting?: AdaptiveRoutingReceiptV1;
+    runtime?: AnalysisReceiptRuntime;
+    providerId: string | null;
+    generatedAt: number;
+    traceEvidence: {
+        sqlCount: number;
+        skillCount: number;
+        dataEnvelopeCount: number;
+        artifactCount: number;
+        evidenceRefCount: number;
+    };
+    nonEvidenceContext: {
+        frontendPrequeryCount: number;
+        memoryHintCount: number;
+        conversationContextCount: number;
+        strategyHintCount: number;
+        /**
+         * Selected-knowledge references the run delivered to the model (background,
+         * never evidence). Absent in older receipts and in runs that recorded none:
+         * absent means not recorded, not zero.
+         */
+        knowledgeReferenceCount?: number;
+    };
+    claimAudit: {
+        totalClaims: number;
+        verifiedClaims: number;
+        unsupportedClaims: number;
+        uncertainClaims: number;
+        /** Claims whose every reference cell matched captured evidence. Absent in older receipts. */
+        referencesMatchedClaims?: number;
+        /** Claims whose typed proposition a finite proof established. Absent in older receipts and before verifier@2. */
+        propositionProvedClaims?: number;
+    };
+    qualityGates: {
+        finalReportContract: AnalysisReceiptGateStatus;
+        claimVerification: AnalysisReceiptGateStatus;
+        identityResolution: AnalysisReceiptGateStatus;
+    };
+    outputs: {
+        reportId?: string;
+        reportUrl?: string;
+        resultSnapshotId?: string;
+        cliTurnPath?: string;
+        reportError?: string;
+    };
+    capabilityManifest?: CapabilityManifestAttributionV1;
+    traceSummary?: TraceSummaryAttributionV1;
+}
+
+export interface AdaptiveRoutingReceiptV1 {
+    schemaVersion: 'adaptive_routing@1';
+    stage: AdaptiveRoutingStage;
+    requestedMode: 'fast' | 'full' | 'auto';
+    resolvedMode: 'quick' | 'full';
+    classifierSource: 'user_explicit' | 'hard_rule' | 'ai' | 'runtime';
+    currentTier: AdaptiveEvidenceTier;
+    recommendedTier: AdaptiveEvidenceTier;
+    decision: AdaptiveRoutingDecision;
+    reasons: AdaptiveRoutingReasonCode[];
+    obligations: AdaptiveRoutingObligationCode[];
+    evidence: {
+        required: number;
+        observed: number;
+        missing: number;
+        unsupportedClaims: number;
+        conflicts: number;
+        identityStatus: 'verified' | 'not_required' | 'ambiguous' | 'conflict' | 'unknown';
+        schemaStatus: 'ready' | 'uncertain' | 'unavailable' | 'unknown';
+        causalOpen: number;
+    };
+    budget: {
+        dispatchUtilization: '0_49' | '50_79' | '80_99' | '100_plus';
+        repeatedToolCalls: number;
+    };
+    shadow: true;
+    policyFingerprint: string;
+    outputCap?: number;
+    contentHash: string;
+}
+
+export type AnalysisReceiptRuntime = AgentRuntimeKind;
+
+export type AnalysisReceiptGateStatus = 'passed' | 'partial' | 'not_applicable';
+
+export interface CapabilityManifestAttributionV1 {
+    schemaVersion: "capability_manifest_attribution@1";
+    resolution: CapabilityManifestAttributionResolutionV1;
+    probeCache: CapabilityManifestProbeCacheCountersV1;
+}
+
+export interface TraceSummaryAttributionV1 {
+    schemaVersion: "trace_summary_attribution@1";
+    status: 'ready' | 'unavailable' | 'error';
+    specId: string;
+    specDigestSha256: string;
+    traceFingerprintSha256?: string;
+    traceProcessor?: CapabilityManifestTraceProcessorIdentityV1;
+    resultDigestSha256?: string;
+    availableMetricIds: string[];
+    missingMetricIds: string[];
+    reason?: TraceSummaryAttributionReason;
+}
+
+export type AdaptiveRoutingStage = 'preflight' | 'post_evidence';
+
+export type AdaptiveEvidenceTier = 'L0' | 'L1' | 'L2' | 'L3';
+
+export type AdaptiveRoutingDecision = 'stay' | 'recommend_upgrade' | 'return_gap';
+
+export type AdaptiveRoutingReasonCode = 'acknowledgement' | 'deterministic_direct_evidence' | 'quick_semantic_explanation' | 'primary_semantic_analysis' | 'user_requested_full' | 'reference_comparison' | 'private_context' | 'cross_process_causality' | 'identity_ambiguous' | 'identity_conflict' | 'evidence_conflict' | 'unsupported_claim' | 'schema_uncertain' | 'capability_uncertain' | 'causal_obligation_open' | 'required_evidence_missing' | 'budget_dispatch_threshold' | 'repeated_tool_call' | 'evidence_sufficient';
+
+export type AdaptiveRoutingObligationCode = 'complete_report' | 'reference_comparison' | 'private_context' | 'cross_process_causality' | 'identity_resolution' | 'claim_support' | 'schema_resolution';
+
+export type CapabilityManifestAttributionResolutionV1 = {
+    status: 'ready';
+    manifestId: string;
+    contentHash: string;
+    manifestSchemaVersion: "capability_manifest@1";
+    traceFingerprintSha256: string;
+    traceProcessor: CapabilityManifestTraceProcessorIdentityV1;
+} | CapabilityManifestUnresolvedV1;
+
+export interface CapabilityManifestProbeCacheCountersV1 {
+    keyHash?: string;
+    hits: number;
+    misses: number;
+    bypasses: number;
+}
+
+export type CapabilityManifestTraceProcessorIdentityV1 = {
+    source: 'bundled';
+    gitRevision: string;
+    reportedVersion?: string;
+    rpcApiVersion?: string;
+    stdlibRevision?: string;
+} | {
+    source: 'custom';
+    binarySha256: string;
+    reportedVersion?: string;
+    rpcApiVersion?: string;
+    stdlibRevision?: string;
+} | {
+    source: 'unknown';
+    reportedVersion?: string;
+    rpcApiVersion?: string;
+    stdlibRevision?: string;
+    unavailableReason: CapabilityManifestTraceProcessorUnavailableReason;
+};
+
+export type TraceSummaryAttributionReason = 'trace_identity_unavailable' | 'trace_processor_identity_unavailable' | 'trace_processor_session_unavailable' | 'trace_source_unavailable' | 'external_rpc_unsupported' | 'temp_spec_failed' | 'temp_cleanup_failed' | 'timeout' | 'output_limit' | 'process_failed' | 'invalid_output';
+
+/**
+ * Why no manifest was resolved. A resolution and its attribution share these
+ * branches, so the attribution (and the analysis receipt that carries it)
+ * never reaches the full manifest or its provenance.
+ */
+export type CapabilityManifestUnresolvedV1 = {
+    status: 'unavailable';
+    reason: 'external_rpc_trace_fingerprint_unavailable' | 'trace_source_unavailable' | 'trace_file_unavailable' | 'trace_hash_failed' | 'identity_resolution_failed';
+    detailCode?: string;
+} | {
+    status: 'failed';
+    reason: 'capability_manifest_build_failed';
+};
+
+export type CapabilityManifestTraceProcessorUnavailableReason = 'external_rpc_binary_unavailable' | 'trace_processor_binary_unavailable' | 'unsupported_platform' | 'trace_processor_pin_unavailable' | 'identity_resolution_failed';
 
 export type UiActionKind =
   | 'navigate_timeline'
@@ -2357,13 +2478,26 @@ export interface SourceUseDecisionV1 {
     coverageComplete?: boolean;
     incompleteReasons?: string[];
     references: SourceReferenceV1[];
+    /**
+     * Client surfaces only (`sourceUseDecisionForClient`): how many references
+     * the run returned and how many it read as a body, by `referenceHasReadBody`,
+     * the rule source verdicts use. Derived, so `sanitizeSourceUseDecision`
+     * drops it and decision fingerprints never include it.
+     */
+    referenceCounts?: SourceReferenceCountsV1;
+    /** How deep this run's source access went, and how that was decided. */
+    depth?: SourceDepthDecisionV1;
 }
 
-export interface SourceClaimVerificationResult {
-    schemaVersion: 'source_claim_verifier@1';
-    status: SourceClaimVerificationStatus;
-    bindings: SourceClaimBindingV1[];
-    issues: SourceClaimVerificationIssue[];
+/** What a stored analysis result may carry: the current verifier's result or a historical one. */
+export type StoredSourceClaimVerificationResult = SourceClaimVerificationResult | LegacySourceClaimVerificationResultV1;
+
+export interface KnowledgeUseV1 {
+    schemaVersion: "knowledge_use@1";
+    sources: KnowledgeUseSourceV1[];
+    citations: KnowledgeCitationV1[];
+    /** Some citations were not read; nothing is known about them. */
+    citationsTruncated?: true;
 }
 
 export interface SceneTimelineView {
@@ -2423,6 +2557,8 @@ export interface AnalysisTurnIntentDecision {
     recommendedComplexity: QueryComplexity;
     deliverable: "answer" | "report";
     evidenceAccess: "existing_only" | "read_new";
+    /** Asked only when the run has source selected; absent otherwise or when the model omitted it. */
+    sourceNeed?: SourceNeed;
     reason?: string;
 }
 
@@ -2530,6 +2666,13 @@ export type AnalysisDeliveryEntry = 'runtime_draft' | 'new_finalization' | 'hist
 
 export type AnalysisAssuranceStatus = 'not_applicable' | 'not_checked' | 'unavailable' | 'coverage_incomplete' | 'passed' | 'failed';
 
+/**
+ * A new run derives its status from actual lookups (`pending`, `attempted`,
+ * `located`, `corroborated`, `not_found_complete`, `search_incomplete`) or
+ * starts at `not_needed` when it may acquire no evidence. `disallowed`,
+ * `no_queryable_anchor`, `ambiguous_candidates` and `unverified` came only from
+ * a retired model-declared decision and stay so stored results remain readable.
+ */
 export type SourceUseStatus = 'pending' | 'not_needed' | 'disallowed' | 'no_queryable_anchor' | 'attempted' | 'located' | 'corroborated' | 'ambiguous_candidates' | 'not_found_complete' | 'search_incomplete' | 'unverified';
 
 export interface SourceReferenceV1 {
@@ -2545,27 +2688,82 @@ export interface SourceReferenceV1 {
     symbol?: string;
     buildId?: string;
     commitHash?: string;
+    /**
+     * The content the range came from: an index generation (`codebase_…`), or
+     * for on-demand reads the live content version (`live-…`, keyed per process,
+     * so comparable only within one run, never across a restart).
+     */
     sourceGeneration?: string;
-    lookupKind: 'metadata' | 'body' | 'indexed' | 'graph';
+    /**
+     * How the reference was returned. `search_hit` and `metadata`/`graph` locate
+     * code; only `body` (a read window) and `indexed` deliver it as evidence.
+     */
+    lookupKind: SourceLookupKind;
 }
 
-export type SourceClaimVerificationStatus = 'passed' | 'failed' | 'partial' | 'not_checked';
-
-export interface SourceClaimBindingV1 {
-    claimId: string;
-    mechanismStatus: SourceMechanismStatus;
-    sourceReferenceIds: string[];
-    traceEvidenceRefIds: string[];
-    reason?: string;
+export interface SourceReferenceCountsV1 {
+    located: number;
+    read: number;
 }
 
-export interface SourceClaimVerificationIssue {
-    claimId?: string;
-    severity: 'error' | 'warning';
-    code: 'source_claim_missing' | 'source_reference_not_returned' | 'source_reference_outside_selection' | 'source_binding_trace_support_missing' | 'source_binding_trace_cross_claim' | 'source_binding_trace_occurrence_not_verified' | 'source_absence_requires_complete_search' | 'source_claim_semantics_unchecked' | 'source_binding_mechanism_unverified' | 'source_binding_strength_downgraded';
-    message: string;
-    sourceReferenceId?: string;
-    traceEvidenceRefId?: string;
+/** How a run's source depth was decided; stored with the run's source use. */
+export interface SourceDepthDecisionV1 {
+    requested: RequestedSourceDepth;
+    effective: SourceDepth;
+    /** `requested`: the user chose it; `intent`: the turn intent's source need; `budget`: the run's budget. */
+    origin: 'requested' | 'intent' | 'budget';
+    /** Why `auto` fell back to the budget. */
+    fallbackReason?: SourceNeedMissingReason;
+    /** A cap that lowered the depth wanted. */
+    cap?: 'metadata_only';
+}
+
+export interface SourceClaimVerificationResult {
+    schemaVersion: 'source_claim_verifier@2';
+    status: SourceClaimVerificationStatus;
+    /** The declared bindings, canonical. */
+    bindings: SourceClaimBindingV1[];
+    /** One entry per source-dependent claim. */
+    claims: SourceClaimStatusV1[];
+    /** Source locations written in the answer body, matched against the run's references. */
+    citations: SourceCitationV1[];
+    issues: SourceClaimVerificationIssue[];
+}
+
+/** A result stored before source claims were judged per claim; read and rendered as stored. */
+export interface LegacySourceClaimVerificationResultV1 {
+    schemaVersion: 'source_claim_verifier@1';
+    status: SourceClaimVerificationStatus;
+    bindings: SourceClaimBindingV1[];
+    issues: Array<Omit<SourceClaimVerificationIssue, 'code'> & {
+        code: string;
+    }>;
+}
+
+export interface KnowledgeUseSourceV1 {
+    knowledgeBaseId: string;
+    kind: KnowledgeBaseKind;
+    /** The generation this run pinned and read. */
+    generation: string;
+    /** Distinct references (document hits, Wiki chunks) actually delivered; repeats count once. */
+    deliveredReferenceCount: number;
+}
+
+export interface KnowledgeCitationV1 {
+    /** The citation exactly as written. */
+    citation: string;
+    relativePath: string;
+    /** The written lines; absent when they are not a valid range (reversed, zero, too large), which never matches. */
+    lineRange?: {
+        start: number;
+        end: number;
+    };
+    status: KnowledgeCitationStatus;
+    /** The knowledge base and reference that pin it, for a positive status. */
+    knowledgeBaseId?: string;
+    referenceId?: string;
+    /** For `ambiguous`: the knowledge bases holding a covering document. */
+    candidateKnowledgeBaseIds?: string[];
 }
 
 export interface SceneSegmentView {
@@ -2638,6 +2836,8 @@ export interface SceneCoverageTargetView {
 /** Query complexity level — determines which analysis pipeline to use. */
 export type QueryComplexity = 'quick' | 'full';
 
+export type SourceNeed = "none" | "locate" | "mechanism";
+
 /** Content interpretation is separate from the producer's acquisition record. */
 export interface InvestigationContentAssessment {
     requirementId: string;
@@ -2657,7 +2857,87 @@ export type InvestigationAcquisitionStatus = 'observed' | 'insufficient' | 'not_
 
 export type EvidenceScalar = string | number | boolean | null;
 
-export type SourceMechanismStatus = 'corroborated' | 'compatible' | 'ambiguous' | 'unverified';
+export type SourceLookupKind = "metadata" | "search_hit" | "body" | "indexed" | "graph";
+
+/** What a request asks for; `auto` follows the turn intent's source need, else the run's budget. */
+export type RequestedSourceDepth = SourceDepth | 'auto';
+
+/** How deep a run may go into source: locating code, or reading its mechanism. */
+export type SourceDepth = 'locate' | 'mechanism';
+
+/** Why a turn has no source need: no classification, a product run, or a decision that omitted it. */
+export type SourceNeedMissingReason = "intent_unavailable" | "product_run" | "source_need_missing";
+
+/**
+ * `failed`: a claim binds a reference this run never issued (or outside the
+ * selection), the one error; `partial`: some source-dependent claim or cited
+ * location is weaker than source plus Trace (delivered, never fully verified);
+ * `passed`: every one is `trace_linked` and every citation matched.
+ */
+export type SourceClaimVerificationStatus = 'passed' | 'failed' | 'partial' | 'not_checked';
+
+/**
+ * A claim bound to the source references (and same-claim Trace evidence) it
+ * relies on. The product computes the claim's source status; the model no
+ * longer declares one. `mechanismStatus` is read only from stored results.
+ */
+export interface SourceClaimBindingV1 {
+    claimId: string;
+    sourceReferenceIds: string[];
+    traceEvidenceRefIds: string[];
+    /** Retired model-declared status; present only in stored historical results. */
+    mechanismStatus?: SourceMechanismStatus;
+}
+
+export interface SourceClaimStatusV1 {
+    claimId: string;
+    status: SourceClaimStatus;
+    sourceReferenceIds: string[];
+    traceEvidenceRefIds: string[];
+}
+
+/**
+ * A source location written in the answer (`path/File.kt:L10-L20`), checked
+ * against what this run actually returned. It locates and is displayed; it
+ * never proves behavior, and an unmatched one is a warning, not a failure.
+ */
+export interface SourceCitationV1 {
+    /** The citation exactly as written. */
+    citation: string;
+    filePath: string;
+    lineRange: {
+        start: number;
+        end: number;
+    };
+    /**
+     * `verified_body`: body windows this run read cover every written line;
+     * `located`: returned locations cover them, but not all were read;
+     * `unmatched`: no single file version this run returned covers them;
+     * `ambiguous`: several file versions do.
+     */
+    status: SourceCitationStatus;
+    /** The issued reference that pins it, for a positive status. */
+    sourceReferenceId?: string;
+    /**
+     * For `ambiguous`: the issued references that fit. A claim bound to one of
+     * them names the version it relies on, which pins the citation for that claim.
+     */
+    candidateReferenceIds?: string[];
+}
+
+export interface SourceClaimVerificationIssue {
+    claimId?: string;
+    severity: 'error' | 'warning';
+    code: 'source_reference_not_returned' | 'source_reference_outside_selection' | 'source_binding_trace_support_missing' | 'source_binding_trace_cross_claim' | 'source_claim_unbound' | 'source_claim_location_only' | 'source_claim_trace_unlinked' | 'source_claim_not_visible' | 'source_absence_requires_complete_search' | 'source_claim_semantics_unchecked' | 'source_citation_unmatched' | 'source_citation_ambiguous' | 'source_citation_extraction_truncated';
+    message: string;
+    sourceReferenceId?: string;
+    traceEvidenceRefId?: string;
+    citation?: string;
+}
+
+export type KnowledgeBaseKind = "document_collection" | "android_internals_wiki";
+
+export type KnowledgeCitationStatus = "delivered" | "located" | "unmatched" | "ambiguous";
 
 export interface SceneTimelineEvidenceReference {
     evidenceRefId?: string;
@@ -2673,6 +2953,12 @@ export interface SceneTimelineBoundary {
     evidenceIndex?: number;
     column?: string;
 }
+
+export type SourceMechanismStatus = 'corroborated' | 'compatible' | 'ambiguous' | 'unverified';
+
+export type SourceClaimStatus = "invalid" | "unbound" | "location_only" | "source_only" | "trace_linked";
+
+export type SourceCitationStatus = "verified_body" | "located" | "unmatched" | "ambiguous";
 
 export interface AnalysisCompletedFinding {
   id: string;
@@ -2733,7 +3019,9 @@ export interface AnalysisCompletedEvent {
     investigationAssessment?: FinalInvestigationAssessment;
     deliveryAssurance?: AnalysisDeliveryAssurance;
     sourceUseDecision?: SourceUseDecisionV1;
-    sourceClaimVerificationResult?: SourceClaimVerificationResult;
+    sourceClaimVerificationResult?: StoredSourceClaimVerificationResult;
+    /** Selected knowledge the run delivered and the answer's knowledge citations; absent = not recorded. */
+    knowledgeUse?: KnowledgeUseV1;
     conclusion?: string;
     conclusionContract?: ConclusionContract;
     claimSupport?: ClaimSupportV1[];
@@ -2753,8 +3041,6 @@ export interface AnalysisCompletedEvent {
     smartScenePreview?: Record<string, unknown>;
     sceneTimeline?: SceneTimelineView;
     sceneReport?: SceneReportReference;
-    /** Primary result is terminal, but a separate source supplement is still running. */
-    sourceEnrichmentPending?: boolean;
     terminalRunStatus?: 'completed' | 'failed' | 'cancelled' | 'quota_exceeded';
     findings: AnalysisCompletedFinding[];
     resultContract?: Record<string, unknown>;

@@ -67,7 +67,11 @@ import {
   traceLocationLabel,
 } from './trace_location_label';
 import {uiOutputLanguage, uiText} from './ui_language';
-import {parseSourceUseReceipt} from './analysis_context';
+import {
+  parseKnowledgeUseReceipt,
+  parseSourceUseReceipt,
+  sourceVerificationFailed,
+} from './source_use_receipt';
 import {readAnswerDraftEvent, reduceAnswerDraft, type AnswerDraftEvent, type AnswerDraftOp} from './answer_draft';
 
 /** Set to true for verbose SSE event logging during development. */
@@ -110,7 +114,7 @@ type AnalysisCompletedPayload = {
   quickRun?: QuickRunReceipt;
   analysisReceipt?: AnalysisReceipt;
   sourceUseReceipt?: Message['sourceUseReceipt'];
-  sourceEnrichmentPending?: boolean;
+  knowledgeUseReceipt?: Message['knowledgeUseReceipt'];
   uiActionProposals?: UiActionProposalV1[];
   serverVerificationBinding?: Message['serverVerificationBinding'];
 };
@@ -162,8 +166,15 @@ function toAnalysisCompletedPayload(
   const conclusionContract = source.conclusionContract;
   if (isRecord(conclusionContract)) {
     payload.conclusionContract = conclusionContract;
-    payload.sourceUseReceipt = parseSourceUseReceipt(conclusionContract, source.sourceClaimVerificationResult);
   }
+  const sourceUseReceipt = parseSourceUseReceipt({
+    conclusionContract,
+    verification: source.sourceClaimVerificationResult,
+    sourceUseDecision: source.sourceUseDecision,
+  });
+  if (sourceUseReceipt) payload.sourceUseReceipt = sourceUseReceipt;
+  const knowledgeUseReceipt = parseKnowledgeUseReceipt(source.knowledgeUse);
+  if (knowledgeUseReceipt) payload.knowledgeUseReceipt = knowledgeUseReceipt;
   if (Array.isArray(source.claimSupport)) {
     payload.claimSupport = source.claimSupport;
   }
@@ -234,9 +245,8 @@ function toAnalysisCompletedPayload(
       .some(key => assurance[key] === 'failed' || assurance[key] === 'coverage_incomplete');
     payload.deliveryCompletionPassed = assurance.completion === 'passed';
   }
-  if (isRecord(source.sourceClaimVerificationResult) &&
-      source.sourceClaimVerificationResult.schemaVersion === 'source_claim_verifier@1') {
-    payload.sourceVerificationFailed = source.sourceClaimVerificationResult.status === 'failed';
+  if (sourceVerificationFailed(source.sourceClaimVerificationResult)) {
+    payload.sourceVerificationFailed = true;
   }
 
   if (isRecord(source.quickRun)) {
@@ -245,9 +255,6 @@ function toAnalysisCompletedPayload(
   if (isRecord(source.analysisReceipt)) {
     payload.analysisReceipt =
       source.analysisReceipt as unknown as AnalysisReceipt;
-  }
-  if (source.sourceEnrichmentPending === true) {
-    payload.sourceEnrichmentPending = true;
   }
   if (Array.isArray(source.uiActionProposals)) {
     payload.uiActionProposals =
@@ -286,6 +293,32 @@ function toAnalysisCompletedPayload(
   }
 
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+/** The receipts a terminal payload carries, as one message update. */
+function receiptMessageUpdate(payload: AnalysisCompletedPayload | undefined): Partial<Message> {
+  return {
+    ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
+    ...(payload?.analysisReceipt ? {analysisReceipt: payload.analysisReceipt} : {}),
+    ...(payload?.sourceUseReceipt ? {sourceUseReceipt: payload.sourceUseReceipt} : {}),
+    ...(payload?.knowledgeUseReceipt ? {knowledgeUseReceipt: payload.knowledgeUseReceipt} : {}),
+  };
+}
+
+function hasReceipt(payload: AnalysisCompletedPayload | undefined): boolean {
+  return Object.keys(receiptMessageUpdate(payload)).length > 0;
+}
+
+/**
+ * Events after which the Agent SSE stream carries nothing more for the run.
+ * `analysis_completed` is terminal on its own: no pending field keeps the
+ * stream open.
+ */
+export function isAgentSseTerminalEvent(eventType: string): boolean {
+  return eventType === 'analysis_completed' ||
+    eventType === 'analysis_cancelled' ||
+    eventType === 'error' ||
+    eventType === 'end';
 }
 
 function analysisCompletedRunStatus(
@@ -4570,18 +4603,9 @@ function pushFinalConclusionOutput(ctx: SSEHandlerContext, payload: AnalysisComp
 }
 
 /**
- * Process analysis_completed event - final analysis result.
+ * Process analysis_completed event - final analysis result. It is terminal:
+ * nothing further arrives for the run.
  */
-function updateCurrentAnswerSourceEnrichment(
-  ctx: SSEHandlerContext,
-  update: Message['analysisSourceEnrichment'],
-): void {
-  const messageId = ctx.streamingAnswer.messageId;
-  if (!messageId || !update) return;
-  if (!ctx.getMessages().some((message) => message.id === messageId)) return;
-  ctx.updateMessage(messageId, {analysisSourceEnrichment: update}, {persist: true});
-}
-
 export function handleAnalysisCompletedEvent(
   data: RawSSEEvent,
   ctx: SSEHandlerContext,
@@ -4594,7 +4618,6 @@ export function handleAnalysisCompletedEvent(
   // A stop whose review did not end in time keeps the read body as an
   // unverified partial turn: the verdict itself is "unfinished".
   const verdictCue = payload?.terminationReason === 'review_not_finished' ? 'unfinished' as const : undefined;
-  const sourceEnrichmentPending = payload?.sourceEnrichmentPending === true;
   const rawConclusionContract = rawPayload.conclusionContract;
   const conclusionContract =
     payload?.conclusionContract ??
@@ -4671,9 +4694,7 @@ export function handleAnalysisCompletedEvent(
       conclusionContract ||
       canonicalContent ||
       payload?.smartScenePreview ||
-      payload?.quickRun ||
-      payload?.analysisReceipt ||
-      payload?.sourceUseReceipt ||
+      hasReceipt(payload) ||
       payload?.uiActionProposals?.length ||
       serverVerificationDetails ||
       serverVerificationNotice
@@ -4698,13 +4719,7 @@ export function handleAnalysisCompletedEvent(
             ...(payload?.smartScenePreview
               ? {smartScenePreview: payload.smartScenePreview}
               : {}),
-            ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-            ...(payload?.analysisReceipt
-              ? {analysisReceipt: payload.analysisReceipt}
-              : {}),
-            ...(payload?.sourceUseReceipt
-              ? {sourceUseReceipt: payload.sourceUseReceipt}
-              : {}),
+            ...receiptMessageUpdate(payload),
             ...uiActionProposalMessageUpdate(payload),
             ...(canonicalContent
               ? {
@@ -4753,13 +4768,7 @@ export function handleAnalysisCompletedEvent(
             ...(payload?.smartScenePreview
               ? {smartScenePreview: payload.smartScenePreview}
               : {}),
-            ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-            ...(payload?.analysisReceipt
-              ? {analysisReceipt: payload.analysisReceipt}
-              : {}),
-            ...(payload?.sourceUseReceipt
-              ? {sourceUseReceipt: payload.sourceUseReceipt}
-              : {}),
+            ...receiptMessageUpdate(payload),
             ...uiActionProposalMessageUpdate(payload),
           });
           ctx.streamingAnswer.messageId = messageId;
@@ -4806,11 +4815,8 @@ export function handleAnalysisCompletedEvent(
     if (ctx.collectedErrors.length > 0) {
       showErrorSummary(ctx);
     }
-    if (sourceEnrichmentPending) {
-      updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
-    }
     settleAnalysisCompletedStreams(ctx, payload);
-    return {isTerminal: !sourceEnrichmentPending, stopLoading: true};
+    return {isTerminal: true, stopLoading: true};
   }
 
   // Support both 'answer' (legacy) and 'conclusion' (agent-driven),
@@ -4876,13 +4882,7 @@ export function handleAnalysisCompletedEvent(
           ...(payload?.smartScenePreview
             ? {smartScenePreview: payload.smartScenePreview}
             : {}),
-          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-          ...(payload?.analysisReceipt
-            ? {analysisReceipt: payload.analysisReceipt}
-            : {}),
-          ...(payload?.sourceUseReceipt
-            ? {sourceUseReceipt: payload.sourceUseReceipt}
-            : {}),
+          ...receiptMessageUpdate(payload),
           ...uiActionProposalMessageUpdate(payload),
         },
         {persist: true},
@@ -4902,13 +4902,7 @@ export function handleAnalysisCompletedEvent(
           ...(payload?.smartScenePreview
             ? {smartScenePreview: payload.smartScenePreview}
             : {}),
-          ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-          ...(payload?.analysisReceipt
-            ? {analysisReceipt: payload.analysisReceipt}
-            : {}),
-          ...(payload?.sourceUseReceipt
-            ? {sourceUseReceipt: payload.sourceUseReceipt}
-            : {}),
+          ...receiptMessageUpdate(payload),
           ...uiActionProposalMessageUpdate(payload),
       });
       ctx.streamingAnswer.messageId = messageId;
@@ -4929,9 +4923,7 @@ export function handleAnalysisCompletedEvent(
     const serverVerificationNotice = renderServerVerificationNotice(payload);
     if (
       (reportUrl ||
-        payload?.quickRun ||
-        payload?.analysisReceipt ||
-        payload?.sourceUseReceipt ||
+        hasReceipt(payload) ||
         payload?.uiActionProposals?.length ||
         serverVerificationDetails ||
         serverVerificationNotice) &&
@@ -4954,13 +4946,7 @@ export function handleAnalysisCompletedEvent(
           {
             answerVerification: verdictCue,
             ...(reportUrl ? {reportUrl: `${ctx.backendUrl}${reportUrl}`} : {}),
-            ...(payload?.quickRun ? {quickRun: payload.quickRun} : {}),
-            ...(payload?.analysisReceipt
-              ? {analysisReceipt: payload.analysisReceipt}
-              : {}),
-            ...(payload?.sourceUseReceipt
-              ? {sourceUseReceipt: payload.sourceUseReceipt}
-              : {}),
+            ...receiptMessageUpdate(payload),
             ...(exactMetadataBackfill &&
                 (serverVerificationDetails || serverVerificationNotice)
               ? {serverVerificationDetails, serverVerificationNotice}
@@ -4978,46 +4964,7 @@ export function handleAnalysisCompletedEvent(
     showErrorSummary(ctx);
   }
 
-  if (sourceEnrichmentPending) {
-    updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
-  }
   settleAnalysisCompletedStreams(ctx, payload);
-  return {isTerminal: !sourceEnrichmentPending, stopLoading: true};
-}
-
-export function handleAnalysisSourceEnrichmentEvent(
-  eventType: string,
-  data: RawSSEEvent,
-  ctx: SSEHandlerContext,
-): SSEHandlerResult {
-  const eventRecord = asRecord(data);
-  const payload = asRecord(eventRecord.data ?? eventRecord);
-  if (eventType === 'analysis_source_enrichment_started') {
-    updateCurrentAnswerSourceEnrichment(ctx, {status: 'running'});
-    return {};
-  }
-  if (eventType === 'analysis_source_enrichment_completed') {
-    const message = readStringField(payload, 'message');
-    const metrics = asRecord(payload.metrics);
-    updateCurrentAnswerSourceEnrichment(ctx, {
-      status: 'completed',
-      message,
-      metrics: {
-        searchCalls: readNumberField(metrics, 'searchCalls'),
-        readCalls: readNumberField(metrics, 'readCalls'),
-        durationMs: readNumberField(metrics, 'durationMs'),
-      },
-    });
-    return {isTerminal: true, stopLoading: true};
-  }
-  if (eventType === 'analysis_source_enrichment_failed') {
-    updateCurrentAnswerSourceEnrichment(ctx, {
-      status: 'failed',
-      errorCode: readStringField(payload, 'errorCode', 'analysis_source_enrichment_failed'),
-    });
-    return {isTerminal: true, stopLoading: true};
-  }
-  updateCurrentAnswerSourceEnrichment(ctx, {status: 'cancelled'});
   return {isTerminal: true, stopLoading: true};
 }
 
@@ -6441,12 +6388,6 @@ function handleSSEEventInner(
 
     case 'analysis_completed':
       return handleAnalysisCompletedEvent(eventData, ctx);
-
-    case 'analysis_source_enrichment_started':
-    case 'analysis_source_enrichment_completed':
-    case 'analysis_source_enrichment_failed':
-    case 'analysis_source_enrichment_cancelled':
-      return handleAnalysisSourceEnrichmentEvent(eventType, eventData, ctx);
 
     case 'analysis_cancelled':
       return handleAnalysisCancelledEvent(eventData, ctx);

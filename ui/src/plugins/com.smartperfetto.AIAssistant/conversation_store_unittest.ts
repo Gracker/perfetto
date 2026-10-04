@@ -18,7 +18,6 @@ import {
   conversationMessageContent,
   conversationOutcomeTurn,
   conversationRecoveryNotice,
-  updateConversationMessageSourceEnrichment,
 } from './conversation_store';
 import {invalidateSmartPerfettoAuthSession} from '../../core/smartperfetto_auth';
 import {answerVerificationCueText} from './answer_verification';
@@ -37,38 +36,6 @@ afterEach(() => {
 });
 
 describe('conversation store private message persistence', () => {
-  it('updates source enrichment independently from the primary message', () => {
-    const backendUrl = 'http://localhost:9000';
-    appendConversationMessage(backendUrl, {
-      id: 'assistant-message',
-      role: 'assistant',
-      content: 'Primary answer',
-      timestamp: Date.now(),
-    });
-
-    updateConversationMessageSourceEnrichment(backendUrl, 'assistant-message', {
-      status: 'running',
-    });
-    expect(loadConversationStore(backendUrl).messages[0]).toMatchObject({
-      content: 'Primary answer',
-      sourceEnrichment: {status: 'running'},
-    });
-
-    updateConversationMessageSourceEnrichment(backendUrl, 'assistant-message', {
-      status: 'completed',
-      message: 'Source supplement',
-      evidence: [{id: 'source-1', label: 'Foo.kt:L10-L12'}],
-      metrics: {searchCalls: 1, readCalls: 2, durationMs: 40},
-    });
-    expect(loadConversationStore(backendUrl).messages[0]).toMatchObject({
-      content: 'Primary answer',
-      sourceEnrichment: {
-        status: 'completed',
-        message: 'Source supplement',
-      },
-    });
-  });
-
   it('keeps raw private query content in memory only', () => {
     const backendUrl = 'http://localhost:9000';
     const privateCanary = 'conversation-private-canary-must-not-persist';
@@ -357,7 +324,7 @@ describe('conversation history permission omissions', () => {
 });
 
 describe('restored conversation mutation and projection', () => {
-  it('keeps authorized private body and turn metadata through append and enrichment', async () => {
+  it('keeps authorized private body and turn metadata through append', async () => {
     seedConversation();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(restoredResponse()));
     const restored = await restoreConversationStore({backendUrl: 'http://backend'});
@@ -365,8 +332,6 @@ describe('restored conversation mutation and projection', () => {
       id: 'follow-up', role: 'user', content: 'follow up', timestamp: 2,
     }, restored.sessionId);
     expect(appended.messages[0]).toMatchObject({content: 'authorized private answer', turn: {partial: true}});
-    const updated = updateConversationMessageSourceEnrichment('http://backend', restored.messages[0].id, {status: 'running'});
-    expect(updated.messages[0]).toMatchObject({content: 'authorized private answer', turn: {partial: true}});
     expect(loadConversationStore('http://backend').messages[0].content).toContain('PRIVATE_QUERY_REFERENCE');
   });
 
