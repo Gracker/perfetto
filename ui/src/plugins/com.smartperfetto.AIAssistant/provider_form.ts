@@ -1100,7 +1100,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
 
     const boolField = (
       label: string,
-      key: 'enableSubAgents' | 'enableVerification',
+      key: 'enableSubAgents',
     ) =>
       m(
         'div',
@@ -1179,20 +1179,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
           '40000',
         ),
         numField(
-          text('验证器超时（ms）', 'Verifier Timeout (ms)'),
-          'verifierTimeoutMs',
-          '60000',
-        ),
-        numField(
           text('分类器超时（ms）', 'Classifier Timeout (ms)'),
           'classifierTimeoutMs',
           '30000',
         ),
         boolField(text('启用子 Agent', 'Enable Sub-agents'), 'enableSubAgents'),
-        boolField(
-          text('启用验证', 'Enable Verification'),
-          'enableVerification',
-        ),
       ],
     );
   }

@@ -71,7 +71,7 @@ function saved(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
       agentRuntime: 'openai-agents-sdk',
       openaiProtocol: 'responses',
     },
-    tuning: {maxTurns: 42, enableVerification: false},
+    tuning: {maxTurns: 42, enableSubAgents: false},
     custom: {envOverrides: {EXAMPLE: 'value'}},
     ...overrides,
   };

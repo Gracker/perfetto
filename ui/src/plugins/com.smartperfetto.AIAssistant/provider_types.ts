@@ -87,10 +87,8 @@ export interface ProviderTuning {
   maxBudgetUsd?: number;
   fullPerTurnMs?: number;
   quickPerTurnMs?: number;
-  verifierTimeoutMs?: number;
   classifierTimeoutMs?: number;
   enableSubAgents?: boolean;
-  enableVerification?: boolean;
 }
 
 export interface ProviderConfig {
