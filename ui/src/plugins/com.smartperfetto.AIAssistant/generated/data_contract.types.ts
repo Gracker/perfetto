@@ -120,6 +120,15 @@ export interface ConclusionContractClaimItem {
   /** Model-produced hint only; visible verdicts come from verifier output. */
   supportLevel?: ConclusionClaimSupportLevel;
   semantics?: ClaimSemanticsV1;
+  /**
+   * Parser-owned per-claim validity: present only when this claim failed its own
+   * item validation while the declaration root stayed valid. Verification,
+   * proof and anchoring consumers skip such a claim; display and fingerprint
+   * consumers keep it.
+   */
+  valid?: false;
+  /** Closed per-claim parse issue codes when `valid` is false; parser-owned. */
+  invalidCodes?: ConclusionContractParseIssue['code'][];
   /** Original invalid model declaration; never a verified interpretation. */
   rawSemantics?: unknown;
   /** Malformed references remain available for diagnosis and lossless reparse. */
@@ -200,7 +209,7 @@ export type ConclusionRelationProposalDiagnostic =
 export type ConclusionBindingEligibility = 'eligible' | 'ineligible' | 'legacy_unchecked';
 
 export interface ConclusionContractDeclarationParseResult {
-  status: 'absent' | 'valid' | 'invalid';
+  status: 'absent' | 'valid' | 'partially_valid' | 'invalid';
   raw: string;
   rawPayload?: unknown;
   contract?: ConclusionContract;
@@ -613,9 +622,20 @@ export interface ClaimPropositionCoverage {
   reason: string;
 }
 
+/**
+ * What the one semantic review located for a claim: body offsets with a hash
+ * of the located text, never the text. Lets repeated reviews of a body be
+ * compared (`verdict:stability`) without storing answer content again.
+ */
+export interface ClaimSemanticReviewTrace {
+  consistency: 'consistent' | 'inconsistent' | 'unknown';
+  contentLocations: Array<{start: number; end: number; textHash: string}>;
+}
+
 export interface ClaimVerificationClaimResult {
   claimId: string;
   status: ClaimVerificationClaimStatus;
+  semanticReview?: ClaimSemanticReviewTrace;
   /** Compatibility alias. A matched cell alone never verifies a proposition in v2. */
   referenceResults?: ClaimReferenceVerificationResult[];
   referenceCells?: ClaimReferenceVerificationResult[];
@@ -2216,6 +2236,8 @@ export interface AnalysisReceiptBase {
         referencesMatchedClaims?: number;
         /** Claims whose typed proposition a finite proof established. Absent in older receipts and before verifier@2. */
         propositionProvedClaims?: number;
+        /** Claims whose own declaration entry failed item validation; never verified, never contradicted. Absent in older receipts. */
+        invalidDeclarationClaims?: number;
     };
     qualityGates: {
         finalReportContract: AnalysisReceiptGateStatus;
