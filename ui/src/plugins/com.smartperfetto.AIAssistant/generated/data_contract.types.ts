@@ -1755,8 +1755,8 @@ export interface ColumnDefinition {
   /** For timestamp click actions, the associated duration column for range selection */
   durationColumn?: string;
 
-  /** Time unit for timestamp/duration columns (default: 'ns') */
-  unit?: 'ns' | 'us' | 'ms' | 's';
+  /** Authored quantity unit; timestamp/duration columns accept time units only. */
+  unit?: string;
 
   /** Whether this column should be hidden by default */
   hidden?: boolean;

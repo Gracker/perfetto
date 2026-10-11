@@ -729,7 +729,7 @@ export interface SqlQueryResult {
     format?: string;
     clickAction?: string;
     durationColumn?: string;
-    unit?: 'ns' | 'us' | 'ms' | 's';
+    unit?: string;
     hidden?: boolean;
   }>;
   // Expandable row data (for iterator type results)
