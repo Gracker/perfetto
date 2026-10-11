@@ -137,6 +137,16 @@ export interface ConclusionContractClaimItem {
   semanticsParseIssues?: ConclusionContractParseIssue[];
 }
 
+/** A proposed display binding, never a proof or a replacement for the exact proposition. */
+export interface NumericPresentationDeclaration {
+  schemaVersion: 'numeric_presentation@1';
+  unit: string;
+  decimalPlaces: number;
+  rounding: 'half_away_from_zero';
+  /** Exact numeric literal including unit; occurrence is zero-based when repeated. */
+  quotes: Array<{text: string; occurrence?: number}>;
+}
+
 export interface ClaimSemanticsV1 {
   schemaVersion: 'claim_semantics@1';
   /** Unknown rule IDs are valid declarations but supply no proof. */
@@ -153,7 +163,8 @@ export interface ClaimSemanticsV1 {
     timeRangeNs?: {start: string; end: string};
   };
   /** The proposition value is distinct from a cited cell's value. */
-  numeric?: {operator: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte'; value: number | string; unit: string};
+  numeric?: {operator: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte'; value: number | string; unit: string;
+    presentation?: NumericPresentationDeclaration};
 }
 
 export interface ConclusionContractParseIssue {
@@ -418,6 +429,14 @@ export interface EvidenceIdentityV1 {
   warnings?: string[];
 }
 
+/** Producer-declared metric identity of one captured cell; never model-authored. */
+export interface EvidenceCellProducerV1 {
+  skillId: string;
+  stepId: string;
+  metricId: string;
+  aggregation?: string;
+}
+
 export interface EvidenceCellV1 {
   sourceRef?: string;
   rowIndex?: number;
@@ -430,6 +449,13 @@ export interface EvidenceCellV1 {
   isSqlNull?: boolean;
   displayValue?: string;
   unit?: string;
+  /**
+   * Captured field semantics of this column's producer declaration, issued by
+   * the evidence read that bound the cell. Present only when the producer
+   * declared the full tuple (skill/step/metric); a model-written SQL column
+   * carries none, so it can never satisfy a producer-bound expectation.
+   */
+  producer?: EvidenceCellProducerV1;
 }
 
 export interface EvidenceAnchorV1 {
@@ -546,10 +572,6 @@ export interface EvidenceContractV1 {
   warnings: string[];
 }
 
-// SPDX-License-Identifier: AGPL-3.0-or-later
-// Copyright (C) 2024-2026 Gracker (Chris)
-// This file is part of SmartPerfetto. See LICENSE for details.
-
 /** Version 1 remains readable in persisted results; new verification emits version 2. */
 export type ClaimVerificationSchemaVersion = 'claim_verifier@1' | 'claim_verifier@2';
 
@@ -632,10 +654,21 @@ export interface ClaimSemanticReviewTrace {
   contentLocations: Array<{start: number; end: number; textHash: string}>;
 }
 
+/** Backend-calculated formatting only; neither semantic coverage nor evidence of causality. */
+export interface NumericPresentationAssessment {
+  schemaVersion: 'numeric_presentation_assessment@1';
+  status: 'matched' | 'mismatch' | 'not_checked';
+  reason: string;
+  binding: {candidate: AnalysisCandidateIdentity; claimFingerprint: string};
+  source?: {anchorId: string; captureId: string; rowIndex: number; column: string};
+  locations: Array<{start: number; end: number}>;
+}
+
 export interface ClaimVerificationClaimResult {
   claimId: string;
   status: ClaimVerificationClaimStatus;
   semanticReview?: ClaimSemanticReviewTrace;
+  numericPresentation?: NumericPresentationAssessment;
   /** Compatibility alias. A matched cell alone never verifies a proposition in v2. */
   referenceResults?: ClaimReferenceVerificationResult[];
   referenceCells?: ClaimReferenceVerificationResult[];
