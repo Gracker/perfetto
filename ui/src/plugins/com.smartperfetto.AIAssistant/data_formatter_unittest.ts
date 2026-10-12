@@ -42,6 +42,7 @@ import {
   formatSceneTimestamp,
   formatDisplayValue,
   formatMessage,
+  formatSummaryMetrics,
   parseSummaryToTable,
   formatLayerName,
   parseEvidence,
@@ -369,6 +370,57 @@ describe('formatDisplayValue', () => {
 // =============================================================================
 // Message Formatting Tests
 // =============================================================================
+
+describe('formatSummaryMetrics', () => {
+  it('renders observations neutrally and preserves numeric precision and units', () => {
+    const container = document.createElement('div');
+    container.innerHTML = formatMessage(formatSummaryMetrics([
+      {label: 'client_ts.avg', value: 12313109289175.518, severity: 'info'},
+      {label: 'client_dur_ms.p95', value: 6.944, unit: 'ms'},
+      {label: 'thread_id', value: '00123'},
+    ]));
+
+    expect(Array.from(container.querySelectorAll('th')).map(cell => cell.textContent))
+      .toEqual(['指标', '数值']);
+    expect(Array.from(container.querySelectorAll('td')).map(cell => cell.textContent))
+      .toEqual(['client_ts.avg', '12313109289175.518', 'client_dur_ms.p95', '6.944ms', 'thread_id', '00123']);
+    expect(container.textContent).not.toMatch(/🟢|正常|Normal/);
+    expect(container.querySelector('td:nth-child(2)')?.getAttribute('style'))
+      .toContain('text-align:right');
+  });
+
+  it('shows explicit warning and critical states in either language', () => {
+    const metrics = [
+      {label: 'frame duration', value: 45, severity: 'warning' as const},
+      {label: 'blocked', value: 200, severity: 'critical' as const},
+    ];
+    expect(formatMessage(formatSummaryMetrics(metrics)))
+      .toContain('<strong>注意</strong> · frame duration');
+    expect(formatMessage(formatSummaryMetrics(metrics)))
+      .toContain('<strong>严重</strong> · blocked');
+
+    setUiLanguagePreference('en-US');
+    const html = formatMessage(formatSummaryMetrics(metrics));
+    expect(html).toContain('<strong>Warning</strong>');
+    expect(html).toContain('<strong>Critical</strong>');
+    expect(html).toContain('Metric');
+    expect(html).toContain('Value');
+    expect(formatSummaryMetrics([])).toBe('');
+  });
+
+  it('keeps metric fields literal so delimiters and markup cannot alter the table', () => {
+    const container = document.createElement('div');
+    container.innerHTML = formatMessage(formatSummaryMetrics([
+      {label: 'binder|**name**_[id]\\path', value: '<img src=x>&copy;', unit: '|ms'},
+      {label: 'multiline\nlabel', value: 'a\nb'},
+    ]));
+
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(2);
+    expect(Array.from(container.querySelectorAll('td')).map(cell => cell.textContent))
+      .toEqual(['binder|**name**_[id]\\path', '<img src=x>&copy;|ms', 'multiline label', 'a b']);
+    expect(container.querySelector('img, strong, a')).toBeNull();
+  });
+});
 
 describe('formatMessage', () => {
   describe('empty/null handling', () => {

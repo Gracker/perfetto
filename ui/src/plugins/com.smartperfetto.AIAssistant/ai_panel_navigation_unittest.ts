@@ -2247,14 +2247,14 @@ describe('AIPanel /goto navigation', () => {
     );
   });
 
-  it('marks summary messages for a compact schema-driven type hierarchy', () => {
+  it.each(['summary', 'metric'])('marks %s messages for a compact schema-driven type hierarchy', (kind) => {
     const panel = new AIPanel() as any;
     panel.renderMermaidInElement = vi.fn();
     const dom = document.createElement('div');
     const summaryMessage = {
       id: 'summary-msg',
       role: 'assistant',
-      content: '## SQL Summary\n\n### 关键指标\n\n🟢 **total_rows:** 42',
+      content: '## SQL Summary\n\n| 指标 | 数值 |\n| --- | ---: |\n| total_rows | 42 |',
       timestamp: Date.now(),
       sourceContext: {
         ref: '摘要 1',
@@ -2262,7 +2262,7 @@ describe('AIPanel /goto navigation', () => {
         source: 'execute_sql',
         reason: 'Summarize SQL output',
         meaning: 'Summary metrics',
-        kind: 'summary',
+        kind,
       },
     };
 

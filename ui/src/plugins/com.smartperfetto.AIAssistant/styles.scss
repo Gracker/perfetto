@@ -5222,6 +5222,20 @@ tr.detail-row {
   p {
     margin: 3px 0;
   }
+
+  table {
+    table-layout: fixed;
+
+    th,
+    td {
+      overflow-wrap: anywhere;
+      vertical-align: top;
+    }
+
+    td {
+      font-variant-numeric: tabular-nums;
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------

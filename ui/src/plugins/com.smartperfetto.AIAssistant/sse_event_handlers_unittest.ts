@@ -57,6 +57,7 @@ import {
 } from './sse_event_handlers';
 import {setUiLanguagePreference} from './ui_language';
 import {orderMessagesForDisplay} from './message_order';
+import {formatMessage} from './data_formatter';
 
 import {
   Message,
@@ -2032,6 +2033,46 @@ describe('handleSkillLayeredResultEvent', () => {
 // =============================================================================
 
 describe('handleDataEvent', () => {
+  it.each(['summary', 'metric'])('renders %s metrics as a neutral table while retaining evidence context', (format) => {
+    const ctx = createMockContext();
+    handleDataEvent({
+      id: 'sql-metrics',
+      envelope: {
+        meta: {
+          type: 'sql_result',
+          version: '2.0',
+          source: 'execute_sql',
+          evidenceRefId: 'data:sql_summary:current:trace-a:query-a:tool-a',
+        },
+        data: {
+          summary: {
+            title: 'SQL Summary Review',
+            content: 'Observed SQL statistics',
+            metrics: [
+              {label: 'total_rows', value: 6046, severity: 'info'},
+              {label: 'duration', value: 6.944, unit: 'ms', severity: 'warning'},
+            ],
+          },
+        },
+        display: {layer: 'overview', format, title: 'SQL Summary Review'},
+      },
+    }, ctx);
+
+    expect(ctx.messages).toHaveLength(1);
+    const message = ctx.messages[0];
+    const container = document.createElement('div');
+    container.innerHTML = formatMessage(message.content);
+    expect(container.querySelectorAll('table')).toHaveLength(1);
+    expect(Array.from(container.querySelectorAll('td')).map(cell => cell.textContent))
+      .toEqual(['total_rows', '6046', '注意 · duration', '6.944ms']);
+    expect(message.content).not.toContain('🟢');
+    expect(message.sourceContext).toMatchObject({
+      kind: format,
+      evidenceRefId: 'data:sql_summary:current:trace-a:query-a:tool-a',
+      source: 'execute_sql',
+    });
+  });
+
   let ctx: ReturnType<typeof createMockContext>;
 
   beforeEach(() => {

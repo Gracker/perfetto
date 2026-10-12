@@ -832,7 +832,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   ): void {
     dom.classList.toggle(
       'ai-message-content-summary',
-      msg.sourceContext?.kind === 'summary',
+      msg.sourceContext?.kind === 'summary' || msg.sourceContext?.kind === 'metric',
     );
     const lastRenderedContent = this.renderedMessageContent.get(dom);
     if (lastRenderedContent === msg.content) return;

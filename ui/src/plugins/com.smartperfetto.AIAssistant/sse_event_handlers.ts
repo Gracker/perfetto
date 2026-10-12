@@ -49,6 +49,7 @@ import {
   extractConclusionFromOverview,
   convertToExpandableSections,
   parseSummaryToTable,
+  formatSummaryMetrics,
 } from './data_formatter';
 import {
   type ConclusionContract,
@@ -5397,22 +5398,10 @@ function renderDataEnvelope(
         }
 
         if (payload.summary.metrics && payload.summary.metrics.length > 0) {
-          const metricLines: string[] = [
+          sections.push([
             uiText('### 关键指标', '### Key metrics'),
-          ];
-          for (const metric of payload.summary.metrics) {
-            const icon =
-              metric.severity === 'critical'
-                ? '🔴'
-                : metric.severity === 'warning'
-                  ? '🟡'
-                  : '🟢';
-            const unit = metric.unit || '';
-            metricLines.push(
-              `${icon} **${metric.label}:** ${metric.value}${unit}`,
-            );
-          }
-          sections.push(metricLines.join('\n'));
+            formatSummaryMetrics(payload.summary.metrics),
+          ].join('\n\n'));
         }
 
         const summaryContent = sections.join('\n\n');
@@ -5437,17 +5426,10 @@ function renderDataEnvelope(
             kind: 'metric',
           },
         );
-        let metricContent = `### 📈 ${title}\n\n`;
-        for (const metric of payload.summary.metrics) {
-          const icon =
-            metric.severity === 'critical'
-              ? '🔴'
-              : metric.severity === 'warning'
-                ? '🟡'
-                : '🟢';
-          const unit = metric.unit || '';
-          metricContent += `| ${icon} ${metric.label} | **${metric.value}${unit}** |\n`;
-        }
+        const metricContent = [
+          `### 📈 ${title}`,
+          formatSummaryMetrics(payload.summary.metrics),
+        ].filter(Boolean).join('\n\n');
         ctx.addMessage({
           id: ctx.generateId(),
           role: 'assistant',

@@ -31,6 +31,7 @@
 import {
   type FullAnalysis,
   type ExpandableSections,
+  type SummaryContent,
   isFrameDetailData,
 } from './generated';
 import markdownit from 'markdown-it';
@@ -403,6 +404,34 @@ export function formatMessage(content: string): string {
   const withTimestampLinks = encodeTimestampMarkers(normalized);
   const rendered = markdownRenderer.render(withTimestampLinks).trim();
   return sanitizeHtml(decodeTimestampLinks(rendered));
+}
+
+/** Render observed metrics without implying a healthy performance verdict. */
+export function formatSummaryMetrics(
+  metrics: NonNullable<SummaryContent['metrics']>,
+): string {
+  if (metrics.length === 0) return '';
+
+  const cell = (value: string | number) =>
+    String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/\\/g, '\\\\')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/([`*_{}\[\]()<>!|])/g, '\\$1');
+  const rows = metrics.map((metric) => {
+    const status =
+      metric.severity === 'critical'
+        ? `**${uiText('严重', 'Critical')}** · `
+        : metric.severity === 'warning'
+          ? `**${uiText('注意', 'Warning')}** · `
+          : '';
+    return `| ${status}${cell(metric.label)} | ${cell(metric.value)}${cell(metric.unit || '')} |`;
+  });
+  return [
+    `| ${uiText('指标', 'Metric')} | ${uiText('数值', 'Value')} |`,
+    '| :--- | ---: |',
+    ...rows,
+  ].join('\n');
 }
 
 /**
