@@ -103,6 +103,7 @@ type AnalysisCompletedPayload = {
   deliveryIncomplete?: boolean;
   deliveryCompletionPassed?: boolean;
   sourceVerificationFailed?: boolean;
+  verificationNoticeRequired?: boolean;
   /** Local projection fields, never accepted from SSE JSON. */
   hasResultContent?: boolean;
   effectiveResultStatus?: StreamingFlowState['lastTerminalStatus'];
@@ -241,13 +242,17 @@ function toAnalysisCompletedPayload(
   }
   if (isRecord(source.deliveryAssurance) && source.deliveryAssurance.schemaVersion === 1) {
     const assurance = source.deliveryAssurance;
-    payload.deliveryIncomplete = ['completion', 'claims', 'source', 'identity', 'report']
-      .some(key => assurance[key] === 'failed' || assurance[key] === 'coverage_incomplete');
+    payload.deliveryIncomplete = assurance.completion === 'failed' || assurance.completion === 'coverage_incomplete';
     payload.deliveryCompletionPassed = assurance.completion === 'passed';
+    payload.verificationNoticeRequired = ['claims', 'source', 'identity', 'report', 'investigation', 'investigationEvidence']
+      .some(key => typeof assurance[key] === 'string' && !['passed', 'not_applicable'].includes(assurance[key] as string));
   }
   if (sourceVerificationFailed(source.sourceClaimVerificationResult)) {
     payload.sourceVerificationFailed = true;
   }
+  const sourceVerifier = asRecord(source.sourceClaimVerificationResult);
+  if ((sourceVerifier.schemaVersion === 'source_claim_verifier@1' || sourceVerifier.schemaVersion === 'source_claim_verifier@2') &&
+      sourceVerifier.status !== 'passed') payload.verificationNoticeRequired = true;
 
   if (isRecord(source.quickRun)) {
     payload.quickRun = source.quickRun as unknown as QuickRunReceipt;
@@ -334,20 +339,9 @@ function analysisCompletedResultStatus(
   flow?: StreamingFlowState,
 ): NonNullable<AnalysisCompletedPayload['terminalRunStatus']> | 'partial' {
   if (payload?.effectiveResultStatus) return payload.effectiveResultStatus;
-  const claimVerification = payload?.claimVerificationResult;
-  const knownVerification = claimVerification?.schemaVersion === 'claim_verifier@1' ||
-    claimVerification?.schemaVersion === 'claim_verifier@2';
-  const verificationFailed = knownVerification &&
-    (claimVerification?.status === 'failed' ||
-      (Array.isArray(claimVerification?.issues) && claimVerification.issues.some(issue =>
-        isRecord(issue) && issue.severity === 'error')));
-  const bindingIneligible = payload?.conclusionContract?.bindingEligibility === 'ineligible' ||
-    payload?.claimSupport?.some(claim => isRecord(claim) && claim.bindingEligibility === 'ineligible');
   const explicitVerdict = payload?.terminalRunStatus !== undefined ||
     payload?.success !== undefined || payload?.completionStatus !== undefined ||
-    payload?.partial === true || payload?.deliveryIncomplete || payload?.deliveryCompletionPassed ||
-    payload?.sourceVerificationFailed || verificationFailed || bindingIneligible ||
-    (knownVerification && claimVerification?.status === 'passed');
+    payload?.partial === true || payload?.deliveryIncomplete || payload?.deliveryCompletionPassed;
   if (!explicitVerdict) {
     if (flow?.lastTerminalStatus) return flow.lastTerminalStatus;
     if (flow?.status === 'partial' || flow?.status === 'failed' || flow?.status === 'cancelled') {
@@ -364,8 +358,7 @@ function analysisCompletedResultStatus(
   }
   return payload?.partial === true || payload?.success === false ||
     payload?.completionStatus === 'incomplete' || payload?.completionStatus === 'unknown' ||
-    payload?.deliveryIncomplete || payload?.sourceVerificationFailed || verificationFailed ||
-    bindingIneligible
+    payload?.deliveryIncomplete
     ? 'partial' : 'completed';
 }
 
@@ -389,7 +382,7 @@ function settleAnalysisCompletedStreams(
   } else if (status === 'partial' || status === 'quota_exceeded') {
     partialStreamingFlow(ctx, payload?.terminationMessage ?? ctx.streamingFlow.error ?? (status === 'quota_exceeded'
       ? uiText('达到使用额度，未完成全部分析。', 'The usage quota was reached before analysis completed.')
-      : uiText('结果仍不完整或尚未通过核验。', 'The result is incomplete or has not passed verification.')));
+      : uiText('本轮分析输出仍不完整。', 'The analysis output is incomplete.')));
   } else {
     completeStreamingFlow(ctx);
   }
@@ -4190,15 +4183,26 @@ function renderServerVerificationNotice(
 ): string | undefined {
   if (!payload) return undefined;
   const status = analysisCompletedResultStatus(payload);
-  if (status !== 'partial' && status !== 'failed' && status !== 'quota_exceeded') {
-    return undefined;
+  const lines: string[] = [];
+  if (status === 'partial' || status === 'failed' || status === 'quota_exceeded') {
+    const reason = payload.terminationMessage || payload.terminationReason ||
+      uiText('本轮分析输出仍不完整。', 'The analysis output is incomplete.');
+    lines.push(uiText('> **结果完整性提示**', '> **Result completeness notice**'),
+      ...reason.split(/\r?\n/).filter(Boolean).map(line => `> ${line}`));
   }
-  const reason = payload.terminationMessage || payload.terminationReason ||
-    uiText('结果仍不完整或尚未通过核验。', 'The result is incomplete or has not passed verification.');
-  return [
-    uiText('> **结果完整性提示**', '> **Result completeness notice**'),
-    ...reason.split(/\r?\n/).filter(Boolean).map(line => `> ${line}`),
-  ].join('\n');
+  const verifier = payload.claimVerificationResult;
+  const knownVerifier = verifier?.schemaVersion === 'claim_verifier@1' || verifier?.schemaVersion === 'claim_verifier@2';
+  const bindingIneligible = payload.conclusionContract?.bindingEligibility === 'ineligible' ||
+    payload.claimSupport?.some(claim => isRecord(claim) && claim.bindingEligibility === 'ineligible');
+  const identityUnverified = payload.identityResolutions?.some(identity => isRecord(identity) && identity.status !== 'verified');
+  const verifierUnresolved = knownVerifier && (verifier?.status !== 'passed' ||
+    Array.isArray(verifier?.issues) && verifier.issues.some(issue => isRecord(issue) && issue.severity === 'error'));
+  if (payload.verificationNoticeRequired || payload.sourceVerificationFailed || verifierUnresolved || bindingIneligible || identityUnverified) {
+    if (lines.length) lines.push('');
+    lines.push(uiText('> **核验提示**', '> **Verification notice**'),
+      uiText('> 存在疑点或尚未核验，可展开服务器核验详情。', '> Some findings are disputed or unchecked. Expand server verification details.'));
+  }
+  return lines.length ? lines.join('\n') : undefined;
 }
 
 function sameServerVerificationBinding(

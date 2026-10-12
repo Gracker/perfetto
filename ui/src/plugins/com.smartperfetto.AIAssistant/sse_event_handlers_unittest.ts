@@ -3908,8 +3908,8 @@ describe('handleDataEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0].content).toBe('最终结论');
-    expect(ctx.streamingFlow.status).toBe('partial');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
     expect(ctx.messages[0].serverVerificationDetails).toContain('## 服务器核验详情');
     expect(ctx.messages[0].serverVerificationDetails).toContain('blocked_ms 为 120');
     expect(ctx.messages[0].serverVerificationDetails).toContain('supportLevel=unsupported');
@@ -4811,25 +4811,35 @@ describe('handleSSEEvent', () => {
     if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('finalized');
   });
 
+  it('completes the native answer while retaining failed verification as an independent notice', () => {
+    const payload = {
+      conclusion: '保留完整分析正文', success: true, partial: false,
+      terminalRunStatus: 'completed', completion: {schemaVersion: 1, status: 'completed'},
+      deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'failed', report: 'coverage_incomplete'},
+      claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'failed', policy: 'record_only',
+        passed: false, claimResults: [{claimId: 'Q1', status: 'unsupported'}], issues: [
+          {code: 'numeric_mismatch', severity: 'error', claimId: 'Q1', message: 'Independent verification mismatch'},
+        ]},
+    };
+    const original = structuredClone(payload);
+    handleSSEEvent('analysis_completed', {data: payload}, ctx);
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(getAISharedState().status).toBe('completed');
+    expect(ctx.messages[0].content).toBe(payload.conclusion);
+    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('存在疑点或尚未核验');
+    expect(ctx.messages[0].serverVerificationNotice).not.toContain('结果完整性提示');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('status=unsupported');
+    expect(ctx.messages[0].serverVerificationDetails).toContain('Independent verification mismatch');
+    expect(payload).toEqual(original);
+  });
+
   it.each([
     {partial: true},
     {completion: {schemaVersion: 1, status: 'incomplete', reason: 'output_limit'}},
     {completion: {schemaVersion: 1, status: 'unknown'}},
     {deliveryAssurance: {schemaVersion: 1, completion: 'coverage_incomplete'}},
-    {deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'failed'}},
-    {conclusionContract: {schemaVersion: 'conclusion_contract_v1', bindingEligibility: 'ineligible', claims: []}},
-    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'failed', issues: [
-      {code: 'binding_ineligible', severity: 'error', claimId: 'Q1'},
-    ]}},
-    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'partial', issues: [
-      {code: 'binding_ineligible', severity: 'error', claimId: 'Q1'},
-    ]}},
-    {claimSupport: [{claimId: 'Q1', bindingEligibility: 'ineligible'}]},
-    {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@1', status: 'failed', bindings: []}},
-    {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@2', status: 'failed', bindings: [],
-      claims: [{claimId: 'Q1', status: 'invalid', sourceReferenceIds: ['x'], traceEvidenceRefIds: []}],
-      citations: [], issues: []}},
-  ])('uses structured incomplete metadata consistently for terminal UI: %j', metadata => {
+  ])('keeps real incomplete lifecycle metadata terminal and partial: %j', metadata => {
     handleSSEEvent('progress', {data: {message: '正在核验分析结果'}}, ctx);
     handleSSEEvent('analysis_completed', {data: {
       conclusion: '保留当前有依据的输出', success: true, terminalRunStatus: 'completed', ...metadata,
@@ -4841,6 +4851,39 @@ describe('handleSSEEvent', () => {
     expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
     expect(ctx.messages[0].content).toBe('保留当前有依据的输出');
     expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
+  });
+
+  it.each([
+    {deliveryAssurance: {schemaVersion: 1, completion: 'passed', claims: 'failed'}},
+    {deliveryAssurance: {schemaVersion: 1, completion: 'passed', report: 'coverage_incomplete', identity: 'failed'}},
+    {deliveryAssurance: {schemaVersion: 1, completion: 'passed', source: 'unavailable'}},
+    {conclusionContract: {schemaVersion: 'conclusion_contract_v1', bindingEligibility: 'ineligible', claims: []}},
+    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'failed', issues: [
+      {code: 'binding_ineligible', severity: 'error', claimId: 'Q1'},
+    ]}},
+    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'partial', issues: [
+      {code: 'binding_ineligible', severity: 'error', claimId: 'Q1'},
+    ]}},
+    {claimVerificationResult: {schemaVersion: 'claim_verifier@2', status: 'not_checked', notCheckedReason: 'invalid_declarations'}},
+    {claimSupport: [{claimId: 'Q1', bindingEligibility: 'ineligible'}]},
+    {identityResolutions: [{status: 'weak'}]},
+    {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@1', status: 'failed', bindings: []}},
+    {sourceClaimVerificationResult: {schemaVersion: 'source_claim_verifier@2', status: 'failed', bindings: [],
+      claims: [{claimId: 'Q1', status: 'invalid', sourceReferenceIds: ['x'], traceEvidenceRefIds: []}],
+      citations: [], issues: []}},
+  ])('keeps verification limitations advisory after a completed native answer: %j', metadata => {
+    handleSSEEvent('progress', {data: {message: '正在核验分析结果'}}, ctx);
+    handleSSEEvent('analysis_completed', {data: {
+      conclusion: '保留当前有依据的输出', success: true, terminalRunStatus: 'completed',
+      completion: {schemaVersion: 1, status: 'completed'}, ...metadata,
+    }}, ctx);
+    const rendered = ctx.flowMessages.map(message => message.content).join('\n');
+    expect(ctx.streamingFlow.status).toBe('completed');
+    expect(getAISharedState().status).toBe('completed');
+    expect(rendered).toContain('流程完成，结论已生成');
+    expect(ctx.messages[0].content).toBe('保留当前有依据的输出');
+    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
+    expect(ctx.messages[0].serverVerificationNotice).not.toContain('结果完整性提示');
   });
 
   it('waits for final verification after conclusion and corrects a late incomplete verdict idempotently', () => {
@@ -5008,7 +5051,7 @@ describe('handleSSEEvent', () => {
     expect(ctx.streamingFlow.status).toBe('completed');
     expect(getAISharedState().status).toBe('completed');
     expect(ctx.flowMessages.map(message => message.content).join('\n')).toContain('流程完成，结论已生成');
-    expect(ctx.messages[0].serverVerificationNotice).toBeUndefined();
+    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
   });
 
   it('shows investigation deficits after an early conclusion without downgrading native completion', () => {
