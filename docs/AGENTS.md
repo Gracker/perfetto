@@ -1,264 +1,104 @@
-# Perfetto Project Development Guidelines for AI Agents
+# Perfetto Fork Agent Guide
 
-This document provides essential instructions and best practices for developing in the Perfetto codebase. Adhere to these guidelines to ensure consistency and quality.
+This checkout is the SmartPerfetto fork of Perfetto. When working inside the
+SmartPerfetto submodule, follow the parent project's agent and area rules too.
+Preserve unrelated edits and inspect the current source and build configuration
+before choosing commands. Reuse existing utilities and keep changes scoped to
+the affected architecture boundary.
 
-## Where to Land Changes
+## Ownership and Landing
 
-All Perfetto changes must be landed in the upstream repository at
-https://github.com/google/perfetto.
+| Area | Source | Contract |
+| --- | --- | --- |
+| Tracing services and probes | `src/traced`, `src/traced_probes`, `src/tracing` | Target-device collection; respect OS support |
+| Tracing SDKs | `src/tracing`, `include/perfetto/tracing`, `include/perfetto/public` | Preserve public C++ and C API compatibility |
+| Trace Processor | `src/trace_processor` | Offline parsing, SQLite query engine and Wasm |
+| UI | `ui/` | Read [UI agent rules](AGENTS-ui.md); keep plugins on the public API |
+| Other tools | `tools/`, `src/tools` | Follow the owning target and existing tests |
 
-**Note for Google folks:** Pull requests or changelists raised against
-`third_party/perfetto/` in google3, or against `external/perfetto` in the
-internal Android repository, will NOT be accepted. To upstream your changes,
-follow the instructions at
-[go/perfetto-github-instructions](http://go/perfetto-github-instructions), or contact
-perfetto-team@google.com for help.
+For this fork, push changes to `fork` (Gracker/perfetto), never upstream
+`origin` (google/perfetto). Before the parent project publishes a gitlink,
+ensure the commit is reachable from `fork/main`, following the parent Git
+rules. UI source/generated-output changes also require the parent's committed
+frontend refresh and verification; documentation-only changes do not.
+Upstream contributions use the separate
+[contributing workflow](contributing/getting-started.md).
 
-## Overview
+## Native Build and Verification
 
-The perfetto repo contains several projects. These are the major ones
+Commands below run from the Perfetto root. Read the
+[build instructions](contributing/build-instructions.md) for dependency setup,
+configuration and generators, and [testing](contributing/testing.md) for
+platform prerequisites and test ownership.
 
-1. Tracing services: a set of C++ projects that ship on the target device being traced. They live in src/{traced, traced_probes, tracing}. Target names: perfetto, traced, traced_probes, traced_perf, heapprofd.
+1. Use `$OUT` when it identifies an appropriate configured build; otherwise
+   inspect existing `out/*/args.gn` and select the host/configuration needed by
+   the change. Do not blindly choose the newest directory or assume a Linux
+   output path on another OS. Set a concrete `OUT` once before running commands.
+   If no suitable build exists, configure it via the build instructions;
+   report unavailable prerequisites instead of claiming validation.
+2. GN is the build source of truth. Update the owning `BUILD.gn` for added or
+   removed sources. After `.gn`/`.gni` changes run `tools/gn gen --check "$OUT"`
+   and, for include/dependency changes, `tools/gn check "$OUT"`.
+   Add direct dependencies to the target that needs them; do not widen
+   `public_deps` just to silence an include error.
+3. Android.bp and Bazel BUILD are generated. Use the repository generators as
+   described in the build instructions when GN changes require them; never
+   hand-edit generated outputs or defer required generation to an unspecified
+   later process.
+4. Build the affected targets, then run their owning suites. Reuse unchanged
+   passing evidence; widen verification for actual shared-code, platform or
+   unresolved risk, rather than rebuilding every configuration by default.
 
-2. Tracing SDK: this lives in src/tracing. They are used by apps that want to use Perfetto tro emit trace events. There are two flavours of this SDK.
-   - The (older) C++ SDK: reachable via include/perfetto/tracing/.
-   - The (newer) C SDK: reachable via include/perfetto/public.
+| Changed code/test | Build target | Verification |
+| --- | --- | --- |
+| Native unit tests (`*_unittest.cc`) | `perfetto_unittests` | Google Test suite filter |
+| Integration tests (`*_integrationtest.cc`) | `perfetto_integrationtests` | Owning suite and supported OS prerequisites |
+| Performance (`*_benchmark.cc`) | `perfetto_benchmarks` | Google Benchmark regex filter |
+| Trace parsing, schema, SQL stdlib or metrics | `trace_processor_shell` and required descriptors | Trace Processor diff tests |
 
-3. TraceProcessor: a C++ project that lives in src/trace_processor/. This code is typically NOT shipped on device and is used by offline tools. It is internally based on sqlite and it extends its query engine via the vtable API. The UI uses this building in Wasm (Web Assembly).
-
-4. Perfetto UI: This is a Single Page Web Application, client-only (no server component) written in TypeScript that powers ui.perfetto.dev. It lives in ui/. It embeds TraceProcessor via Wasm. If you plan to make UI changes, look at /docs/AGENTS-ui.md and stop looking at the rest of this file.
-
-5. A bunch of other tools and utilities used rarely, in tools/ and src/tools.
-
-## Core Software Engineering Principles
-
-Follow these principles when writing and modifying code.
-
-- Avoid code duplication: Before writing a new function, search the codebase for existing functions that provide similar functionality.
-- Reuse and refactor: If a suitable function exists, reuse it. If it's close but not an exact match, consider refactoring the existing function to accommodate the new use case instead of creating a copy.
-- Consult if unsure: If you are considering duplicating a function or a significant block of code, consult with the user first.
-
-## C++ projects overview
-
-GN supports different configurations, one per out/* folder. You can inspect them by looking at out/xxx/args.gn. Typically when building/running tests while developing, we target our local machine (linux or mac) and we do NOT use android targets.
-
-Use the following commands to build the project for different configurations.
-All commands should be run from the root of the repository.
-
-The output folder where code is built lives in out/xxx. Different people use different output folders.
-
-**IMPORTANT: Before running ANY build or test command, first determine the output directory:**
-
-1. Check if `$OUT` is set by running `echo $OUT`
-2. If `$OUT` is set, use that value
-3. If `$OUT` is empty/unset, run `ls -t1 out | head -n1` to find the most recent output directory
-
-Then use that concrete path (e.g., `out/linux_clang_release`) in all subsequent commands. **NEVER inline `$(ls -t1 out | head -n1)` into commands** - always substitute the actual directory name.
-
-### Building C++ code
-
-Our primary build system is "gn" (GenerateNinja) + "ninja".
-These tools are checked in and accessible via wrapper scripts in our repo, tools/gn and tools/ninja.
-
-- If you touch a .gn or .gni file, rerun `tools/gn gen --check out/linux_clang_release`
-- Afterwards, you can build code running `tools/ninja -C out/linux_clang_release TARGET_NAME`
-- TARGET_NAME is:
-  - perfetto_unittests: for any file in src/**/*_unittest.cc
-  - perfetto_integrationtests: for any file in src/**/*_integrationtest.cc (and most code under test/)
-  - perfetto_benchmarks: for any file in src/**/*_benchmark.cc (and most code under test/)
-  - Other target names are usually: traced, traced_probes, perfetto, trace_processor_shell. You can discover them following the root /BUILD.gn file
-
-When adding/removing source files, keep BUILD.gn files updated.
-Usually there is a BUILD.gn file in each directory. If not, look at closer parent dirs for precedent.
-
-Never bother manually updating Android.bp files or bazel BUILD files.
-Those are autogenerated later when uploading the pull request via `tools/gen_all out/linux_clang_release`, but humans will take care of that.
-
-To build one or more targets:
+With `OUT` set to the selected configured directory, examples are:
 
 ```sh
-tools/ninja -C out/linux_clang_release -k 10000 trace_processor_shell perfetto_unittests
+tools/ninja -C "$OUT" trace_processor_shell perfetto_unittests
+"$OUT/perfetto_unittests" --gtest_brief=1 --gtest_filter='SuiteName.*'
+"$OUT/perfetto_benchmarks" --benchmark_filter='BenchmarkName'
+tools/diff_test_trace_processor.py "$OUT/trace_processor_shell" \
+  --keep-input --quiet --name-filter='SuiteName:case_name'
 ```
 
-All the C++ projects share the same "base" target (include/perfetto/base, include/perfetto/ext/base) and can share some other targets (See GN).
+Prefer an owning test suite to one individual case. Google Test filters are
+globs; benchmark and diff-test filters are regexes. Diff-test names omit the
+`test_` method prefix and use `SuiteName:case_name`. Check that the requested
+tests actually ran; an empty
+selection is not evidence. Diff outputs should compare semantic columns, not
+unstable allocation IDs such as `upid`, `utid` or `id`. Keep SQL units explicit
+and follow the [PerfettoSQL style guide](analysis/style-guide.md).
 
-### C++ Code style
+Use an existing ASan/MSan configuration for changes needing those checks and
+set the matching symbolizer from that configuration's toolchain. Do not assume
+Linux sanitizer paths work on all hosts. Device/ftrace integration checks need
+their documented platform, permissions and runtime; native and cross-platform
+verification are separate evidence.
 
-We mainly adhere to the Google C++ style guide, which you can consult here
-https://google.github.io/styleguide/cppguide.html
+## Native Implementation Contracts
 
-Highlights:
-
-- Use C++17.
-- Don't use exceptions, don't bother with try/catch.
-- Try to keep template usage to a minimum.
-- Prefer forward declarations in header files, and #include the needed deps in the .cc files.
-- We fail fast. If something shouldn't happen add a PERFETTO_DCHECK() (debug only) or a PERFETTO_CHECK() (production).
-- Remember to never put code with side effects inside a PERFETTO_DCHECK, as those become no-ops in release builds.
-- If a function argument is out or inout, pass it by pointer, not by reference.
-- Delete copy and move constructors unless they are really needed.
-- If you need a copy/move constructor use the same pattern seen in include/perfetto/ext/base/circular_queue.h
-- Use PERFETTO_DLOG (debug only), PERFETTO_LOG/ILOG/ELOG() for logging.
-- Variable names should be proportional to the scope and distance. Variables used in a small loop can be called i,j; Variables scoped to a function should be shorter; Variables/function used across different files should be longer (within reasonable limits) and less prone to collisions when code-searching.
-- Avoid libraries other than STL, posix/Unix common headers, and other libraries that we already pull in buildtools/. If you think you need a new library, ask the user.
-- Generally, be consistent with the style of the file.
-
-When possible try to use data structures and constructs available in include/perfetto/base/ and include/perfetto/ext/base/. Generally look for precedent in the codebase. If in doubt, ask the .
-
-Frequently used includes you should look into are, under include/:
-
-- perfetto/base/task_runner.h"
-- perfetto/base/compiler.h"
-- perfetto/base/time.h"
-- perfetto/ext/base/status_or.h"
-- perfetto/ext/base/scoped_file.h"
-- perfetto/ext/base/file_utils.h"
-- perfetto/ext/base/flat_hash_map.h"
-- perfetto/ext/base/utils.h"
-- perfetto/ext/base/string_view.h"
-- perfetto/ext/base/string_utils.h"
-- perfetto/base/status.h"
-- perfetto/base/logging.h"
-
-When creating new files, this is where you put headers:
-
-- .cc files always go under src/, with the exception of some test/ code.
-- If possible, keep .h headers private and keep them alongside the .cc file.
-- If needed you can put headers in include/perfetto/ext, as that is a non-public API surface.
-- In rare cases, if the user says so, you can put new headers in include/perfetto/public, but that's only for C-SDK cases.
-- Note that "include/" is in the include path, so you never need to type #include "include/perfetto/foo" but only #include "perfetto/foo".
-
-### Supporting different OSes in C++
-
-We generally support all the major platforms (Linux, Android, MacOS/iOS,  Windows) in our codebase, with the exception of src/traced which is supported only on Linux/Android (and few parts on MacOS).
-
-If you need to split code for different platforms, you must use  perfetto/base/build_config.h, and specifically the macros therein defined as `#if PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)` and so on.
-
-Note that every PERFETTO_BUILDFLAG_DEFINE_XXX that you see there must be used via the PERFETTO_BUILDFLAG(XXX) wrapper.
-For example PERFETTO_BUILDFLAG(PERFETTO_OS_QNX) when you see  PERFETTO_BUILDFLAG_DEFINE_PERFETTO_OS_QNX.
-
-### Running C++ Tests
-
-Perfetto uses the Google Test framework. You will see c++ sources like
-```cpp
-TEST(ProtozeroToJsonTest, Foo) {
-...
-}
-```
-
-ProtozeroToJsonTest is the test suite name, Foo the test name.
-
-You can run all the tests in a test suite by doing:
-
-```sh
-out/linux_clang_release/perfetto_unittests --gtest_brief=1 --gtest_filter="ProtozeroToJsonTest.*"
-```
-
-Or if you touch a specific test, you can run only that one doing
-```sh
-out/linux_clang_release/perfetto_unittests --gtest_brief=1 --gtest_filter="ProtozeroToJsonTest.Foo"
-```
-Same goes for perfetto_integrationtests.
-
-For perfetto_benchmarks you need instead to run
-
-```sh
-out/linux_clang_release/perfetto_benchmarks --benchmark_filter='.*BM_RtMutex_NoContention.*'
-```
-
-Note that unlike Google Test, where the filter is a glob, in Google Benchmarks
-the filter is a regex.
-
-### Trace Processor Diff Tests
-
-Trace Processor Diff Tests (or diff tests for short) are executed by running the following command:
-
-```sh
-tools/diff_test_trace_processor.py out/linux_clang_release/trace_processor_shell --keep-input --quiet --name-filter="<regex of test names>"
-```
-
-**Note:** These tests can also be run with ASan or MSan builds by changing the path from `out/linux_clang_release/` to `out/linux_asan/` or `out/linux_msan/` respectively.
-
-**Note:** The `--name-filter` argument is optional.
-
-**Note:** When using the `--name-filter` flag, do not include `test_` in the filter. The test
-runner automatically drops this prefix.
-For example, to run `test_my_cool_test`, use the filter `MyTestSuite.my_cool_test`.
-
-### Test Guidelines
-
-- **Prefer test suites over individual tests.** When using the `--gtest_filter` flag, specify a whole test suite (e.g., `"MyTestSuite.*"`) instead of a single test case (e.g., `"MyTestSuite.MySpecificTest"`). This ensures broader test coverage.
-- **Do not test unstable IDs.** When writing diff tests, do not include columns that contain unstable IDs (e.g. `upid`, `utid`, `id`, etc) in the output. These IDs can change between different runs of the same test, which will cause the test to fail.
-  
-- **Remove `test_` prefix for diff tests.** When using the `--name-filter` flag for diff tests, do not include `test_` in the filter. The test runner automatically drops this prefix. For example, to run `test_my_cool_test`, use the filter `MyTestSuite.my_cool_test`.
-
-## Fixing GN Dependencies
-
-When asked to fix GN dependencies, run the following command and fix any errors
-that are reported:
-
-```sh
-tools/gn check out/linux_clang_release
-```
-
-**Note:** When fixing include errors, do not add dependencies to `public_deps`
-unless explicitly instructed to by the user. Instead, add a direct dependency to
-the target that requires it.
-
-## Other Configurations
-
-### ASan (AddressSanitizer) Build
-
-To build with ASan for memory error detection:
-
-```sh
-tools/ninja -C out/linux_asan -k 10000 trace_processor_shell perfetto_unittests
-```
-
-### MSan (MemorySanitizer) Build
-
-To build with MSan for uninitialized read detection:
-
-```sh
-tools/ninja -C out/linux_msan -k 10000 trace_processor_shell perfetto_unittests
-```
-
-### ASan (AddressSanitizer) Tests
-
-**Note:** Ensure the `ASAN_SYMBOLIZER_PATH` is set correctly.
-
-```sh
-ASAN_SYMBOLIZER_PATH="$(pwd)/buildtools/linux64/clang/bin/llvm-symbolizer" \
-out/linux_asan/perfetto_unittests --gtest_brief=1 --gtest_filter="<TestSuiteName.*>"
-```
-
-### MSan (MemorySanitizer) Tests
-
-**Note:** Ensure the `MSAN_SYMBOLIZER_PATH` is set correctly.
-
-```sh
-MSAN_SYMBOLIZER_PATH="$(pwd)/buildtools/linux64/clang/bin/llvm-symbolizer" \
-out/linux_msan/perfetto_unittests --gtest_brief=1 --gtest_filter="<TestSuiteName.*>"
-```
-
-## Creating Pull Requests
-
-**Note:** This is the default PR workflow. If the user has their own way of
-creating and managing pull requests, follow that and skip this section.
-
-When creating a pull request, follow these steps:
-
-1.  **Create a new branch:**
-    Use the command `git checkout -b dev/$USER/<name-of-branch>` to create a new branch for your pull request.
-
-2.  **Create a stacked/dependent pull request:**
-    To create a pull request that depends on another, use the command `git checkout -b dev/$USER/<name-of-branch> <name-of-parent-branch>`.
-
-**Note:** The `git checkout` command only creates and switches to a new branch. The normal `git add` and `git commit` workflow should be used to add changes to the branch.
-
-## Commit Messages
-
-When writing commit messages, follow these guidelines:
-
-- Prefix your commits: Prefix changes to Trace Processor code with `tp:`, UI code with `ui:`, and general Perfetto changes with `perfetto:`.
-- Keep it concise: A short one-line summary followed by a \n then a paragraph describing the change is the best commit message. Wrap the commit message at 72 cols.
+- Follow the surrounding style and the C++17 policy in the contributing guide.
+  Do not add exceptions or unnecessary templates/dependencies. Prefer existing
+  `include/perfetto/base/` and `include/perfetto/ext/base/` utilities.
+- Keep headers private alongside implementation where possible. `include/perfetto/ext`
+  is non-public; changes to public SDK headers require API review. C SDK headers
+  belong under `include/perfetto/public`. Include `perfetto/...`, not
+  `include/perfetto/...`.
+- Prefer forward declarations in headers and implementation includes in `.cc`.
+  Pass out/inout arguments by pointer. Delete unneeded copy/move constructors;
+  follow existing patterns when they are required.
+- Use `PERFETTO_CHECK`/`PERFETTO_DCHECK` for violated invariants; never put side
+  effects in a `PERFETTO_DCHECK` because release builds omit it. Use Perfetto's
+  logging macros and preserve existing error handling.
+- Respect supported OSes. Use `perfetto/base/build_config.h` and
+  `PERFETTO_BUILDFLAG(PERFETTO_OS_...)`, never the underlying DEFINE macros
+  directly. Tracing services have narrower OS support than Trace Processor/SDK.
+- Match local naming/style and use clear names for cross-file interfaces.
+  Commit summaries conventionally use `tp:`, `ui:` or `perfetto:` according to
+  the changed area; follow the user's requested landing workflow.
