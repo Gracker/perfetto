@@ -562,8 +562,8 @@ export class KnowledgeBaseSection implements m.ClassComponent<KnowledgeBaseSecti
         }, this.busy === 'choose' ? text('选择中…', 'Choosing…') : text('选择文件夹添加', 'Add a folder')),
       ]),
       m('div', {style: STYLES.subtitle}, text(
-        '模型可在分析中检索这些文档作为背景资料；每轮用哪些，在输入框旁的上下文选择中设置。',
-        'The model may search these documents as background; choose which ones a turn uses beside the input box.',
+        '添加你的设备 tag 定义、Trace 片段说明或团队文档，帮助模型解释其含义；每轮在输入框旁选择使用，回答下方显示检索与引用情况。',
+        'Add device tag definitions, trace passage notes or team documents to help explain their meaning. Select bases beside the input for each turn; retrieval and citations appear below the answer.',
       )),
       this.form ? this.renderForm(attrs, this.form) : this.renderTypedPath(attrs),
       this.error ? m('div', {style: STYLES.error, role: 'alert'}, this.error) : null,

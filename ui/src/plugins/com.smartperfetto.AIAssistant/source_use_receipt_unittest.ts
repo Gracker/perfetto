@@ -512,6 +512,8 @@ describe('knowledge use receipt', () => {
     expect(parseKnowledgeUseReceipt(undefined)).toBeUndefined();
     expect(parseKnowledgeUseReceipt({schemaVersion: 'knowledge_use@2', sources: [], citations: []})).toBeUndefined();
     expect(parseKnowledgeUseReceipt({schemaVersion: 'knowledge_use@1', sources: []})).toBeUndefined();
+    expect(knowledgeUseReceiptPresentation({schemaVersion: 'knowledge_use_receipt@1',
+      sourceCount: 1, deliveredReferenceCount: 1} as any)).toBeUndefined();
   });
 
   it('shows a recorded zero as no content delivered', () => {
@@ -519,7 +521,7 @@ describe('knowledge use receipt', () => {
     expect(receipt).toEqual({schemaVersion: 'knowledge_use_receipt@1', sourceCount: 0,
       deliveredReferenceCount: 0, citationStatusCounts: {}});
     expect(knowledgeUseReceiptPresentation(receipt)?.summary)
-      .toBe('No content was delivered from the selected knowledge bases');
+      .toBe('No content was delivered from the selected knowledge bases · No knowledge citations in the answer');
   });
 
   it('counts delivered references per base and citation statuses without keeping paths', () => {
@@ -541,7 +543,7 @@ describe('knowledge use receipt', () => {
     });
     expect(JSON.stringify(receipt)).not.toMatch(/PRIVATE_KB_PATH|kb-a|kb-b/);
     const presentation = knowledgeUseReceiptPresentation(receipt)!;
-    expect(presentation.summary).toBe('5 reference(s) delivered from 2 knowledge base(s)');
+    expect(presentation.summary).toBe('5 passage(s) delivered from 2 knowledge base(s) · 5 answer citation(s) checked');
     const details = presentation.details.join(' | ');
     expect(details).toContain('Text delivered in this run 1');
     expect(details).toContain('Located only; full text not delivered in this run 2');
@@ -556,5 +558,29 @@ describe('knowledge use receipt', () => {
       citations: [citation('located')]})!;
     expect(receipt.citationStatusCounts).toEqual({located: 1});
     expect(knowledgeUseReceiptPresentation(receipt)?.details.join(' ')).not.toContain('Text delivered');
+  });
+
+  it('distinguishes retrieved passages from an answer that never cited them, in both languages', () => {
+    const receipt = parseKnowledgeUseReceipt({schemaVersion: 'knowledge_use@1',
+      sources: [{knowledgeBaseId: 'kb-a', deliveredReferenceCount: 3}], citations: []})!;
+    expect(knowledgeUseReceiptPresentation(receipt)?.summary)
+      .toBe('3 passage(s) delivered from 1 knowledge base(s) · No knowledge citations in the answer');
+    setUiLanguagePreference('zh-CN');
+    try {
+      expect(knowledgeUseReceiptPresentation(receipt)?.summary)
+        .toBe('检索交付 3 条资料（1 个知识库） · 答案未引用知识库');
+    } finally {
+      setUiLanguagePreference('auto');
+    }
+  });
+
+  it('shows answer citations separately without calling unmatched locations verified', () => {
+    const receipt = parseKnowledgeUseReceipt({schemaVersion: 'knowledge_use@1',
+      sources: [{knowledgeBaseId: 'kb-a', deliveredReferenceCount: 3}],
+      citations: [citation('delivered'), citation('unmatched')]})!;
+    const presentation = knowledgeUseReceiptPresentation(receipt)!;
+    expect(presentation.summary).toBe('3 passage(s) delivered from 1 knowledge base(s) · 2 location(s) cited in the answer');
+    expect(presentation.details.join(' ')).toContain('Not returned in this run 1');
+    expect(JSON.stringify(presentation)).not.toContain(pathCanary);
   });
 });

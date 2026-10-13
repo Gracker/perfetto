@@ -630,11 +630,19 @@ export function knowledgeUseReceiptPresentation(
   if (receipt.schemaVersion !== 'knowledge_use_receipt@1') return undefined;
   const sources = safeCount(receipt.sourceCount);
   const delivered = safeCount(receipt.deliveredReferenceCount);
-  if (sources === undefined || delivered === undefined) return undefined;
-  const summary = sources > 0
-    ? text(`交付 ${delivered} 条引用（${sources} 个知识库）`,
-      `${delivered} reference(s) delivered from ${sources} knowledge base(s)`)
+  if (sources === undefined || delivered === undefined || !isRecord(receipt.citationStatusCounts)) return undefined;
+  const delivery = sources > 0
+    ? text(`检索交付 ${delivered} 条资料（${sources} 个知识库）`,
+      `${delivered} passage(s) delivered from ${sources} knowledge base(s)`)
     : text('本轮没有从已选知识库交付内容', 'No content was delivered from the selected knowledge bases');
+  const cited = KNOWLEDGE_CITATION_STATUSES.reduce((total, status) =>
+    total + (safeCount(receipt.citationStatusCounts[status]) ?? 0), 0);
+  const citationSummary = receipt.citationsTruncated
+    ? text(`已核对 ${cited} 处答案引用`, `${cited} answer citation(s) checked`)
+    : cited > 0
+      ? text(`答案引用 ${cited} 处`, `${cited} location(s) cited in the answer`)
+      : text('答案未引用知识库', 'No knowledge citations in the answer');
+  const summary = `${delivery} · ${citationSummary}`;
   const details = [text('内部资料只提供背景，不是 Trace 证据。', 'Internal knowledge is background, not trace evidence.')];
   const citationLabels = countedLabels(receipt.citationStatusCounts, KNOWLEDGE_CITATION_STATUSES,
     knowledgeCitationLabels());
