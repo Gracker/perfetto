@@ -3,6 +3,8 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import m from 'mithril';
+import type {App} from '../../public/app';
 
 import {
   invalidateSmartPerfettoAuthSession,
@@ -85,7 +87,20 @@ function createPage(): any {
   return page;
 }
 
+let renderRoot: HTMLElement;
+
+function renderPage(page: ConversationPage): HTMLElement {
+  m.render(renderRoot, page.view({attrs: {app: {} as App}} as m.Vnode<{app: App}>));
+  return renderRoot;
+}
+
+function renderedMessages(): string[] {
+  return Array.from(renderRoot.querySelectorAll('.ai-conversation-page-message-content'),
+    (element) => element.textContent?.trim() ?? '');
+}
+
 beforeEach(() => {
+  renderRoot = document.createElement('div');
   clearConversationRuntimeIdentities();
   installOidcSession();
   localStorage.clear();
@@ -98,6 +113,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  m.render(renderRoot, null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.__SMARTPERFETTO_CONFIG__ = undefined;
@@ -193,6 +209,9 @@ describe('ConversationPage OIDC lifecycle', () => {
       'trace-free answer',
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    renderPage(page);
+    expect(renderedMessages()).toEqual(['Explain scheduling latency.', 'trace-free answer']);
+    expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
     page.onremove();
   });
 
@@ -211,10 +230,15 @@ describe('ConversationPage OIDC lifecycle', () => {
       .mockResolvedValueOnce(startResponse())
       .mockResolvedValueOnce(new Response(body, {status: 200, headers: {'content-type': 'text/event-stream'}})));
     const page = createPage();
+    expect(renderPage(page).querySelector('.ai-conversation-page-empty')).not.toBeNull();
     page.input = 'trace 时长';
     const send = page.send();
     await vi.waitFor(() => expect(page.provisionalAnswer?.message.content).toBe('answer body'));
     expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([]);
+    renderPage(page);
+    expect(renderedMessages()).toEqual(['trace 时长', 'answer body']);
+    expect(renderRoot.querySelectorAll('.ai-answer-verification-pending')).toHaveLength(1);
+    const pendingArticle = renderRoot.querySelector('.ai-conversation-page-message-assistant');
     streamController.enqueue(encoder.encode(
       'event: run_completed\ndata: {"type":"run_completed","outcome":{"kind":"answered","message":"answer body"}}\n\n',
     ));
@@ -224,6 +248,10 @@ describe('ConversationPage OIDC lifecycle', () => {
     expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([
       expect.objectContaining({id: 'conversation-session-a-run-a-assistant', content: 'answer body'}),
     ]);
+    renderPage(page);
+    expect(renderedMessages()).toEqual(['trace 时长', 'answer body']);
+    expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
+    expect(renderRoot.querySelector('.ai-conversation-page-message-assistant')).toBe(pendingArticle);
     page.onremove();
   });
 
@@ -262,6 +290,8 @@ describe('ConversationPage OIDC lifecycle', () => {
     page.input = 'trace 时长';
     const first = page.send();
     await vi.waitFor(() => expect(page.provisionalAnswer?.message.content).toBe('first answer'));
+    renderPage(page);
+    expect(renderedMessages()).toEqual(['trace 时长', 'first answer']);
     page.input = '应用包名';
     await page.send();
     await first.catch(() => undefined);
@@ -274,7 +304,45 @@ describe('ConversationPage OIDC lifecycle', () => {
       ['user', '应用包名', null],
       ['assistant', 'second answer', null],
     ]);
+    renderPage(page);
+    expect(renderedMessages()[1]).toContain('first answer');
+    expect(renderedMessages().slice(2)).toEqual(['应用包名', 'second answer']);
+    expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
     page.onremove();
+  });
+
+  it.each(['closed', 'failed'])('renders before delivery and after a provisional stream is %s', async (ending) => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(startResponse())
+      .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+        start(controller) { stream = controller; },
+      }), {status: 200, headers: {'content-type': 'text/event-stream'}}));
+    vi.stubGlobal('fetch', fetch);
+    const page = createPage();
+    try {
+      page.input = 'question before delivery';
+      const send = page.send();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      renderPage(page);
+      expect(renderedMessages()).toEqual(['question before delivery']);
+      stream.enqueue(new TextEncoder().encode(
+        'event: provisional_answer\ndata: {"type":"provisional_answer","message":"unfinished answer","verification":"pending"}\n\n',
+      ));
+      await vi.waitFor(() => expect(page.provisionalAnswer).toBeDefined());
+      renderPage(page);
+      expect(renderedMessages()).toEqual(['question before delivery', 'unfinished answer']);
+      if (ending === 'closed') stream.close();
+      else stream.error(new Error('stream interrupted'));
+      await send;
+      renderPage(page);
+      expect(renderedMessages()[1]).toContain('unfinished answer');
+      expect(renderRoot.querySelectorAll('.ai-conversation-page-message-assistant')).toHaveLength(1);
+      expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
+      expect(page.store.messages[1].turn.partial).toBe(true);
+    } finally {
+      page.onremove();
+    }
   });
 
   it('rejects a late start completion after logout', async () => {
@@ -395,6 +463,31 @@ function restoredPageConversation(): Response {
 }
 
 describe('ConversationPage authorized restoration', () => {
+  it.each([false, true])('renders restored history and clears it for New Chat (OIDC: %s)', async (oidc) => {
+    if (!oidc) {
+      window.__SMARTPERFETTO_CONFIG__ = {oidcEnabled: false, backendUrl: 'http://backend'};
+      window.__SMARTPERFETTO_AUTH_SESSION__ = undefined;
+    }
+    seedSavedPageConversation();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(restoredPageConversation()));
+    const page = createPage();
+    try {
+      renderPage(page);
+      expect(renderedMessages()).toEqual([]);
+      await page.ensureConversationRestored();
+      renderPage(page);
+      expect(renderedMessages()).toHaveLength(1);
+      expect(renderedMessages()[0]).toContain('restored answer');
+      expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
+      await page.startNewConversation();
+      renderPage(page);
+      expect(renderedMessages()).toEqual([]);
+      expect(renderRoot.querySelector('.ai-conversation-page-empty')).not.toBeNull();
+    } finally {
+      page.onremove();
+    }
+  });
+
   it('waits for the same restoration before sending a follow-up in the saved session', async () => {
     seedSavedPageConversation();
     const restore = deferredResponse();

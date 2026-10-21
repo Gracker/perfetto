@@ -238,9 +238,9 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         this.store.messages.length > 0
           ? [
               ...this.store.messages.map((message) => renderThreadMessage(message)),
-              this.provisionalAnswer
-                ? renderThreadMessage(this.provisionalAnswer.message, 'pending')
-                : null,
+              ...(this.provisionalAnswer
+                ? [renderThreadMessage(this.provisionalAnswer.message, 'pending')]
+                : []),
             ]
           : m('div.ai-conversation-page-empty', [
               m('h2', uiText('从问题开始，不从流程开始', 'Start with the question, not a workflow')),
