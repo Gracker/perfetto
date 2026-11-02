@@ -2236,11 +2236,11 @@ describe('AIPanel /goto navigation', () => {
       timestamp: Date.now(),
     };
 
-    panel.renderMessageContent(dom, msg, false);
+    panel.renderMessageContent(dom, msg);
     const heading = dom.querySelector('h2') as HTMLElement;
     heading.setAttribute('data-selection-anchor', 'kept');
 
-    panel.renderMessageContent(dom, msg, false);
+    panel.renderMessageContent(dom, msg);
 
     expect(dom.querySelector('h2')?.getAttribute('data-selection-anchor')).toBe(
       'kept',
@@ -2266,13 +2266,12 @@ describe('AIPanel /goto navigation', () => {
       },
     };
 
-    panel.renderMessageContent(dom, summaryMessage, false);
+    panel.renderMessageContent(dom, summaryMessage);
     expect(dom.classList.contains('ai-message-content-summary')).toBe(true);
 
     panel.renderMessageContent(
       dom,
       {...summaryMessage, id: 'normal-msg', content: '## 普通结论', sourceContext: undefined},
-      false,
     );
     expect(dom.classList.contains('ai-message-content-summary')).toBe(false);
   });

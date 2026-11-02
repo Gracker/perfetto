@@ -17,6 +17,8 @@
 // limitations under the License.
 
 import m from 'mithril';
+import {MenuItem, MenuDivider, PopupMenu} from '../../widgets/menu';
+import {PopupPosition} from '../../widgets/popup';
 import {SettingsModal, type SettingsTab} from './settings_modal';
 import {ProviderQuickSwitcher} from './provider_switcher';
 import {AnalysisContextControl, analysisContextSummary} from './analysis_context_control';
@@ -296,6 +298,7 @@ import {
   registerTransientSaver,
   resetTransientState,
   switchFloatingMode,
+  toggleSidebarCollapsedWithTransientState,
   unregisterTransientSaver,
 } from './ai_transient_state';
 import type {TransientState} from './ai_transient_state';
@@ -548,14 +551,6 @@ export type {
 // Inline style objects cannot resolve CSS custom properties for dark mode;
 // all visual tokens live in styles.scss so the --chat-* cascade handles theming.
 
-/** Detect system dark mode preference. Updates reactively when user toggles OS theme. */
-function detectDarkMode(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    window.matchMedia?.('(prefers-color-scheme: dark)').matches === true
-  );
-}
-
 interface CachedSqlFormat {
   raw: string;
   text: string;
@@ -628,8 +623,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private trace?: Trace;
   private tracePairWorkspaceController = new TracePairWorkspaceController();
   private unsubscribeTracePairWorkspace?: () => void;
-  private isDarkMode = detectDarkMode();
-  private darkModeListener?: () => void;
   private state: AIPanelState = {
     messages: [],
     input: '',
@@ -751,8 +744,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    */
   private readonly focusTrackingUnsupportedSessions = new Set<string>();
   private analysisCancellationRequest: Promise<void> | null = null;
-  // Paragraph-level progressive reveal: tracks how many children have been animated per message
-  private revealedBlockCounts = new Map<string, number>();
   private renderedMessageContent = new WeakMap<HTMLElement, string>();
   private copiedMessageIds = new Set<string>();
   private formattedSqlCache = new Map<string, CachedSqlFormat>();
@@ -806,29 +797,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     await mermaidRenderer.renderMermaidInElement(container);
   }
 
-  /**
-   * Apply paragraph-level progressive reveal animation to message content.
-   * Only animates block-level children that haven't been revealed yet,
-   * enabling incremental streaming: already-revealed blocks appear instantly
-   * while new blocks fade in with a staggered delay.
-   */
-  private applyBlockReveal(dom: HTMLElement, msgId: string): void {
-    const children = Array.from(dom.children) as HTMLElement[];
-    const alreadyRevealed = this.revealedBlockCounts.get(msgId) ?? 0;
-
-    for (let i = alreadyRevealed; i < children.length; i++) {
-      const child = children[i];
-      child.classList.add('ai-reveal-block');
-      child.style.animationDelay = `${(i - alreadyRevealed) * 60}ms`;
-    }
-
-    this.revealedBlockCounts.set(msgId, children.length);
-  }
-
   private renderMessageContent(
     dom: HTMLElement,
     msg: Message,
-    isProgressMessage: boolean,
   ): void {
     dom.classList.toggle(
       'ai-message-content-summary',
@@ -840,9 +811,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     dom.innerHTML = formatMessage(msg.content);
     this.renderedMessageContent.set(dom, msg.content);
     void this.renderMermaidInElement(dom);
-    if (msg.role === 'assistant' && !isProgressMessage) {
-      this.applyBlockReveal(dom, msg.id);
-    }
   }
 
   private copyTextToClipboard(text: string): Promise<boolean> {
@@ -2862,16 +2830,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.acceptComposerDraft(draft),
     );
 
-    // Listen for OS dark mode changes
-    const mql = window.matchMedia?.('(prefers-color-scheme: dark)');
-    if (mql) {
-      this.darkModeListener = () => {
-        this.isDarkMode = mql.matches;
-        m.redraw();
-      };
-      mql.addEventListener('change', this.darkModeListener);
-    }
-
     // Flush pending session save on page unload
     this.beforeUnloadHandler = () => this.flushSessionSave();
     window.addEventListener('beforeunload', this.beforeUnloadHandler);
@@ -2995,13 +2953,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.unsubscribeComposerDraft();
       this.unsubscribeComposerDraft = undefined;
     }
-    // Clean up dark mode listener
-    if (this.darkModeListener) {
-      window
-        .matchMedia?.('(prefers-color-scheme: dark)')
-        ?.removeEventListener('change', this.darkModeListener);
-      this.darkModeListener = undefined;
-    }
     if (this.unsubscribeBackendUpload) {
       this.unsubscribeBackendUpload();
       this.unsubscribeBackendUpload = undefined;
@@ -3073,10 +3024,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   ): m.Children {
     const floatingState = getFloatingState();
     const isDockedSidebar = floatingState.mode === 'sidebar';
-
     return m('div.ai-header-actions', [
-      m('div.ai-header-action-group.ai-header-action-group--analysis', [
-        m('span.ai-header-action-group-label', uiText('分析', 'Analysis')),
         isInRpcMode && hasBackendTrace
           ? this.renderHeaderIconButton({
               icon: 'compare_arrows',
@@ -3095,70 +3043,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               },
             })
           : null,
-        isInRpcMode
-          ? this.renderHeaderIconButton({
-              icon: 'fact_check',
-              title: uiText('分析结果对比…', 'Compare analysis results…'),
-              active: this.state.showResultPicker,
-              onclick: () => {
-                this.state.showResultPicker = true;
-                this.state.resultComparisonError = null;
-                this.state.showTracePicker = false;
-                this.state.showSessionSidebar = false;
-                this.state.showStorySidebar = false;
-                this.state.captureConfigSuggestion.visible = false;
-                void (async () => {
-                  await this.postWindowHeartbeat();
-                  await this.fetchAnalysisResults();
-                })();
-                m.redraw();
-              },
-            })
-          : null,
-        this.renderHeaderIconButton({
-          icon: 'tune',
-          title: isBackendConnected
-            ? uiText('建议抓取配置', 'Suggest capture config')
-            : uiText(
-                '连接后端后才能建议抓取配置',
-                'Connect the backend before suggesting a capture config',
-              ),
-          active: this.state.captureConfigSuggestion.visible,
-          disabled: !isBackendConnected,
-          onclick: () => this.toggleCaptureConfigSuggestion(),
-        }),
-        // Connection status indicator (read-only, no upload button in auto-RPC mode).
-        m(
-          'span.ai-header-icon-btn.ai-header-icon-btn--readonly',
-          {
-            title: isInRpcMode
-              ? uiText('已连接 AI 后端', 'Connected to AI backend')
-              : uiText('AI 后端未连接', 'AI backend not connected'),
-          },
-          m('i.pf-icon', isInRpcMode ? 'cloud_done' : 'cloud_off'),
-        ),
-        this.renderHeaderIconButton({
-          icon: 'movie',
-          title: this.state.showStorySidebar
-            ? uiText('隐藏场景还原', 'Hide Scene Story')
-            : uiText('场景还原', 'Scene Story'),
-          active: this.state.showStorySidebar,
-          onclick: () => {
-            if (this.state.showStorySidebar) {
-              this.state.showStorySidebar = false;
-            } else {
-              void this.handleSceneReconstructCommand();
-              this.state.showSessionSidebar = false;
-              this.state.showTracePicker = false;
-              this.state.showResultPicker = false;
-              this.state.captureConfigSuggestion.visible = false;
-            }
-            m.redraw();
-          },
-        }),
-      ]),
-      m('div.ai-header-action-group.ai-header-action-group--session', [
-        m('span.ai-header-action-group-label', uiText('会话', 'Session')),
         this.renderHeaderIconButton({
           icon: 'add_comment',
           title: uiText('新对话', 'New chat'),
@@ -3182,15 +3066,75 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             m.redraw();
           },
         }),
-      ]),
-      m('div.ai-header-action-group.ai-header-action-group--window', [
-        m('span.ai-header-action-group-label', uiText('窗口', 'Window')),
+      m(PopupMenu, {
+        position: PopupPosition.BottomEnd,
+        trigger: this.renderHeaderIconButton({
+          icon: 'more_horiz',
+          title: uiText('工具与布局', 'Tools and layout'),
+        }),
+      }, [
+        isInRpcMode
+          ? m(MenuItem, {
+              icon: 'fact_check',
+              label: uiText('分析结果对比…', 'Compare analysis results…'),
+              title: uiText('分析结果对比…', 'Compare analysis results…'),
+              active: this.state.showResultPicker,
+              onclick: () => {
+                this.state.showResultPicker = true;
+                this.state.resultComparisonError = null;
+                this.state.showTracePicker = false;
+                this.state.showSessionSidebar = false;
+                this.state.showStorySidebar = false;
+                this.state.captureConfigSuggestion.visible = false;
+                void (async () => {
+                  await this.postWindowHeartbeat();
+                  await this.fetchAnalysisResults();
+                })();
+                m.redraw();
+              },
+            })
+          : null,
+        m(MenuItem, {
+          icon: 'tune',
+          label: uiText('建议抓取配置', 'Suggest capture config'),
+          title: isBackendConnected
+            ? uiText('建议抓取配置', 'Suggest capture config')
+            : uiText(
+                '连接后端后才能建议抓取配置',
+                'Connect the backend before suggesting a capture config',
+              ),
+          active: this.state.captureConfigSuggestion.visible,
+          disabled: !isBackendConnected,
+          onclick: isBackendConnected ? () => this.toggleCaptureConfigSuggestion() : undefined,
+        }),
+        m(MenuItem, {
+          icon: 'movie',
+          label: uiText('场景还原', 'Scene Story'),
+          title: this.state.showStorySidebar
+            ? uiText('隐藏场景还原', 'Hide Scene Story')
+            : uiText('场景还原', 'Scene Story'),
+          active: this.state.showStorySidebar,
+          onclick: () => {
+            if (this.state.showStorySidebar) {
+              this.state.showStorySidebar = false;
+            } else {
+              void this.handleSceneReconstructCommand();
+              this.state.showSessionSidebar = false;
+              this.state.showTracePicker = false;
+              this.state.showResultPicker = false;
+              this.state.captureConfigSuggestion.visible = false;
+            }
+            m.redraw();
+          },
+        }),
+        m(MenuDivider),
         isDockedSidebar
           ? this.renderSidebarLayoutSwitch(floatingState.sidebar.layout)
           : null,
         isDockedSidebar
-          ? this.renderHeaderIconButton({
+          ? m(MenuItem, {
               icon: 'open_in_new',
+              label: uiText('浮动窗口', 'Floating window'),
               title: this.isAnalysisIdentityLocked()
                 ? uiText(
                     '分析运行中，完成或停止后可切换挂载位置',
@@ -3201,11 +3145,12 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     'Open as a draggable, resizable floating window that stays visible across tabs',
                   ),
               disabled: this.isAnalysisIdentityLocked(),
-              onclick: () => this.popOutToFloatingWindow(),
+              onclick: this.isAnalysisIdentityLocked() ? undefined : () => this.popOutToFloatingWindow(),
             })
           : null,
-        this.renderHeaderIconButton({
+        m(MenuItem, {
           icon: 'settings',
+          label: uiText('设置', 'Settings'),
           title: this.isAnalysisIdentityLocked()
             ? uiText(
                 '分析运行中，设置保持只读',
@@ -3213,24 +3158,32 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               )
             : uiText('设置', 'Settings'),
           disabled: this.isAnalysisIdentityLocked(),
-          onclick: () => this.openSettings(),
+          onclick: this.isAnalysisIdentityLocked() ? undefined : () => this.openSettings(),
         }),
       ]),
+      isDockedSidebar ? this.renderHeaderIconButton({
+        icon: floatingState.sidebar.layout === 'right' ? 'right_panel_close' : 'bottom_panel_close',
+        title: uiText('收起 AI 面板', 'Collapse AI panel'),
+        onclick: () => toggleSidebarCollapsedWithTransientState(),
+      }) : null,
     ]);
   }
 
   private renderHeaderIconButton(attrs: {
     icon: string;
     title: string;
-    onclick: () => void;
+    onclick?: () => void;
     active?: boolean;
     disabled?: boolean;
     label?: string;
     prominent?: boolean;
-  }): m.Children {
+  }): m.Vnode {
     return m(
       'button.ai-header-icon-btn',
       {
+        'type': 'button',
+        'aria-label': attrs.title,
+        'aria-pressed': attrs.active,
         title: attrs.title,
         onclick: attrs.disabled ? undefined : attrs.onclick,
         disabled: attrs.disabled,
@@ -3264,32 +3217,20 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       m.redraw();
     };
 
-    return m('div.ai-header-layout-switch', [
-      m(
-        'button',
-        {
-          class: layout === 'right' ? 'active' : '',
-          title: uiText(
-            '右侧：AI 助手显示在 Timeline 右侧',
-            'Right: show AI Assistant to the right of the timeline',
-          ),
-          onclick: () => setLayout('right'),
-        },
-        uiText('右侧', 'Right'),
-      ),
-      m(
-        'button',
-        {
-          class: layout === 'bottom' ? 'active' : '',
-          title: uiText(
-            '底部：AI 助手显示在 Timeline 底部',
-            'Bottom: show AI Assistant below the timeline',
-          ),
-          onclick: () => setLayout('bottom'),
-        },
-        uiText('底部', 'Bottom'),
-      ),
-    ]);
+    return [
+      m(MenuItem, {
+        label: uiText('停靠右侧', 'Dock right'),
+        icon: 'right_panel_open',
+        active: layout === 'right',
+        onclick: () => setLayout('right'),
+      }),
+      m(MenuItem, {
+        label: uiText('停靠底部', 'Dock bottom'),
+        icon: 'bottom_panel_open',
+        active: layout === 'bottom',
+        onclick: () => setLayout('bottom'),
+      }),
+    ];
   }
 
   private toggleCaptureConfigSuggestion(): void {
@@ -3659,7 +3600,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     return m(
       'div.ai-panel',
       {
-        'data-theme': this.isDarkMode ? 'dark' : 'light',
         'lang': uiOutputLanguage() === 'zh-CN' ? 'zh-CN' : 'en',
       },
       [
@@ -3820,7 +3760,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   uiText('Trace 对比', 'Trace comparison'),
                 ]),
                 m('div.ai-comparison-panes', [
-                  m('span.ai-comparison-pane.primary', [
+                  m('span.ai-comparison-pane.primary', {title: `${this.getTracePairPaneTitle('current')}: ${this.state.tracePairBaselineTraceName || this.getCurrentTraceName()}`}, [
                     m(
                       'span.ai-comparison-pane-side',
                       this.getTracePairPaneTitle('current'),
@@ -3832,7 +3772,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     ),
                   ]),
                   m('span.ai-comparison-divider', 'vs'),
-                  m('span.ai-comparison-pane.reference', [
+                  m('span.ai-comparison-pane.reference', {title: `${this.getTracePairPaneTitle('reference')}: ${this.state.referenceTraceName || uiText('对比 Trace', 'Comparison Trace')}`}, [
                     m(
                       'span.ai-comparison-pane-side',
                       this.getTracePairPaneTitle('reference'),
@@ -4232,7 +4172,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                           this.renderMessageContent(
                                             dom,
                                             msg,
-                                            isProgressMessage,
                                           );
                                         },
                                         onupdate: (vnode: m.VnodeDOM) => {
@@ -4240,7 +4179,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                           this.renderMessageContent(
                                             dom,
                                             msg,
-                                            isProgressMessage,
                                           );
                                         },
                                       }),
@@ -5030,8 +4968,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           analysisInputLocked ||
                           !canSendFromCurrentSurface,
                       }),
+                      this.renderPresetQuestionButtons(isInRpcMode),
                       m('div.ai-input-controls', [
-                        this.renderPresetQuestionButtons(isInRpcMode),
                         m('div.ai-input-control-spacer'),
                         this.renderAnalysisModeSelector(),
                         m(AnalysisContextControl, {
@@ -5151,7 +5089,15 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
 
     const aiDisabled = this.isAiDisabled();
-    return m('div.ai-preset-questions', [
+    return [
+      m('.ai-composer-shortcuts', m(PopupMenu, {
+        position: PopupPosition.TopEnd,
+        trigger: m('button.ai-quick-actions-trigger', {
+          'type': 'button',
+          'aria-label': uiText('快捷分析', 'Quick analysis'),
+          'title': uiText('快捷分析', 'Quick analysis'),
+        }, m('i.pf-icon', 'bolt')),
+      }, [
       ...(this.state.referenceTraceId
         ? COMPARISON_PRESET_QUESTIONS
         : PRESET_QUESTIONS
@@ -5159,9 +5105,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         const localizedQuestion = uiText(preset.question, preset.questionEn);
         const blocked = this.shouldBlockModelBackedRequest(localizedQuestion);
         return m(
-          `button.ai-preset-btn${preset.isTeaching ? '.ai-teaching-btn' : ''}${preset.isSmart ? '.ai-smart-btn' : ''}`,
+          MenuItem,
           {
-            onclick: () => this.sendPresetQuestion(localizedQuestion),
+            icon: preset.icon,
+            label: uiText(preset.label, preset.labelEn),
+            onclick: blocked ? undefined : () => this.sendPresetQuestion(localizedQuestion),
             title: blocked
               ? this.aiDisabledReason()
               : preset.isTeaching
@@ -5177,9 +5125,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                   : localizedQuestion,
             disabled: this.state.isLoading || blocked,
           },
-          [m('i.pf-icon', preset.icon), uiText(preset.label, preset.labelEn)],
         );
       }),
+      ])),
+      this.hasActiveSelection() || this.hasSmartSceneSelectionReady()
+        ? m('div.ai-preset-questions', [
       this.renderSmartSelectionButtons('preset'),
       this.hasActiveSelection()
         ? m(
@@ -5195,7 +5145,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
             ],
           )
         : null,
-    ]);
+        ]) : null,
+    ];
   }
 
   private renderSmartSelectionButtons(
@@ -13818,6 +13769,12 @@ Click ⚙️ to configure backend connection.`,
       m('div.ai-session-sidebar-header', [
         m('i.pf-icon', 'chat'),
         m('span', uiText('对话', 'Chats')),
+        m('button.ai-session-sidebar-close', {
+          'type': 'button',
+          'aria-label': uiText('关闭历史对话', 'Close chat history'),
+          'title': uiText('关闭历史对话', 'Close chat history'),
+          'onclick': () => { this.state.showSessionSidebar = false; },
+        }, m('i.pf-icon', 'close')),
       ]),
 
       // Session 列表
@@ -13951,7 +13908,6 @@ Click ⚙️ to configure backend connection.`,
     this.state.commandHistory = [];
     this.state.historyIndex = -1;
     this.state.pinnedResults = []; // Clear pinned results
-    this.revealedBlockCounts.clear();
     this.state.completionHandled = false;
     this.state.displayedSkillProgress = new Set();
     this.state.collectedErrors = [];

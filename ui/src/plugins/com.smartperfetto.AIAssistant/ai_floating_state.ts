@@ -56,9 +56,45 @@ export const SIDEBAR_COLLAPSED_WIDTH = 36;
 export const SIDEBAR_DEFAULT_HEIGHT = 360;
 export const SIDEBAR_MIN_HEIGHT = 260;
 export const SIDEBAR_COLLAPSED_HEIGHT = 40;
-/** Never consume more than this fraction of the viewport for the sidebar. */
-const SIDEBAR_MAX_WIDTH_RATIO = 0.5;
-const SIDEBAR_MAX_HEIGHT_RATIO = 0.6;
+// Reserve a usable timeline instead of limiting the assistant to half a screen.
+const TIMELINE_MIN_WIDTH = 400;
+const TIMELINE_MIN_HEIGHT = 160;
+
+/** Shared bounds for pointer, keyboard, restored geometry and viewport changes. */
+export function getSidebarSizeBounds(layout: 'right' | 'bottom'): {
+  min: number;
+  max: number;
+} {
+  const root =
+    document.querySelector('.pf-ui-main') ?? document.documentElement;
+  const styles = window.getComputedStyle(root);
+  const cssPixels = (name: string) =>
+    parseFloat(styles.getPropertyValue(name)) || 0;
+  const navigation = root.querySelector('.pf-sidebar');
+  const navigationWidth = navigation
+    ? Math.max(0, navigation.getBoundingClientRect().right)
+    : cssPixels('--sidebar-width');
+  const available = Math.max(
+    0,
+    layout === 'right'
+      ? window.innerWidth - navigationWidth
+      : window.innerHeight -
+          cssPixels('--topbar-height') -
+          cssPixels('--pf-statusbar-height'),
+  );
+  const min = Math.min(
+    layout === 'right' ? SIDEBAR_MIN_WIDTH : SIDEBAR_MIN_HEIGHT,
+    available,
+  );
+  return {
+    min,
+    max: Math.max(
+      min,
+      available -
+        (layout === 'right' ? TIMELINE_MIN_WIDTH : TIMELINE_MIN_HEIGHT),
+    ),
+  };
+}
 
 /** Clamp a value to [min, max]. Exported so the window module can reuse it. */
 export function clamp(value: number, min: number, max: number): number {
@@ -500,17 +536,12 @@ export function toggleSidebarCollapsed(): void {
 }
 
 /**
- * Clamp sidebar width so it never exceeds SIDEBAR_MAX_WIDTH_RATIO of the
- * viewport. Called on window resize while in sidebar mode.
+ * Keep the dock and timeline within the available page area.
  */
 export function clampSidebarWidth(): void {
   if (typeof window === 'undefined') return;
-  const maxW = Math.floor(window.innerWidth * SIDEBAR_MAX_WIDTH_RATIO);
-  const clamped = clamp(
-    state.sidebar.width,
-    SIDEBAR_MIN_WIDTH,
-    Math.max(SIDEBAR_MIN_WIDTH, maxW),
-  );
+  const {min, max} = getSidebarSizeBounds('right');
+  const clamped = clamp(state.sidebar.width, min, max);
   if (clamped !== state.sidebar.width) {
     updateFloatingState({sidebar: {...state.sidebar, width: clamped}});
   }
@@ -526,12 +557,8 @@ export function getEffectiveSidebarWidth(): number {
 
 export function clampSidebarHeight(): void {
   if (typeof window === 'undefined') return;
-  const maxH = Math.floor(window.innerHeight * SIDEBAR_MAX_HEIGHT_RATIO);
-  const clamped = clamp(
-    state.sidebar.height,
-    SIDEBAR_MIN_HEIGHT,
-    Math.max(SIDEBAR_MIN_HEIGHT, maxH),
-  );
+  const {min, max} = getSidebarSizeBounds('bottom');
+  const clamped = clamp(state.sidebar.height, min, max);
   if (clamped !== state.sidebar.height) {
     updateFloatingState({sidebar: {...state.sidebar, height: clamped}});
   }

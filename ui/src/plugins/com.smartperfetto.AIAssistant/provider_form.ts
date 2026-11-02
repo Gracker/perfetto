@@ -825,7 +825,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 cursor: 'pointer',
                 fontSize: '12px',
                 fontWeight: active ? 600 : 500,
-                color: active ? '#1a1a1a' : t.textSecondary,
+                color: active ? 'var(--pf-color-text-on-primary)' : t.textSecondary,
                 background: active ? t.accentGradient : 'transparent',
               },
               onclick: () => {

@@ -654,12 +654,12 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
           borderRadius: '8px',
           cursor: isActive ? 'default' : 'pointer',
           backgroundColor: isActive
-            ? `${t.accent}15`
+            ? `color-mix(in srgb, ${t.accent} 8%, transparent)`
             : isHovered
               ? t.surfaceHover
               : t.surface,
           border: isActive
-            ? `1px solid ${t.accent}44`
+            ? `1px solid color-mix(in srgb, ${t.accent} 27%, transparent)`
             : `1px solid ${isHovered ? t.border : 'transparent'}`,
           borderLeft: isActive
             ? `3px solid ${t.accent}`
@@ -782,12 +782,12 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
           borderRadius: '8px',
           cursor: isActive ? 'default' : 'pointer',
           backgroundColor: isActive
-            ? `${t.accent}15`
+            ? `color-mix(in srgb, ${t.accent} 8%, transparent)`
             : isHovered
               ? t.surfaceHover
               : t.surface,
           border: isActive
-            ? `1px solid ${t.accent}44`
+            ? `1px solid color-mix(in srgb, ${t.accent} 27%, transparent)`
             : `1px solid ${isHovered ? t.border : 'transparent'}`,
           borderLeft: isActive
             ? `3px solid ${t.accent}`
@@ -899,7 +899,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                                   fontSize: '10px',
                                   padding: '1px 5px',
                                   borderRadius: '3px',
-                                  backgroundColor: `${t.accent}20`,
+                                  backgroundColor: `color-mix(in srgb, ${t.accent} 13%, transparent)`,
                                   color: t.accent,
                                   fontWeight: 500,
                                 },
@@ -914,7 +914,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                               fontSize: '10px',
                               padding: '1px 5px',
                               borderRadius: '3px',
-                              backgroundColor: `${t.textMuted}20`,
+                              backgroundColor: `color-mix(in srgb, ${t.textMuted} 13%, transparent)`,
                               color: t.textSecondary,
                               fontWeight: 500,
                             },
@@ -932,7 +932,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
                                   padding: '1px 5px',
                                   borderRadius: '3px',
                                   background: t.accentGradient,
-                                  color: '#1a1a1a',
+                                  color: 'var(--pf-color-text-on-primary)',
                                   fontWeight: 600,
                                 },
                               },

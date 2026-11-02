@@ -83,8 +83,8 @@ const VIEWPORT_MARGIN = 24;
 // so clicking Timeline Sync always places its popup above this window.
 const FLOATING_WINDOW_Z_INDEX = 9;
 
-const BTN_BG_IDLE = 'rgba(255,255,255,0.12)';
-const BTN_BG_HOVER = 'rgba(255,255,255,0.22)';
+const BTN_BG_IDLE = 'transparent';
+const BTN_BG_HOVER = 'var(--pf-color-background-tertiary)';
 
 /**
  * Resting-state drop shadow for the floating window. Reused by the
@@ -92,7 +92,7 @@ const BTN_BG_HOVER = 'rgba(255,255,255,0.22)';
  * keyframes blend back into the window's normal shadow seamlessly.
  */
 const WINDOW_BASE_SHADOW =
-  '0 12px 40px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 0, 0, 0.08)';
+  '0 8px 24px var(--pf-color-box-shadow), 0 0 0 1px var(--pf-color-border)';
 
 // ── Styles ──────────────────────────────────────────────────────────────
 
@@ -108,18 +108,17 @@ const STYLES = {
     z-index: ${FLOATING_WINDOW_Z_INDEX};
     font-family: 'Roboto', sans-serif;
   `,
-  // Title bar uses Perfetto's sidebar surface color (deep slate blue) so the
-  // floating window reads as part of Perfetto chrome rather than a third-party
-  // overlay. Fallback hex matches theme_provider.scss --pf-sidebar-surface.
+  // Use the same neutral surfaces and text as the assistant and timeline.
   titlebar: `
-    background: var(--pf-sidebar-surface, #262f3c);
-    color: var(--pf-sidebar-on-surface, #c8c8c8);
+    background: var(--pf-color-background-secondary);
+    color: var(--pf-color-text);
     padding: 0 12px;
     height: ${TITLEBAR_HEIGHT}px;
     display: flex;
     align-items: center;
     gap: 8px;
     cursor: grab;
+    touch-action: none;
     user-select: none;
     flex-shrink: 0;
   `,
@@ -135,7 +134,7 @@ const STYLES = {
   `,
   iconBtn: `
     background: ${BTN_BG_IDLE};
-    color: var(--pf-sidebar-on-surface, #c8c8c8);
+    color: var(--pf-color-text);
     border: none;
     border-radius: 4px;
     padding: 4px 8px;
@@ -169,7 +168,8 @@ const STYLES = {
 // ── Drag / resize gesture state ─────────────────────────────────────────
 
 interface DragGesture {
-  type: 'drag' | 'resize';
+  type: 'drag' | 'resize' | 'resize-left' | 'resize-right';
+  pointerId: number;
   startMouseX: number;
   startMouseY: number;
   startPosX: number;
@@ -179,6 +179,7 @@ interface DragGesture {
 }
 
 let activeGesture: DragGesture | null = null;
+let endGesture: (() => void) | undefined;
 
 /**
  * Module-level callback to dismiss the snap layout menu when a drag gesture
@@ -228,8 +229,8 @@ function clampSize(
   };
 }
 
-function onGestureMove(e: MouseEvent): void {
-  if (!activeGesture) return;
+function onGestureMove(e: PointerEvent): void {
+  if (!activeGesture || e.pointerId !== activeGesture.pointerId) return;
   const dx = e.clientX - activeGesture.startMouseX;
   const dy = e.clientY - activeGesture.startMouseY;
 
@@ -242,11 +243,22 @@ function onGestureMove(e: MouseEvent): void {
       ),
     });
   } else {
+    const left = activeGesture.type === 'resize-left';
+    const size = clampSize(
+      activeGesture.startWidth + (left ? -dx : dx),
+      activeGesture.startHeight + (activeGesture.type === 'resize' ? dy : 0),
+    );
     updateFloatingState({
-      size: clampSize(
-        activeGesture.startWidth + dx,
-        activeGesture.startHeight + dy,
-      ),
+      size,
+      ...(left
+        ? {
+            position: {
+              x:
+                activeGesture.startPosX + activeGesture.startWidth - size.width,
+              y: activeGesture.startPosY,
+            },
+          }
+        : {}),
     });
   }
 }
@@ -261,32 +273,22 @@ function onVisibilityChange(): void {
 }
 
 function onGestureEnd(): void {
-  activeGesture = null;
-  document.removeEventListener('mousemove', onGestureMove);
-  document.removeEventListener('mouseup', onGestureEnd);
-  // blur fires when the browser window loses focus (alt-tab, clicking
-  // another app); visibilitychange fires on background tab. Both are
-  // ways the user can release the mouse without us seeing mouseup.
-  window.removeEventListener('blur', onGestureEnd);
-  document.removeEventListener('visibilitychange', onVisibilityChange);
-  document.body.style.userSelect = '';
+  endGesture?.();
 }
 
-function startGesture(type: 'drag' | 'resize', e: MouseEvent): void {
+function startGesture(type: DragGesture['type'], e: PointerEvent): void {
+  if (!e.isPrimary || e.button !== 0) return;
+  const handle = e.currentTarget;
+  if (!(handle instanceof HTMLElement)) return;
   e.preventDefault();
   e.stopPropagation();
-  // Close the snap layout menu if open — drag on titlebar while menu is
-  // open would leave it orphaned because stopPropagation prevents the
-  // window's onclick dismiss handler from firing.
-  if (dismissLayoutMenu) dismissLayoutMenu();
-  // Defensive: if a previous gesture leaked (shouldn't happen but be safe),
-  // tear it down before starting a new one.
-  if (activeGesture !== null) {
-    onGestureEnd();
-  }
+  dismissLayoutMenu?.();
+  onGestureEnd();
   const s = getFloatingState();
+  const {pointerId} = e;
   activeGesture = {
     type,
+    pointerId,
     startMouseX: e.clientX,
     startMouseY: e.clientY,
     startPosX: s.position.x,
@@ -294,11 +296,44 @@ function startGesture(type: 'drag' | 'resize', e: MouseEvent): void {
     startWidth: s.size.width,
     startHeight: s.size.height,
   };
-  document.addEventListener('mousemove', onGestureMove);
-  document.addEventListener('mouseup', onGestureEnd);
+  const oldUserSelect = document.body.style.userSelect;
+  const oldCursor = document.body.style.cursor;
+  const up = (event: PointerEvent) => {
+    if (event.pointerId !== pointerId) return;
+    onGestureMove(event);
+    onGestureEnd();
+  };
+  const cancel = (event: PointerEvent) => {
+    if (event.pointerId === pointerId) onGestureEnd();
+  };
+  endGesture = () => {
+    activeGesture = null;
+    endGesture = undefined;
+    window.removeEventListener('pointermove', onGestureMove);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', cancel);
+    window.removeEventListener('blur', onGestureEnd);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    handle.removeEventListener('lostpointercapture', cancel);
+    if (handle.hasPointerCapture(pointerId))
+      handle.releasePointerCapture(pointerId);
+    document.body.style.userSelect = oldUserSelect;
+    document.body.style.cursor = oldCursor;
+  };
+  handle.setPointerCapture(pointerId);
+  window.addEventListener('pointermove', onGestureMove);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', cancel);
   window.addEventListener('blur', onGestureEnd);
   document.addEventListener('visibilitychange', onVisibilityChange);
+  handle.addEventListener('lostpointercapture', cancel);
   document.body.style.userSelect = 'none';
+  document.body.style.cursor =
+    type === 'drag'
+      ? 'grabbing'
+      : type === 'resize'
+        ? 'nwse-resize'
+        : 'col-resize';
 }
 
 // ── Layout dropdown styles ──────────────────────────────────────────────
@@ -369,6 +404,7 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
 
   onremove() {
     if (dismissLayoutMenu) dismissLayoutMenu = null;
+    onGestureEnd();
   }
 
   view({attrs}: m.Vnode<FloatingWindowAttrs>): m.Children {
@@ -404,8 +440,8 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
           'div',
           {
             style: STYLES.titlebar,
-            onmousedown: (e: MouseEvent) => {
-              // Ignore mousedown on buttons inside the title bar
+            onpointerdown: (e: PointerEvent) => {
+              // Ignore pointerdown on buttons inside the title bar
               if ((e.target as HTMLElement).closest('button')) return;
               startGesture('drag', e);
             },
@@ -551,10 +587,42 @@ class FloatingWindow implements m.ClassComponent<FloatingWindowAttrs> {
           }),
         ),
 
-        // ── Resize handle (bottom-right) ──
-        m('div', {
+        // Edges resize width independently; the corner retains two-axis resize.
+        ...(['left', 'right'] as const).map((edge) =>
+          m(`.ai-floating-resize-edge.ai-floating-resize-edge--${edge}`, {
+            'role': 'separator',
+            'tabindex': 0,
+            'aria-label': uiText(
+              '调整浮窗宽度',
+              'Resize floating window width',
+            ),
+            'aria-orientation': 'vertical',
+            'aria-valuenow': Math.round(s.size.width),
+            'aria-valuemin': FLOATING_MIN_WIDTH,
+            'aria-valuemax': window.innerWidth - VIEWPORT_MARGIN,
+            'title': uiText('左右拖动调整宽度', 'Drag horizontally to resize'),
+            'onpointerdown': (e: PointerEvent) =>
+              startGesture(`resize-${edge}`, e),
+            'onkeydown': (e: KeyboardEvent) => {
+              if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+              e.preventDefault();
+              const direction = e.key === 'ArrowRight' ? 1 : -1;
+              const size = clampSize(
+                s.size.width + direction * (edge === 'left' ? -16 : 16),
+                s.size.height,
+              );
+              updateFloatingState({
+                size,
+                ...(edge === 'left'
+                  ? {position: {x: s.position.x + s.size.width - size.width}}
+                  : {}),
+              });
+            },
+          }),
+        ),
+        m('.ai-floating-resize-corner', {
           style: STYLES.resizeHandle,
-          onmousedown: (e: MouseEvent) => startGesture('resize', e),
+          onpointerdown: (e: PointerEvent) => startGesture('resize', e),
           title: uiText('拖动调整大小', 'Drag to resize'),
         }),
       ],
@@ -672,6 +740,7 @@ function ensureHostParent(hostDiv: HTMLElement): void {
 const RIGHT_RAIL_VAR = '--pf-right-rail-width';
 const BOTTOM_RAIL_VAR = '--pf-bottom-rail-height';
 const STATUSBAR_HEIGHT_VAR = '--pf-statusbar-height';
+const DOCK_LEFT_VAR = '--pf-ai-dock-left';
 
 function getStatusbarHeight(): number {
   const statusbar = document.querySelector('.pf-statusbar');
@@ -690,12 +759,18 @@ function syncDockSpace(
     timelineActive && tracePairWorkspaceController.getState().open;
 
   if (sidebarVisible || workspaceVisible) {
+    const navigation = document.querySelector('.pf-sidebar');
+    document.documentElement.style.setProperty(
+      DOCK_LEFT_VAR,
+      `${Math.max(0, navigation?.getBoundingClientRect().right ?? 0)}px`,
+    );
     document.documentElement.style.setProperty(
       STATUSBAR_HEIGHT_VAR,
       `${getStatusbarHeight()}px`,
     );
   } else {
     document.documentElement.style.removeProperty(STATUSBAR_HEIGHT_VAR);
+    document.documentElement.style.removeProperty(DOCK_LEFT_VAR);
   }
 
   if (sidebarVisible) {
@@ -717,6 +792,7 @@ function clearDockSpace(): void {
   document.documentElement.style.removeProperty(RIGHT_RAIL_VAR);
   document.documentElement.style.removeProperty(BOTTOM_RAIL_VAR);
   document.documentElement.style.removeProperty(STATUSBAR_HEIGHT_VAR);
+  document.documentElement.style.removeProperty(DOCK_LEFT_VAR);
 }
 
 export function setupFloatingWindow(
@@ -740,6 +816,11 @@ export function setupFloatingWindow(
       // the application before this portal, so reconnect the existing host to
       // the new stacking context without remounting the panel or its session.
       ensureHostParent(hostDiv);
+      if (getFloatingState().mode === 'sidebar') {
+        clampSidebarWidth();
+        clampSidebarHeight();
+      }
+      syncDockSpace(tracePairWorkspaceController);
     },
     view: () => {
       if (!isTimelineRouteActive()) return null;

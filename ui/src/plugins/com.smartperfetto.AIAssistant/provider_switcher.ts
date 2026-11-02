@@ -412,6 +412,7 @@ export class ProviderQuickSwitcher
             {
               style: {
                 maxWidth: '120px',
+                minWidth: '0',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
               },
@@ -637,7 +638,7 @@ export class ProviderQuickSwitcher
               cursor: active && provider.isActive ? 'default' : 'pointer',
               fontSize: '10px',
               fontWeight: active ? 700 : 500,
-              color: active ? '#1a1a1a' : t.textSecondary,
+              color: active ? 'var(--pf-color-text-on-primary)' : t.textSecondary,
               background: active ? t.accentGradient : t.surface,
             },
             onclick: () => {

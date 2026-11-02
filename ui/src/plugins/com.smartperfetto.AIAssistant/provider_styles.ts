@@ -1,37 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Premium Dark token system — Apple Pro / Figma Dark inspired
-// Deep textured surfaces + gold accents + subtle gradients
-// Dual-mode: dark/light detection via class + prefers-color-scheme
-
-function isDark(): boolean {
-  return (
-    document.documentElement.classList.contains('dark-mode') ||
-    window.matchMedia('(prefers-color-scheme: dark)').matches
-  );
-}
-
+// Use the same semantic palette as the timeline, assistant and settings.
+// CSS variables also follow explicit Perfetto theme changes without JS detection.
 export function getTokens() {
-  const dark = isDark();
   return {
-    bg: dark ? '#1c1c1e' : '#fafaf9',
-    surface: dark ? '#2c2c2e' : '#ffffff',
-    surfaceHover: dark ? '#363638' : '#f5f4f2',
-    border: dark ? '#3a3a3c' : '#e8e5e0',
-    text: dark ? '#f5f5f7' : '#1a1a1a',
-    textSecondary: dark ? '#a1a1a6' : '#6b6660',
-    textMuted: dark ? '#86868b' : '#9e9a94',
-    accent: dark ? '#d4a574' : '#996633',
-    accentHover: dark ? '#e0b88a' : '#7a5c2e',
-    accentGradient: dark
-      ? 'linear-gradient(135deg, #d4a574, #b8860b)'
-      : 'linear-gradient(135deg, #b8860b, #7a5c2e)',
-    success: dark ? '#34d399' : '#059669',
-    warning: dark ? '#fbbf24' : '#d97706',
-    error: dark ? '#f87171' : '#dc2626',
-    cardGradient: dark
-      ? 'linear-gradient(145deg, #2c2c2e, #252527)'
-      : 'linear-gradient(145deg, #ffffff, #f8f7f5)',
+    bg: 'var(--pf-color-background)',
+    surface: 'var(--pf-color-background-secondary)',
+    surfaceHover: 'var(--pf-color-background-tertiary)',
+    border: 'var(--pf-color-border)',
+    text: 'var(--pf-color-text)',
+    textSecondary: 'var(--pf-color-text-muted)',
+    textMuted: 'var(--pf-color-text-hint)',
+    accent: 'var(--pf-color-primary)',
+    accentHover: 'var(--pf-color-interactive-base)',
+    accentGradient: 'var(--pf-color-primary)',
+    success: 'var(--pf-color-success)',
+    warning: 'var(--pf-color-warning)',
+    error: 'var(--pf-color-danger)',
+    cardGradient: 'var(--pf-color-background)',
   };
 }
 
@@ -66,7 +52,7 @@ export function STYLES(t: Tokens) {
       color: t.textSecondary,
     },
 
-    // ── Add button (gold gradient) ───────────────────────────────────────────
+    // ── Add button ───────────────────────────────────────────
     addBtn: {
       display: 'inline-flex' as const,
       alignItems: 'center' as const,
@@ -78,8 +64,8 @@ export function STYLES(t: Tokens) {
       fontWeight: 500,
       cursor: 'pointer',
       background: t.accentGradient,
-      color: '#1a1a1a',
-      transition: 'all 0.2s ease',
+      color: 'var(--pf-color-text-on-primary)',
+      transition: 'background 0.15s ease, border-color 0.15s ease',
     },
 
     // ── Provider grid ────────────────────────────────────────────────────────
@@ -94,13 +80,13 @@ export function STYLES(t: Tokens) {
       border: `1px solid ${t.border}`,
       background: t.cardGradient,
       boxShadow: '0 1px 4px rgba(0,0,0,0.15)',
-      transition: 'all 0.2s ease',
+      transition: 'background 0.15s ease, border-color 0.15s ease',
       position: 'relative' as const,
       cursor: 'default',
     },
     cardActive: {
       borderLeft: `3px solid ${t.accent}`,
-      boxShadow: `0 0 12px ${t.accent}33`,
+      boxShadow: `0 0 12px color-mix(in srgb, ${t.accent} 20%, transparent)`,
     },
     cardHeader: {
       display: 'flex' as const,
@@ -141,10 +127,10 @@ export function STYLES(t: Tokens) {
     },
     activeBadge: {
       background: t.accentGradient,
-      color: '#1a1a1a',
+      color: 'var(--pf-color-text-on-primary)',
     },
     categoryBadge: {
-      backgroundColor: `${t.accent}20`,
+      backgroundColor: `color-mix(in srgb, ${t.accent} 13%, transparent)`,
       color: t.accent,
     },
 
@@ -177,11 +163,11 @@ export function STYLES(t: Tokens) {
       cursor: 'pointer',
       backgroundColor: 'transparent',
       color: t.textSecondary,
-      transition: 'all 0.2s ease',
+      transition: 'background 0.15s ease, border-color 0.15s ease',
       gap: '4px',
     },
     actionBtnDanger: {
-      borderColor: `${t.error}66`,
+      borderColor: `color-mix(in srgb, ${t.error} 40%, transparent)`,
       color: t.error,
     },
 
@@ -214,8 +200,8 @@ export function STYLES(t: Tokens) {
       borderRadius: '8px',
       fontSize: '13px',
       marginBottom: '16px',
-      backgroundColor: `${t.error}15`,
-      border: `1px solid ${t.error}40`,
+      backgroundColor: `color-mix(in srgb, ${t.error} 8%, transparent)`,
+      border: `1px solid color-mix(in srgb, ${t.error} 25%, transparent)`,
       color: t.error,
     },
     successBanner: {
@@ -225,8 +211,8 @@ export function STYLES(t: Tokens) {
       borderRadius: '8px',
       fontSize: '13px',
       marginBottom: '16px',
-      backgroundColor: `${t.success}15`,
-      border: `1px solid ${t.success}40`,
+      backgroundColor: `color-mix(in srgb, ${t.success} 8%, transparent)`,
+      border: `1px solid color-mix(in srgb, ${t.success} 25%, transparent)`,
       color: t.success,
     },
     warningBanner: {
@@ -236,8 +222,8 @@ export function STYLES(t: Tokens) {
       borderRadius: '8px',
       fontSize: '13px',
       marginBottom: '16px',
-      backgroundColor: `${t.warning}15`,
-      border: `1px solid ${t.warning}40`,
+      backgroundColor: `color-mix(in srgb, ${t.warning} 8%, transparent)`,
+      border: `1px solid color-mix(in srgb, ${t.warning} 25%, transparent)`,
       color: t.warning,
     },
 
@@ -275,12 +261,12 @@ export function STYLES(t: Tokens) {
       color: t.text,
       fontSize: '14px',
       boxSizing: 'border-box' as const,
-      transition: 'all 0.2s ease',
+      transition: 'background 0.15s ease, border-color 0.15s ease',
       fontFamily: 'inherit',
     },
     formInputFocus: {
       border: `1px solid ${t.accent}`,
-      boxShadow: `0 0 0 3px ${t.accent}20`,
+      boxShadow: `0 0 0 3px color-mix(in srgb, ${t.accent} 13%, transparent)`,
       outline: 'none',
     },
     formSelect: {
@@ -319,11 +305,11 @@ export function STYLES(t: Tokens) {
       fontSize: '14px',
       fontWeight: 500,
       cursor: 'pointer',
-      transition: 'all 0.2s ease',
+      transition: 'background 0.15s ease, border-color 0.15s ease',
     },
     btnPrimary: {
       background: t.accentGradient,
-      color: '#1a1a1a',
+      color: 'var(--pf-color-text-on-primary)',
     },
     btnSecondary: {
       backgroundColor: 'transparent',
@@ -332,7 +318,7 @@ export function STYLES(t: Tokens) {
     },
     btnSuccess: {
       backgroundColor: t.success,
-      color: '#fff',
+      color: 'var(--pf-color-text-on-success)',
     },
     btnDisabled: {
       opacity: 0.6,
@@ -371,11 +357,11 @@ export function STYLES(t: Tokens) {
       backgroundColor: t.surface,
       cursor: 'pointer',
       textAlign: 'center' as const,
-      transition: 'all 0.2s ease',
+      transition: 'background 0.15s ease, border-color 0.15s ease',
     },
     typeCardSelected: {
       border: `2px solid ${t.accent}`,
-      boxShadow: `0 0 0 2px ${t.accent}33`,
+      boxShadow: `0 0 0 2px color-mix(in srgb, ${t.accent} 20%, transparent)`,
     },
     typeCardDisabled: {
       opacity: 0.4,
@@ -453,12 +439,16 @@ export function STYLES(t: Tokens) {
 
     // ── Quick switcher ────────────────────────────────────────────────────────
     switcherContainer: {
+      minWidth: 0,
+      flexShrink: 1,
       display: 'inline-flex' as const,
       alignItems: 'center' as const,
       gap: '8px',
       position: 'relative' as const,
     },
     switcherBtn: {
+      minWidth: 0,
+      maxWidth: '100%',
       display: 'inline-flex' as const,
       alignItems: 'center' as const,
       gap: '4px',
@@ -469,7 +459,7 @@ export function STYLES(t: Tokens) {
       cursor: 'pointer',
       backgroundColor: 'transparent',
       color: t.textSecondary,
-      transition: 'all 0.15s ease',
+      transition: 'background 0.15s ease, color 0.15s ease',
       whiteSpace: 'nowrap' as const,
     },
     switcherDropdown: {
@@ -497,7 +487,7 @@ export function STYLES(t: Tokens) {
     },
     switcherItemActive: {
       borderLeft: `3px solid ${t.accent}`,
-      backgroundColor: `${t.accent}15`,
+      backgroundColor: `color-mix(in srgb, ${t.accent} 8%, transparent)`,
     },
     switcherToast: {
       position: 'fixed' as const,

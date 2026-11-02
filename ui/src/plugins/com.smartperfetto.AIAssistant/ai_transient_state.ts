@@ -206,8 +206,8 @@ export function switchFloatingMode(newMode: FloatingMode): void {
   if (newMode === 'floating') {
     clampFloatingGeometryToViewport();
   }
-  // Clamp sidebar width to viewport ratio on entry — a width saved on a
-  // 4K monitor would overflow the sidebar on a smaller viewport otherwise.
+  // Clamp the dock to the available page area on entry — geometry saved on
+  // a larger monitor must not overflow a smaller viewport.
   if (newMode === 'sidebar') {
     const layout = getFloatingState().sidebar.layout;
     if (layout === 'bottom') {

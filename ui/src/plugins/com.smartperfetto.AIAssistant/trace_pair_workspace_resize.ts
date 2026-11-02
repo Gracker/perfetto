@@ -17,6 +17,7 @@ export class TracePairWorkspaceResizeController {
   }
 
   start(event: PointerEvent, controller: TracePairWorkspaceController): void {
+    if (!event.isPrimary || event.button !== 0) return;
     if (controller.getState().maximizedTraceSide) return;
     const splitter = event.currentTarget;
     if (!(splitter instanceof HTMLElement)) return;
@@ -25,33 +26,53 @@ export class TracePairWorkspaceResizeController {
     event.preventDefault();
     this.stop();
     const pointerId = event.pointerId;
+    const startPercent = controller.getState().splitPercent;
+    const vertical = controller.getState().layout === 'vertical';
     splitter.setPointerCapture(pointerId);
     this.resizing = true;
     const update = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
       const rect = body.getBoundingClientRect();
-      const raw =
-        controller.getState().layout === 'vertical'
-          ? ((moveEvent.clientY - rect.top) / rect.height) * 100
-          : ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      if (rect.width === 0 || rect.height === 0) return;
+      const delta = vertical
+        ? (moveEvent.clientY - event.clientY) / rect.height
+        : (moveEvent.clientX - event.clientX) / rect.width;
+      const raw = startPercent + delta * 100;
       controller.setSplitPercent(raw);
     };
     const stop = () => this.stop();
+    const up = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      update(upEvent);
+      stop();
+    };
+    const cancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId === pointerId) stop();
+    };
+    const visibility = () => {
+      if (document.hidden) stop();
+    };
     window.addEventListener('pointermove', update);
-    window.addEventListener('pointerup', stop, {once: true});
-    window.addEventListener('pointercancel', stop, {once: true});
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', stop);
+    document.addEventListener('visibilitychange', visibility);
+    splitter.addEventListener('lostpointercapture', cancel);
     this.cleanup = () => {
+      this.cleanup = undefined;
       window.removeEventListener('pointermove', update);
-      window.removeEventListener('pointerup', stop);
-      window.removeEventListener('pointercancel', stop);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', stop);
+      document.removeEventListener('visibilitychange', visibility);
+      splitter.removeEventListener('lostpointercapture', cancel);
       if (splitter.hasPointerCapture(pointerId)) {
         splitter.releasePointerCapture(pointerId);
       }
       this.resizing = false;
-      this.cleanup = undefined;
       m.redraw();
       this.scheduleFrameRedraw();
     };
-    update(event);
   }
 
   stop(): void {

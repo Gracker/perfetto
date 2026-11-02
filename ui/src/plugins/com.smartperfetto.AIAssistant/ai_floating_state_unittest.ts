@@ -26,6 +26,9 @@ import {
   FLOATING_SNAP_LAYOUTS,
   applyFloatingSnapLayout,
   getFloatingState,
+  getSidebarSizeBounds,
+  clampSidebarWidth,
+  clampSidebarHeight,
   resetFloatingGeometry,
   subscribeFloatingState,
   updateFloatingState,
@@ -354,5 +357,45 @@ describe('exported constants', () => {
 
   it('FLOATING_MAX_DIM is large enough for 4K screens', () => {
     expect(FLOATING_MAX_DIM).toBeGreaterThanOrEqual(3840);
+  });
+});
+
+
+describe('AI dock available space', () => {
+  it('can expand beyond half the viewport while keeping timeline space', () => {
+    setViewport(1600, 900);
+    const root = document.createElement('main');
+    root.className = 'pf-ui-main';
+    root.style.setProperty('--sidebar-width', '230px');
+    document.body.append(root);
+    try {
+      updateFloatingState({sidebar: {width: 1400}});
+      clampSidebarWidth();
+      expect(getFloatingState().sidebar.width).toBe(970);
+      expect(getSidebarSizeBounds('right')).toEqual({min: 300, max: 970});
+    } finally { root.remove(); }
+  });
+
+  it('fits a small viewport rather than extending outside it', () => {
+    setViewport(240, 180);
+    updateFloatingState({sidebar: {width: 400, height: 360}});
+    clampSidebarWidth();
+    clampSidebarHeight();
+    expect(getFloatingState().sidebar.width).toBe(240);
+    expect(getFloatingState().sidebar.height).toBe(180);
+  });
+
+  it('reserves the top and status bars for a bottom dock', () => {
+    setViewport(1280, 800);
+    const root = document.createElement('main');
+    root.className = 'pf-ui-main';
+    root.style.setProperty('--topbar-height', '48px');
+    root.style.setProperty('--pf-statusbar-height', '24px');
+    document.body.append(root);
+    try {
+      updateFloatingState({sidebar: {height: 900}});
+      clampSidebarHeight();
+      expect(getFloatingState().sidebar.height).toBe(568);
+    } finally { root.remove(); }
   });
 });

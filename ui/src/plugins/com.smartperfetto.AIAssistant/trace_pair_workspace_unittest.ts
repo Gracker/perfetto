@@ -3,9 +3,10 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import m from 'mithril';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {TracePairWorkspace} from './trace_pair_workspace';
+import {TracePairWorkspaceResizeController} from './trace_pair_workspace_resize';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 
 describe('TracePairWorkspace', () => {
@@ -290,5 +291,45 @@ describe('TracePairWorkspace', () => {
     m.redraw.sync();
     expect(controller.getState().open).toBe(true);
     expect(root.querySelector('.ai-trace-pair-workspace')).not.toBeNull();
+  });
+});
+
+
+describe('Trace pair resize lifecycle', () => {
+  it('uses the final owning pointer and releases capture on blur', () => {
+    const body = document.createElement('div');
+    const handle = document.createElement('div');
+    body.append(handle);
+    document.body.append(body);
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+    body.getBoundingClientRect = () => ({left: 0, top: 0, width: 1000, height: 600}) as DOMRect;
+    const controller = new TracePairWorkspaceController();
+    const resize = new TracePairWorkspaceResizeController(vi.fn());
+    const pointer = (type: string, clientX: number, pointerId = 1) => {
+      const event = new MouseEvent(type, {clientX, clientY: 100, button: 0});
+      Object.defineProperties(event, {pointerId: {value: pointerId}, isPrimary: {value: true}, currentTarget: {value: handle}});
+      return event as PointerEvent;
+    };
+    try {
+      resize.start(pointer('pointerdown', 535), controller);
+      expect(controller.getState().splitPercent).toBe(50); // Grabbing the edge must not jump.
+      resize.stop();
+      resize.start(pointer('pointerdown', 500), controller);
+      window.dispatchEvent(pointer('pointermove', 200, 2));
+      handle.dispatchEvent(pointer('lostpointercapture', 200, 2));
+      expect(controller.getState().splitPercent).toBe(50);
+      expect(resize.isResizing()).toBe(true);
+      window.dispatchEvent(pointer('pointerup', 650));
+      expect(controller.getState().splitPercent).toBe(65);
+      expect(resize.isResizing()).toBe(false);
+      resize.start(pointer('pointerdown', 650), controller);
+      window.dispatchEvent(new Event('blur'));
+      window.dispatchEvent(pointer('pointermove', 200));
+      expect(controller.getState().splitPercent).toBe(65);
+      expect(resize.isResizing()).toBe(false);
+      expect(handle.releasePointerCapture).toHaveBeenCalledTimes(3);
+    } finally { resize.stop(); body.remove(); }
   });
 });

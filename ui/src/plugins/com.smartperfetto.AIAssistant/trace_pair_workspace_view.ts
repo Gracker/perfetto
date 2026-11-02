@@ -58,9 +58,11 @@ function renderSplitter(
       'aria-valuemax': 80,
       'aria-valuenow': Math.round(state.splitPercent),
       title: uiText(
-        '拖动或使用方向键调整两侧窗口大小',
-        'Drag or use the arrow keys to resize the trace panes',
+        '拖动或使用方向键调整窗口大小；双击均分',
+        'Drag or use arrow keys to resize; double-click for equal panes',
       ),
+      'aria-label': uiText('调整 Trace 窗口比例', 'Resize trace panes'),
+      ondblclick: () => controller.setSplitPercent(50),
       onpointerdown: (event: PointerEvent) => startResize(event),
       onkeydown: (event: KeyboardEvent) => {
         const horizontal = state.layout === 'horizontal';

@@ -26,107 +26,13 @@ import type {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {
   clamp,
   getFloatingState,
-  SIDEBAR_MIN_HEIGHT,
-  SIDEBAR_MIN_WIDTH,
+  getSidebarSizeBounds,
+  SIDEBAR_DEFAULT_HEIGHT,
+  SIDEBAR_DEFAULT_WIDTH,
   updateFloatingState,
 } from './ai_floating_state';
 import {getAISharedState} from './ai_shared_state';
 import {toggleSidebarCollapsedWithTransientState} from './ai_transient_state';
-
-// ── Constants ──────────────────────────────────────────────────────────
-
-// ── Resize gesture ─────────────────────────────────────────────────────
-
-let resizeActive = false;
-let resizeAxis: 'x' | 'y' = 'x';
-let resizeStartX = 0;
-let resizeStartY = 0;
-let resizeStartWidth = 0;
-let resizeStartHeight = 0;
-let rafId = 0;
-
-/** Last mouse position during resize — committed synchronously on mouseup. */
-let lastResizeClientX = 0;
-let lastResizeClientY = 0;
-
-function onResizeMove(e: MouseEvent): void {
-  if (!resizeActive) return;
-  lastResizeClientX = e.clientX;
-  lastResizeClientY = e.clientY;
-  // Cancel any pending rAF to avoid stacking updates (Codex #5).
-  if (rafId) cancelAnimationFrame(rafId);
-  rafId = requestAnimationFrame(() => {
-    if (resizeAxis === 'y') {
-      // Dragging up (negative dy) → taller bottom dock.
-      const dy = resizeStartY - e.clientY;
-      const maxH = Math.floor(window.innerHeight * 0.6);
-      const newHeight = clamp(resizeStartHeight + dy, SIDEBAR_MIN_HEIGHT, maxH);
-      updateFloatingState({sidebar: {height: newHeight, collapsed: false}});
-    } else {
-      // Dragging left (negative dx) → wider sidebar.
-      const dx = resizeStartX - e.clientX;
-      const maxW = Math.floor(window.innerWidth * 0.5);
-      const newWidth = clamp(resizeStartWidth + dx, SIDEBAR_MIN_WIDTH, maxW);
-      updateFloatingState({sidebar: {width: newWidth, collapsed: false}});
-    }
-  });
-}
-
-function onResizeVisibilityChange(): void {
-  // Alt-Tab / background tab while dragging — treat as gesture end,
-  // matching the floating window's visibilitychange handling.
-  if (document.hidden && resizeActive) onResizeEnd();
-}
-
-function onResizeEnd(): void {
-  // Commit the final mouse position synchronously — the last rAF may not
-  // have fired yet, so without this the sidebar snaps to the second-to-last
-  // reported position.
-  if (resizeActive) {
-    if (resizeAxis === 'y') {
-      const dy = resizeStartY - lastResizeClientY;
-      const maxH = Math.floor(window.innerHeight * 0.6);
-      const newHeight = clamp(resizeStartHeight + dy, SIDEBAR_MIN_HEIGHT, maxH);
-      updateFloatingState({sidebar: {height: newHeight, collapsed: false}});
-    } else {
-      const dx = resizeStartX - lastResizeClientX;
-      const maxW = Math.floor(window.innerWidth * 0.5);
-      const newWidth = clamp(resizeStartWidth + dx, SIDEBAR_MIN_WIDTH, maxW);
-      updateFloatingState({sidebar: {width: newWidth, collapsed: false}});
-    }
-  }
-  resizeActive = false;
-  if (rafId) {
-    cancelAnimationFrame(rafId);
-    rafId = 0;
-  }
-  document.removeEventListener('mousemove', onResizeMove);
-  document.removeEventListener('mouseup', onResizeEnd);
-  window.removeEventListener('blur', onResizeEnd);
-  document.removeEventListener('visibilitychange', onResizeVisibilityChange);
-  document.body.style.userSelect = '';
-  m.redraw();
-}
-
-function startResize(e: MouseEvent): void {
-  e.preventDefault();
-  e.stopPropagation();
-  if (resizeActive) onResizeEnd();
-  const s = getFloatingState();
-  resizeAxis = s.sidebar.layout === 'bottom' ? 'y' : 'x';
-  resizeStartX = e.clientX;
-  resizeStartY = e.clientY;
-  lastResizeClientX = e.clientX;
-  lastResizeClientY = e.clientY;
-  resizeStartWidth = s.sidebar.width;
-  resizeStartHeight = s.sidebar.height;
-  resizeActive = true;
-  document.addEventListener('mousemove', onResizeMove);
-  document.addEventListener('mouseup', onResizeEnd);
-  window.addEventListener('blur', onResizeEnd);
-  document.addEventListener('visibilitychange', onResizeVisibilityChange);
-  document.body.style.userSelect = 'none';
-}
 
 // ── Sidebar Component ──────────────────────────────────────────────────
 
@@ -137,6 +43,124 @@ export interface SidebarPanelAttrs {
 }
 
 export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
+  private endResize?: () => void;
+  private resizing = false;
+
+  private setSize(layout: 'right' | 'bottom', value: number): void {
+    const {min, max} = getSidebarSizeBounds(layout);
+    const size = clamp(value, min, max);
+    updateFloatingState({
+      sidebar: layout === 'right' ? {width: size} : {height: size},
+    });
+  }
+
+  private resetSize(layout: 'right' | 'bottom'): void {
+    this.setSize(
+      layout,
+      layout === 'right' ? SIDEBAR_DEFAULT_WIDTH : SIDEBAR_DEFAULT_HEIGHT,
+    );
+  }
+
+  private startResize(event: PointerEvent, layout: 'right' | 'bottom'): void {
+    if (!event.isPrimary || event.button !== 0) return;
+    const handle = event.currentTarget;
+    if (!(handle instanceof HTMLElement)) return;
+    event.preventDefault();
+    this.endResize?.();
+    const {pointerId, clientX, clientY} = event;
+    const sidebar = getFloatingState().sidebar;
+    const startSize = layout === 'right' ? sidebar.width : sidebar.height;
+    let lastPosition = layout === 'right' ? clientX : clientY;
+    let frame = 0;
+    const oldUserSelect = document.body.style.userSelect;
+    const oldCursor = document.body.style.cursor;
+    const commit = () => {
+      frame = 0;
+      this.setSize(
+        layout,
+        startSize + (layout === 'right' ? clientX : clientY) - lastPosition,
+      );
+    };
+    const move = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      lastPosition = layout === 'right' ? e.clientX : e.clientY;
+      if (!frame) frame = requestAnimationFrame(commit);
+    };
+    const stop = () => {
+      if (frame) cancelAnimationFrame(frame);
+      commit();
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', stop);
+      document.removeEventListener('visibilitychange', visibility);
+      handle.removeEventListener('lostpointercapture', cancel);
+      this.endResize = undefined;
+      this.resizing = false;
+      if (handle.hasPointerCapture(pointerId))
+        handle.releasePointerCapture(pointerId);
+      document.body.style.userSelect = oldUserSelect;
+      document.body.style.cursor = oldCursor;
+      m.redraw();
+    };
+    const up = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      lastPosition = layout === 'right' ? e.clientX : e.clientY;
+      stop();
+    };
+    const cancel = (e: PointerEvent) => {
+      if (e.pointerId === pointerId) stop();
+    };
+    const visibility = () => {
+      if (document.hidden) stop();
+    };
+    handle.setPointerCapture(pointerId);
+    this.resizing = true;
+    this.endResize = stop;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor =
+      layout === 'right' ? 'col-resize' : 'row-resize';
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', stop);
+    document.addEventListener('visibilitychange', visibility);
+    handle.addEventListener('lostpointercapture', cancel);
+  }
+
+  private resizeWithKeyboard(
+    event: KeyboardEvent,
+    layout: 'right' | 'bottom',
+  ): void {
+    const {min, max} = getSidebarSizeBounds(layout);
+    const sidebar = getFloatingState().sidebar;
+    const size = layout === 'right' ? sidebar.width : sidebar.height;
+    const step = event.shiftKey ? 64 : 16;
+    let next: number | undefined;
+    if (event.key === 'Home') next = min;
+    if (event.key === 'End') next = max;
+    if (
+      (layout === 'right' && event.key === 'ArrowLeft') ||
+      (layout === 'bottom' && event.key === 'ArrowUp')
+    )
+      next = size + step;
+    if (
+      (layout === 'right' && event.key === 'ArrowRight') ||
+      (layout === 'bottom' && event.key === 'ArrowDown')
+    )
+      next = size - step;
+    if (event.key === 'Enter')
+      next =
+        layout === 'right' ? SIDEBAR_DEFAULT_WIDTH : SIDEBAR_DEFAULT_HEIGHT;
+    if (next === undefined) return;
+    event.preventDefault();
+    this.setSize(layout, next);
+  }
+
+  onbeforeupdate(): void {
+    if (getFloatingState().sidebar.collapsed) this.endResize?.();
+  }
+
   view({attrs}: m.Vnode<SidebarPanelAttrs>): m.Children {
     const s = getFloatingState();
     const workspaceOpen = attrs.tracePairWorkspaceController.getState().open;
@@ -156,7 +180,7 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
 
   onremove(): void {
     // Defensive: if a resize gesture is in-flight when we unmount, clean up.
-    if (resizeActive) onResizeEnd();
+    this.endResize?.();
   }
 
   // ── Collapsed strip ────────────────────────────────────────────────
@@ -170,7 +194,7 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
       'button.ai-sidebar-collapsed',
       {
         'type': 'button',
-        'class': workspaceOpen ? 'ai-sidebar-collapsed--workspace' : undefined,
+        'class': `ai-sidebar-collapsed--${getFloatingState().sidebar.layout}${workspaceOpen ? ' ai-sidebar-collapsed--workspace' : ''}`,
         'style': hidden ? 'display: none;' : undefined,
         'onclick': () => toggleSidebarCollapsedWithTransientState(),
         'title': workspaceOpen
@@ -208,6 +232,7 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
     return m(
       `.ai-sidebar-expanded.ai-sidebar-expanded--${layout}`,
       {
+        'class': this.resizing ? 'is-resizing' : undefined,
         'style': hidden
           ? 'display: none;'
           : layout === 'bottom'
@@ -217,11 +242,23 @@ export class SidebarPanel implements m.ClassComponent<SidebarPanelAttrs> {
       },
       [
         m(`.ai-sidebar-resize-handle.ai-sidebar-resize-handle--${layout}`, {
-          onmousedown: startResize,
-          title:
-            layout === 'bottom'
-              ? uiText('拖动调整高度', 'Drag to resize height')
-              : uiText('拖动调整宽度', 'Drag to resize width'),
+          'role': 'separator',
+          'tabindex': 0,
+          'aria-label':
+            layout === 'right'
+              ? uiText('调整 AI 侧栏宽度', 'Resize AI sidebar width')
+              : uiText('调整 AI 面板高度', 'Resize AI panel height'),
+          'aria-orientation': layout === 'right' ? 'vertical' : 'horizontal',
+          'aria-valuemin': getSidebarSizeBounds(layout).min,
+          'aria-valuemax': getSidebarSizeBounds(layout).max,
+          'aria-valuenow': Math.round(layout === 'right' ? width : height),
+          'onpointerdown': (e: PointerEvent) => this.startResize(e, layout),
+          'onkeydown': (e: KeyboardEvent) => this.resizeWithKeyboard(e, layout),
+          'ondblclick': () => this.resetSize(layout),
+          'title': uiText(
+            '拖动调整大小；双击复位；方向键微调',
+            'Drag to resize; double-click to reset; arrow keys to fine-tune',
+          ),
         }),
 
         // Content: AIPanel

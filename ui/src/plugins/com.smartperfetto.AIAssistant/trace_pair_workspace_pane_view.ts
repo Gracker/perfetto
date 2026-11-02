@@ -190,7 +190,7 @@ export function renderTracePairPane(
     },
     [
       m('div.ai-trace-pair-pane-toolbar', [
-        m('span.ai-trace-pair-pane-side', title),
+        m('span.ai-trace-pair-pane-side', {title}, title),
         renderTraceSelector(controller, pane, trace?.id || ''),
         m('div.ai-trace-pair-pane-actions', [
           trace ? renderTraceUploadControl(controller, pane, true) : null,

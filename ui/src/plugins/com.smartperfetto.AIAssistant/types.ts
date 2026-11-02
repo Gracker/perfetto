@@ -1465,8 +1465,8 @@ export interface PresetQuestion {
 export const PRESET_QUESTIONS: PresetQuestion[] = [
   // Teaching mode - helps users understand rendering pipelines
   {
-    label: '🎓 出图教学',
-    labelEn: '🎓 Rendering tutorial',
+    label: '出图教学',
+    labelEn: 'Rendering tutorial',
     question: '/teaching-pipeline',
     questionEn: '/teaching-pipeline',
     icon: 'school',
@@ -1474,8 +1474,8 @@ export const PRESET_QUESTIONS: PresetQuestion[] = [
   },
   // Scene reconstruction - understand what happened in the trace
   {
-    label: '🎬 场景还原',
-    labelEn: '🎬 Scene reconstruction',
+    label: '场景还原',
+    labelEn: 'Scene reconstruction',
     question: '/scene',
     questionEn: '/scene',
     icon: 'movie',
@@ -1483,8 +1483,8 @@ export const PRESET_QUESTIONS: PresetQuestion[] = [
   },
   // Smart mixed-trace analysis - detect and deep-dive multiple user actions.
   {
-    label: '🧠 智能',
-    labelEn: '🧠 Smart',
+    label: '智能',
+    labelEn: 'Smart',
     question: '/smart',
     questionEn: '/smart',
     icon: 'auto_awesome',
