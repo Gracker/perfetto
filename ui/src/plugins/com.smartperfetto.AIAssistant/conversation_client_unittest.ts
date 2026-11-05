@@ -7,6 +7,8 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {
   conversationTraceContextChanged,
   getConversation,
+  getConversationStatus,
+  appendConversationContext,
   parseConversationSseFrames,
   startConversationTurn,
   streamConversationRun,
@@ -195,5 +197,42 @@ describe('getConversation', () => {
     }), {status: 200})));
     await expect(getConversation({backendUrl: 'http://backend'}, 'requested'))
       .rejects.toThrow('Invalid conversation restoration response');
+  });
+});
+
+
+describe('conversation control client', () => {
+  it('reads status without posting a new turn and validates identity and unknown counts', async () => {
+    const status = {success: true, work: {sessionId: 's', runId: 'r', phase: 'running', hasResult: false,
+      activity: {observation: 'unavailable'}, captureActivity: {observation: 'partial', tables: 1, rowSlots: 2, unavailableTables: 1}},
+      context: {availability: 'available', queueEpoch: 'epoch', pendingCount: 0, durability: 'process_memory'}};
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(status), {headers: {'content-type': 'application/json'}}));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await getConversationStatus({backendUrl: 'http://backend'}, 's')).toEqual(status);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/conversation/s/status');
+    status.work.sessionId = 'foreign';
+    await expect(getConversationStatus({backendUrl: 'http://backend'}, 's')).rejects.toThrow('Invalid conversation status');
+  });
+  it('sends explicit bounded context intent and refuses a foreign receipt', async () => {
+    const input = {expectedQueueEpoch: 'epoch', expectedRunId: 'r', idempotencyKey: 'note', text: 'private note'};
+    const payload = {success: true, sessionId: 's', context: {availability: 'available', queueEpoch: 'epoch', pendingCount: 1, durability: 'process_memory'},
+      receipt: {id: 'note', queueEpoch: 'epoch', expectedRunId: 'r', status: 'accepted', appliesTo: 'next_user_turn', durability: 'process_memory'}};
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(payload)));
+    vi.stubGlobal('fetch', fetchMock);
+    await appendConversationContext({backendUrl: 'http://backend'}, 's', input);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual(input);
+    payload.receipt.id = 'foreign';
+    await expect(appendConversationContext({backendUrl: 'http://backend'}, 's', input)).rejects.toThrow('Invalid supplemental');
+  });
+});
+
+
+describe('conversation restored source metadata', () => {
+  it('rejects malformed or expanded selection metadata in the authorized detail response', async () => {
+    const body = {success: true, sessionId: 's', status: 'running', traceContext: {kind: 'none'}, history: [],
+      sourceSelection: {codeAwareMode: 'metadata_only', codebaseIds: ['a'], knowledgeSourceIds: [], path: '/private'}};
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body))));
+    await expect(getConversation({backendUrl: 'http://backend'}, 's')).rejects.toThrow('Invalid conversation restoration');
   });
 });

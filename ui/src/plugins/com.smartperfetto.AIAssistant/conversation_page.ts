@@ -3,6 +3,9 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import m from 'mithril';
+import {assistantWorkPhaseText, renderAssistantWorkDetails} from './assistant_work';
+import {AssistantWorkOverview} from './assistant_work_overview';
+import type {ConversationContextRequest, ConversationStatusResponse} from './generated/data_contract.types';
 import type {App} from '../../public/app';
 import {BackendUploader} from '../../core/backend_uploader';
 import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
@@ -17,6 +20,11 @@ import {
 import {formatMessage} from './data_formatter';
 import {resolveChatInputKeyAction} from './chat_input';
 import {
+  ConversationClientError,
+  conversationSourceSelectionMatches,
+  getConversationStatus,
+  getConversation,
+  appendConversationContext,
   cancelConversationRun,
   conversationContextRestartNotice,
   deferred,
@@ -32,6 +40,8 @@ import {
   clearConversationStore,
   clearConversationRuntimeIdentities,
   conversationMessageContent,
+  conversationStoreFromSnapshot,
+  conversationAuthorityKey,
   conversationMessageId,
   conversationRecoveryNotice,
   conversationOutcomeTurn,
@@ -133,11 +143,21 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     () => this.ensureConversationRestored(),
   );
   private input = '';
+  /** Only an explicit, reauthorized work-item open may retain an attached Trace on send. */
+  private explicitContinuationSessionId?: string;
   private isComposing = false;
   private activeReceipt?: ConversationRunReceipt;
   private activeController?: AbortController;
   private requestOrdinal = 0;
   private error = '';
+  private controlController?: AbortController;
+  private controlOrdinal = 0;
+  private controlStatus?: ConversationStatusResponse;
+  private controlReadAt = 0;
+  private controlNotice = '';
+  private controlError = '';
+  private sessionControlBinding?: {sessionId: string; sourceKey: string};
+  private contextAttempt?: {sessionId: string; sourceKey: string; request: ConversationContextRequest};
   /** Screen-only answer of the active run while its review runs; stored once, with the verdict. */
   private provisionalAnswer?: {runId: string; message: StoredConversationMessage};
   /** Resolves when the current run's verdict landed or its send/resume request ended. */
@@ -176,6 +196,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   }
 
   onremove(): void {
+    this.resetControls();
     ++this.restoreOrdinal;
     invalidateConversationRestore(this.settings.backendUrl);
     ++this.requestOrdinal;
@@ -201,6 +222,10 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   }
 
   view({attrs}: m.Vnode<{app: App}>): m.Children {
+    const workAuthority = this.authLifecycle.capture();
+    const workSourceKey = analysisAuthorizationKey(loadAnalysisContext(this.settings.backendUrl,
+      workAuthority?.context ?? getSmartPerfettoRequestContext()));
+    const workRestoreOrdinal = this.restoreOrdinal;
     const pendingHandoff = [...this.store.messages].reverse().find(
       (message) => message.fullHandoff,
     )?.fullHandoff;
@@ -212,7 +237,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       m('header.ai-conversation-page-header', [
         m('div', [
           m('h1', uiText('AI 对话', 'AI Conversation')),
-          m('p', uiText(
+          m('p', this.store.traceId ? uiText('此对话已附加 Trace。', 'This conversation has an attached trace.') : uiText(
             '当前未附加 Trace。可以讨论需求、性能原理、分析方法和已授权源码；Trace 结论会明确标注证据边界。',
             'No trace is attached. Discuss requirements, performance concepts, analysis methods, or authorized source code; trace claims will state their evidence boundary.',
           )),
@@ -234,6 +259,16 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
           }, uiText('新对话', 'New conversation')),
         ]),
       ]),
+      m(AssistantWorkOverview, {
+        config: {backendUrl: this.settings.backendUrl, apiKey: this.settings.backendApiKey},
+        canRead: Boolean(workAuthority),
+        canContinue: this.canContinueWork(),
+        authorityKey: `${conversationAuthorityKey(this.settings.backendUrl)}:${workSourceKey}:${workRestoreOrdinal}`,
+        isCurrent: () => Boolean(workAuthority && this.authLifecycle.isCurrent(workAuthority) &&
+          workRestoreOrdinal === this.restoreOrdinal && workSourceKey === analysisAuthorizationKey(
+            loadAnalysisContext(this.settings.backendUrl, workAuthority.context))),
+        onContinue: (sessionId: string, signal: AbortSignal) => this.continueWorkConversation(sessionId, signal),
+      }),
       m('section.ai-conversation-page-thread',
         this.store.messages.length > 0
           ? [
@@ -264,6 +299,23 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
             'Answering. You can send another message to steer the response; it will stop the current run first.',
           ))
         : null,
+      this.store.sessionId ? m('section.ai-conversation-controls', [
+        m('button', {disabled: Boolean(this.controlController), onclick: () => void this.control('status')},
+          uiText('查看进度', 'Check progress')),
+        this.controlStatus ? m('span', {role: 'status'}, [
+          assistantWorkPhaseText(this.controlStatus.work.phase),
+          this.controlStatus.work.startedAt !== undefined ? uiText(
+            ` · 已用时 ${Math.max(0, Math.floor(((this.controlStatus.work.completedAt ?? this.controlReadAt) - this.controlStatus.work.startedAt) / 1000))} 秒（本次查询）`,
+            ` · ${Math.max(0, Math.floor(((this.controlStatus.work.completedAt ?? this.controlReadAt) - this.controlStatus.work.startedAt) / 1000))} s elapsed (at check)`) : '',
+          this.controlStatus.context.availability === 'available' && this.controlStatus.context.pendingCount > 0
+            ? uiText(` · ${this.controlStatus.context.pendingCount} 条补充待下一轮使用`,
+              ` · ${this.controlStatus.context.pendingCount} note(s) queued for the next turn`) : '',
+        ]) : null,
+        this.controlStatus ? renderAssistantWorkDetails(this.controlStatus.work) : null,
+        this.controlController ? m('span', {role: 'status'}, uiText('正在处理…', 'Working…')) : null,
+      ]) : null,
+      this.controlNotice ? m('div.ai-conversation-control-notice', {role: 'status'}, this.controlNotice) : null,
+      this.controlError ? m('div.ai-conversation-page-error', {role: 'alert'}, this.controlError) : null,
       this.error ? m('div.ai-conversation-page-error', this.error) : null,
       m('footer.ai-conversation-page-composer', [
         m('textarea', {
@@ -285,6 +337,12 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
             }
           },
         }),
+        this.store.sessionId ? m('button.ai-conversation-page-supplement', {
+          disabled: !this.input.trim() || Boolean(this.controlController),
+          title: uiText('保留当前运行，在你的下一轮提问中使用；后端重启后需重新提交。',
+            'Keep the current run. Use this note with your next question; resubmit after a backend restart.'),
+          onclick: () => void this.control('context'),
+        }, uiText('补充到下一轮', 'Add for next turn')) : null,
         m('button.ai-conversation-page-send', {
           disabled: !this.input.trim(),
           onclick: () => void this.send(),
@@ -293,6 +351,98 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
           : uiText('发送', 'Send')),
       ]),
     ]);
+  }
+
+  private resetControls(): void {
+    ++this.controlOrdinal;
+    if (this.controlController) {
+      this.controlController.abort();
+      this.authLifecycle.releaseAbortController(this.controlController);
+    }
+    this.controlController = undefined;
+    this.controlStatus = undefined;
+    this.contextAttempt = undefined;
+    this.controlNotice = '';
+    this.controlError = '';
+  }
+
+  private async control(action: 'status' | 'context'): Promise<void> {
+    const sessionId = this.store.sessionId;
+    const authority = this.authLifecycle.capture();
+    const text = this.input;
+    if (!sessionId || !authority || this.controlController || (action === 'context' && !text.trim())) return;
+    const ordinal = ++this.controlOrdinal;
+    const requestOrdinal = this.requestOrdinal;
+    const restoreOrdinal = this.restoreOrdinal;
+    const contextKey = analysisAuthorizationKey(loadAnalysisContext(this.settings.backendUrl, authority.context));
+    const matchesSessionContext = this.sessionControlBinding?.sessionId === sessionId &&
+      this.sessionControlBinding.sourceKey === contextKey;
+    if (action === 'context' && !matchesSessionContext) {
+      this.controlError = uiText('当前来源选择尚未绑定到此对话。请先使用当前选择发送一轮问题，再补充说明；输入已保留。',
+        'The current source selection is not bound to this conversation. Send a question with this selection before adding notes; your input is preserved.');
+      m.redraw(); return;
+    }
+    const controller = this.authLifecycle.createAbortController(authority);
+    this.controlController = controller;
+    this.controlError = '';
+    const current = () => !controller.signal.aborted && ordinal === this.controlOrdinal &&
+      requestOrdinal === this.requestOrdinal && restoreOrdinal === this.restoreOrdinal &&
+      sessionId === this.store.sessionId && this.authLifecycle.isCurrent(authority) &&
+      contextKey === analysisAuthorizationKey(loadAnalysisContext(this.settings.backendUrl, authority.context));
+    const config = {backendUrl: this.settings.backendUrl, apiKey: this.settings.backendApiKey};
+    m.redraw();
+    try {
+      if (action === 'status') {
+        const status = await getConversationStatus(config, sessionId, controller.signal);
+        if (current()) {
+          if (!matchesSessionContext) this.controlNotice = uiText('这是已有对话的状态；其来源可能与当前选择不同。',
+            'This is the existing conversation; its sources may differ from the current selection.');
+          const previousContext = this.controlStatus?.context;
+          const epoch = this.contextAttempt?.request.expectedQueueEpoch ??
+            (previousContext?.availability === 'available' ? previousContext.queueEpoch : undefined);
+          if (epoch && (status.context.availability !== 'available' || epoch !== status.context.queueEpoch)) {
+            this.contextAttempt = undefined;
+            this.controlNotice = uiText('先前暂存的补充已不可用，请重新提交；这不表示它们已经被读取。',
+              'Previously queued notes are unavailable. Submit them again; this does not mean they were read.');
+          }
+          this.controlStatus = status;
+          this.controlReadAt = Date.now();
+        }
+        return;
+      }
+      let attempt = this.contextAttempt;
+      if (!attempt || attempt.sessionId !== sessionId || attempt.sourceKey !== contextKey || attempt.request.text !== text) {
+        const status = await getConversationStatus(config, sessionId, controller.signal);
+        if (!current()) return;
+        this.controlStatus = status;
+        this.controlReadAt = Date.now();
+        if (status.context.availability !== 'available' || !status.work.runId) {
+          throw new Error(uiText('暂存补充不可用，请打开对话后重新提交。', 'Pending notes are unavailable. Open the conversation and submit again.'));
+        }
+        attempt = {sessionId, sourceKey: contextKey, request: {text, expectedQueueEpoch: status.context.queueEpoch,
+          expectedRunId: status.work.runId, idempotencyKey: messageId('context')}};
+        this.contextAttempt = attempt;
+      }
+      const response = await appendConversationContext(config, sessionId, attempt.request, controller.signal);
+      if (!current()) return;
+      if (this.controlStatus) this.controlStatus = {...this.controlStatus, context: response.context};
+      if (this.input === text) this.input = '';
+      this.contextAttempt = undefined;
+      this.controlNotice = response.receipt.status === 'consumed'
+        ? uiText('这条补充已用于后续轮次，未重复提交。', 'This note was already included in a later turn; it was not added again.')
+        : uiText('补充已暂存，当前运行不变；将在你下次提问时使用，尚未读取。后端重启后需重新提交。',
+          'Note queued; the current run continues. It will be read with your next question. Resubmit after a backend restart.');
+    } catch (error) {
+      if (current()) {
+        if (error instanceof ConversationClientError && ['CONVERSATION_CONTEXT_EXPIRED', 'CONVERSATION_CONTEXT_RUN_CHANGED',
+          'CONVERSATION_CONTEXT_UNAVAILABLE'].includes(error.code ?? '')) this.contextAttempt = undefined;
+        this.controlError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      this.authLifecycle.releaseAbortController(controller);
+      if (this.controlController === controller) this.controlController = undefined;
+      m.redraw();
+    }
   }
 
   private tracePairScope() {
@@ -368,7 +518,51 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     ]);
   }
 
+  private canContinueWork(): boolean {
+    return !this.activeReceipt && !this.activeController && !this.controlController && !this.contextAttempt;
+  }
+
+  private async continueWorkConversation(sessionId: string, signal: AbortSignal): Promise<void> {
+    const authority = this.authLifecycle.capture();
+    if (!authority || !this.canContinueWork()) throw new Error(uiText(
+      '请先完成当前分析或未决请求；输入已保留。', 'Finish the current analysis or pending request first; your input is preserved.'));
+    const ordinal = this.requestOrdinal;
+    const restoreOrdinal = this.restoreOrdinal;
+    const currentSessionId = this.store.sessionId;
+    const selection = loadAnalysisContext(this.settings.backendUrl, authority.context);
+    const sourceKey = analysisAuthorizationKey(selection);
+    // An explicit open reauthorizes details; it does not reuse the directory's metadata as a grant.
+    const snapshot = await getConversation({backendUrl: this.settings.backendUrl,
+      apiKey: this.settings.backendApiKey}, sessionId, signal);
+    if (signal.aborted || !this.authLifecycle.isCurrent(authority) || ordinal !== this.requestOrdinal ||
+      restoreOrdinal !== this.restoreOrdinal || currentSessionId !== this.store.sessionId || !this.canContinueWork() ||
+      sourceKey !== analysisAuthorizationKey(loadAnalysisContext(this.settings.backendUrl, authority.context))) {
+      throw new ConversationRestoreInvalidatedError();
+    }
+    if (!snapshot.sourceSelection || !conversationSourceSelectionMatches(snapshot.sourceSelection, selection)) {
+      throw new Error(uiText('此对话的来源与当前选择不同。请先选择对应来源，或显式新建对话；输入已保留。',
+        'This conversation uses different sources. Select its sources or explicitly start a new conversation; your input is preserved.'));
+    }
+    const next = conversationStoreFromSnapshot(this.settings.backendUrl, snapshot);
+    ++this.restoreOrdinal;
+    invalidateConversationRestore(this.settings.backendUrl);
+    this.startQueue.reset({persist: false});
+    this.resetControls();
+    this.store = next;
+    this.explicitContinuationSessionId = next.sessionId;
+    this.restoreContextKey = sourceKey;
+    this.restorePromise = Promise.resolve();
+    this.sessionControlBinding = {sessionId, sourceKey};
+    saveConversationStore(next);
+    this.error = conversationRecoveryNotice(next.recoveryStatus, next.historyUnavailableMessages);
+    if (next.activeRunId) void this.resumeConversationRun(next, authority);
+    m.redraw();
+  }
+
   private async startNewConversation(): Promise<void> {
+    this.explicitContinuationSessionId = undefined;
+    this.sessionControlBinding = undefined;
+    this.resetControls();
     const authority = this.authLifecycle.capture();
     if (!authority) return;
     const active = this.activeReceipt;
@@ -412,10 +606,11 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     // settle into history with its verdict before this question.
     await this.settleProvisionalRun();
     if (restoreOrdinal !== this.restoreOrdinal || !this.authLifecycle.isCurrent(authority)) return;
+    this.resetControls();
     const controller = this.authLifecycle.createAbortController(authority);
     this.activeController?.abort();
     this.activeController = controller;
-    if (this.store.traceId) {
+    if (this.store.traceId && this.explicitContinuationSessionId !== this.store.sessionId) {
       this.startQueue.reset();
       this.store = {...this.store, sessionId: undefined, conversationId: undefined, traceId: undefined};
       saveConversationStore(this.store);
@@ -449,6 +644,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         apiKey: this.settings.backendApiKey,
       }, {
         query,
+        ...(this.explicitContinuationSessionId === this.store.sessionId && this.store.traceId ? {traceId: this.store.traceId} : {}),
         analysisContext,
       });
       if (
@@ -462,6 +658,11 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
         return;
       }
       this.activeReceipt = receipt;
+      this.sessionControlBinding = {sessionId: receipt.sessionId, sourceKey: analysisAuthorizationKey(analysisContext)};
+      if (receipt.context?.consumedContextIds.length) this.controlNotice = uiText(
+        `本轮包含 ${receipt.context.consumedContextIds.length} 条补充说明。`,
+        `This turn includes ${receipt.context.consumedContextIds.length} supplemental note(s).`,
+      );
       if (receipt.restartedAfterContextChange) {
         this.store = appendConversationMessage(this.settings.backendUrl, {
           id: messageId('assistant'),
@@ -617,6 +818,7 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     if (!authority) return Promise.reject(new ConversationRestoreInvalidatedError());
     const contextKey = analysisAuthorizationKey(loadAnalysisContext(this.settings.backendUrl, authority.context));
     if (this.restorePromise && this.restoreContextKey !== contextKey) {
+      this.explicitContinuationSessionId = undefined;
       ++this.restoreOrdinal;
       this.activeController?.abort();
       this.activeController = undefined;
@@ -637,6 +839,9 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
     }, isCurrent).then((store) => {
       if (!isCurrent()) throw new ConversationRestoreInvalidatedError();
       this.store = store;
+      this.sessionControlBinding = store.sessionId && store.sourceSelection &&
+        conversationSourceSelectionMatches(store.sourceSelection, loadAnalysisContext(this.settings.backendUrl, authority.context))
+        ? {sessionId: store.sessionId, sourceKey: contextKey} : undefined;
       if (store.activeRunId) void this.resumeConversationRun(store, authority);
       this.error = conversationRecoveryNotice(store.recoveryStatus, store.historyUnavailableMessages);
       m.redraw();
@@ -657,6 +862,9 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
 
   private handleAuthTransition(transition: PageAuthTransition): void {
     if (!transition.authorityChanged) return;
+    this.explicitContinuationSessionId = undefined;
+    this.sessionControlBinding = undefined;
+    this.resetControls();
     ++this.restoreOrdinal;
     this.restorePromise = undefined;
     ++this.requestOrdinal;

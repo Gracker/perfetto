@@ -11,11 +11,12 @@ import {
   type SmartPerfettoAuthSession,
 } from '../../core/smartperfetto_auth';
 import {ConversationPage} from './conversation_page';
+import {AssistantWorkOverview} from './assistant_work_overview';
 import {clearConversationRuntimeIdentities, loadConversationStore, saveConversationStore} from './conversation_store';
 import {sessionManager} from './session_manager';
 import {DEFAULT_SETTINGS} from './types';
 import {loadPersistedTracePairWorkspace} from './trace_pair_workspace_persistence';
-import {saveAnalysisContext} from './analysis_context';
+import {saveAnalysisContext, loadAnalysisContext, analysisAuthorizationKey} from './analysis_context';
 import {getSmartPerfettoRequestContext} from '../../core/smartperfetto_request_context';
 
 function installOidcSession(
@@ -676,4 +677,251 @@ describe('ConversationPage authorized restoration', () => {
     page.onremove();
   });
 
+});
+
+describe('ConversationPage noninterrupting controls', () => {
+  function status(epoch = 'epoch-a') {
+    return {success: true, work: {sessionId: 'session-a', runId: 'run-a', phase: 'running',
+      startedAt: Date.now() - 15_000, hasResult: false,
+      activity: {observation: 'partial', attempted: 3, returned: 2, inFlight: 1},
+      captureActivity: {observation: 'observed', tables: 2, rowSlots: 9, unavailableTables: 1}},
+      context: {availability: 'available', queueEpoch: epoch, pendingCount: 0, durability: 'process_memory'}};
+  }
+  async function preparedPage() {
+    const page = createPage(); await page.ensureConversationRestored();
+    page.store = {backendUrl: 'http://backend', sessionId: 'session-a', messages: [], updatedAt: Date.now()};
+    page.activeReceipt = {sessionId: 'session-a', runId: 'run-a', isNewSession: false, traceContextAttached: false};
+    page.activeController = new AbortController(); page.input = 'supplemental text';
+    page.sessionControlBinding = {sessionId: 'session-a', sourceKey: analysisAuthorizationKey(loadAnalysisContext('http://backend', getSmartPerfettoRequestContext()))};
+    return page;
+  }
+  it('refreshes phase, elapsed and observed activity without changing draft or stream', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(status()))); vi.stubGlobal('fetch', fetchMock);
+    const page = await preparedPage(); const stream = page.activeController;
+    await page.control('status');
+    expect(page.activeController).toBe(stream); expect(stream.signal.aborted).toBe(false);
+    expect(page.input).toBe('supplemental text'); expect(fetchMock).toHaveBeenCalledTimes(1);
+    const rendered = renderPage(page).textContent!;
+    expect(rendered).toMatch(/15/); expect(rendered).toMatch(/3/); expect(rendered).toMatch(/2/);
+    expect(rendered).not.toMatch(/row slots|行槽/);
+    page.onremove();
+  });
+  it('reuses an idempotency key after unknown network outcome and never interrupts the run', async () => {
+    const bodies: Array<Record<string, string>> = [];
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith('/status')) return new Response(JSON.stringify(status()));
+      if (String(url).endsWith('/context')) {
+        const body = JSON.parse(String(init?.body)); bodies.push(body);
+        if (bodies.length === 1) throw new Error('response lost');
+        return new Response(JSON.stringify({success: true, sessionId: 'session-a', context: {...status().context, pendingCount: 1},
+          receipt: {id: body.idempotencyKey, queueEpoch: body.expectedQueueEpoch, expectedRunId: body.expectedRunId,
+            status: 'accepted', appliesTo: 'next_user_turn', durability: 'process_memory'}}));
+      }
+      return new Response('{}');
+    }); vi.stubGlobal('fetch', fetchMock);
+    const page = await preparedPage(); const stream = page.activeController;
+    await page.control('context'); expect(page.input).toBe('supplemental text');
+    await page.control('context'); expect(bodies[0]).toEqual(bodies[1]); expect(page.input).toBe('');
+    expect(page.activeController).toBe(stream); expect(stream.signal.aborted).toBe(false);
+    expect(page.store.messages).toEqual([]);
+    expect(Object.keys(localStorage).map(key => localStorage.getItem(key)).join('')).not.toContain('supplemental text');
+    page.onremove();
+  });
+  it('drops a stale epoch retry identity and permits a fresh explicit submission', async () => {
+    let reads = 0; const epochs: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith('/status')) return new Response(JSON.stringify(status(`epoch-${++reads}`)));
+      if (String(url).endsWith('/context')) {
+        const body = JSON.parse(String(init?.body)); epochs.push(body.expectedQueueEpoch);
+        if (epochs.length === 1) return new Response(JSON.stringify({code: 'CONVERSATION_CONTEXT_EXPIRED', error: 'Expired'}), {status: 409});
+        return new Response(JSON.stringify({success: true, sessionId: 'session-a', context: {...status(body.expectedQueueEpoch).context, pendingCount: 1},
+          receipt: {id: body.idempotencyKey, queueEpoch: body.expectedQueueEpoch, expectedRunId: body.expectedRunId,
+            status: 'accepted', appliesTo: 'next_user_turn', durability: 'process_memory'}}));
+      } return new Response('{}');
+    }));
+    const page = await preparedPage(); await page.control('context');
+    expect(page.input).toBe('supplemental text'); expect(page.contextAttempt).toBeUndefined();
+    await page.control('context'); expect(epochs).toEqual(['epoch-1', 'epoch-2']);
+    page.onremove();
+  });
+});
+
+describe('ConversationPage context lifetime notice', () => {
+  it('replaces the accepted notice when a later status read cannot find the memory queue', async () => {
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith('/status')) return new Response(JSON.stringify({success: true,
+        work: {sessionId: 's', runId: 'r', phase: 'unknown', hasResult: false},
+        context: ++reads === 1 ? {availability: 'available', queueEpoch: 'e', pendingCount: 0, durability: 'process_memory'}
+          : {availability: 'unavailable'}}));
+      const body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({success: true, sessionId: 's',
+        context: {availability: 'available', queueEpoch: 'e', pendingCount: 1, durability: 'process_memory'},
+        receipt: {id: body.idempotencyKey, queueEpoch: 'e', expectedRunId: 'r', status: 'accepted',
+          appliesTo: 'next_user_turn', durability: 'process_memory'}}));
+    }));
+    const page = createPage(); await page.ensureConversationRestored();
+    page.store = {backendUrl: 'http://backend', sessionId: 's', messages: [], updatedAt: Date.now()};
+    page.sessionControlBinding = {sessionId: 's', sourceKey: analysisAuthorizationKey(loadAnalysisContext('http://backend', getSmartPerfettoRequestContext()))};
+    page.input = 'a note'; await page.control('context');
+    page.input = 'new draft'; await page.control('status');
+    expect(page.controlStatus.context.availability).toBe('unavailable');
+    expect(page.controlNotice).toMatch(/不表示.*读取|does not mean.*read/);
+    expect(page.input).toBe('new draft'); page.onremove();
+  });
+});
+
+
+describe('ConversationPage supplemental source binding', () => {
+  async function boundPage() {
+    const page = createPage(); await page.ensureConversationRestored();
+    const scope = getSmartPerfettoRequestContext();
+    saveAnalysisContext('http://backend', scope, {codeAwareMode: 'metadata_only', codebaseIds: ['source-a'], knowledgeSourceIds: []});
+    page.store = {backendUrl: 'http://backend', sessionId: 's', messages: [], updatedAt: Date.now()};
+    page.sessionControlBinding = {sessionId: 's', sourceKey: analysisAuthorizationKey(loadAnalysisContext('http://backend', scope))};
+    page.input = 'keep this note'; return {page, scope};
+  }
+  it('does not post to the old session after the user selects different sources', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const {page, scope} = await boundPage();
+    saveAnalysisContext('http://backend', scope, {codeAwareMode: 'metadata_only', codebaseIds: ['source-b'], knowledgeSourceIds: []});
+    await page.control('context');
+    expect(fetch).not.toHaveBeenCalled(); expect(page.input).toBe('keep this note');
+    expect(page.controlError).toMatch(/尚未绑定|not bound/); page.onremove();
+  });
+  it('does not retry an uncertain old-source note after the selection changes', async () => {
+    const fetch = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).endsWith('/status')) return new Response(JSON.stringify({success: true,
+        work: {sessionId: 's', runId: 'r', phase: 'running', hasResult: false},
+        context: {availability: 'available', queueEpoch: 'e', pendingCount: 0, durability: 'process_memory'}}));
+      throw new Error('response lost');
+    }); vi.stubGlobal('fetch', fetch);
+    const {page, scope} = await boundPage(); await page.control('context');
+    expect(fetch).toHaveBeenCalledTimes(2); const attempt = page.contextAttempt;
+    saveAnalysisContext('http://backend', scope, {codeAwareMode: 'metadata_only', codebaseIds: ['source-b'], knowledgeSourceIds: []});
+    await page.control('context');
+    expect(fetch).toHaveBeenCalledTimes(2); expect(page.contextAttempt).toEqual(attempt);
+    expect(page.input).toBe('keep this note'); page.onremove();
+  });
+  it('requires an explicit admitted turn before supplementing an unbound restored locator', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const page = createPage(); await page.ensureConversationRestored();
+    page.store = {backendUrl: 'http://backend', sessionId: 'restored', messages: [], updatedAt: Date.now()};
+    page.input = 'note'; await page.control('context');
+    expect(fetch).not.toHaveBeenCalled(); expect(page.input).toBe('note'); page.onremove();
+  });
+});
+
+describe('ConversationPage restored supplemental binding', () => {
+  it('binds authorized matching sources and supplements a restored active run without starting or cancelling it', async () => {
+    const scope = getSmartPerfettoRequestContext();
+    saveAnalysisContext('http://backend', scope, {codeAwareMode: 'metadata_only', codebaseIds: ['source-a'],
+      knowledgeSourceIds: [], sourceDepth: 'mechanism', authorizationEpoch: 4});
+    saveConversationStore({backendUrl: 'http://backend', sessionId: 'restored-active', messages: [], updatedAt: 1});
+    const stream = deferredResponse();
+    const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/stream?')) return stream.promise;
+      if (String(url).endsWith('/status')) return new Response(JSON.stringify({success: true,
+        work: {sessionId: 'restored-active', runId: 'active-r', phase: 'running', hasResult: false},
+        context: {availability: 'available', queueEpoch: 'active-epoch', pendingCount: 0, durability: 'process_memory'}}));
+      if (String(url).endsWith('/context')) {
+        const body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({success: true, sessionId: 'restored-active',
+          context: {availability: 'available', queueEpoch: 'active-epoch', pendingCount: 1, durability: 'process_memory'},
+          receipt: {id: body.idempotencyKey, queueEpoch: 'active-epoch', expectedRunId: 'active-r', status: 'accepted',
+            appliesTo: 'next_user_turn', durability: 'process_memory'}}));
+      }
+      return new Response(JSON.stringify({success: true, sessionId: 'restored-active', status: 'running',
+        history: [], historyOmittedMessages: 0, traceContext: {kind: 'none'}, activeRunId: 'active-r',
+        sourceSelection: {codeAwareMode: 'metadata_only', codebaseIds: ['source-a'], knowledgeSourceIds: []}}));
+    }); vi.stubGlobal('fetch', fetch);
+    const page = createPage(); await page.ensureConversationRestored();
+    const active = page.activeController;
+    page.input = 'new note'; await page.control('context');
+    expect(page.input).toBe(''); expect(page.activeController).toBe(active); expect(active.signal.aborted).toBe(false);
+    const requests = fetch.mock.calls;
+    expect(requests.filter(([, init]) => init?.method === 'POST').map(([url]) => String(url)))
+      .toEqual([expect.stringContaining('/restored-active/context')]);
+    const storedConversations = Object.keys(localStorage).filter(key => key.startsWith('smartperfetto-conversation'))
+      .map(key => localStorage.getItem(key)).join('');
+    expect(storedConversations).not.toContain('sourceSelection'); expect(storedConversations).not.toContain('source-a');
+    stream.resolve(streamResponse()); await page.runSettlement.promise; page.onremove();
+  });
+});
+
+describe('ConversationPage work overview continuation', () => {
+  function selectedDetail(source = 'off') {
+    return new Response(JSON.stringify({success: true, sessionId: 'selected-conversation', status: 'completed',
+      traceContext: {kind: 'attached', traceId: 'selected-trace'}, history: [{role: 'assistant', content: 'Selected answer'}],
+      historyOmittedMessages: 0, sourceSelection: {codeAwareMode: source, codebaseIds: source === 'off' ? [] : ['private-source'], knowledgeSourceIds: []}}));
+  }
+  it('keeps an explicit attached Trace, draft and source binding until the next user turn', async () => {
+    const posts: any[] = [];
+    const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/stream?')) return streamResponse();
+      if (init?.method === 'POST') {posts.push(JSON.parse(String(init.body))); return startResponse('selected-conversation', 'next-run');}
+      return selectedDetail();
+    }); vi.stubGlobal('fetch', fetch);
+    const page = createPage(); await page.ensureConversationRestored(); page.input = 'Keep my draft';
+    await page.continueWorkConversation('selected-conversation', new AbortController().signal);
+    expect(posts).toEqual([]); expect(page.input).toBe('Keep my draft'); expect(page.store.traceId).toBe('selected-trace');
+    expect(renderPage(page).textContent).toMatch(/已附加 Trace|attached trace/);
+    expect(page.sessionControlBinding.sessionId).toBe('selected-conversation'); await page.send();
+    expect(posts).toEqual([expect.objectContaining({query: 'Keep my draft', sessionId: 'selected-conversation', traceId: 'selected-trace'})]);
+    expect(Object.keys(localStorage).filter(key => key.startsWith('smartperfetto-conversation')).map(key => localStorage.getItem(key)).join(''))
+      .not.toContain('sourceSelection'); page.onremove();
+  });
+  it('refuses continuation while a run or uncertain note is active without cancelling either', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const page = createPage(); await page.ensureConversationRestored(); page.input = 'draft';
+    page.contextAttempt = {request: {text: 'uncertain note'}};
+    await expect(page.continueWorkConversation('selected-conversation', new AbortController().signal)).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled(); expect(page.contextAttempt.request.text).toBe('uncertain note'); expect(page.input).toBe('draft');
+    page.contextAttempt = undefined; page.activeReceipt = {sessionId: 'current', runId: 'current-run'};
+    await expect(page.continueWorkConversation('selected-conversation', new AbortController().signal)).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled(); page.activeReceipt = undefined; page.onremove();
+  });
+  it('preserves current context and draft when selected sources do not match', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => selectedDetail('metadata_only')));
+    const page = createPage(); await page.ensureConversationRestored();
+    page.store = {backendUrl: 'http://backend', sessionId: 'current', messages: [], updatedAt: 1}; page.input = 'draft';
+    await expect(page.continueWorkConversation('selected-conversation', new AbortController().signal)).rejects.toThrow(/来源|sources/);
+    expect(page.store.sessionId).toBe('current'); expect(page.input).toBe('draft');
+    expect(loadAnalysisContext('http://backend', getSmartPerfettoRequestContext()).codebaseIds).toEqual([]); page.onremove();
+  });
+  it('does not bind a selected conversation after its explicit open is closed', async () => {
+    const pending = deferredResponse(); vi.stubGlobal('fetch', vi.fn(() => pending.promise));
+    const page = createPage(); await page.ensureConversationRestored(); page.input = 'draft';
+    const controller = new AbortController(); const opening = page.continueWorkConversation('selected-conversation', controller.signal);
+    controller.abort(); pending.resolve(selectedDetail());
+    await expect(opening).rejects.toThrow(); expect(page.store.sessionId).toBeUndefined(); expect(page.input).toBe('draft'); page.onremove();
+  });
+  it.each(['abort', '503'])('keeps an explicit continuation when the old initial restore fails late (%s)', async (failure) => {
+    saveConversationStore({backendUrl: 'http://backend', sessionId: 'old-conversation', messages: [], updatedAt: 1});
+    let rejectOld!: (error: Error) => void; let resolveOld!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve, reject) => {resolveOld = resolve; rejectOld = reject;});
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(pending).mockResolvedValueOnce(selectedDetail()));
+    const page = createPage(); const oldRestore = page.ensureConversationRestored().catch(() => undefined);
+    page.input = 'Preserved draft';
+    await page.continueWorkConversation('selected-conversation', new AbortController().signal);
+    if (failure === 'abort') rejectOld(new DOMException('Aborted', 'AbortError'));
+    else resolveOld(new Response('', {status: 503}));
+    await oldRestore;
+    expect(page.store).toMatchObject({sessionId: 'selected-conversation', traceId: 'selected-trace',
+      sourceSelection: {codeAwareMode: 'off', codebaseIds: [], knowledgeSourceIds: []}});
+    expect(page.sessionControlBinding.sessionId).toBe('selected-conversation');
+    expect(page.explicitContinuationSessionId).toBe('selected-conversation');
+    expect(page.input).toBe('Preserved draft'); page.onremove();
+  });
+  it.each(['owner', 'source'])('invalidates a captured overview authority before redraw on %s change', async (change) => {
+    const page = createPage(); await page.ensureConversationRestored();
+    const tree = page.view({attrs: {app: {} as App}});
+    const overview = tree.children.find((child: any) => child.tag === AssistantWorkOverview);
+    expect(overview.attrs.isCurrent()).toBe(true);
+    if (change === 'owner') installOidcSession('user-b');
+    else saveAnalysisContext('http://backend', getSmartPerfettoRequestContext(), {
+      codeAwareMode: 'metadata_only', codebaseIds: ['new-source'], knowledgeSourceIds: [],
+    });
+    expect(overview.attrs.isCurrent()).toBe(false); page.onremove();
+  });
 });

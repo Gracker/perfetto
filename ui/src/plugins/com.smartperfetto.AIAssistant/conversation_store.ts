@@ -13,6 +13,7 @@ import {
 import {
   getConversation,
   type ConversationClientConfig,
+  type ConversationSnapshot,
   type ConversationHistoryTurn,
   type ConversationEvidenceRef,
   type ConversationFullHandoff,
@@ -20,6 +21,7 @@ import {
 } from './conversation_client';
 import {answerVerificationCueText} from './answer_verification';
 import {projectMessageForStorage} from './private_message_storage';
+import type {ConversationSourceSelection} from './generated/data_contract.types';
 import {uiText} from './ui_language';
 
 const CONVERSATION_STORE_KEY = 'smartperfetto-conversation';
@@ -78,6 +80,8 @@ export interface StoredConversationMessage {
 }
 
 export interface StoredConversation {
+  /** Authenticated detail response, memory only; excluded from save/load locator JSON. */
+  sourceSelection?: ConversationSourceSelection;
   backendUrl: string;
   /** Candidate locator; GET authorization is required before binding sessionId. */
   conversationId?: string;
@@ -233,30 +237,7 @@ export function restoreConversationStore(
         loadConversationStore(config.backendUrl).conversationId !== stored.conversationId) {
       throw new ConversationRestoreInvalidatedError();
     }
-    const now = Date.now();
-    const messages: StoredConversationMessage[] = restored.history.map((message, index) => ({
-      id: conversationMessageId(restored.sessionId, message.turnId ?? message.turn?.id ?? index, message.role),
-      role: message.role,
-      content: message.content,
-      timestamp: now + index,
-      privateContent: message.sourceDerived === true,
-      turn: message.turn ? projectConversationHistoryTurn(message.turn) : undefined,
-      ...(message.role === 'assistant' && index === restored.history.length - 1 &&
-          restored.fullHandoff
-        ? {fullHandoff: restored.fullHandoff} : {}),
-    }));
-    const next: StoredConversation = {
-      backendUrl: config.backendUrl,
-      conversationId: restored.sessionId,
-      sessionId: restored.sessionId,
-      traceId: restored.traceContext.kind === 'attached' ? restored.traceContext.traceId : undefined,
-      messages,
-      recoveryStatus: restored.recoveryStatus,
-      activeRunId: restored.activeRunId,
-      historyOmittedMessages: restored.historyOmittedMessages,
-      historyUnavailableMessages: restored.historyUnavailableMessages,
-      updatedAt: now,
-    };
+    const next = conversationStoreFromSnapshot(config.backendUrl, restored);
     saveConversationStore(next);
     return next;
   })().finally(() => {
@@ -264,6 +245,35 @@ export function restoreConversationStore(
   });
   pendingRestores.set(key, {controller, promise});
   return promise;
+}
+
+/** Project an already authorized detail response; callers decide whether to bind it. */
+export function conversationStoreFromSnapshot(backendUrl: string, restored: ConversationSnapshot): StoredConversation {
+  const now = Date.now();
+  const messages: StoredConversationMessage[] = restored.history.map((message, index) => ({
+    id: conversationMessageId(restored.sessionId, message.turnId ?? message.turn?.id ?? index, message.role),
+    role: message.role,
+    content: message.content,
+    timestamp: now + index,
+    privateContent: message.sourceDerived === true,
+    turn: message.turn ? projectConversationHistoryTurn(message.turn) : undefined,
+    ...(message.role === 'assistant' && index === restored.history.length - 1 &&
+        restored.fullHandoff
+      ? {fullHandoff: restored.fullHandoff} : {}),
+  }));
+  return {
+    backendUrl,
+    conversationId: restored.sessionId,
+    sessionId: restored.sessionId,
+    traceId: restored.traceContext.kind === 'attached' ? restored.traceContext.traceId : undefined,
+    messages,
+    recoveryStatus: restored.recoveryStatus,
+    activeRunId: restored.activeRunId,
+    sourceSelection: restored.sourceSelection,
+    historyOmittedMessages: restored.historyOmittedMessages,
+    historyUnavailableMessages: restored.historyUnavailableMessages,
+    updatedAt: now,
+  };
 }
 
 /** Keep only public history metadata; SDK and trace handles cannot enter storage. */

@@ -6,6 +6,8 @@ import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {buildSmartPerfettoContextHeaders} from '../../core/smartperfetto_request_context';
 import {analysisContextRequestFields} from './analysis_context';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import type {ConversationSourceSelection, ConversationStatusResponse, ConversationContextRequest, ConversationContextResponse, ConversationTurnContextReceipt} from './generated/data_contract.types';
+export type {ConversationStatusResponse} from './generated/data_contract.types';
 import {uiText} from './ui_language';
 import type {
   AnalysisContextSelection,
@@ -53,6 +55,7 @@ export interface ConversationSnapshot {
   recommendedFullAnalysis?: boolean;
   fullHandoff?: ConversationFullHandoff;
   activeRunId?: string;
+  sourceSelection?: ConversationSourceSelection;
 }
 
 export type ConversationOutcome = (
@@ -77,6 +80,7 @@ export interface ConversationRunReceipt {
   runId: string;
   isNewSession: boolean;
   traceContextAttached: boolean;
+  context?: ConversationTurnContextReceipt;
   /**
    * Local only: the saved conversation was authorized for another analysis
    * context, so this run started a new conversation with the same question.
@@ -183,7 +187,16 @@ export async function startConversationTurn(
     }),
   });
   if (!response.ok) throw await readError(response);
-  return await response.json() as ConversationRunReceipt;
+  const payload: unknown = await response.json();
+  const parsed = object(payload); const context = object(parsed?.context);
+  if (!parsed || typeof parsed.sessionId !== 'string' || typeof parsed.runId !== 'string' ||
+    typeof parsed.isNewSession !== 'boolean' || typeof parsed.traceContextAttached !== 'boolean' ||
+    (parsed.context !== undefined && (!context || typeof context.queueEpoch !== 'string' ||
+      !Array.isArray(context.consumedContextIds) || context.consumedContextIds.length > 8 ||
+      !context.consumedContextIds.every(id => typeof id === 'string')))) {
+    throw new Error('Invalid conversation start receipt');
+  }
+  return payload as ConversationRunReceipt;
 }
 
 /** GET is the authority boundary for a saved logical conversation locator. */
@@ -199,10 +212,89 @@ export async function getConversation(
   const snapshot = await response.json() as ConversationSnapshot;
   if (snapshot.success !== true || snapshot.sessionId !== sessionId ||
       !Array.isArray(snapshot.history) || !snapshot.traceContext ||
-      (snapshot.traceContext.kind !== 'none' && snapshot.traceContext.kind !== 'attached')) {
+      (snapshot.traceContext.kind !== 'none' && snapshot.traceContext.kind !== 'attached') ||
+      (snapshot.sourceSelection !== undefined && !validSourceSelection(snapshot.sourceSelection))) {
     throw new Error('Invalid conversation restoration response');
   }
   return snapshot;
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+function validContext(value: unknown): boolean {
+  const entry = object(value);
+  return entry?.availability === 'unavailable' || Boolean(entry?.availability === 'available' &&
+    typeof entry.queueEpoch === 'string' && entry.queueEpoch && count(entry.pendingCount) && entry.durability === 'process_memory');
+}
+export function isAssistantWorkSummary(value: unknown, sessionId: string): boolean {
+  const entry = object(value);
+  if (!entry || entry.sessionId !== sessionId || typeof entry.hasResult !== 'boolean' ||
+    !['running', 'reviewing', 'needs_input', 'ready', 'finished', 'interrupted', 'failed', 'cancelled', 'unknown'].includes(String(entry.phase)) ||
+    (entry.runId !== undefined && typeof entry.runId !== 'string') ||
+    [entry.startedAt, entry.completedAt].some(value => value !== undefined && !count(value)) ||
+    (entry.inputReason !== undefined && !['question', 'full_analysis'].includes(String(entry.inputReason)))) return false;
+  if (entry.captureActivity !== undefined) {
+    const capture = object(entry.captureActivity);
+    if (!capture || !['observed', 'partial'].includes(String(capture.observation)) ||
+      ![capture.tables, capture.rowSlots, capture.unavailableTables].every(count)) return false;
+  }
+  if (entry.activity === undefined) return true;
+  const activity = object(entry.activity);
+  return activity?.observation === 'unavailable' || Boolean(activity &&
+    ['observed', 'partial'].includes(String(activity.observation)) &&
+    [activity.attempted, activity.returned, activity.inFlight].every(count) &&
+    (activity.repeatedExactCalls === undefined || count(activity.repeatedExactCalls)));
+}
+function validSourceSelection(value: unknown): value is ConversationSourceSelection {
+  const entry = object(value);
+  return Boolean(entry && ['off', 'metadata_only', 'provider_send'].includes(String(entry.codeAwareMode)) &&
+    Object.keys(entry).every(key => ['codeAwareMode', 'codebaseIds', 'knowledgeSourceIds'].includes(key)) &&
+    [entry.codebaseIds, entry.knowledgeSourceIds].every(ids => Array.isArray(ids) &&
+      ids.every(id => typeof id === 'string' && id.trim().length > 0)));
+}
+/** Compare effective sources; local epoch is bound only after this authorized match. */
+export function conversationSourceSelectionMatches(selection: ConversationSourceSelection,
+  current: AnalysisContextSelection): boolean {
+  const fields = analysisContextRequestFields(current);
+  const ids = fields.codebaseIds ?? [];
+  const sorted = (values: readonly string[]) => JSON.stringify([...new Set(values)].sort());
+  return selection.codeAwareMode === (ids.length ? fields.codeAwareMode : 'off') &&
+    sorted(selection.codebaseIds) === sorted(ids) &&
+    sorted(selection.knowledgeSourceIds) === sorted(fields.knowledgeSourceIds ?? []);
+}
+
+export async function getConversationStatus(config: ConversationClientConfig, sessionId: string,
+  signal?: AbortSignal): Promise<ConversationStatusResponse> {
+  const response = await smartPerfettoFetch(buildAssistantApiV1Url(config.backendUrl,
+    `/conversation/${encodeURIComponent(sessionId)}/status`), {headers: requestHeaders(config), signal});
+  if (!response.ok) throw await readError(response);
+  const payload: unknown = await response.json();
+  const parsed = object(payload);
+  if (parsed?.success !== true || !isAssistantWorkSummary(parsed.work, sessionId) || !validContext(parsed.context)) {
+    throw new Error('Invalid conversation status response');
+  }
+  return payload as ConversationStatusResponse;
+}
+export async function appendConversationContext(config: ConversationClientConfig, sessionId: string,
+  input: ConversationContextRequest, signal?: AbortSignal): Promise<ConversationContextResponse> {
+  const response = await smartPerfettoFetch(buildAssistantApiV1Url(config.backendUrl,
+    `/conversation/${encodeURIComponent(sessionId)}/context`), {
+    method: 'POST', headers: requestHeaders(config), signal, body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await readError(response);
+  const payload: unknown = await response.json();
+  const parsed = object(payload); const receipt = object(parsed?.receipt);
+  if (parsed?.success !== true || parsed.sessionId !== sessionId || !validContext(parsed.context) ||
+    !receipt || receipt.id !== input.idempotencyKey || receipt.queueEpoch !== input.expectedQueueEpoch ||
+    receipt.expectedRunId !== input.expectedRunId || !['accepted', 'consumed'].includes(String(receipt.status)) ||
+    receipt.appliesTo !== 'next_user_turn' || receipt.durability !== 'process_memory' ||
+    (receipt.status === 'consumed' && typeof receipt.consumedByRunId !== 'string')) {
+    throw new Error('Invalid supplemental context receipt');
+  }
+  return payload as ConversationContextResponse;
 }
 
 export function parseConversationSseFrames(buffer: string): {
