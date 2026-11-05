@@ -88,6 +88,12 @@ test('keeps heavy/light analysis stable through window operations and confirms s
     await expect
       .poll(() => heldAnalyze.value?.sessionId ?? '', {timeout: 120_000})
       .not.toBe('');
+    // The analyze response precedes native dispatch. Hold the browser response
+    // until the intended in-flight provider request exists, so cancellation
+    // tests its shutdown rather than racing the trace preflight.
+    await expect
+      .poll(() => providerState(request), {timeout: 120_000})
+      .toMatchObject({opened: 2, closed: 1, active: 1});
     await expect(page.locator('button.ai-stop-btn')).toBeVisible();
     await workspaceAssistant.click();
     await expect(page.locator('.ai-panel')).not.toBeVisible();
@@ -213,7 +219,9 @@ test('keeps heavy/light analysis stable through window operations and confirms s
     );
     await expect(workspaceExit).toContainText('退出双窗');
     await expect(page.getByTitle('新对话')).toBeDisabled();
+    await page.getByTitle('工具与布局').click();
     await expect(page.getByTitle('分析运行中，设置保持只读')).toBeDisabled();
+    await page.keyboard.press('Escape');
     await expect(page.locator('[data-switcher] > button')).toBeDisabled();
     await expect(page.getByTitle('请先停止当前分析再退出对比')).toBeDisabled();
 
