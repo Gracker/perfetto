@@ -235,6 +235,8 @@ export interface ConclusionContractSidecarParseResult extends ConclusionContract
   machineSegments: Array<{start: number; end: number}>;
 }
 
+export type ConclusionDeclarationSyntax = 'canonical_v1' | 'authoring_v1' | 'authoring_v2';
+
 export interface ConclusionContractMetadata {
   confidencePercent?: number;
   rounds?: number;
@@ -2706,6 +2708,8 @@ export interface AnalysisTurnIntentDecision {
     recommendedComplexity: QueryComplexity;
     deliverable: "answer" | "report";
     evidenceAccess: "existing_only" | "read_new";
+    /** Semantic use of the current selection; absence stays unknown and grants no acquisition authority. */
+    targetUse?: "current_selection" | "other_target" | "unknown";
     /** Asked only when the run has source selected; absent otherwise or when the model omitted it. */
     sourceNeed?: SourceNeed;
     reason?: string;

@@ -18,6 +18,8 @@
 
 import {afterEach, beforeEach, describe, it, expect, vi} from 'vitest';
 import type {Mock} from 'vitest';
+import m from 'mithril';
+import {defer} from '../../base/deferred';
 
 import {AIPanel} from './ai_panel';
 import {getAISharedState, resetAISharedState, updateAISharedState} from './ai_shared_state';
@@ -262,9 +264,79 @@ function findVNodeByTag(node: any, tag: unknown): any {
 }
 
 describe('AIPanel conversation selection context', () => {
-  it('omits Perfetto\'s negative duration sentinel for an open slice', async () => {
+  it('captures a native slice hint only from the selected track renderer', async () => {
+    const panel = new AIPanel() as any;
+    const query = vi.fn(() => {throw new Error('selection capture must not query');});
+    const getTrack = vi.fn(() => ({renderer: {rootTableName: 'slice'}}));
+    panel.engine = {query};
+    panel.trace = {
+      tracks: {getTrack},
+      selection: {selection: {kind: 'track_event', trackUri: '/opaque_track', eventId: 42, ts: 1000n, dur: 250n}},
+    };
+
+    await expect(panel.captureSelectionContext()).resolves.toEqual({
+      kind: 'track_event', source: 'track_event_selection', trackUri: '/opaque_track',
+      eventId: 42, ts: 1000, dur: 250, nativeTable: 'slice',
+    });
+    expect(getTrack).toHaveBeenCalledTimes(1);
+    expect(getTrack).toHaveBeenCalledWith('/opaque_track');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing track', undefined],
+    ['missing root table', {renderer: {}}],
+    ['thread state', {renderer: {rootTableName: 'thread_state'}}],
+    ['actual frames', {renderer: {rootTableName: 'actual_frame_timeline_slice'}}],
+    ['generic event', {renderer: {rootTableName: 'track_event'}}],
+    ['slice view', {renderer: {rootTableName: 'slice_view'}}],
+    ['different case', {renderer: {rootTableName: 'Slice'}}],
+  ] as const)('keeps the old shape for %s even with a slice-looking URI and tags', async (_name, track) => {
+    const panel = new AIPanel() as any;
+    const getTrack = vi.fn(() => track && {
+      ...track, title: 'SliceTrack', tags: {kind: 'slice', type: 'thread_slice', nativeTable: 'slice'},
+    });
+    panel.trace = {
+      tracks: {getTrack},
+      selection: {selection: {kind: 'track_event', trackUri: '/slice/thread_slice/42', eventId: 42, ts: 1000n, dur: 250n}},
+    };
+
+    await expect(panel.captureSelectionContext()).resolves.toEqual({
+      kind: 'track_event', source: 'track_event_selection', trackUri: '/slice/thread_slice/42',
+      eventId: 42, ts: 1000, dur: 250,
+    });
+    expect(getTrack).toHaveBeenCalledTimes(1);
+    expect(getTrack).toHaveBeenCalledWith('/slice/thread_slice/42');
+  });
+
+  it('reads the current renderer after changing selections and never retains a previous slice hint', async () => {
+    const panel = new AIPanel() as any;
+    const tracks = new Map([
+      ['/first', {renderer: {rootTableName: 'slice'}}],
+      ['/second', {renderer: {rootTableName: 'thread_state'}}],
+    ]);
+    const getTrack = vi.fn((uri: string) => tracks.get(uri));
+    panel.trace = {tracks: {getTrack}, selection: {selection: {
+      kind: 'track_event', trackUri: '/first', eventId: 42, ts: 1000n, dur: 250n,
+    }}};
+    await expect(panel.captureSelectionContext()).resolves.toHaveProperty('nativeTable', 'slice');
+
+    panel.trace.selection.selection = {kind: 'track_event', trackUri: '/second', eventId: 42, ts: 2000n, dur: 500n};
+    await expect(panel.captureSelectionContext()).resolves.toEqual({
+      kind: 'track_event', source: 'track_event_selection', trackUri: '/second', eventId: 42, ts: 2000, dur: 500,
+    });
+    tracks.set('/first', {renderer: {rootTableName: 'track_event'}});
+    panel.trace.selection.selection = {kind: 'track_event', trackUri: '/first', eventId: 42, ts: 3000n, dur: 750n};
+    await expect(panel.captureSelectionContext()).resolves.not.toHaveProperty('nativeTable');
+    panel.trace.selection.selection = {kind: 'empty'};
+    await expect(panel.captureSelectionContext()).resolves.toBeNull();
+    expect(getTrack.mock.calls.map(([uri]) => uri)).toEqual(['/first', '/second', '/first']);
+  });
+
+  it('omits Perfetto\'s negative duration sentinel for an open track event', async () => {
     const panel = new AIPanel() as any;
     panel.trace = {
+      tracks: {getTrack: vi.fn(() => undefined)},
       selection: {
         selection: {
           kind: 'track_event',
@@ -369,6 +441,7 @@ describe('AIPanel conversation selection context', () => {
       childCount: 4,
     };
     panel.trace = {
+      tracks: {getTrack: vi.fn(() => undefined)},
       selection: {
         selection: {
           kind: 'track_event',
@@ -450,6 +523,9 @@ describe('AIPanel evidence-backed commands', () => {
 });
 
 describe('AIPanel selection display cards', () => {
+  beforeEach(() => vi.spyOn(m, 'redraw').mockImplementation(() => undefined));
+  afterEach(() => vi.restoreAllMocks());
+
   const singleRow = (row: Record<string, unknown>) => ({
     iter: () => {
       let valid = true;
@@ -464,6 +540,245 @@ describe('AIPanel selection display cards', () => {
   });
   const noRows = () => ({
     iter: () => ({valid: () => false, next: () => undefined}),
+  });
+  const sliceRow = {
+    id: 42, name: 'work', ts: 1000n, dur: 20_000_000n, dur_ms: 20,
+    thread_name: 'main', process_name: 'app', depth: 0, child_count: 0,
+  };
+  const createPanel = (rootTableName: string | undefined = 'slice') => {
+    const panel = new AIPanel() as any;
+    panel.trace = {
+      selection: {selection: {
+        kind: 'track_event', trackUri: '/slice/42', eventId: 42,
+        ts: 1000n, dur: 20_000_000n,
+      }},
+      tracks: {getTrack: vi.fn(() => ({renderer: {rootTableName}}))},
+      timeline: {panIntoView: vi.fn()},
+    };
+    panel.engine = {query: vi.fn().mockResolvedValue(singleRow(sliceRow))};
+    return panel;
+  };
+  const flushQueries = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  it('queries and displays details only for the actual native slice renderer', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+    expect(panel.engine.query.mock.calls[0][0]).toContain('WHERE s.id = 42');
+    const text = collectVNodeText(panel.renderSliceCard());
+    expect(text).toContain('work');
+    expect(text).toContain('20.00ms');
+    expect(text).toContain('main');
+    expect(text).toContain('app');
+    expect(text).toContain('分析此 Slice');
+  });
+
+  it.each(['sched_slice', 'thread_state', 'actual_frame_timeline_slice', undefined])(
+    'does not query or display a same-id slice for renderer %s', async (table) => {
+      const panel = createPanel();
+      panel.trace.tracks.getTrack.mockReturnValue(
+        table === undefined ? undefined : {renderer: {rootTableName: table}},
+      );
+      panel.trace.selection.selection = {
+        kind: 'track_event', trackUri: '/slice/forged-name', eventId: 30145,
+        ts: 506733856657456n, dur: 4_000_000n,
+      };
+      panel.engine.query.mockResolvedValue(singleRow({
+        ...sliceRow, id: 30145, name: 'Resuming mutator threads',
+        thread_name: 'HeapTaskDaemon', process_name: 'unrelated.app',
+      }));
+      panel.updateSliceCard();
+      await flushQueries();
+      expect(panel.engine.query).not.toHaveBeenCalled();
+      const text = collectVNodeText(panel.renderSliceCard());
+      expect(text).toContain('已选轨道事件');
+      expect(text).toContain('30145');
+      expect(text).toContain('4.00ms');
+      expect(text).not.toContain('Resuming mutator threads');
+      expect(text).not.toContain('HeapTaskDaemon');
+      expect(text).not.toContain('unrelated.app');
+      expect(text).not.toContain('调用链');
+      expect(panel.buildCurrentSelectionAnalysisQuery()).not.toContain('Slice');
+      expect(panel.getSelectionButtonTitle()).not.toContain('Slice');
+      expect(await panel.captureSelectionContext()).toEqual({
+        kind: 'track_event', source: 'track_event_selection',
+        trackUri: '/slice/forged-name', eventId: 30145,
+        ts: 506733856657456, dur: 4_000_000,
+      });
+    },
+  );
+
+  it.each([undefined, -1n])('does not turn unknown event duration %s into zero', (dur) => {
+    const panel = createPanel('sched_slice');
+    panel.trace.selection.selection.dur = dur;
+    panel.updateSliceCard();
+    const text = collectVNodeText(panel.renderSliceCard());
+    expect(text).toContain('持续时间未知');
+    expect(text).not.toContain('0μs');
+  });
+
+  it('keeps instant events distinct from unknown duration in the English card', () => {
+    setUiLanguagePreference('en');
+    const panel = createPanel('sched_slice');
+    panel.trace.selection.selection.dur = 0n;
+    panel.updateSliceCard();
+    const instant = collectVNodeText(panel.renderSliceCard());
+    expect(instant).toContain('Track event selected');
+    expect(instant).toContain('0μs');
+    expect(instant).not.toContain('Duration unavailable');
+    panel.trace.selection.selection.dur = undefined;
+    panel.updateSliceCard();
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('Duration unavailable');
+  });
+
+  it('analyzes a non-slice card using the actual selection without slice assumptions', async () => {
+    const panel = createPanel('sched_slice');
+    panel.sendMessage = vi.fn();
+    panel.updateSliceCard();
+    const card = panel.renderSliceCard();
+    const action = findVNodeByTag(card.children[2], 'button');
+    expect(action).toBeDefined();
+    expect(collectVNodeText(action)).toContain('分析当前选区');
+    await action.attrs.onclick();
+    expect(panel.sendMessage).toHaveBeenCalledTimes(1);
+    expect(panel.state.input).toContain('轨道事件');
+    expect(panel.state.input).not.toContain('Slice');
+    expect(await panel.captureSelectionContext()).toMatchObject({
+      trackUri: '/slice/42', eventId: 42, ts: 1000, dur: 20_000_000,
+    });
+    expect((await panel.captureSelectionContext()).nativeTable).toBeUndefined();
+  });
+
+  it('clears same-id slice details on a different track and preserves the real selection', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    await flushQueries();
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('work');
+    panel.trace.selection.selection = {
+      kind: 'track_event', trackUri: '/sched_cpu7', eventId: 42,
+      ts: 5000n, dur: 4_000_000n,
+    };
+    panel.trace.tracks.getTrack.mockReturnValue({renderer: {rootTableName: 'sched_slice'}});
+    // Readers must reject stale details even before the next view/update.
+    expect(collectVNodeText(panel.renderSliceCard())).not.toContain('work');
+    expect(panel.buildTeachingPipelineRequestContext()).toMatchObject({
+      packageName: undefined,
+      selectionContext: {eventId: 42, ts: 5000, dur: 4_000_000,
+        name: undefined, threadName: undefined, processName: undefined},
+    });
+    panel.updateSliceCard();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('4.00ms');
+  });
+
+  it('invalidates cached details when the same track renderer changes table', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    await flushQueries();
+    panel.trace.tracks.getTrack.mockReturnValue({renderer: {rootTableName: 'sched_slice'}});
+    expect(collectVNodeText(panel.renderSliceCard())).not.toContain('work');
+    panel.updateSliceCard();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['trackUri', 'ts', 'dur'])('refreshes slice details when only %s changes', async (field) => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    await flushQueries();
+    panel.trace.selection.selection[field] = field === 'trackUri' ? '/other-slice' : 2000n;
+    expect(panel.renderSliceCard()).toBeNull();
+    panel.updateSliceCard();
+    await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores an old slice response after selecting a non-slice without a redraw', async () => {
+    const panel = createPanel();
+    const pending = defer<ReturnType<typeof singleRow>>();
+    panel.engine.query.mockReturnValueOnce(pending);
+    panel.updateSliceCard();
+    panel.trace.tracks.getTrack.mockReturnValue({renderer: {rootTableName: 'sched_slice'}});
+    pending.resolve(singleRow(sliceRow));
+    await flushQueries();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    expect(m.redraw).not.toHaveBeenCalled();
+  });
+
+  it('ignores the first response after selection A to B to A', async () => {
+    const panel = createPanel();
+    const first = defer<ReturnType<typeof singleRow>>();
+    const latest = defer<ReturnType<typeof singleRow>>();
+    panel.engine.query.mockReturnValueOnce(first).mockReturnValueOnce(latest);
+    panel.updateSliceCard();
+    panel.trace.selection.selection = {kind: 'empty'};
+    panel.updateSliceCard();
+    panel.trace.selection.selection = {
+      kind: 'track_event', trackUri: '/slice/42', eventId: 42,
+      ts: 1000n, dur: 20_000_000n,
+    };
+    panel.updateSliceCard();
+    latest.resolve(singleRow({...sliceRow, name: 'latest'}));
+    await flushQueries();
+    first.resolve(singleRow({...sliceRow, name: 'obsolete'}));
+    await flushQueries();
+    expect(panel.state.sliceCardInfo.name).toBe('latest');
+    expect(panel.engine.query).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['trace', 'engine'])('ignores pending details after %s ownership changes', async (owner) => {
+    const panel = createPanel();
+    const pending = defer<ReturnType<typeof singleRow>>();
+    panel.engine.query.mockReturnValueOnce(pending);
+    panel.updateSliceCard();
+    panel[owner] = {...panel[owner]};
+    pending.resolve(singleRow(sliceRow));
+    await flushQueries();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    expect(m.redraw).not.toHaveBeenCalled();
+    panel.updateSliceCard();
+    await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(2);
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('work');
+  });
+
+  it('does not commit or redraw a pending card after unmount', async () => {
+    const panel = createPanel();
+    const pending = defer<ReturnType<typeof singleRow>>();
+    panel.engine.query.mockReturnValueOnce(pending);
+    panel.updateSliceCard();
+    panel.flushSessionSave = vi.fn();
+    panel.cancelSSEConnection = vi.fn();
+    panel.onremove();
+    vi.mocked(m.redraw).mockClear();
+    pending.resolve(singleRow(sliceRow));
+    await flushQueries();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    expect(m.redraw).not.toHaveBeenCalled();
+  });
+
+  it('keeps area queries on their original engine and ignores late area results', async () => {
+    const panel = createPanel();
+    const first = defer<ReturnType<typeof singleRow>>();
+    const originalEngine = panel.engine;
+    originalEngine.query.mockReturnValueOnce(first)
+      .mockResolvedValueOnce(noRows()).mockResolvedValueOnce(singleRow({cnt: 0}));
+    panel.trace.selection.selection = {kind: 'area', start: 100n, end: 200n, trackUris: []};
+    panel.updateSliceCard();
+    panel.engine = {query: vi.fn()};
+    panel.trace.selection.selection = {kind: 'empty'};
+    panel.updateSliceCard();
+    first.resolve(singleRow({cnt: 0, tracks: 0}));
+    await flushQueries();
+    await flushQueries();
+    expect(originalEngine.query).toHaveBeenCalledTimes(3);
+    expect(panel.engine.query).not.toHaveBeenCalled();
+    expect(panel.state.areaCardInfo).toBeNull();
   });
 
   it('distinguishes an unavailable jank query from an observed zero', async () => {
@@ -527,9 +842,11 @@ describe('AIPanel selection display cards', () => {
     });
   });
 
-  it('renders observed-zero and unavailable jank states distinctly', () => {
-    const panel = new AIPanel() as any;
-    panel.trace = {selection: {selection: {kind: 'area'}}};
+  it('renders observed-zero and unavailable jank states distinctly', async () => {
+    const panel = createPanel();
+    panel.trace.selection.selection = {
+      kind: 'area', start: 100n, end: 200n, trackUris: [],
+    };
     const base = {
       startNs: 100,
       endNs: 200,
@@ -543,37 +860,23 @@ describe('AIPanel selection display cards', () => {
       jankCount: 0,
     };
 
-    panel.state.areaCardInfo = {...base, jankStatus: 'observed'};
+    panel.queryAreaCardInfo = vi.fn().mockResolvedValue({...base, jankStatus: 'observed'});
+    panel.updateSliceCard();
+    await flushQueries();
     expect(collectVNodeText(panel.renderAreaCard())).toContain('未发现卡顿帧');
 
     panel.state.areaCardInfo = {...base, jankStatus: 'unavailable'};
     expect(collectVNodeText(panel.renderAreaCard())).toContain('卡顿数据不可用');
   });
 
-  it('does not classify an arbitrary selected slice using a fixed 16 ms budget', () => {
-    const panel = new AIPanel() as any;
-    panel.trace = {
-      selection: {
-        selection: {
-          kind: 'track_event',
-          eventId: 42,
-        },
-      },
-      timeline: {panIntoView: vi.fn()},
-    };
-    panel.state.sliceCardInfo = {
-      id: 42,
-      name: 'work',
-      ts: 1000,
-      dur: 20_000_000,
-      durMs: 20,
-      threadName: 'main',
-      processName: 'app',
-      depth: 0,
-      childCount: 0,
-    };
+  it('does not classify an arbitrary selected slice using a fixed 16 ms budget', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    await flushQueries();
 
     const text = collectVNodeText(panel.renderSliceCard());
+    expect(text).toContain('work');
+    expect(text).toContain('20.00ms');
     expect(text).not.toContain('超过帧预算');
     expect(text).not.toContain('卡顿分析');
     expect(text).not.toContain('⚠️');
@@ -2398,7 +2701,7 @@ describe('AIPanel /goto navigation', () => {
 });
 
 describe('AIPanel teaching pipeline compatibility view', () => {
-  it('passes visible window and selected slice context to backend request', () => {
+  it('passes visible window and selected slice context to backend request', async () => {
     const panel = new AIPanel() as any;
     panel.trace = {
       timeline: {
@@ -2409,19 +2712,29 @@ describe('AIPanel teaching pipeline compatibility view', () => {
       selection: {
         selection: {
           kind: 'track_event',
+          trackUri: '/slice/42',
           eventId: 42,
           ts: 120n,
           dur: 16n,
         },
       },
+      tracks: {getTrack: () => ({renderer: {rootTableName: 'slice'}})},
     };
-    panel.state.sliceCardInfo = {
-      ts: 123,
-      dur: 17,
+    panel.engine = {};
+    panel.querySliceCardInfo = vi.fn().mockResolvedValue({
+      id: 42,
+      ts: 120,
+      dur: 16,
+      durMs: 16 / 1e6,
       name: 'Choreographer#doFrame',
       threadName: 'main',
       processName: 'com.example.app',
-    };
+      depth: 0,
+      childCount: 0,
+    });
+    panel.updateSliceCard();
+    await Promise.resolve();
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('Choreographer#doFrame');
 
     expect(panel.buildTeachingPipelineRequestContext()).toEqual({
       packageName: 'com.example.app',
@@ -2429,12 +2742,19 @@ describe('AIPanel teaching pipeline compatibility view', () => {
       selectionContext: {
         kind: 'track_event',
         eventId: 42,
-        ts: 123,
-        dur: 17,
+        ts: 120,
+        dur: 16,
         name: 'Choreographer#doFrame',
         threadName: 'main',
         processName: 'com.example.app',
       },
+    });
+
+    // Display enrichment must never replace the actual selected interval.
+    panel.state.sliceCardInfo.ts = 123;
+    panel.state.sliceCardInfo.dur = 17;
+    expect(panel.buildTeachingPipelineRequestContext().selectionContext).toMatchObject({
+      ts: 120, dur: 16,
     });
   });
 

@@ -1552,13 +1552,13 @@ export const COMPARISON_PRESET_QUESTIONS: PresetQuestion[] = [
 // =============================================================================
 
 /**
- * Describes the user's current Perfetto UI selection (area or single slice).
- * Serialized and sent to the backend as identity and time bounds only. The
- * backend resolves descriptive trace facts before using them as evidence.
+ * Describes the user's current Perfetto UI selection (area or single track event).
+ * Sent as identity/time bounds and an optional native-table hint. The backend
+ * resolves and validates trace facts before using them as evidence.
  */
 export interface SelectionContext {
   kind: 'area' | 'track_event';
-  /** Where this scope came from: explicit Perfetto selection, selected slice, or current viewport fallback. */
+  /** Where this scope came from: explicit area/event selection or current viewport fallback. */
   source?: 'area_selection' | 'track_event_selection' | 'visible_window';
   // ── Area selection (M key) ──
   startNs?: number;
@@ -1567,11 +1567,13 @@ export interface SelectionContext {
   /** Stable Perfetto track identities for the selected area. */
   tracks?: SelectionTrackInfo[];
   trackCount?: number;
-  // ── Single slice selection ──
+  // ── Single track event selection ──
   trackUri?: string;
   eventId?: number;
   ts?: number;
   dur?: number;
+  /** Renderer table hint only; the backend must resolve the current native row. */
+  nativeTable?: 'slice';
 }
 
 /** Stable Perfetto track identity supplied by the UI. */

@@ -621,6 +621,13 @@ const SMART_SCENE_SELECTION_GROUPS: Array<{
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
+  private selectionCardOrdinal = 0;
+  private selectionCardRequest?: {
+    trace: Trace;
+    engine?: Engine;
+    key: string;
+    ordinal: number;
+  };
   private tracePairWorkspaceController = new TracePairWorkspaceController();
   private unsubscribeTracePairWorkspace?: () => void;
   private state: AIPanelState = {
@@ -2880,6 +2887,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
+    ++this.selectionCardOrdinal;
+    this.selectionCardRequest = undefined;
     const currentOidcAuthorityKey = this.currentOidcAuthorityKey();
     const authorityInvalidated = isSmartPerfettoOidcMode() && (
       !currentOidcAuthorityKey ||
@@ -8365,7 +8374,9 @@ Click ⚙️ to configure backend connection.`,
       );
     }
     if (sel.kind === 'track_event') {
-      return uiText('分析选中的 Slice', 'Analyze selected slice');
+      return this.selectedEventIsNativeSlice()
+        ? uiText('分析选中的 Slice', 'Analyze selected slice')
+        : uiText('分析选中的轨道事件', 'Analyze selected track event');
     }
     return uiText('分析当前选区', 'Analyze current selection');
   }
@@ -8390,6 +8401,12 @@ Click ⚙️ to configure backend connection.`,
       );
     }
     if (sel.kind === 'track_event') {
+      if (!this.selectedEventIsNativeSlice()) {
+        return uiText(
+          '分析当前选中的轨道事件：它是什么、关键时间，以及相关性能表现',
+          'Analyze the selected track event: what it is, its key timestamps, and relevant performance behavior',
+        );
+      }
       return uiText(
         '快速分析用户选中的这个 Slice：它是什么、关键时间、子调用耗时概况，以及是否明显异常',
         'Quickly analyze the selected slice: what it is, its key timestamps and child-call costs, and whether it is clearly abnormal',
@@ -9142,7 +9159,7 @@ Click ⚙️ to configure backend connection.`,
 
   /**
    * Query slice metadata for the Slice Selected card.
-   * Called when selection changes to a track_event.
+   * Called only for a track_event whose renderer identifies the native slice table.
    */
   private async querySliceCardInfo(
     eventId: number,
@@ -9197,6 +9214,7 @@ Click ⚙️ to configure backend connection.`,
     startNs: number,
     endNs: number,
   ): Promise<AreaCardInfo> {
+    const engine = this.engine;
     const durationMs = (endNs - startNs) / 1e6;
     let sliceCount = 0;
     let trackCount = 0;
@@ -9206,7 +9224,7 @@ Click ⚙️ to configure backend connection.`,
     let jankStatus: AreaCardInfo['jankStatus'] = 'unavailable';
     const topSlices: Array<{name: string; durMs: number; count: number}> = [];
 
-    if (!this.engine) {
+    if (!engine) {
       return {
         startNs,
         endNs,
@@ -9223,7 +9241,7 @@ Click ⚙️ to configure backend connection.`,
     }
 
     try {
-      const r = await this.engine.query(`
+      const r = await engine.query(`
         SELECT COUNT(*) as cnt, COUNT(DISTINCT s.track_id) as tracks
         FROM slice s
         WHERE s.ts >= ${startNs} AND s.ts + s.dur <= ${endNs} AND s.dur > 0
@@ -9239,7 +9257,7 @@ Click ⚙️ to configure backend connection.`,
     }
 
     try {
-      const r = await this.engine.query(`
+      const r = await engine.query(`
         SELECT s.name, COUNT(*) as cnt, CAST(SUM(s.dur)/1e6 AS REAL) as total_ms
         FROM slice s
         WHERE s.ts >= ${startNs} AND s.ts + s.dur <= ${endNs} AND s.dur > 0
@@ -9262,7 +9280,7 @@ Click ⚙️ to configure backend connection.`,
     }
 
     try {
-      const r = await this.engine.query(`
+      const r = await engine.query(`
         SELECT COUNT(*) as cnt FROM actual_frame_timeline_slice
         WHERE ts >= ${startNs} AND ts + dur <= ${endNs}
           AND jank_type IS NOT NULL AND jank_type != 'None'
@@ -9291,31 +9309,66 @@ Click ⚙️ to configure backend connection.`,
     };
   }
 
-  /**
-   * Detect selection changes (called from view()) and trigger async slice/area info query.
-   */
+  private selectedEventIsNativeSlice(): boolean {
+    const sel = this.trace?.selection.selection;
+    return sel?.kind === 'track_event' &&
+      this.trace?.tracks.getTrack(sel.trackUri)?.renderer.rootTableName === 'slice';
+  }
+
+  private selectionCardKey(): string {
+    const sel = this.trace?.selection.selection;
+    if (sel?.kind === 'track_event') {
+      return JSON.stringify([
+        sel.kind, sel.trackUri, sel.eventId, String(sel.ts),
+        sel.dur === undefined ? null : String(sel.dur),
+        this.trace?.tracks.getTrack(sel.trackUri)?.renderer.rootTableName,
+      ]);
+    }
+    if (sel?.kind === 'area') {
+      return JSON.stringify([sel.kind, String(sel.start), String(sel.end), sel.trackUris]);
+    }
+    return 'none';
+  }
+
+  private ownsSelectionCardRequest(request = this.selectionCardRequest): boolean {
+    return request !== undefined &&
+      request.ordinal === this.selectionCardOrdinal &&
+      request.trace === this.trace && request.engine === this.engine &&
+      request.key === this.selectionCardKey();
+  }
+
+  private currentSliceCardInfo(): SliceCardInfo | null {
+    const sel = this.trace?.selection.selection;
+    return sel?.kind === 'track_event' && this.selectedEventIsNativeSlice() &&
+      this.ownsSelectionCardRequest() && this.state.sliceCardInfo?.id === sel.eventId
+      ? this.state.sliceCardInfo : null;
+  }
+
+  /** Detect selection changes and query only within the current trace/table. */
   private updateSliceCard(): void {
-    if (!this.trace) return;
-    const sel = this.trace.selection.selection;
-    const selKey =
-      sel.kind === 'track_event'
-        ? `te-${sel.eventId}`
-        : sel.kind === 'area'
-          ? `area-${Number(sel.start)}-${Number(sel.end)}`
-          : 'none';
-    if (selKey === this.state.sliceCardPrevSelId) return;
-    this.state.sliceCardPrevSelId = selKey;
+    if (this.ownsSelectionCardRequest()) return;
+    const ordinal = ++this.selectionCardOrdinal;
+    this.selectionCardRequest = undefined;
+    const key = this.selectionCardKey();
+    this.state.sliceCardPrevSelId = key;
     this.state.sliceCardDismissed = false;
     this.state.sliceCardInfo = null;
     this.state.areaCardInfo = null;
-    if (sel.kind === 'track_event') {
+    const trace = this.trace;
+    if (!trace) return;
+    const request = {trace, engine: this.engine, key, ordinal};
+    this.selectionCardRequest = request;
+    const sel = trace.selection.selection;
+    if (sel.kind === 'track_event' && this.selectedEventIsNativeSlice()) {
       this.querySliceCardInfo(sel.eventId).then((info) => {
+        if (!this.ownsSelectionCardRequest(request)) return;
         this.state.sliceCardInfo = info;
         m.redraw();
       });
     } else if (sel.kind === 'area') {
       this.queryAreaCardInfo(Number(sel.start), Number(sel.end)).then(
         (info) => {
+          if (!this.ownsSelectionCardRequest(request)) return;
           this.state.areaCardInfo = info;
           m.redraw();
         },
@@ -9330,19 +9383,49 @@ Click ⚙️ to configure backend connection.`,
   }
 
   /**
-   * Render the Slice Selected card above the input box.
+   * Render native slice details or neutral track-event facts above the input box.
    */
   private renderSliceCard(): m.Vnode | null {
     if (!this.trace) return null;
     const sel = this.trace.selection.selection;
     if (sel.kind !== 'track_event') return null;
     if (this.state.sliceCardDismissed) return null;
-    const info = this.state.sliceCardInfo;
+    if (!this.selectedEventIsNativeSlice()) {
+      return m('div.sp-sel-card', [
+        m('div.sp-sel-card-header', [
+          m('span.sp-sel-card-title', uiText('已选轨道事件', 'Track event selected')),
+          m('button.sp-sel-card-dismiss', {
+            onclick: () => {
+              this.state.sliceCardDismissed = true;
+              m.redraw();
+            },
+            title: uiText('关闭', 'Dismiss'),
+          }, '✕'),
+        ]),
+        m('div.sp-sel-card-meta', [
+          m('span.sp-meta-pill', `ID ${sel.eventId}`),
+          m('span.sp-meta-pill', [
+            '⏱ ', sel.dur !== undefined && sel.dur >= 0n
+              ? this.fmtDurMs(Number(sel.dur) / 1e6)
+              : uiText('持续时间未知', 'Duration unavailable'),
+          ]),
+          m('span.sp-meta-pill', `📍 ${(Number(sel.ts) / 1e6).toFixed(1)}ms`),
+        ]),
+        m('div.sp-sel-card-actions', [
+          m('button.sp-action-btn.sp-action-btn--primary', {
+            onclick: () => this.analyzeCurrentSelection(),
+            disabled: this.state.isLoading,
+          }, uiText('分析当前选区', 'Analyze current selection')),
+        ]),
+      ]);
+    }
+    const info = this.currentSliceCardInfo();
     if (!info) return null;
 
     const dur = this.fmtDurMs(info.durMs);
 
     const onAction = (query: string) => {
+      if (this.currentSliceCardInfo() !== info) return;
       this.state.sliceCardDismissed = true;
       this.state.input = query;
       this.sendMessage();
@@ -9450,7 +9533,7 @@ Click ⚙️ to configure backend connection.`,
     const sel = this.trace.selection.selection;
     if (sel.kind !== 'area') return null;
     if (this.state.sliceCardDismissed) return null;
-    const info = this.state.areaCardInfo;
+    const info = this.ownsSelectionCardRequest() ? this.state.areaCardInfo : null;
     if (!info) return null;
 
     const startMs = (info.startNs / 1e6).toFixed(1);
@@ -9687,6 +9770,8 @@ Click ⚙️ to configure backend connection.`,
 
     if (sel.kind === 'track_event') {
       const duration = sel.dur === undefined ? undefined : Number(sel.dur);
+      const nativeTable =
+        this.trace.tracks.getTrack(sel.trackUri)?.renderer.rootTableName;
       const ctx: SelectionContext = {
         kind: 'track_event',
         source: 'track_event_selection',
@@ -9694,6 +9779,7 @@ Click ⚙️ to configure backend connection.`,
         eventId: sel.eventId,
         ts: Number(sel.ts),
         ...(duration !== undefined && duration >= 0 ? {dur: duration} : {}),
+        ...(nativeTable === 'slice' ? {nativeTable} : {}),
       };
       console.log(
         '[AIPanel] captureSelectionContext: track_event captured',
@@ -10724,7 +10810,7 @@ Click ⚙️ to configure backend connection.`,
         }
       }
 
-      // Capture current Perfetto selection (area / slice) and include in request
+      // Include the current Perfetto area or track event selection in the request.
       const selectionContext = await this.captureSelectionContext(message);
       if (selectionContext) {
         requestBody.selectionContext = selectionContext;
@@ -11884,17 +11970,15 @@ Click ⚙️ to configure backend connection.`,
         }
       : undefined;
     const selection = this.trace?.selection?.selection;
-    const sliceInfo = this.state.sliceCardInfo;
-    const areaInfo = this.state.areaCardInfo;
+    const sliceInfo = this.currentSliceCardInfo();
+    const areaInfo = this.ownsSelectionCardRequest() ? this.state.areaCardInfo : null;
     const selectionContext =
       selection?.kind === 'track_event'
         ? {
             kind: 'track_event',
             eventId: selection.eventId,
-            ts: sliceInfo?.ts ?? Number(selection.ts),
-            dur:
-              sliceInfo?.dur ??
-              (selection.dur !== undefined ? Number(selection.dur) : undefined),
+            ts: Number(selection.ts),
+            dur: selection.dur !== undefined ? Number(selection.dur) : undefined,
             name: sliceInfo?.name,
             threadName: sliceInfo?.threadName,
             processName: sliceInfo?.processName,
@@ -11902,8 +11986,8 @@ Click ⚙️ to configure backend connection.`,
         : selection?.kind === 'area'
           ? {
               kind: 'area',
-              startTs: areaInfo?.startNs ?? Number(selection.start),
-              endTs: areaInfo?.endNs ?? Number(selection.end),
+              startTs: Number(selection.start),
+              endTs: Number(selection.end),
               durationMs: areaInfo?.durationMs,
             }
           : undefined;
