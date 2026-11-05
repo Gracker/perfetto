@@ -72,6 +72,11 @@ import {
 } from '../../core/backend_upload_state';
 import type {TraceSource} from '../../core/trace_source';
 import {Time} from '../../base/time';
+import {
+  AsyncMemo,
+  TASK_CANCELLED,
+  type CancellationSignal,
+} from '../../base/async_memo';
 import {download} from '../../base/download_utils';
 import {getCanonicalTraceName} from './trace_name';
 // Note: generated types are used by SSE event handlers module
@@ -621,12 +626,18 @@ const SMART_SCENE_SELECTION_GROUPS: Array<{
 export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private engine?: Engine;
   private trace?: Trace;
-  private selectionCardOrdinal = 0;
-  private selectionCardRequest?: {
-    trace: Trace;
+  private readonly selectionCardMemo = new AsyncMemo<
+    | {kind: 'slice'; info: SliceCardInfo | null}
+    | {kind: 'area'; info: AreaCardInfo}
+    | {kind: 'empty'}
+  >();
+  private selectionCardRemoved = false;
+  private selectionCardGeneration = 0;
+  private selectionCardContext?: {
+    trace?: Trace;
     engine?: Engine;
     key: string;
-    ordinal: number;
+    generation: number;
   };
   private tracePairWorkspaceController = new TracePairWorkspaceController();
   private unsubscribeTracePairWorkspace?: () => void;
@@ -2887,8 +2898,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
-    ++this.selectionCardOrdinal;
-    this.selectionCardRequest = undefined;
+    this.selectionCardRemoved = true;
+    this.selectionCardContext = undefined;
+    this.selectionCardMemo.invalidate();
+    this.selectionCardMemo.dispose();
     const currentOidcAuthorityKey = this.currentOidcAuthorityKey();
     const authorityInvalidated = isSmartPerfettoOidcMode() && (
       !currentOidcAuthorityKey ||
@@ -9163,10 +9176,11 @@ Click ⚙️ to configure backend connection.`,
    */
   private async querySliceCardInfo(
     eventId: number,
+    engine = this.engine,
   ): Promise<SliceCardInfo | null> {
-    if (!this.engine) return null;
+    if (!engine) return null;
     try {
-      const result = await this.engine.query(`
+      const result = await engine.query(`
         SELECT s.id, s.name, s.ts, s.dur,
           CAST(s.dur / 1e6 AS REAL) as dur_ms,
           COALESCE(t.name, '') as thread_name,
@@ -9213,8 +9227,9 @@ Click ⚙️ to configure backend connection.`,
   private async queryAreaCardInfo(
     startNs: number,
     endNs: number,
-  ): Promise<AreaCardInfo> {
-    const engine = this.engine;
+    engine = this.engine,
+    signal?: CancellationSignal,
+  ): Promise<AreaCardInfo | typeof TASK_CANCELLED> {
     const durationMs = (endNs - startNs) / 1e6;
     let sliceCount = 0;
     let trackCount = 0;
@@ -9224,6 +9239,7 @@ Click ⚙️ to configure backend connection.`,
     let jankStatus: AreaCardInfo['jankStatus'] = 'unavailable';
     const topSlices: Array<{name: string; durMs: number; count: number}> = [];
 
+    if (signal?.isCancelled) return TASK_CANCELLED;
     if (!engine) {
       return {
         startNs,
@@ -9256,6 +9272,7 @@ Click ⚙️ to configure backend connection.`,
       /* unavailable */
     }
 
+    if (signal?.isCancelled) return TASK_CANCELLED;
     try {
       const r = await engine.query(`
         SELECT s.name, COUNT(*) as cnt, CAST(SUM(s.dur)/1e6 AS REAL) as total_ms
@@ -9279,6 +9296,7 @@ Click ⚙️ to configure backend connection.`,
       topSlices.length = 0;
     }
 
+    if (signal?.isCancelled) return TASK_CANCELLED;
     try {
       const r = await engine.query(`
         SELECT COUNT(*) as cnt FROM actual_frame_timeline_slice
@@ -9294,6 +9312,7 @@ Click ⚙️ to configure backend connection.`,
       /* ignore */
     }
 
+    if (signal?.isCancelled) return TASK_CANCELLED;
     return {
       startNs,
       endNs,
@@ -9330,50 +9349,71 @@ Click ⚙️ to configure backend connection.`,
     return 'none';
   }
 
-  private ownsSelectionCardRequest(request = this.selectionCardRequest): boolean {
-    return request !== undefined &&
-      request.ordinal === this.selectionCardOrdinal &&
-      request.trace === this.trace && request.engine === this.engine &&
-      request.key === this.selectionCardKey();
+  private ownsSelectionCardContext(context = this.selectionCardContext): boolean {
+    return !this.selectionCardRemoved && context !== undefined &&
+      context === this.selectionCardContext &&
+      context.trace === this.trace && context.engine === this.engine &&
+      context.key === this.selectionCardKey();
   }
 
   private currentSliceCardInfo(): SliceCardInfo | null {
     const sel = this.trace?.selection.selection;
     return sel?.kind === 'track_event' && this.selectedEventIsNativeSlice() &&
-      this.ownsSelectionCardRequest() && this.state.sliceCardInfo?.id === sel.eventId
+      this.ownsSelectionCardContext() && this.state.sliceCardInfo?.id === sel.eventId
       ? this.state.sliceCardInfo : null;
   }
 
   /** Detect selection changes and query only within the current trace/table. */
   private updateSliceCard(): void {
-    if (this.ownsSelectionCardRequest()) return;
-    const ordinal = ++this.selectionCardOrdinal;
-    this.selectionCardRequest = undefined;
-    const key = this.selectionCardKey();
-    this.state.sliceCardPrevSelId = key;
-    this.state.sliceCardDismissed = false;
-    this.state.sliceCardInfo = null;
-    this.state.areaCardInfo = null;
-    const trace = this.trace;
-    if (!trace) return;
-    const request = {trace, engine: this.engine, key, ordinal};
-    this.selectionCardRequest = request;
-    const sel = trace.selection.selection;
-    if (sel.kind === 'track_event' && this.selectedEventIsNativeSlice()) {
-      this.querySliceCardInfo(sel.eventId).then((info) => {
-        if (!this.ownsSelectionCardRequest(request)) return;
-        this.state.sliceCardInfo = info;
-        m.redraw();
-      });
-    } else if (sel.kind === 'area') {
-      this.queryAreaCardInfo(Number(sel.start), Number(sel.end)).then(
-        (info) => {
-          if (!this.ownsSelectionCardRequest(request)) return;
-          this.state.areaCardInfo = info;
-          m.redraw();
-        },
-      );
+    if (this.selectionCardRemoved) return;
+    if (!this.ownsSelectionCardContext()) {
+      this.selectionCardContext = {
+        trace: this.trace,
+        engine: this.engine,
+        key: this.selectionCardKey(),
+        // Distinguish A→B→A tasks even when an older A is still settling.
+        generation: ++this.selectionCardGeneration,
+      };
+      this.state.sliceCardPrevSelId = this.selectionCardContext.key;
+      this.state.sliceCardDismissed = false;
     }
+    const context = this.selectionCardContext;
+    if (!context) return;
+    const sel = context.trace?.selection.selection;
+    // Capture primitive query inputs; a queued task must not read a later selection.
+    const query =
+      sel?.kind === 'track_event' && this.selectedEventIsNativeSlice()
+        ? {kind: 'slice' as const, eventId: sel.eventId}
+        : sel?.kind === 'area'
+          ? {kind: 'area' as const, start: Number(sel.start), end: Number(sel.end)}
+          : {kind: 'empty' as const};
+    const panel = this;
+    const {data} = this.selectionCardMemo.use({
+      key: {generation: context.generation, selection: context.key},
+      compute: async (memoSignal) => {
+        const signal: CancellationSignal = {
+          get isCancelled() {
+            return memoSignal.isCancelled ||
+              !panel.ownsSelectionCardContext(context);
+          },
+        };
+        if (signal.isCancelled) return TASK_CANCELLED;
+        if (query.kind === 'slice') {
+          const info = await this.querySliceCardInfo(query.eventId, context.engine);
+          return signal.isCancelled ? TASK_CANCELLED : {kind: 'slice', info};
+        }
+        if (query.kind === 'area') {
+          const info = await this.queryAreaCardInfo(
+            query.start, query.end, context.engine, signal,
+          );
+          return signal.isCancelled || info === TASK_CANCELLED
+            ? TASK_CANCELLED : {kind: 'area', info};
+        }
+        return {kind: 'empty'};
+      },
+    });
+    this.state.sliceCardInfo = data?.kind === 'slice' ? data.info : null;
+    this.state.areaCardInfo = data?.kind === 'area' ? data.info : null;
   }
 
   private fmtDurMs(ms: number): string {
@@ -9533,7 +9573,7 @@ Click ⚙️ to configure backend connection.`,
     const sel = this.trace.selection.selection;
     if (sel.kind !== 'area') return null;
     if (this.state.sliceCardDismissed) return null;
-    const info = this.ownsSelectionCardRequest() ? this.state.areaCardInfo : null;
+    const info = this.ownsSelectionCardContext() ? this.state.areaCardInfo : null;
     if (!info) return null;
 
     const startMs = (info.startNs / 1e6).toFixed(1);
@@ -11971,7 +12011,7 @@ Click ⚙️ to configure backend connection.`,
       : undefined;
     const selection = this.trace?.selection?.selection;
     const sliceInfo = this.currentSliceCardInfo();
-    const areaInfo = this.ownsSelectionCardRequest() ? this.state.areaCardInfo : null;
+    const areaInfo = this.ownsSelectionCardContext() ? this.state.areaCardInfo : null;
     const selectionContext =
       selection?.kind === 'track_event'
         ? {

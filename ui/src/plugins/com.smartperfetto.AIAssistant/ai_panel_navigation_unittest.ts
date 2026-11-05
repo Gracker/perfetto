@@ -524,7 +524,10 @@ describe('AIPanel evidence-backed commands', () => {
 
 describe('AIPanel selection display cards', () => {
   beforeEach(() => vi.spyOn(m, 'redraw').mockImplementation(() => undefined));
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.restoreAllMocks();
+  });
 
   const singleRow = (row: Record<string, unknown>) => ({
     iter: () => {
@@ -559,14 +562,70 @@ describe('AIPanel selection display cards', () => {
     return panel;
   };
   const flushQueries = async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    // Match AsyncMemo's owning tests: let the queued promise chain settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   };
+  const renderAfterQueries = async (panel: {updateSliceCard: () => void}) => {
+    await flushQueries();
+    panel.updateSliceCard();
+  };
+
+  it('projects completed card data only in the next render and memoizes the same selection', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    await flushQueries();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    panel.updateSliceCard();
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('work');
+    panel.updateSliceCard();
+    await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes card queries and keeps only the latest pending selection', async () => {
+    const panel = createPanel();
+    const first = defer<ReturnType<typeof singleRow>>();
+    const latest = defer<ReturnType<typeof singleRow>>();
+    panel.engine.query.mockReturnValueOnce(first).mockReturnValueOnce(latest);
+    panel.updateSliceCard();
+    await flushQueries();
+    panel.trace.selection.selection.eventId = 43;
+    panel.updateSliceCard();
+    panel.trace.selection.selection.eventId = 44;
+    panel.updateSliceCard();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+    first.resolve(singleRow(sliceRow));
+    await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(2);
+    expect(panel.engine.query.mock.calls[1][0]).toContain('WHERE s.id = 44');
+    expect(panel.state.sliceCardInfo).toBeNull();
+    latest.resolve(singleRow({...sliceRow, id: 44, name: 'latest'}));
+    await flushQueries();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    panel.updateSliceCard();
+    expect(panel.state.sliceCardInfo.name).toBe('latest');
+    expect(panel.engine.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not run a queued query with a mutated selection before the next render', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    panel.trace.selection.selection.eventId = 43;
+    await flushQueries();
+    expect(panel.engine.query).not.toHaveBeenCalled();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    panel.engine.query.mockResolvedValue(singleRow({...sliceRow, id: 43}));
+    panel.updateSliceCard();
+    await renderAfterQueries(panel);
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+    expect(panel.engine.query.mock.calls[0][0]).toContain('WHERE s.id = 43');
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('work');
+  });
 
   it('queries and displays details only for the actual native slice renderer', async () => {
     const panel = createPanel();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     expect(panel.engine.query).toHaveBeenCalledTimes(1);
     expect(panel.engine.query.mock.calls[0][0]).toContain('WHERE s.id = 42');
     const text = collectVNodeText(panel.renderSliceCard());
@@ -656,7 +715,7 @@ describe('AIPanel selection display cards', () => {
   it('clears same-id slice details on a different track and preserves the real selection', async () => {
     const panel = createPanel();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     expect(collectVNodeText(panel.renderSliceCard())).toContain('work');
     panel.trace.selection.selection = {
       kind: 'track_event', trackUri: '/sched_cpu7', eventId: 42,
@@ -679,7 +738,7 @@ describe('AIPanel selection display cards', () => {
   it('invalidates cached details when the same track renderer changes table', async () => {
     const panel = createPanel();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     panel.trace.tracks.getTrack.mockReturnValue({renderer: {rootTableName: 'sched_slice'}});
     expect(collectVNodeText(panel.renderSliceCard())).not.toContain('work');
     panel.updateSliceCard();
@@ -690,11 +749,11 @@ describe('AIPanel selection display cards', () => {
   it.each(['trackUri', 'ts', 'dur'])('refreshes slice details when only %s changes', async (field) => {
     const panel = createPanel();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     panel.trace.selection.selection[field] = field === 'trackUri' ? '/other-slice' : 2000n;
     expect(panel.renderSliceCard()).toBeNull();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     expect(panel.engine.query).toHaveBeenCalledTimes(2);
   });
 
@@ -703,11 +762,13 @@ describe('AIPanel selection display cards', () => {
     const pending = defer<ReturnType<typeof singleRow>>();
     panel.engine.query.mockReturnValueOnce(pending);
     panel.updateSliceCard();
+    await flushQueries();
     panel.trace.tracks.getTrack.mockReturnValue({renderer: {rootTableName: 'sched_slice'}});
     pending.resolve(singleRow(sliceRow));
     await flushQueries();
     expect(panel.state.sliceCardInfo).toBeNull();
-    expect(m.redraw).not.toHaveBeenCalled();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
+    expect(collectVNodeText(panel.renderSliceCard())).toContain('已选轨道事件');
   });
 
   it('ignores the first response after selection A to B to A', async () => {
@@ -716,6 +777,7 @@ describe('AIPanel selection display cards', () => {
     const latest = defer<ReturnType<typeof singleRow>>();
     panel.engine.query.mockReturnValueOnce(first).mockReturnValueOnce(latest);
     panel.updateSliceCard();
+    await flushQueries();
     panel.trace.selection.selection = {kind: 'empty'};
     panel.updateSliceCard();
     panel.trace.selection.selection = {
@@ -723,10 +785,15 @@ describe('AIPanel selection display cards', () => {
       ts: 1000n, dur: 20_000_000n,
     };
     panel.updateSliceCard();
-    latest.resolve(singleRow({...sliceRow, name: 'latest'}));
-    await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
     first.resolve(singleRow({...sliceRow, name: 'obsolete'}));
     await flushQueries();
+    expect(panel.engine.query).toHaveBeenCalledTimes(2);
+    // The old A completing must not clear the new A's pending identity.
+    panel.updateSliceCard();
+    expect(panel.state.sliceCardInfo).toBeNull();
+    latest.resolve(singleRow({...sliceRow, name: 'latest'}));
+    await renderAfterQueries(panel);
     expect(panel.state.sliceCardInfo.name).toBe('latest');
     expect(panel.engine.query).toHaveBeenCalledTimes(2);
   });
@@ -736,21 +803,25 @@ describe('AIPanel selection display cards', () => {
     const pending = defer<ReturnType<typeof singleRow>>();
     panel.engine.query.mockReturnValueOnce(pending);
     panel.updateSliceCard();
+    await flushQueries();
     panel[owner] = {...panel[owner]};
     pending.resolve(singleRow(sliceRow));
     await flushQueries();
     expect(panel.state.sliceCardInfo).toBeNull();
-    expect(m.redraw).not.toHaveBeenCalled();
+    expect(panel.renderSliceCard()).toBeNull();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     expect(panel.engine.query).toHaveBeenCalledTimes(2);
     expect(collectVNodeText(panel.renderSliceCard())).toContain('work');
   });
 
-  it('does not commit or redraw a pending card after unmount', async () => {
+  it('does not commit or start queued card queries after unmount', async () => {
     const panel = createPanel();
     const pending = defer<ReturnType<typeof singleRow>>();
     panel.engine.query.mockReturnValueOnce(pending);
+    panel.updateSliceCard();
+    await flushQueries();
+    panel.trace.selection.selection.eventId = 43;
     panel.updateSliceCard();
     panel.flushSessionSave = vi.fn();
     panel.cancelSSEConnection = vi.fn();
@@ -759,10 +830,25 @@ describe('AIPanel selection display cards', () => {
     pending.resolve(singleRow(sliceRow));
     await flushQueries();
     expect(panel.state.sliceCardInfo).toBeNull();
-    expect(m.redraw).not.toHaveBeenCalled();
+    // AsyncMemo may redraw in its finally block, but disposed work cannot
+    // project data, dispatch queued SQL, or use the disposed memo again.
+    expect(() => panel.updateSliceCard()).not.toThrow();
+    expect(panel.engine.query).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps area queries on their original engine and ignores late area results', async () => {
+  it('does not start SQL when unmounted before the memo task starts', async () => {
+    const panel = createPanel();
+    panel.updateSliceCard();
+    panel.flushSessionSave = vi.fn();
+    panel.cancelSSEConnection = vi.fn();
+    panel.onremove();
+    await flushQueries();
+    expect(() => panel.updateSliceCard()).not.toThrow();
+    expect(panel.engine.query).not.toHaveBeenCalled();
+    expect(panel.state.sliceCardInfo).toBeNull();
+  });
+
+  it.each(['resolve', 'reject'])('stops old area SQL after an owner change and late %s', async (settle) => {
     const panel = createPanel();
     const first = defer<ReturnType<typeof singleRow>>();
     const originalEngine = panel.engine;
@@ -770,13 +856,14 @@ describe('AIPanel selection display cards', () => {
       .mockResolvedValueOnce(noRows()).mockResolvedValueOnce(singleRow({cnt: 0}));
     panel.trace.selection.selection = {kind: 'area', start: 100n, end: 200n, trackUris: []};
     panel.updateSliceCard();
+    await flushQueries();
     panel.engine = {query: vi.fn()};
     panel.trace.selection.selection = {kind: 'empty'};
     panel.updateSliceCard();
-    first.resolve(singleRow({cnt: 0, tracks: 0}));
+    if (settle === 'resolve') first.resolve(singleRow({cnt: 0, tracks: 0}));
+    else first.reject(new Error('previous engine unavailable'));
     await flushQueries();
-    await flushQueries();
-    expect(originalEngine.query).toHaveBeenCalledTimes(3);
+    expect(originalEngine.query).toHaveBeenCalledTimes(1);
     expect(panel.engine.query).not.toHaveBeenCalled();
     expect(panel.state.areaCardInfo).toBeNull();
   });
@@ -862,7 +949,7 @@ describe('AIPanel selection display cards', () => {
 
     panel.queryAreaCardInfo = vi.fn().mockResolvedValue({...base, jankStatus: 'observed'});
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
     expect(collectVNodeText(panel.renderAreaCard())).toContain('未发现卡顿帧');
 
     panel.state.areaCardInfo = {...base, jankStatus: 'unavailable'};
@@ -872,7 +959,7 @@ describe('AIPanel selection display cards', () => {
   it('does not classify an arbitrary selected slice using a fixed 16 ms budget', async () => {
     const panel = createPanel();
     panel.updateSliceCard();
-    await flushQueries();
+    await renderAfterQueries(panel);
 
     const text = collectVNodeText(panel.renderSliceCard());
     expect(text).toContain('work');
@@ -2733,7 +2820,8 @@ describe('AIPanel teaching pipeline compatibility view', () => {
       childCount: 0,
     });
     panel.updateSliceCard();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    panel.updateSliceCard();
     expect(collectVNodeText(panel.renderSliceCard())).toContain('Choreographer#doFrame');
 
     expect(panel.buildTeachingPipelineRequestContext()).toEqual({
