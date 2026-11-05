@@ -13,8 +13,6 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-INCLUDE PERFETTO MODULE intervals.intersect;
-
 INCLUDE PERFETTO MODULE wattson.device_infos;
 
 INCLUDE PERFETTO MODULE wattson.estimates;
@@ -29,30 +27,26 @@ INCLUDE PERFETTO MODULE wattson.tasks.task_slices;
 
 INCLUDE PERFETTO MODULE wattson.ui.continuous_estimates;
 
-INCLUDE PERFETTO MODULE wattson.utils;
+-- GPU tasks with the active task count and total GPU power at each instant.
+CREATE PERFETTO TABLE _gpu_tasks_w_power AS
+INTERVAL INTERSECTION OF (
+  _gpu_tasks AS task,
+  _gpu_active_task_count AS task_count,
+  _gpu_estimates_mw AS power
+)
+|> SELECT ts, dur, task.uid, task.gpu_id, task_count.active_tasks, power.gpu_mw;
 
 -- Attribute GPU power to each UID based on its active task count.
 -- Formula: attributed_mw = total_gpu_mw / active_tasks
 CREATE PERFETTO TABLE _gpu_tasks_attribution AS
 SELECT
-  ii.ts,
-  ii.dur,
-  t.uid,
-  t.gpu_id,
+  ts,
+  dur,
+  uid,
+  gpu_id,
   -- Calculate attributed power (mW) proportionally shared
-  iif(ii.id_1 > 0, p.gpu_mw / ii.id_1, 0.0) AS estimated_mw
-FROM _interval_intersect!(
-  (
-    _ii_subquery!(_gpu_tasks),
-    (SELECT active_tasks AS id, ts, dur FROM _gpu_active_task_count),
-    _ii_subquery!(_gpu_estimates_mw)
-  ),
-  ()
-) AS ii
-JOIN _gpu_tasks AS t
-  ON t._auto_id = ii.id_0
-JOIN _gpu_estimates_mw AS p
-  ON p._auto_id = ii.id_2;
+  iif(active_tasks > 0, gpu_mw / active_tasks, 0.0) AS estimated_mw
+FROM _gpu_tasks_w_power;
 
 CREATE PERFETTO TABLE _unioned_wattson_estimates_mw AS
 SELECT ts, dur, 0 AS cpu, cpu0_mw AS estimated_mw
@@ -100,18 +94,11 @@ WHERE
 -- Only utid is carried here; descriptive metadata lives in _wattson_task_metadata
 -- and is joined once after aggregation.
 CREATE PERFETTO TABLE _estimates_w_tasks_attribution AS
-SELECT ii.ts, ii.dur, ii.cpu, uw.estimated_mw, s.utid
-FROM _interval_intersect!(
-  (
-    _ii_subquery!(_unioned_wattson_estimates_mw),
-    _ii_subquery!(_wattson_task_slices)
-  ),
-  (cpu)
-) AS ii
-JOIN _unioned_wattson_estimates_mw AS uw
-  ON uw._auto_id = id_0
-JOIN _wattson_task_slices AS s
-  ON s._auto_id = id_1;
+INTERVAL INTERSECTION OF (
+  _unioned_wattson_estimates_mw AS estimate,
+  _wattson_task_slices AS task
+) PER cpu
+|> SELECT ts, dur, cpu, estimate.estimated_mw, task.utid;
 
 -- Standalone GPU attribution table
 CREATE PERFETTO TABLE _gpu_estimates_w_tasks_attribution AS

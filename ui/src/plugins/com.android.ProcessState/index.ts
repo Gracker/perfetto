@@ -12,30 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {HSLColor} from '../../base/color';
 import {createAggregationTab} from '../../components/aggregation_adapter';
-import {CounterTrack} from '../../components/tracks/counter_track';
+import {
+  getColorForSlice,
+  GRAY,
+  makeColorScheme,
+} from '../../components/colorizer';
 import {SliceTrack} from '../../components/tracks/slice_track';
+import {SliceTrackDetailsPanel} from '../../components/tracks/slice_track_details_panel';
 import type {PerfettoPlugin} from '../../public/plugin';
 import type {Trace} from '../../public/trace';
 import {TrackNode} from '../../public/workspace';
 import {SourceDataset} from '../../trace_processor/dataset';
 import {
   LONG,
+  LONG_NULL,
   NUM,
   NUM_NULL,
   STR,
   STR_NULL,
 } from '../../trace_processor/query_result';
-import {sqliteString} from '../../base/string_utils';
 import {
+  ProcessExitsAggregator,
+  ProcessStartsAggregator,
   ProcessStateResidencyAggregator,
   ProcessStateTransitionsAggregator,
   processTrackUri,
   TAG_COUNT_TRACK,
   TAG_PROCESS_TRACK,
 } from './aggregators';
+import {ProcessStateCountTrack} from './state_count_track';
 
-const PROCESS_STATE_SCHEMA = {
+const BASE_SCHEMA = {
   id: NUM,
   ts: LONG,
   dur: LONG,
@@ -48,8 +57,27 @@ const PROCESS_STATE_SCHEMA = {
   version_code: NUM_NULL,
   debuggable: NUM_NULL,
   state: STR,
-  reason: STR_NULL,
+  state_change_reason: STR_NULL,
 } as const;
+
+const NONEXISTENT_SCHEMA = {
+  ...BASE_SCHEMA,
+  hosting_type: STR_NULL,
+  hosting_name: STR_NULL,
+  trigger_type: STR_NULL,
+  bind_application_delay_ms: LONG_NULL,
+  process_start_delay_ms: LONG_NULL,
+} as const;
+
+const EXITED_SCHEMA = {
+  ...BASE_SCHEMA,
+  exit_reason: STR_NULL,
+  exit_subreason: STR_NULL,
+} as const;
+
+const PROCESS_STATE_SCHEMA = {...NONEXISTENT_SCHEMA, ...EXITED_SCHEMA} as const;
+
+const SLATE = makeColorScheme(new HSLColor([210, 18, 48]));
 
 /**
  * Visualizes Android framework process states over the lifetime of a trace.
@@ -78,6 +106,12 @@ export default class ProcessState implements PerfettoPlugin {
     ctx.selection.registerAreaSelectionTab(
       createAggregationTab(ctx, new ProcessStateTransitionsAggregator(ctx)),
     );
+    ctx.selection.registerAreaSelectionTab(
+      createAggregationTab(ctx, new ProcessStartsAggregator(ctx)),
+    );
+    ctx.selection.registerAreaSelectionTab(
+      createAggregationTab(ctx, new ProcessExitsAggregator(ctx)),
+    );
 
     const group = new TrackNode({
       name: 'Process states',
@@ -102,7 +136,7 @@ export default class ProcessState implements PerfettoPlugin {
   // at any point in time. Ordered by declaration order in the proto.
   private async createConcurrencyTracks(ctx: Trace): Promise<TrackNode> {
     const summary = new TrackNode({
-      name: 'Concurrency by state',
+      name: 'By state',
       isSummary: true,
     });
 
@@ -123,15 +157,7 @@ export default class ProcessState implements PerfettoPlugin {
       const uri = `${ProcessState.id}#count.${state}`;
       ctx.tracks.registerTrack({
         uri,
-        renderer: CounterTrack.create({
-          trace: ctx,
-          uri,
-          sqlSource: `
-            SELECT ts, concurrency AS value
-            FROM _android_process_state_concurrency
-            WHERE state = ${sqliteString(state)}
-          `,
-        }),
+        renderer: new ProcessStateCountTrack(ctx, uri, state),
         tags: {type: TAG_COUNT_TRACK, state},
         description: `Number of processes concurrently in ${state}.`,
       });
@@ -155,7 +181,10 @@ export default class ProcessState implements PerfettoPlugin {
         process_name AS name
       FROM _android_process_state_intervals
       GROUP BY upid
-      ORDER BY uid NULLS LAST, min(ts), pid
+      ORDER BY
+        uid NULLS LAST,
+        min(ts),
+        pid
     `);
 
     for (
@@ -179,6 +208,28 @@ export default class ProcessState implements PerfettoPlugin {
           // These tracks come in their hundreds, so keep them compact.
           sliceLayout: {sliceHeight: 12, titleSizePx: 10},
           sliceName: (row) => row.state,
+          colorizer: (row) => {
+            if (row.state === 'NONEXISTENT') return SLATE;
+            if (row.state === 'EXITED') return GRAY;
+            return getColorForSlice(row.state);
+          },
+          detailsPanel: (row) => {
+            const schema =
+              row.state === 'NONEXISTENT'
+                ? NONEXISTENT_SCHEMA
+                : row.state === 'EXITED'
+                  ? EXITED_SCHEMA
+                  : BASE_SCHEMA;
+            return new SliceTrackDetailsPanel(
+              ctx,
+              new SourceDataset({
+                schema,
+                src: '_android_process_state_intervals',
+                filter: {col: 'upid', eq: upid},
+              }),
+              row,
+            );
+          },
           rootTableName: '_android_process_state_intervals',
         }),
         tags: {type: TAG_PROCESS_TRACK, upid},
