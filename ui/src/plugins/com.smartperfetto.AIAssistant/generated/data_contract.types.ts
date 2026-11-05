@@ -2570,7 +2570,7 @@ export interface AnalysisCompletion extends AnalysisCandidateIdentity {
     sdkFinishReason?: string;
 }
 
-export type AnalysisOutputOrigin = 'sdk_final' | 'assistant_stream' | 'evidence_rendered' | 'runtime_fallback';
+export type AnalysisOutputOrigin = 'sdk_final' | 'assistant_stream' | 'model_tool_arguments' | 'evidence_rendered' | 'runtime_fallback';
 
 /** Never concatenate this into the body whose claims and completion were checked. */
 export interface AnalysisRuntimeAppendix {
