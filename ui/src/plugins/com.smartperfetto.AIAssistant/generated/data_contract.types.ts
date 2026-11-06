@@ -830,6 +830,8 @@ export interface IdentityResolutionV1 {
 
 export const QUERY_REVIEW_SCHEMA_VERSION = 1 as const;
 
+export type SqlExecutionContext = 'working' | 'original_trace';
+
 export type QueryReviewProducerKind = 'execute_sql' | 'execute_sql_on' | 'invoke_skill';
 export type QueryReviewConfidence = 'declared' | 'observed' | 'partial';
 export type QueryReviewGuardrailSeverity = 'info' | 'warning';
@@ -881,6 +883,7 @@ export interface QueryReviewGuardrailV1 {
 
 export interface QueryReviewObservedExecutionV1 {
   executed: true;
+  executionContext?: SqlExecutionContext;
   executableSql?: string;
   sqlRewrites?: string[];
   stdlibInjectedModules?: string[];
