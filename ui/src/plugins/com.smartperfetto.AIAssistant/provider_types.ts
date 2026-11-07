@@ -103,6 +103,8 @@ export interface ProviderConfig {
   connection: ProviderConnection;
   tuning?: ProviderTuning;
   custom?: {envOverrides?: Record<string, string>};
+  /** Runtimes this provider's type may select, from the backend runtime descriptors. */
+  supportedRuntimes?: AgentRuntimeKind[];
 }
 
 export interface ProviderModelOption {
@@ -118,6 +120,8 @@ export interface ProviderTemplate {
   defaultModels: ProviderModels;
   availableModels: ProviderModelOption[];
   defaultConnection?: Partial<ProviderConnection>;
+  /** Runtimes this provider type may select, from the backend runtime descriptors. */
+  supportedRuntimes: AgentRuntimeKind[];
 }
 
 export interface ProviderPanelAttrs {
@@ -511,9 +515,9 @@ export function providerHasQoderSurface(provider: ProviderConfig): boolean {
 }
 
 export function resolveProviderRuntime(
-  provider?: ProviderConfig,
+  provider: ProviderConfig,
 ): AgentRuntimeKind {
-  const runtime = provider?.connection.agentRuntime;
+  const runtime = provider.connection.agentRuntime;
   if (
     runtime === 'openai-agents-sdk' ||
     runtime === 'claude-agent-sdk' ||
@@ -523,7 +527,6 @@ export function resolveProviderRuntime(
   ) {
     return runtime;
   }
-  if (!provider) return 'claude-agent-sdk';
   if (provider.type === 'openai' || provider.type === 'ollama') {
     return 'openai-agents-sdk';
   }
@@ -541,6 +544,11 @@ export function providerSupportsRuntime(
   provider: ProviderConfig,
   runtime: AgentRuntimeKind,
 ): boolean {
+  // A non-custom provider's type decides its runtimes; the backend lists them.
+  // Custom providers keep the per-field surface rules below.
+  if (provider.type !== 'custom' && provider.supportedRuntimes) {
+    return provider.supportedRuntimes.includes(runtime);
+  }
   if (runtime === 'openai-agents-sdk') {
     return providerHasOpenAISurface(provider);
   }

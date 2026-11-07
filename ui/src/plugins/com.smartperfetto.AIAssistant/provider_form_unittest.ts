@@ -26,6 +26,7 @@ const templates: ProviderTemplate[] = [
       claudeBaseUrl: 'https://example.com/anthropic',
       agentRuntime: 'claude-agent-sdk',
     },
+    supportedRuntimes: ['claude-agent-sdk', 'openai-agents-sdk', 'pi-agent-core'],
   },
   {
     type: 'openai',
@@ -37,6 +38,7 @@ const templates: ProviderTemplate[] = [
       openaiBaseUrl: 'https://api.openai.com/v1',
       agentRuntime: 'openai-agents-sdk',
     },
+    supportedRuntimes: ['openai-agents-sdk'],
   },
   {
     type: 'custom',
@@ -44,6 +46,13 @@ const templates: ProviderTemplate[] = [
     requiredFields: [],
     defaultModels: {primary: '', light: ''},
     availableModels: [],
+    supportedRuntimes: [
+      'claude-agent-sdk',
+      'openai-agents-sdk',
+      'pi-agent-core',
+      'opencode',
+      'qoder-agent-sdk',
+    ],
   },
 ];
 

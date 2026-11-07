@@ -18,6 +18,7 @@ import {
   apiUrl,
   createEmptyForm,
   providerRequestFailure,
+  providerRuntimeLabel,
 } from './provider_types';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 import {uiText as text} from './ui_language';
@@ -86,8 +87,8 @@ const CONNECTION_FIELD_HINTS: Partial<Record<string, [string, string]>> = {
     'Optional explicit module path. Leave empty to load @earendil-works/pi-agent-core from the backend package.',
   ],
   piAgentCoreModelJson: [
-    'Pi Agent Core 必填。请粘贴 Pi 运行时要求的模型 JSON 对象；此字段按敏感信息处理。',
-    'Required for Pi Agent Core. Paste the model JSON object expected by the Pi runtime. This field is treated as sensitive.',
+    '自定义提供商使用 Pi Agent Core 时必填；GLM、DeepSeek 等提供商留空即按 Pi 内置目录解析模型。请粘贴 Pi 运行时要求的模型 JSON 对象；此字段按敏感信息处理。',
+    'Required for a custom provider on Pi Agent Core; leave empty for GLM, DeepSeek and similar providers to resolve the model from the Pi builtin catalog. Paste the model JSON object expected by the Pi runtime. This field is treated as sensitive.',
   ],
   piAgentCoreSystemPrompt: [
     'Pi Agent Core 的可选运行时系统提示词。SmartPerfetto 分析契约仍来自后端 Strategy。',
@@ -142,6 +143,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private saving = false;
   private isEdit = false;
   private editingId: string | null = null;
+  /** Runtimes the selected provider type may select, from its backend template. */
+  private runtimes: AgentRuntimeKind[] = [];
 
   oninit(vnode: m.Vnode<ProviderFormAttrs>) {
     const {editingProvider, cloneSource, templates} = vnode.attrs;
@@ -341,6 +344,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     const s = getStyles(t);
     const {templates, availableModels, onCancel} = vnode.attrs;
     const template = templates.find((tmpl) => tmpl.type === this.form.type);
+    this.runtimes = template?.supportedRuntimes ?? [];
 
     return m(
       'div',
@@ -567,12 +571,18 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private renderAdvancedConnection(
     s: ReturnType<typeof getStyles>,
   ): m.Children {
-    const dual = isDualSurfaceProviderType(this.form.type);
+    // A runtime choice exists only when the backend lists more than one for this type.
+    const dual = this.runtimes.length > 1;
     const mainField = this.primaryCredentialField();
-    const openai = this.currentRuntime() === 'openai-agents-sdk';
-    const fields = openai
-      ? ['openaiApiKey', 'openaiBaseUrl']
-      : ['claudeApiKey', 'claudeAuthToken', 'claudeBaseUrl'];
+    const runtime = this.currentRuntime();
+    const openai = runtime === 'openai-agents-sdk';
+    // Pi runs on the provider's own key and endpoint; an explicit model JSON is optional.
+    const fields =
+      runtime === 'pi-agent-core'
+        ? ['openaiBaseUrl', 'claudeBaseUrl', 'piAgentCoreModelJson']
+        : openai
+          ? ['openaiApiKey', 'openaiBaseUrl']
+          : ['claudeApiKey', 'claudeAuthToken', 'claudeBaseUrl'];
     return m('div', [
       dual ? this.renderRuntimeSelector(s) : null,
       dual && mainField !== 'apiKey'
@@ -580,7 +590,11 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         : null,
       ...fields
         .filter((field) => field !== mainField)
-        .map((field) => this.renderConnectionInput(s, field)),
+        .map((field) =>
+          field.endsWith('Json')
+            ? this.renderConnectionTextarea(s, field)
+            : this.renderConnectionInput(s, field),
+        ),
       openai ? this.renderOpenAIProtocolSelect(s) : null,
     ]);
   }
@@ -785,17 +799,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private renderRuntimeSelector(s: ReturnType<typeof getStyles>): m.Children {
     const t = getTokens();
     const current = this.currentRuntime();
-    const options: Array<{value: AgentRuntimeKind; label: string}> = [
-      {value: 'claude-agent-sdk', label: 'Claude SDK'},
-      {value: 'openai-agents-sdk', label: 'OpenAI SDK'},
-      ...(this.form.type === 'custom'
-        ? [
-            {value: 'pi-agent-core' as const, label: 'Pi Agent Core'},
-            {value: 'opencode' as const, label: 'OpenCode'},
-            {value: 'qoder-agent-sdk' as const, label: 'Qoder SDK'},
-          ]
-        : []),
-    ];
+    const options = this.runtimes.map((value) => ({
+      value,
+      label: providerRuntimeLabel(value),
+    }));
 
     return m('div', {style: s.formField}, [
       m('label', {style: s.formLabel}, text('运行时', 'Runtime')),

@@ -139,3 +139,45 @@ describe('providerRequestFailure', () => {
     expect(failure.storeUnreadable).toBe(storeUnreadable);
   });
 });
+
+describe('Pi Agent Core on catalog-backed provider types', () => {
+  it('follows the backend supportedRuntimes list for non-custom providers', () => {
+    const glm = makeProvider({
+      type: 'glm',
+      category: 'official',
+      connection: {agentRuntime: 'pi-agent-core', apiKey: 'k'},
+      supportedRuntimes: ['claude-agent-sdk', 'openai-agents-sdk', 'pi-agent-core'],
+    });
+    expect(providerSupportsRuntime(glm, 'pi-agent-core')).toBe(true);
+    expect(resolveProviderRuntime(glm)).toBe('pi-agent-core');
+    expect(providerSupportsRuntime(glm, 'opencode')).toBe(false);
+    expect(
+      providerSupportsRuntime({...glm, supportedRuntimes: undefined}, 'pi-agent-core'),
+    ).toBe(false);
+    // The backend list also decides Claude/OpenAI for non-custom types.
+    expect(
+      providerSupportsRuntime(
+        makeProvider({
+          type: 'anthropic',
+          category: 'official',
+          connection: {openaiBaseUrl: 'https://example.com/v1'},
+          supportedRuntimes: ['claude-agent-sdk'],
+        }),
+        'openai-agents-sdk',
+      ),
+    ).toBe(false);
+    expect(
+      providerSupportsRuntime(
+        makeProvider({type: 'qwen', category: 'official', supportedRuntimes: ['claude-agent-sdk', 'openai-agents-sdk']}),
+        'pi-agent-core',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the explicit Pi fields rule for custom providers', () => {
+    expect(
+      providerSupportsRuntime(makeProvider({connection: {piAgentCoreModelJson: '{}'}}), 'pi-agent-core'),
+    ).toBe(true);
+    expect(providerSupportsRuntime(makeProvider({}), 'pi-agent-core')).toBe(false);
+  });
+});
