@@ -453,8 +453,8 @@ export class ProviderQuickSwitcher
             'div',
             {style: {fontSize: '11px', color: t.textSecondary}},
             uiText(
-              'Claude Code、backend/.env 或 Docker .env',
-              'Claude Code, backend/.env, or Docker .env',
+              'backend/.env 或 Docker .env',
+              'backend/.env or Docker .env',
             ),
           ),
         ]),

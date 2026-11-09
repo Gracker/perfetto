@@ -394,6 +394,28 @@ describe('ProviderForm', () => {
     expect(body.connection).not.toHaveProperty('agentRuntime');
     expect(body.connection).not.toHaveProperty('apiSurface');
   });
+  it('clears the other stored keys once the new host has its own key', async () => {
+    mount({editingProvider: saved({
+      type: 'custom',
+      connection: {apiKey: '****1234', claudeBaseUrl: 'https://gateway.example', agentRuntime: 'pi-agent-core'},
+    })});
+    clickSurface('OpenAI-compatible');
+    input('provider-openaiBaseUrl', 'https://other.example/v1');
+    input('provider-openaiApiKey', 'sk-new');
+    const body = await save();
+    expect(body.connection).toMatchObject({apiSurface: 'openai', openaiApiKey: 'sk-new', apiKey: ''});
+  });
+
+  it('does not ask for a key when a record with no recorded surface is opened', () => {
+    mount({editingProvider: saved({
+      type: 'custom',
+      connection: {apiKey: '****1234', openaiBaseUrl: 'https://llm.example/v1'},
+      effectiveApiSurface: 'openai',
+    })});
+    expect(root.querySelector('[data-testid=surface-credential-reentry]')).toBeNull();
+    expect(root.querySelector('#provider-openaiBaseUrl')).not.toBeNull();
+  });
+
   it('asks to re-enter the key before a saved provider switches endpoint', () => {
     const hint = () => root.querySelector('[data-testid=surface-credential-reentry]');
     mount({editingProvider: saved({

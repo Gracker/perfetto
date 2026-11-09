@@ -159,7 +159,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     if (editingProvider) {
       this.isEdit = true;
       this.editingId = editingProvider.id;
-      this.savedConnection = editingProvider.connection;
+      this.savedConnection = connectionWithEffectiveSurface(editingProvider);
       this.form = {
         name: editingProvider.name,
         type: editingProvider.type,
@@ -262,7 +262,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private async saveProvider(attrs: ProviderFormAttrs) {
     const {templates, backendUrl, apiKey, onSaved} = attrs;
     const template = templates.find((tmpl) => tmpl.type === this.form.type);
-    const connection = {...this.form.connection};
+    const connection = this.connectionWithStaleCredentialsCleared();
     if (this.form.type === 'bedrock') {
       connection.useBedrock = this.form.useBedrock;
     }
@@ -519,13 +519,14 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
    * to a different host, so the backend asks for that key again and refuses
    * the save until it is. An unset endpoint counts as another origin.
    */
-  private surfaceSwitchNeedsCredential(): boolean {
+  /** The credential field the selected surface sends, when a surface switch moves it to another host. */
+  private movedCredentialField(): string | undefined {
     const saved = this.savedConnection;
     if (
       !saved ||
       !SAVED_NETWORK_CREDENTIAL_FIELDS.some((field) => Boolean(saved[field]))
     ) {
-      return false;
+      return undefined;
     }
     const surface = this.currentSurface();
     const savedSurface = providerApiSurface(
@@ -533,20 +534,35 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       saved,
       this.templateFor(this.form.type),
     );
-    if (surface === savedSurface) return false;
+    if (surface === savedSurface) return undefined;
     const savedOrigin = surfaceEndpointOrigin(saved, savedSurface);
     if (savedOrigin && savedOrigin === surfaceEndpointOrigin(this.form.connection, surface)) {
-      return false;
+      return undefined;
     }
-    const conn = this.form.connection as Record<string, string | undefined>;
-    const field =
-      this.form.type === 'custom'
-        ? surface === 'openai'
-          ? 'openaiApiKey'
-          : 'claudeApiKey'
-        : this.primaryCredentialField();
-    const value = conn[field]?.trim();
+    if (this.form.type !== 'custom') return this.primaryCredentialField();
+    return surface === 'openai' ? 'openaiApiKey' : 'claudeApiKey';
+  }
+
+  private surfaceSwitchNeedsCredential(): boolean {
+    const field = this.movedCredentialField();
+    if (!field) return false;
+    const value = (this.form.connection as Record<string, string | undefined>)[field]?.trim();
     return !value || value.startsWith('****');
+  }
+
+  /**
+   * After the key for the new host is entered, the other stored keys must be
+   * cleared: the server refuses to move a credential the user did not name, and
+   * the form shows only the selected surface's key.
+   */
+  private connectionWithStaleCredentialsCleared(): FormState['connection'] {
+    const field = this.movedCredentialField();
+    const connection = {...this.form.connection} as Record<string, string | undefined>;
+    if (!field || this.surfaceSwitchNeedsCredential()) return connection as FormState['connection'];
+    for (const stale of SAVED_NETWORK_CREDENTIAL_FIELDS) {
+      if (stale !== field && this.savedConnection?.[stale]) connection[stale] = '';
+    }
+    return connection as FormState['connection'];
   }
 
   private primaryCredentialField(): string {
