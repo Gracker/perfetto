@@ -798,6 +798,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private analysisModeMenuClickHandler: ((event: MouseEvent) => void) | null =
     null;
   private isInputComposing = false;
+  /** Fails toward private: set by restoring private text, cleared only when the composer is sent. */
+  private composerHoldsPrivateText = false;
   private conversationHistoryHydrated = false;
   private conversationRestorePromise?: Promise<void>;
   private conversationRestoreAuthority = '';
@@ -4774,8 +4776,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                         !this.runSupplementLedger.entries.some((entry) => entry.key === msg.id),
                                     },
                                     {
-                                      onRetry: () => void this.submitRunSupplement(msg.content),
-                                      onEdit: () => this.restoreRunSupplementToInput(msg.content),
+                                      onRetry: () => void this.submitRunSupplement({query: msg.content, privateContent: msg.privateContent === true}),
+                                      onEdit: () => this.restoreRunSupplementToInput(msg.content, msg.privateContent === true),
                                       onRestart: () => this.restartWithRunSupplement(msg),
                                     },
                                   )
@@ -8223,14 +8225,12 @@ Click ⚙️ to configure backend connection.`,
       content: input,
       timestamp: Date.now(),
       model: this.serverStatus.model,
-      ...(submission?.privateContent === true || hasPrivateAnalysisContext(this.state.analysisContext)
-        ? {privateContent: true}
-        : {}),
+      ...(this.submissionIsPrivate(submission) ? {privateContent: true} : {}),
       // Local commands use no analysis context.
       ...(input.startsWith('/') ? {} : this.submittedContext()),
     });
 
-    if (submission === undefined) this.state.input = '';
+    if (submission === undefined) this.clearComposer();
     this.state.commandHistory.push(input);
     this.state.historyIndex = -1;
 
@@ -14046,6 +14046,7 @@ Click ⚙️ to configure backend connection.`,
       this.state.isLoading || !!this.state.agentSessionId;
     return {
       inputDraft: this.state.input,
+      inputDraftPrivate: this.composerHoldsPrivateText,
       collapsedTables: Array.from(this.state.collapsedTables),
       historyIndex: this.state.historyIndex,
       activeAnalysis:
@@ -14112,6 +14113,7 @@ Click ⚙️ to configure backend connection.`,
     if (!snapshot) return;
 
     this.state.input = snapshot.inputDraft;
+    this.composerHoldsPrivateText = snapshot.inputDraftPrivate === true;
     this.state.collapsedTables = new Set(snapshot.collapsedTables);
     this.state.historyIndex = snapshot.historyIndex;
 
@@ -14599,8 +14601,8 @@ Click ⚙️ to configure backend connection.`,
   }
 
   /** Send to the running analysis. Errors settle the message; nothing here retries by itself. */
-  private async submitRunSupplement(resendText?: string): Promise<void> {
-    const text = (resendText ?? this.state.input).trim();
+  private async submitRunSupplement(resend?: RunSupplementRestartSubmission): Promise<void> {
+    const text = (resend?.query ?? this.state.input).trim();
     const sessionId = this.state.agentSessionId;
     const runId = this.state.agentRunId;
     if (!sessionId || !runId || !isRunSupplementText(text) || !this.isRunSupplementComposerOpen()) {
@@ -14616,11 +14618,9 @@ Click ⚙️ to configure backend connection.`,
       flowTag: 'run_supplement',
       model: this.serverStatus.model,
       runSupplement: {key, state: 'classifying'},
-      ...(hasPrivateAnalysisContext(this.state.analysisContext)
-        ? {privateContent: true}
-        : {}),
+      ...(this.submissionIsPrivate(resend) ? {privateContent: true} : {}),
     });
-    if (resendText === undefined) this.state.input = '';
+    if (resend === undefined) this.clearComposer();
     this.state.historyIndex = -1;
     m.redraw();
 
@@ -14641,9 +14641,22 @@ Click ⚙️ to configure backend connection.`,
     }
   }
 
-  private restoreRunSupplementToInput(text: string): void {
+  /** A resubmission carries its own privacy; the composer carries that of any private text restored into it. */
+  private submissionIsPrivate(submission?: RunSupplementRestartSubmission): boolean {
+    return (submission ? submission.privateContent : this.composerHoldsPrivateText) ||
+      hasPrivateAnalysisContext(this.state.analysisContext);
+  }
+
+  private clearComposer(): void {
+    this.state.input = '';
+    this.composerHoldsPrivateText = false;
+  }
+
+  /** Restored text keeps its privacy, whatever the analysis context is by the time it is sent. */
+  private restoreRunSupplementToInput(text: string, privateContent: boolean): void {
     const draft = this.state.input.trim();
     this.state.input = draft ? `${draft}\n${text}` : text;
+    this.composerHoldsPrivateText ||= privateContent;
     this.focusChatInput();
     m.redraw();
   }

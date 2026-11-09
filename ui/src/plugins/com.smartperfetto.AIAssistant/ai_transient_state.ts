@@ -58,6 +58,8 @@ import type {RunSupplementLedger} from './run_supplement_state';
 export interface TransientState {
   /** Draft text in the input field. */
   inputDraft: string;
+  /** The draft holds text restored from a private message. */
+  inputDraftPrivate?: boolean;
   /** IDs of currently collapsed result tables. */
   collapsedTables: string[];
   /** Command history index (current navigation position). */
