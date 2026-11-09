@@ -295,7 +295,7 @@ describe('conversation completion notices', () => {
       turn: {id: 'run-1', turnIndex: 3, partial: true, completionStatus: 'incomplete',
         terminationReason: 'review_not_finished', uncertainties: [], nextSteps: [], evidence: []}});
     expect(live).toBe(restored);
-    expect(live).toContain(answerVerificationCueText('unfinished'));
+    expect(live).toContain(answerVerificationCueText());
     expect(live).toContain('Read answer');
   });
 });

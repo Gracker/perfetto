@@ -5444,26 +5444,37 @@ describe('canonical scene SSE snapshots', () => {
   });
 });
 
-describe('deliver first, verify after', () => {
-  const provisional = (conclusion = 'Trace duration is 12.3 s.') => ({
+describe('conclusion delivery', () => {
+  const plainConclusion = (conclusion = 'Trace duration is 12.3 s.') => ({
     runId: 'run-a',
-    data: {conclusion, provisional: true, verification: 'pending'},
+    data: {conclusion},
   });
 
-  it('renders the provisional answer with a pending cue and keeps the run active', () => {
+  it('renders a conclusion as the finished answer and keeps the run active', () => {
     const ctx = createMockContext();
-    const result = handleSSEEvent('conclusion', provisional(), ctx);
+    const result = handleSSEEvent('conclusion', plainConclusion(), ctx);
     expect(result.stopLoading).toBeUndefined();
     expect(result.isTerminal).toBeUndefined();
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0]).toMatchObject({answerVerification: 'pending', flowTag: 'answer_stream'});
+    expect(ctx.messages[0]).toMatchObject({flowTag: 'answer_stream'});
+    expect(ctx.messages[0].answerVerification).toBeUndefined();
     expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
     expect(ctx.completionHandled).toBe(true);
   });
 
+  it('ignores the retired provisional marker on a replayed conclusion', () => {
+    const ctx = createMockContext();
+    const replayed = {runId: 'run-a', data: {conclusion: 'Trace duration is 12.3 s.', provisional: true, verification: 'pending'}};
+    const result = handleSSEEvent('conclusion', replayed, ctx);
+    expect(result).toEqual({});
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0].answerVerification).toBeUndefined();
+    expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
+  });
+
   it('replaces the verdict on the same message when analysis_completed arrives', () => {
     const ctx = createMockContext();
-    handleSSEEvent('conclusion', provisional(), ctx);
+    handleSSEEvent('conclusion', plainConclusion(), ctx);
     const messageId = ctx.messages[0].id;
     const result = handleSSEEvent('analysis_completed', {runId: 'run-a', data: {
       success: true, conclusion: 'Trace duration is 12.3 s.', findings: [],
@@ -5475,24 +5486,16 @@ describe('deliver first, verify after', () => {
     expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
   });
 
-  it.each([
-    ['error', {data: {message: 'finalization failed'}}],
-    ['analysis_cancelled', {data: {reason: 'Analysis cancelled by user'}}],
-    ['end', {}],
-  ] as const)('downgrades the pending cue when %s arrives without a verdict', (eventType, payload) => {
-    const ctx = createMockContext();
-    handleSSEEvent('conclusion', provisional(), ctx);
-    handleSSEEvent(eventType, payload, ctx);
-    const answer = ctx.messages.find((message) => message.flowTag === 'answer_stream');
-    expect(answer?.answerVerification).toBe('unfinished');
-    expect(answer?.content).toContain('Trace duration is 12.3 s.');
-  });
-
-  it('clears an unfinished cue restored with completionHandled when the verdict arrives', () => {
-    const ctx = createMockContext();
+  // A stored or restored message can still carry a cue from before the review ended.
+  const restoredCue = (ctx: ReturnType<typeof createMockContext>) => {
     ctx.addMessage({id: 'restored-answer', role: 'assistant', content: 'Trace duration is 12.3 s.',
       timestamp: 1, flowTag: 'answer_stream', answerVerification: 'unfinished'});
     ctx.streamingAnswer.messageId = 'restored-answer';
+  };
+
+  it('clears an unfinished cue restored with completionHandled when the verdict arrives', () => {
+    const ctx = createMockContext();
+    restoredCue(ctx);
     ctx.setCompletionHandled(true);
     handleSSEEvent('analysis_completed', {runId: 'run-a', data: {success: true,
       conclusion: 'Trace duration is 12.3 s.', findings: []}}, ctx);
@@ -5502,13 +5505,13 @@ describe('deliver first, verify after', () => {
 
   it('does not upgrade an unfinished cue on a later error', () => {
     const ctx = createMockContext();
-    handleSSEEvent('conclusion', provisional(), ctx);
+    restoredCue(ctx);
     handleSSEEvent('error', {data: {message: 'lost'}}, ctx);
     handleSSEEvent('end', {}, ctx);
     expect(ctx.messages.find((message) => message.flowTag === 'answer_stream')?.answerVerification).toBe('unfinished');
   });
 
-  it('renders a final (no-review) conclusion without a cue but keeps the run active until analysis_completed', () => {
+  it('renders a final conclusion without a cue but keeps the run active until analysis_completed', () => {
     const ctx = createMockContext();
     expect(handleSSEEvent('conclusion', {data: {conclusion: 'Final answer'}}, ctx)).toEqual({});
     expect(ctx.messages[0].answerVerification).toBeUndefined();
@@ -5550,15 +5553,15 @@ describe('display-only answer draft', () => {
     expect(answers(ctx)).toMatchObject([{content: 'New'}]);
   });
 
-  it.each([true, false])('lets the conclusion (provisional=%s) replace the draft on the same message', provisional => {
+  it('lets the conclusion replace the draft on the same message', () => {
     const ctx = createMockContext();
     handleSSEEvent('answer_token', token('Draft body'), ctx);
     const draftId = answers(ctx)[0].id;
-    handleSSEEvent('conclusion', {runId: 'run-a', data: {conclusion: 'Final body',
-      ...(provisional ? {provisional: true, verification: 'pending'} : {})}}, ctx);
+    handleSSEEvent('conclusion', {runId: 'run-a', data: {conclusion: 'Final body'}}, ctx);
     expect(answers(ctx)).toHaveLength(1);
     expect(answers(ctx)[0].id).toBe(draftId);
     expect(answers(ctx)[0].answerDraft).toBeUndefined();
+    expect(answers(ctx)[0].answerVerification).toBeUndefined();
     expect(answers(ctx)[0].content).toContain('Final body');
     // A late draft event cannot reopen or clear the finalized answer.
     handleSSEEvent('answer_token', token(' LATE'), ctx);

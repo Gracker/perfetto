@@ -30,16 +30,17 @@ export type ProviderType =
   | 'ollama'
   | 'custom';
 export type ProviderCategory = 'official' | 'proxy' | 'local' | 'custom';
-export type AgentRuntimeKind =
+/** Pi is the only runtime a provider runs on; the other labels are recorded provenance. */
+export type ServerRuntimeKind =
+  | 'pi-agent-core'
   | 'claude-agent-sdk'
   | 'openai-agents-sdk'
-  | 'pi-agent-core'
   | 'opencode'
-  | 'qoder-agent-sdk';
-export type ServerRuntimeKind =
-  | AgentRuntimeKind
+  | 'qoder-agent-sdk'
   | 'experimental-pi-agent-core'
   | 'experimental-opencode';
+/** The endpoint Pi Agent Core calls for a provider with more than one. */
+export type ProviderApiSurface = 'claude' | 'openai';
 export type OpenAIProtocol = 'responses' | 'chat_completions';
 
 export type HealthStatus = 'passed' | 'failed' | 'untested';
@@ -61,14 +62,9 @@ export interface ProviderConnection {
   piAgentCoreModulePath?: string;
   piAgentCoreModelJson?: string;
   piAgentCoreSystemPrompt?: string;
-  openCodeSdkModulePath?: string;
-  openCodeModelJson?: string;
-  openCodeSystemPrompt?: string;
-  qoderAccessToken?: string;
-  qoderCliPath?: string;
-  qoderModel?: string;
-  qoderSystemPrompt?: string;
-  agentRuntime?: AgentRuntimeKind;
+  /** Pi, or a retired label on a record the backend could not convert. */
+  agentRuntime?: ServerRuntimeKind;
+  apiSurface?: ProviderApiSurface;
   openaiProtocol?: OpenAIProtocol;
   awsRegion?: string;
   awsBearerToken?: string;
@@ -103,8 +99,15 @@ export interface ProviderConfig {
   connection: ProviderConnection;
   tuning?: ProviderTuning;
   custom?: {envOverrides?: Record<string, string>};
-  /** Runtimes this provider's type may select, from the backend runtime descriptors. */
-  supportedRuntimes?: AgentRuntimeKind[];
+  /** The surface the backend resolves for this record, also when none is recorded. */
+  effectiveApiSurface?: ProviderApiSurface;
+}
+
+/** The record's connection with its effective surface filled in, so the form shows what really runs. */
+export function connectionWithEffectiveSurface(provider: ProviderConfig): ProviderConnection {
+  return !provider.connection.apiSurface && provider.effectiveApiSurface && providerHasApiSurfaceChoice(provider.type)
+    ? {...provider.connection, apiSurface: provider.effectiveApiSurface}
+    : provider.connection;
 }
 
 export interface ProviderModelOption {
@@ -120,8 +123,10 @@ export interface ProviderTemplate {
   defaultModels: ProviderModels;
   availableModels: ProviderModelOption[];
   defaultConnection?: Partial<ProviderConnection>;
-  /** Runtimes this provider type may select, from the backend runtime descriptors. */
-  supportedRuntimes: AgentRuntimeKind[];
+  /** The endpoints Pi's builtin model catalog serves for this type. */
+  piCatalogRouteSurfaces?: string[];
+  /** The endpoint this type calls when a record names none. */
+  defaultApiSurface?: string;
 }
 
 export interface ProviderPanelAttrs {
@@ -185,7 +190,7 @@ const DUAL_SURFACE_PROVIDER_TYPES: ProviderType[] = [
   'huawei',
 ];
 
-function isDualSurfaceProviderType(type: ProviderType): boolean {
+export function isDualSurfaceProviderType(type: ProviderType): boolean {
   return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
 }
 
@@ -250,41 +255,6 @@ export const CONNECTION_FIELD_LABELS: Record<
     type: 'text',
     placeholder: 'Optional runtime-level system prompt',
   },
-  openCodeSdkModulePath: {
-    label: 'OpenCode SDK Module Path',
-    type: 'text',
-    placeholder: '/path/to/@opencode-ai/sdk/dist/index.js',
-  },
-  openCodeModelJson: {
-    label: 'OpenCode Model JSON',
-    type: 'text',
-    placeholder: '{"providerID":"smartperfetto","modelID":"..."}',
-  },
-  openCodeSystemPrompt: {
-    label: 'OpenCode System Prompt',
-    type: 'text',
-    placeholder: 'Optional runtime-level system prompt',
-  },
-  qoderAccessToken: {
-    label: 'Qoder Personal Access Token',
-    type: 'password',
-    placeholder: 'qpat_...',
-  },
-  qoderCliPath: {
-    label: 'Qoder CLI Path',
-    type: 'text',
-    placeholder: '/usr/local/bin/qodercli',
-  },
-  qoderModel: {
-    label: 'Qoder Model',
-    type: 'text',
-    placeholder: 'Optional model override',
-  },
-  qoderSystemPrompt: {
-    label: 'Qoder System Prompt',
-    type: 'text',
-    placeholder: 'Optional runtime-level system prompt',
-  },
   awsRegion: {label: 'AWS Region', type: 'text', placeholder: 'us-east-1'},
   awsBearerToken: {
     label: 'AWS Bearer Token',
@@ -326,13 +296,6 @@ const CONNECTION_FIELD_LABEL_ZH: Record<string, string> = {
   piAgentCoreModulePath: 'Pi Agent Core 模块路径',
   piAgentCoreModelJson: 'Pi Agent Core 模型 JSON',
   piAgentCoreSystemPrompt: 'Pi Agent Core 系统提示词',
-  openCodeSdkModulePath: 'OpenCode SDK 模块路径',
-  openCodeModelJson: 'OpenCode 模型 JSON',
-  openCodeSystemPrompt: 'OpenCode 系统提示词',
-  qoderAccessToken: 'Qoder 个人访问令牌',
-  qoderCliPath: 'Qoder CLI 路径',
-  qoderModel: 'Qoder 模型',
-  qoderSystemPrompt: 'Qoder 系统提示词',
   awsRegion: 'AWS 区域',
   awsBearerToken: 'AWS Bearer 令牌',
   awsAccessKeyId: 'AWS 访问密钥 ID',
@@ -346,8 +309,6 @@ const CONNECTION_FIELD_LABEL_ZH: Record<string, string> = {
 const CONNECTION_FIELD_PLACEHOLDER_ZH: Record<string, string> = {
   claudeAuthToken: '不包含 Bearer 前缀的令牌',
   piAgentCoreSystemPrompt: '可选的运行时级系统提示词',
-  openCodeSystemPrompt: '可选的运行时级系统提示词',
-  qoderSystemPrompt: '可选的运行时级系统提示词',
   awsBearerToken: '令牌……',
   awsSecretAccessKey: '私密密钥……',
   awsSessionToken: '会话令牌……',
@@ -433,158 +394,132 @@ export async function providerRequestFailure(
   );
 }
 
-export function providerHasClaudeSurface(provider: ProviderConfig): boolean {
-  const conn = provider.connection;
-  if (
-    provider.type === 'anthropic' ||
-    provider.type === 'bedrock' ||
-    provider.type === 'vertex' ||
-    isDualSurfaceProviderType(provider.type)
-  ) {
-    return true;
-  }
-  return !!(
-    conn.claudeBaseUrl ||
-    conn.claudeApiKey ||
-    conn.claudeAuthToken ||
-    (provider.type === 'custom' &&
-      conn.agentRuntime !== 'openai-agents-sdk' &&
-      conn.agentRuntime !== 'pi-agent-core' &&
-      conn.agentRuntime !== 'opencode' &&
-      (conn.baseUrl || conn.apiKey))
-  );
+/** Dual-surface providers and custom ones: both endpoints are available to choose from. */
+export function providerHasApiSurfaceChoice(type: ProviderType): boolean {
+  return type === 'custom' || isDualSurfaceProviderType(type);
 }
 
-export function providerHasOpenAISurface(provider: ProviderConfig): boolean {
-  const conn = provider.connection;
-  if (
-    provider.type === 'openai' ||
-    provider.type === 'ollama' ||
-    isDualSurfaceProviderType(provider.type)
-  ) {
-    return true;
-  }
-  return !!(
-    conn.openaiBaseUrl ||
-    conn.openaiApiKey ||
-    conn.openaiProtocol ||
-    (provider.type === 'custom' &&
-      conn.agentRuntime === 'openai-agents-sdk' &&
-      (conn.baseUrl || conn.apiKey))
-  );
+type ProviderSurfaceTemplate = Pick<
+  ProviderTemplate,
+  'piCatalogRouteSurfaces' | 'defaultApiSurface'
+>;
+
+function asApiSurface(value?: string): ProviderApiSurface | undefined {
+  return value === 'claude' || value === 'openai' ? value : undefined;
 }
 
-export function providerHasPiAgentCoreSurface(
-  provider: ProviderConfig,
+function piCatalogRouteSurface(
+  template?: ProviderSurfaceTemplate,
+): ProviderApiSurface | undefined {
+  const surfaces = (template?.piCatalogRouteSurfaces ?? []).flatMap(
+    (value) => asApiSurface(value) ?? [],
+  );
+  const preferred = asApiSurface(template?.defaultApiSurface);
+  return preferred && surfaces.includes(preferred) ? preferred : surfaces[0];
+}
+
+/**
+ * Whether Pi resolves this record from its builtin model catalog: a Pi record
+ * of a catalog type that recorded no endpoint. Only the shared key and that
+ * endpoint apply then.
+ */
+export function providerUsesPiCatalogRoute(
+  connection: ProviderConnection,
+  template?: ProviderSurfaceTemplate,
 ): boolean {
-  const conn = provider.connection;
   return (
-    provider.type === 'custom' &&
-    !!(
-      conn.agentRuntime === 'pi-agent-core' ||
-      conn.piAgentCoreModelJson ||
-      conn.piAgentCoreModulePath
-    )
+    connection.agentRuntime === 'pi-agent-core' &&
+    !connection.apiSurface &&
+    piCatalogRouteSurface(template) !== undefined
   );
 }
 
-export function providerHasOpenCodeSurface(provider: ProviderConfig): boolean {
-  const conn = provider.connection;
+/** The endpoint a record calls: its recorded choice, else what its template declares. */
+export function providerApiSurface(
+  type: ProviderType,
+  connection: ProviderConnection,
+  template?: ProviderSurfaceTemplate,
+): ProviderApiSurface {
   return (
-    provider.type === 'custom' &&
-    !!(
-      conn.agentRuntime === 'opencode' ||
-      conn.openCodeModelJson ||
-      conn.openCodeSdkModulePath ||
-      conn.openaiBaseUrl ||
-      conn.baseUrl
-    )
+    (providerHasApiSurfaceChoice(type) ? connection.apiSurface : undefined) ??
+    (providerUsesPiCatalogRoute(connection, template)
+      ? piCatalogRouteSurface(template)
+      : undefined) ??
+    asApiSurface(template?.defaultApiSurface) ??
+    'claude'
   );
 }
 
-export function providerHasQoderSurface(provider: ProviderConfig): boolean {
-  const conn = provider.connection;
-  return (
-    provider.type === 'custom' &&
-    !!(
-      conn.agentRuntime === 'qoder-agent-sdk' ||
-      conn.qoderAccessToken ||
-      conn.qoderCliPath
-    )
-  );
-}
-
+/** The runtime a record carries: Pi, unless it keeps a retired label. */
 export function resolveProviderRuntime(
   provider: ProviderConfig,
-): AgentRuntimeKind {
-  const runtime = provider.connection.agentRuntime;
-  if (
-    runtime === 'openai-agents-sdk' ||
-    runtime === 'claude-agent-sdk' ||
-    runtime === 'pi-agent-core' ||
-    runtime === 'opencode' ||
-    runtime === 'qoder-agent-sdk'
-  ) {
-    return runtime;
-  }
-  if (provider.type === 'openai' || provider.type === 'ollama') {
-    return 'openai-agents-sdk';
-  }
-  if (
-    provider.type === 'custom' &&
-    providerHasOpenAISurface(provider) &&
-    !providerHasClaudeSurface(provider)
-  ) {
-    return 'openai-agents-sdk';
-  }
-  return 'claude-agent-sdk';
+): ServerRuntimeKind {
+  return provider.connection.agentRuntime ?? 'pi-agent-core';
 }
 
-export function providerSupportsRuntime(
-  provider: ProviderConfig,
-  runtime: AgentRuntimeKind,
+const RETIRED_RUNTIME_LABELS: readonly ServerRuntimeKind[] = [
+  'opencode',
+  'qoder-agent-sdk',
+];
+const RETIRED_RUNTIME_CONNECTION_FIELDS = [
+  'openCodeSdkModulePath',
+  'openCodeModelJson',
+  'openCodeSystemPrompt',
+  'qoderAccessToken',
+  'qoderCliPath',
+  'qoderModel',
+  'qoderSystemPrompt',
+];
+
+/**
+ * A record the backend could not convert to Pi: read-time migration removes
+ * this state from every record it can map to an endpoint, so what is left
+ * still needs the endpoint it never had.
+ */
+export function providerNeedsPiEndpoint(
+  connection: ProviderConnection,
 ): boolean {
-  // A non-custom provider's type decides its runtimes; the backend lists them.
-  // Custom providers keep the per-field surface rules below.
-  if (provider.type !== 'custom' && provider.supportedRuntimes) {
-    return provider.supportedRuntimes.includes(runtime);
-  }
-  if (runtime === 'openai-agents-sdk') {
-    return providerHasOpenAISurface(provider);
-  }
-  if (runtime === 'pi-agent-core') {
-    return providerHasPiAgentCoreSurface(provider);
-  }
-  if (runtime === 'opencode') return providerHasOpenCodeSurface(provider);
-  if (runtime === 'qoder-agent-sdk')
-    return providerHasQoderSurface(provider);
-  return providerHasClaudeSurface(provider);
+  const fields = connection as Record<string, unknown>;
+  return (
+    (connection.agentRuntime !== undefined &&
+      RETIRED_RUNTIME_LABELS.includes(connection.agentRuntime)) ||
+    RETIRED_RUNTIME_CONNECTION_FIELDS.some(
+      (field) => fields[field] !== undefined,
+    )
+  );
 }
 
+/** The record as Pi runs it; the next backend read drops the retired fields it stored. */
+export function withPiRuntimeRecord(
+  connection: ProviderConnection,
+): ProviderConnection {
+  const piConnection = {...connection, agentRuntime: 'pi-agent-core' as const};
+  const fields = piConnection as Record<string, unknown>;
+  for (const field of RETIRED_RUNTIME_CONNECTION_FIELDS) delete fields[field];
+  return piConnection;
+}
+
+/** Labels the runtime a record or session carries; anything unrecognized is Pi. */
 export function providerRuntimeLabel(runtime: ServerRuntimeKind): string {
+  if (runtime === 'claude-agent-sdk') return 'Claude SDK';
   if (runtime === 'openai-agents-sdk') return 'OpenAI SDK';
-  if (runtime === 'pi-agent-core') return 'Pi Agent Core';
   if (runtime === 'experimental-pi-agent-core') {
     return 'Experimental Pi Agent Core';
   }
   if (runtime === 'opencode') return 'OpenCode';
   if (runtime === 'experimental-opencode') return 'Experimental OpenCode';
   if (runtime === 'qoder-agent-sdk') return 'Qoder SDK';
-  return 'Claude SDK';
+  return 'Pi Agent Core';
 }
 
 export function providerRuntimeShortLabel(runtime: ServerRuntimeKind): string {
+  if (runtime === 'claude-agent-sdk') return 'CL';
   if (runtime === 'openai-agents-sdk') return 'OA';
-  if (runtime === 'pi-agent-core' || runtime === 'experimental-pi-agent-core') {
-    return 'PI';
-  }
   if (runtime === 'opencode' || runtime === 'experimental-opencode') {
     return 'OC';
   }
-  if (runtime === 'qoder-agent-sdk') {
-    return 'QD';
-  }
-  return 'CL';
+  if (runtime === 'qoder-agent-sdk') return 'QD';
+  return 'PI';
 }
 
 export type BedrockAuthMethod = 'bearer' | 'accessKey' | 'profile';

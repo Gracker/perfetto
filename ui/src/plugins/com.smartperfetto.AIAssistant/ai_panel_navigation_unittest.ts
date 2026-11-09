@@ -154,12 +154,6 @@ describe('AI Provider configuration shortcut', () => {
     expect(panel.renderProviderConfigurationBanner()).toBeNull();
   });
 
-  it('does not treat Qoder CLI login as missing provider setup', () => {
-    const panel = new AIPanel() as any;
-    panel.serverStatus = {connected: true, configured: false, runtime: 'qoder-agent-sdk'};
-    expect(panel.renderProviderConfigurationBanner()).toBeNull();
-  });
-
   it('preserves the analysis identity lock', () => {
     const panel = new AIPanel() as any;
     panel.serverStatus = {connected: true, configured: false};
@@ -1895,7 +1889,7 @@ describe('AIPanel per-turn analysis mode', () => {
       await stop;
       expect(panel.state.loadingPhase).toBe('停止未确认，分析仍在进行');
       const stops = stopButtons(panel.view({attrs: {}}));
-      expect(stops[0].attrs.title).toBe('强制停止：结束本轮，已显示的结论按未核验保留');
+      expect(stops[0].attrs.title).toBe('停止分析');
       expect(stops[0].attrs.disabled).toBe(false);
       expect(panel.activeConversationRun?.runId).toBe('chat-run');
     });

@@ -212,11 +212,10 @@ describe('ConversationPage OIDC lifecycle', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     renderPage(page);
     expect(renderedMessages()).toEqual(['Explain scheduling latency.', 'trace-free answer']);
-    expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
     page.onremove();
   });
 
-  it('shows the provisional answer in memory and stores it once, with the verdict, under the run id', async () => {
+  it('ignores a replayed provisional_answer and stores the outcome once', async () => {
     const encoder = new TextEncoder();
     let streamController!: ReadableStreamDefaultController<Uint8Array>;
     const body = new ReadableStream<Uint8Array>({
@@ -227,92 +226,31 @@ describe('ConversationPage OIDC lifecycle', () => {
         ));
       },
     });
-    vi.stubGlobal('fetch', vi.fn()
+    const fetchMock = vi.fn()
       .mockResolvedValueOnce(startResponse())
-      .mockResolvedValueOnce(new Response(body, {status: 200, headers: {'content-type': 'text/event-stream'}})));
+      .mockResolvedValueOnce(new Response(body, {status: 200, headers: {'content-type': 'text/event-stream'}}));
+    vi.stubGlobal('fetch', fetchMock);
     const page = createPage();
     expect(renderPage(page).querySelector('.ai-conversation-page-empty')).not.toBeNull();
     page.input = 'trace 时长';
     const send = page.send();
-    await vi.waitFor(() => expect(page.provisionalAnswer?.message.content).toBe('answer body'));
-    expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     renderPage(page);
-    expect(renderedMessages()).toEqual(['trace 时长', 'answer body']);
-    expect(renderRoot.querySelectorAll('.ai-answer-verification-pending')).toHaveLength(1);
-    const pendingArticle = renderRoot.querySelector('.ai-conversation-page-message-assistant');
+    expect(renderedMessages()).toEqual(['trace 时长']);
     streamController.enqueue(encoder.encode(
       'event: run_completed\ndata: {"type":"run_completed","outcome":{"kind":"answered","message":"answer body"}}\n\n',
     ));
     streamController.close();
     await send;
-    expect(page.provisionalAnswer).toBeUndefined();
     expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([
       expect.objectContaining({id: 'conversation-session-a-run-a-assistant', content: 'answer body'}),
     ]);
     renderPage(page);
     expect(renderedMessages()).toEqual(['trace 时长', 'answer body']);
-    expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
-    expect(renderRoot.querySelector('.ai-conversation-page-message-assistant')).toBe(pendingArticle);
     page.onremove();
   });
 
-  it('a new message first ends the previous review and keeps an unverdicted answer before the new question', async () => {
-    const encoder = new TextEncoder();
-    let firstStream!: ReadableStreamDefaultController<Uint8Array>;
-    const calls: string[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/conversation') && calls.filter(call => call === 'start').length === 0) {
-        calls.push('start');
-        return startResponse('session-a', 'run-a');
-      }
-      if (url.includes('/stream') && url.includes('run-a')) {
-        calls.push('stream-a');
-        return new Response(new ReadableStream<Uint8Array>({start(controller) {
-          firstStream = controller;
-          controller.enqueue(encoder.encode(
-            'event: provisional_answer\ndata: {"type":"provisional_answer","message":"first answer","verification":"pending"}\n\n'));
-        }}), {status: 200, headers: {'content-type': 'text/event-stream'}});
-      }
-      if (url.endsWith('/cancel')) {
-        calls.push('cancel-a');
-        // The run could not settle with a verdict: its stream ends without run_completed.
-        firstStream.close();
-        return new Response(JSON.stringify({success: true, runId: 'run-a', status: 'cancelled'}), {status: 200});
-      }
-      if (url.endsWith('/conversation')) {
-        calls.push('start-b');
-        return startResponse('session-a', 'run-b');
-      }
-      calls.push('stream-b');
-      return streamResponse('second answer');
-    }));
-    const page = createPage();
-    page.input = 'trace 时长';
-    const first = page.send();
-    await vi.waitFor(() => expect(page.provisionalAnswer?.message.content).toBe('first answer'));
-    renderPage(page);
-    expect(renderedMessages()).toEqual(['trace 时长', 'first answer']);
-    page.input = '应用包名';
-    await page.send();
-    await first.catch(() => undefined);
-    expect(calls.indexOf('cancel-a')).toBeGreaterThan(-1);
-    expect(calls.indexOf('cancel-a')).toBeLessThan(calls.indexOf('start-b'));
-    expect(page.store.messages.map((message: {role: string; content: string; turn?: {partial: boolean}}) =>
-      [message.role, message.content, message.turn?.partial ?? null])).toEqual([
-      ['user', 'trace 时长', null],
-      ['assistant', 'first answer', true],
-      ['user', '应用包名', null],
-      ['assistant', 'second answer', null],
-    ]);
-    renderPage(page);
-    expect(renderedMessages()[1]).toContain('first answer');
-    expect(renderedMessages().slice(2)).toEqual(['应用包名', 'second answer']);
-    expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
-    page.onremove();
-  });
-
-  it.each(['closed', 'failed'])('renders before delivery and after a provisional stream is %s', async (ending) => {
+  it.each(['closed', 'failed'])('keeps no answer for a replayed provisional_answer when the stream is %s', async (ending) => {
     let stream!: ReadableStreamDefaultController<Uint8Array>;
     const fetch = vi.fn()
       .mockResolvedValueOnce(startResponse())
@@ -325,22 +263,15 @@ describe('ConversationPage OIDC lifecycle', () => {
       page.input = 'question before delivery';
       const send = page.send();
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-      renderPage(page);
-      expect(renderedMessages()).toEqual(['question before delivery']);
       stream.enqueue(new TextEncoder().encode(
         'event: provisional_answer\ndata: {"type":"provisional_answer","message":"unfinished answer","verification":"pending"}\n\n',
       ));
-      await vi.waitFor(() => expect(page.provisionalAnswer).toBeDefined());
-      renderPage(page);
-      expect(renderedMessages()).toEqual(['question before delivery', 'unfinished answer']);
       if (ending === 'closed') stream.close();
       else stream.error(new Error('stream interrupted'));
       await send;
       renderPage(page);
-      expect(renderedMessages()[1]).toContain('unfinished answer');
-      expect(renderRoot.querySelectorAll('.ai-conversation-page-message-assistant')).toHaveLength(1);
-      expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
-      expect(page.store.messages[1].turn.partial).toBe(true);
+      expect(renderedMessages()).toEqual(['question before delivery']);
+      expect(page.store.messages.filter((message: {role: string}) => message.role === 'assistant')).toEqual([]);
     } finally {
       page.onremove();
     }
@@ -479,7 +410,6 @@ describe('ConversationPage authorized restoration', () => {
       renderPage(page);
       expect(renderedMessages()).toHaveLength(1);
       expect(renderedMessages()[0]).toContain('restored answer');
-      expect(renderRoot.querySelector('.ai-answer-verification-pending')).toBeNull();
       await page.startNewConversation();
       renderPage(page);
       expect(renderedMessages()).toEqual([]);
@@ -845,7 +775,7 @@ describe('ConversationPage restored supplemental binding', () => {
     const storedConversations = Object.keys(localStorage).filter(key => key.startsWith('smartperfetto-conversation'))
       .map(key => localStorage.getItem(key)).join('');
     expect(storedConversations).not.toContain('sourceSelection'); expect(storedConversations).not.toContain('source-a');
-    stream.resolve(streamResponse()); await page.runSettlement.promise; page.onremove();
+    stream.resolve(streamResponse()); await vi.waitFor(() => expect(page.activeReceipt).toBeUndefined()); page.onremove();
   });
 });
 

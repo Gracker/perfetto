@@ -761,8 +761,6 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
   private renderStatusCard(providersDisabled = false): m.Children {
     const status = this.serverStatus;
     if (!status) return null;
-    const qoderLocalAuth = status.runtime === 'qoder-agent-sdk' &&
-      status.configured === false;
 
     if (!status.connected) {
       return m('div', {style: MODAL_STYLES.statusCard}, [
@@ -870,24 +868,15 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
           {
             style: {
               ...MODAL_STYLES.statusValue,
-              color: status.configured
-                ? COLORS.success
-                : qoderLocalAuth
-                  ? COLORS.warning
-                  : COLORS.error,
+              color: status.configured ? COLORS.success : COLORS.error,
             },
           },
           status.configured
             ? uiText('是', 'Yes')
-            : qoderLocalAuth
-              ? uiText(
-                  '未显式配置（本地 CLI 登录将在分析时验证）',
-                  'Not explicitly configured (local CLI login is verified during analysis)',
-                )
             : uiText('否（需完成 Provider 配置）', 'No (Provider setup required)'),
         ),
       ]),
-      status.configured === false && !qoderLocalAuth && status.aiEnabled !== false
+      status.configured === false && status.aiEnabled !== false
         ? m('button', {
             'type': 'button',
             'data-testid': 'configure-provider-from-status',

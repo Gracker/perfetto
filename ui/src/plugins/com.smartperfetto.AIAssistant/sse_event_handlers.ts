@@ -1279,7 +1279,7 @@ function persistSettledStreamingFlow(ctx: SSEHandlerContext): void {
 
 function completeStreamingFlow(ctx: SSEHandlerContext): void {
   // Called only after the authoritative analysis_completed verdict. A replay
-  // may settle a provisional partial state left by an interrupted stream.
+  // may settle a partial state left by an interrupted stream.
   ctx.streamingFlow.status = 'completed';
   ctx.streamingFlow.error = null;
   persistSettledStreamingFlow(ctx);
@@ -4600,19 +4600,6 @@ function renderConclusionContract(
   return lines.join('\n');
 }
 
-/**
- * A run that stopped without its verdict (error, cancellation, a stream end)
- * keeps the provisional text and marks it unverified. The verdict itself clears
- * the cue inside the analysis_completed message patch.
- */
-function markAnswerUnverified(ctx: SSEHandlerContext): void {
-  const messageId = ctx.streamingAnswer.messageId;
-  if (!messageId) return;
-  const message = ctx.getMessages().find((candidate) => candidate.id === messageId);
-  if (message?.answerVerification !== 'pending') return;
-  ctx.updateMessage(messageId, {answerVerification: 'unfinished'}, {persist: true});
-}
-
 function pushFinalConclusionOutput(ctx: SSEHandlerContext, payload: AnalysisCompletedPayload | undefined): void {
   pushStreamingOutput(
     ctx,
@@ -4704,7 +4691,7 @@ export function handleAnalysisCompletedEvent(
       : undefined;
     const serverVerificationDetails = renderServerVerificationDetails(payload);
     const serverVerificationNotice = renderServerVerificationNotice(payload);
-    // The verdict replaces any verification cue on the answer, pending or unfinished.
+    // The verdict replaces any verification cue restored on the answer.
     const answerHasCue = Boolean(ctx.getMessages().find(
       (msg) => msg.id === ctx.streamingAnswer.messageId)?.answerVerification);
     if (
@@ -5001,7 +4988,6 @@ export function handleAnalysisCancelledEvent(
   cancelStreamingFlow(ctx);
   // A stop during the draft is a full cancel: the notice below replaces it.
   discardStreamingDraft(ctx);
-  markAnswerUnverified(ctx);
 
   const isDefaultUserCancellation =
     reason === 'Analysis cancelled by user' || reason === 'Aborted by user';
@@ -5702,7 +5688,6 @@ export function handleErrorEvent(
   ctx: SSEHandlerContext,
 ): SSEHandlerResult {
   discardStreamingDraft(ctx);
-  markAnswerUnverified(ctx);
 
   const payload = eventPayload(data);
   const error =
@@ -6505,16 +6490,12 @@ function handleSSEEventInner(
     }
 
     case 'conclusion': {
-      // Deliver first, verify after. A provisional conclusion (review running)
-      // or a final one (no review) is the finished body and replaces any answer
-      // draft on the same message. Either way the run (loading, stop control,
-      // session lock) stays active until analysis_completed brings the verdict
-      // and report metadata; a legacy stream that ends without it stops on
-      // `end`. Only a provisional body carries the pending cue.
+      // Deliver first: the finished body replaces any answer draft on the same
+      // message. The run (loading, stop control, session lock) stays active
+      // until analysis_completed brings the delivery assurance and report
+      // metadata; a legacy stream that ends without it stops on `end`.
       const conclusionPayload = eventPayload(eventData);
       const conclusionText = readStringField(conclusionPayload, 'conclusion');
-      const provisional = conclusionPayload.provisional === true;
-      const verificationCue = provisional ? {answerVerification: 'pending' as const} : {};
       if (DEBUG_SSE) console.log('[SSEHandlers] CONCLUSION event received');
 
       if (conclusionText) {
@@ -6542,7 +6523,6 @@ function handleSSEEventInner(
               serverVerificationBinding: undefined,
               timestamp: Date.now(),
               flowTag: 'answer_stream',
-              ...verificationCue,
             },
             {persist: true},
           );
@@ -6557,7 +6537,6 @@ function handleSSEEventInner(
             serverVerificationBinding: undefined,
             timestamp: Date.now(),
             flowTag: 'answer_stream',
-            ...verificationCue,
           });
           ctx.streamingAnswer.messageId = messageId;
           ctx.streamingAnswer.content = content;
@@ -6689,7 +6668,6 @@ function handleSSEEventInner(
       return handleSkillErrorEvent(eventData, ctx);
 
     case 'end':
-      markAnswerUnverified(ctx);
       if (ctx.streamingFlow.status === 'running') {
         partialStreamingFlow(ctx, uiText(
           '未收到最终完成与核验状态，请保留当前结果并重试。',

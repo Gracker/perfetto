@@ -328,12 +328,6 @@ export async function streamConversationRun(
   options: {
     signal?: AbortSignal;
     onEvent?(event: ParsedConversationSseEvent): void;
-    /**
-     * The finished answer while its semantic review runs. Render it, keep the
-     * run active, and let onOutcome replace the same message with the
-     * verdict; persist nothing until then.
-     */
-    onProvisionalAnswer?(answer: {message: string}): void;
     onOutcome?(outcome: ConversationOutcome): void;
   } = {},
 ): Promise<ConversationOutcome> {
@@ -358,10 +352,6 @@ export async function streamConversationRun(
     buffer = parsed.remainder;
     for (const event of parsed.events) {
       options.onEvent?.(event);
-      if (event.type === 'provisional_answer') {
-        const message = (event.data as {message?: unknown}).message;
-        if (typeof message === 'string' && message.trim()) options.onProvisionalAnswer?.({message});
-      }
       if (event.type === 'run_completed') {
         // Terminal: nothing further arrives for the run.
         const outcome = (event.data as {outcome: ConversationOutcome}).outcome;
@@ -377,11 +367,7 @@ export async function streamConversationRun(
   throw new Error('Conversation stream ended before a result was received');
 }
 
-/**
- * Returns the backend's answer: `review_stop_requested` when the run's answer
- * was already delivered (only its review stops; the stream carries the turn),
- * otherwise the settled outcome kind.
- */
+/** Returns the backend's settled outcome kind, or undefined when it gave none. */
 export async function cancelConversationRun(
   config: ConversationClientConfig,
   sessionId: string,
@@ -402,43 +388,4 @@ export async function cancelConversationRun(
   const payload: unknown = await response.json().catch(() => undefined);
   const status = payload && typeof payload === 'object' ? (payload as {status?: unknown}).status : undefined;
   return typeof status === 'string' ? status : undefined;
-}
-
-/** A promise with its resolver, for "this request has settled" signals. */
-export interface Deferred {
-  promise: Promise<void>;
-  resolve(): void;
-}
-
-export function deferred(): Deferred {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {resolve = done;});
-  return {promise, resolve};
-}
-
-/**
- * End only the review of a run whose answer is already shown, then wait (at
- * most `timeoutMs`) for its verdict to land. The cancel request is not awaited:
- * the backend answers it only after the run settled, which could otherwise hold
- * the next question for minutes.
- */
-export async function stopReviewAndWait(
-  config: ConversationClientConfig,
-  receipt: Pick<ConversationRunReceipt, 'sessionId' | 'runId'>,
-  settlement: Promise<void> | undefined,
-  timeoutMs = 5_000,
-): Promise<void> {
-  void cancelConversationRun(config, receipt.sessionId, receipt.runId).catch(() => undefined);
-  await waitForSettlement(settlement, timeoutMs);
-}
-
-/** Wait at most `timeoutMs` for a run's verdict to land. */
-export async function waitForSettlement(
-  settlement: Promise<void> | undefined,
-  timeoutMs = 5_000,
-): Promise<void> {
-  if (!settlement) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([settlement, new Promise<void>((resolve) => {timer = setTimeout(resolve, timeoutMs);})]);
-  clearTimeout(timer);
 }

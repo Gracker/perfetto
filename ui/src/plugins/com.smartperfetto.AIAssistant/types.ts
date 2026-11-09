@@ -123,16 +123,15 @@ export interface Message {
   /** Exact finalized candidate identity that owns serverVerificationDetails. */
   serverVerificationBinding?: ServerVerificationBinding;
   /**
-   * Deliver first, verify after. `pending`: the body is final and its one
-   * semantic review is still running; analysis_completed (or run_completed)
-   * replaces the message with its verdict. `unfinished`: the run ended without
-   * a verdict, so the text stays but must not read as verified.
+   * `unfinished`: a stored answer whose run ended without a verification
+   * verdict, so the text stays but must not read as verified. Old stored
+   * values read the same; analysis_completed clears it.
    */
   answerVerification?: AnswerVerificationState;
   /**
    * Display-only answer draft (see answer_draft.ts): streamed before the answer
-   * is finalized and revocable. Never stored; the provisional or final answer
-   * replaces it and clears this flag.
+   * is finalized and revocable. Never stored; the final answer replaces it and
+   * clears this flag.
    */
   answerDraft?: boolean;
 }
@@ -677,8 +676,8 @@ export function createStreamingFlowState(): StreamingFlowState {
 }
 
 /**
- * Incremental answer stream state: the display-only draft until a provisional
- * or final conclusion replaces it (status `finalized`).
+ * Incremental answer stream state: the display-only draft until the final
+ * conclusion replaces it (status `finalized`).
  */
 export interface StreamingAnswerState {
   messageId: string | null;

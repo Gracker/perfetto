@@ -148,8 +148,8 @@ describe('streamConversationRun terminal event', () => {
   });
 });
 
-describe('streamConversationRun provisional answer', () => {
-  it('hands the provisional answer over before the verdict and ignores it afterwards', async () => {
+describe('streamConversationRun replayed provisional answer', () => {
+  it('treats a replayed provisional_answer as a no-op beyond the generic event', async () => {
     const frames = [
       'event: provisional_answer\ndata: {"type":"provisional_answer","message":"answer body","verification":"pending"}\n\n',
       'event: run_completed\ndata: {"type":"run_completed","outcome":{"kind":"answered","message":"answer body"}}\n\n',
@@ -167,15 +167,17 @@ describe('streamConversationRun provisional answer', () => {
       }),
     } as Response)));
     const order: string[] = [];
-    await streamConversationRun(
+    const outcome = await streamConversationRun(
       {backendUrl: 'http://backend'},
       {sessionId: 'conversation-1', runId: 'run-1', isNewSession: true, traceContextAttached: false},
       {
-        onProvisionalAnswer: ({message}) => order.push(`provisional:${message}`),
+        onEvent: event => order.push(`event:${event.type}`),
         onOutcome: primary => order.push(`primary:${primary.message}`),
       },
     );
-    expect(order).toEqual(['provisional:answer body', 'primary:answer body']);
+    expect(outcome).toEqual({kind: 'answered', message: 'answer body'});
+    // The stream stops at the terminal event; nothing else reacts to the retired event.
+    expect(order).toEqual(['event:provisional_answer', 'event:run_completed', 'primary:answer body']);
   });
 });
 

@@ -7,8 +7,8 @@
  * model's answer text as `answer_token` events stamped with `runId` and a
  * monotone `attempt`, and revokes what it showed with `answer_segment_reset`
  * whenever that text turns out not to be the answer (a tool call follows, a
- * continuation or retry replaces it). The draft is replaced by the provisional
- * or final answer, is never stored, and is never replayed on reconnect.
+ * continuation or retry replaces it). The draft is replaced by the final
+ * answer, is never stored, and is never replayed on reconnect.
  */
 
 interface AnswerDraftIdentity {
@@ -39,7 +39,7 @@ export function readAnswerDraftEvent(type: unknown, payload: unknown): AnswerDra
 export interface AnswerDraftTracking {
   runId: string | null;
   attempt: number;
-  /** A provisional or final conclusion owns the message; no draft event touches it. */
+  /** A final conclusion owns the message; no draft event touches it. */
   owned: boolean;
 }
 

@@ -4,13 +4,11 @@ import m from 'mithril';
 
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {
-  type AgentRuntimeKind,
   type ProviderConfig,
   type ProviderQuickSwitcherAttrs,
   type HealthStatus,
   providerRuntimeLabel,
   providerRuntimeShortLabel,
-  providerSupportsRuntime,
   resolveProviderRuntime,
   buildHeaders,
   apiUrl,
@@ -221,70 +219,6 @@ export class ProviderQuickSwitcher
         if (providerName) {
           this.showToast(`✶ Switched to ${providerName}`);
         }
-      }
-    } catch {
-      // Silent fail
-    } finally {
-      this.activating = false;
-      this.open = false;
-      this.focusIndex = -1;
-      m.redraw();
-    }
-  }
-
-  private async switchRuntime(
-    provider: ProviderConfig,
-    runtime: AgentRuntimeKind,
-    vnode?: m.Vnode<ProviderQuickSwitcherAttrs>,
-  ) {
-    if (this.isMutationLocked()) return;
-    this.activating = true;
-    this.open = false;
-    this.focusIndex = -1;
-    m.redraw();
-    try {
-      if (this.isMutationLocked()) return;
-      const runtimeRes = await smartPerfettoFetch(
-        apiUrl(this.backendUrl, `/${provider.id}/runtime`),
-        {
-          method: 'POST',
-          headers: buildHeaders(this.apiKey),
-          body: JSON.stringify({agentRuntime: runtime}),
-        },
-      );
-      if (!runtimeRes.ok) return;
-
-      if (provider.isActive) {
-        this.publishProviderCatalogChanged('runtime-switched');
-        vnode?.attrs.onActivate?.();
-        await this.loadProviders();
-        this.showToast(
-          uiText(
-            `✶ 已切换到 ${provider.name} · ${providerRuntimeLabel(runtime)}`,
-            `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
-          ),
-        );
-        return;
-      }
-
-      if (this.isMutationLocked()) return;
-      const activateRes = await smartPerfettoFetch(
-        apiUrl(this.backendUrl, `/${provider.id}/activate`),
-        {
-          method: 'POST',
-          headers: buildHeaders(this.apiKey),
-        },
-      );
-      if (activateRes.ok) {
-        this.publishProviderCatalogChanged('runtime-switched');
-        vnode?.attrs.onActivate?.();
-        this.showToast(
-          uiText(
-            `✶ 已切换到 ${provider.name} · ${providerRuntimeLabel(runtime)}`,
-            `✶ Switched to ${provider.name} · ${providerRuntimeLabel(runtime)}`,
-          ),
-        );
-        await this.loadProviders();
       }
     } catch {
       // Silent fail
@@ -579,78 +513,12 @@ export class ProviderQuickSwitcher
                   `${providerRuntimeLabel(resolveProviderRuntime(p))} · ${p.models.primary}`,
                 ),
               ]),
-              this.renderRuntimeButtons(p, vnode),
               this.renderHealthDot(p.id),
               p.isActive ? m('div', {style: s.activeDot}) : null,
             ],
           ),
         ),
       ],
-    );
-  }
-
-  private renderRuntimeButtons(
-    provider: ProviderConfig,
-    vnode: m.Vnode<ProviderQuickSwitcherAttrs>,
-  ): m.Children {
-    const t = getTokens();
-    const current = resolveProviderRuntime(provider);
-    const identityLocked = this.isMutationLocked();
-    const allButtons: Array<{runtime: AgentRuntimeKind; label: string}> = [
-      {runtime: 'claude-agent-sdk', label: 'Claude'},
-      {runtime: 'openai-agents-sdk', label: 'OpenAI'},
-      {runtime: 'pi-agent-core', label: 'Pi'},
-      {runtime: 'opencode', label: 'OpenCode'},
-      {runtime: 'qoder-agent-sdk', label: 'Qoder'},
-    ];
-    const buttons = allButtons.filter((button) =>
-      providerSupportsRuntime(provider, button.runtime),
-    );
-
-    if (buttons.length < 2) {
-      return null;
-    }
-
-    return m(
-      'div',
-      {
-        style: {
-          display: 'inline-flex',
-          border: `1px solid ${t.border}`,
-          borderRadius: '5px',
-          overflow: 'hidden',
-          flexShrink: 0,
-        },
-        onclick: (e: Event) => e.stopPropagation(),
-      },
-      buttons.map((button, index) => {
-        const active = current === button.runtime;
-        return m(
-          'button',
-          {
-            key: button.runtime,
-            type: 'button',
-            style: {
-              border: 'none',
-              borderRight:
-                index < buttons.length - 1 ? `1px solid ${t.border}` : 'none',
-              padding: '4px 6px',
-              cursor: active && provider.isActive ? 'default' : 'pointer',
-              fontSize: '10px',
-              fontWeight: active ? 700 : 500,
-              color: active ? 'var(--pf-color-text-on-primary)' : t.textSecondary,
-              background: active ? t.accentGradient : t.surface,
-            },
-            onclick: () => {
-              if (this.isMutationLocked()) return;
-              if (active && provider.isActive) return;
-              void this.switchRuntime(provider, button.runtime, vnode);
-            },
-            disabled: identityLocked,
-          },
-          button.label,
-        );
-      }),
     );
   }
 

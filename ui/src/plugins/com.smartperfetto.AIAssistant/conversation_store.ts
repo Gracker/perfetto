@@ -296,8 +296,8 @@ export function conversationMessageContent(message: StoredConversationMessage): 
   const notices: string[] = [];
   if (message.role === 'assistant' && turn && (turn.partial || turn.completionStatus !== 'completed')) {
     const interrupted = turn.terminationMessage === 'conversation_run_interrupted_before_final_commit';
-    // The same cue as a provisional answer whose verdict never arrived.
-    const reason = turn.terminationReason === 'review_not_finished' ? answerVerificationCueText('unfinished')
+    // Stored turns from before the review was retired read as unverified.
+    const reason = turn.terminationReason === 'review_not_finished' ? answerVerificationCueText()
       : interrupted ? uiText(
       '上一轮在保存最终结论前被中断，请基于已有证据和未完成项继续提问。',
       'The previous turn was interrupted before its final conclusion was saved. Continue with the available evidence and open questions.',
@@ -332,25 +332,11 @@ export function conversationOutcomeTurn(
 
 /**
  * Deterministic message id for one role of one conversation turn. The run id is
- * the turn id, so a provisional answer, its final outcome and the restored
- * history all address the same message.
+ * the turn id, so the final outcome and the restored history address the
+ * same message.
  */
 export function conversationMessageId(sessionId: string, turnId: string | number, role: 'user' | 'assistant'): string {
   return `conversation-${sessionId}-${turnId}-${role}`;
-}
-
-/**
- * A provisional answer whose run ended without a verdict (failure, lost stream,
- * or a stop that had to fall back to a full cancel). The text the user read is
- * kept in history, explicitly marked unverified and incomplete.
- */
-export function unfinishedProvisionalAnswerMessage(input: {
-  id: string; runId: string; content: string; privateContent?: boolean;
-}): StoredConversationMessage {
-  return {id: input.id, role: 'assistant', content: input.content, timestamp: Date.now(),
-    ...(input.privateContent ? {privateContent: true} : {}),
-    turn: {id: input.runId, turnIndex: 0, partial: true, completionStatus: 'incomplete',
-      terminationMessage: answerVerificationCueText('unfinished'), uncertainties: [], nextSteps: [], evidence: []}};
 }
 
 export function conversationRestoreErrorMessage(error: unknown): string {

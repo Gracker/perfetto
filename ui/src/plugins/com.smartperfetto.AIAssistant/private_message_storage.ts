@@ -16,7 +16,7 @@ export interface PrivateMessageStorageMarker {
   serverVerificationDetails?: string;
   serverVerificationNotice?: string;
   serverVerificationBinding?: unknown;
-  answerVerification?: 'pending' | 'unfinished';
+  answerVerification?: 'unfinished';
   answerDraft?: boolean;
   runSupplement?: RunSupplementEntry;
 }
@@ -51,11 +51,7 @@ export function projectMessageForStorage<T extends PrivateMessageStorageMarker>(
         serverVerificationBinding: undefined,
       }
     : message;
-  // A reload cannot resume a review; a stored answer is never still pending.
-  const settled = projected.answerVerification === 'pending'
-    ? {...projected, answerVerification: 'unfinished' as const}
+  return projected.runSupplement
+    ? {...projected, runSupplement: settleRunSupplementEntryForStorage(projected.runSupplement)}
     : projected;
-  return settled.runSupplement
-    ? {...settled, runSupplement: settleRunSupplementEntryForStorage(settled.runSupplement)}
-    : settled;
 }

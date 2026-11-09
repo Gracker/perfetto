@@ -4,20 +4,9 @@
 
 import {uiText} from './ui_language';
 
-/**
- * Deliver first, verify after: the answer body is final when it first appears,
- * while its one semantic review may still run. The cue says which of the two
- * non-final verification states the message is in; a finished verdict removes it.
- */
-export type AnswerVerificationState = 'pending' | 'unfinished';
+/** A delivered answer whose verification did not finish (read from stored messages). */
+export type AnswerVerificationState = 'unfinished';
 
-/** Loading phase while a review-only stop is being honoured. */
-export function reviewStopPhaseText(): string {
-  return uiText('正在结束核验…', 'Stopping verification…');
-}
-
-export function answerVerificationCueText(state: AnswerVerificationState): string {
-  return state === 'pending'
-    ? uiText('结论已生成，正在核验…', 'Answer ready; verification in progress…')
-    : uiText('未完成核验：此结论未经核验', 'Verification did not finish: this answer is unverified');
+export function answerVerificationCueText(): string {
+  return uiText('未完成核验：此结论未经核验', 'Verification did not finish: this answer is unverified');
 }

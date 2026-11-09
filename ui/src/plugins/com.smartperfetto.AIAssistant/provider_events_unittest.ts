@@ -13,7 +13,7 @@ import {
   notifyProviderCatalogChanged,
   subscribeProviderCatalogChanged,
 } from './provider_events';
-import {resetAISharedState, updateAISharedState} from './ai_shared_state';
+import {resetAISharedState} from './ai_shared_state';
 
 let originalFetch: typeof fetch;
 let fetchMock: MockedFunction<typeof fetch>;
@@ -49,7 +49,7 @@ function providerPayload(
   name: string,
   options: {
     isActive?: boolean;
-    agentRuntime?: 'claude-agent-sdk' | 'openai-agents-sdk';
+    agentRuntime?: 'pi-agent-core';
   } = {},
 ) {
   return {
@@ -69,7 +69,7 @@ function providerPayload(
         },
         connection: {
           apiKey: '****1234',
-          agentRuntime: options.agentRuntime ?? 'claude-agent-sdk',
+          agentRuntime: options.agentRuntime ?? 'pi-agent-core',
           claudeBaseUrl: 'https://api.deepseek.com/anthropic',
         },
       },
@@ -146,82 +146,12 @@ describe('Provider catalog change events', () => {
     expect(root.textContent).toContain('DeepSeek Work');
   });
 
-  it('closes the dropdown before switching runtimes and renders the refreshed runtime', async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        jsonResponse(
-          providerPayload('DeepSeek Work', {
-            isActive: true,
-            agentRuntime: 'claude-agent-sdk',
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(jsonResponse({success: true}))
-      .mockResolvedValueOnce(
-        jsonResponse(
-          providerPayload('DeepSeek Work', {
-            isActive: true,
-            agentRuntime: 'openai-agents-sdk',
-          }),
-        ),
-      );
+  it('offers no runtime switch in the dropdown', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(
+      providerPayload('DeepSeek Work', {isActive: true}),
+    ));
 
-    m.mount(root, {
-      view: () =>
-        m(ProviderQuickSwitcher, {
-          backendUrl: 'http://backend',
-        }),
-    });
-    await flushAsyncWork();
-    m.redraw.sync();
-
-    const toggle = root.querySelector('button');
-    if (!toggle) throw new Error('Provider switcher button missing');
-    toggle.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-    m.redraw.sync();
-
-    const openAiButton = Array.from(root.querySelectorAll('button')).find(
-      (button) => button.textContent === 'OpenAI',
-    );
-    if (!openAiButton) throw new Error('OpenAI runtime button missing');
-    openAiButton.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-    m.redraw.sync();
-
-    expect(root.textContent).not.toContain('Not tested');
-
-    await vi.waitFor(() => {
-      m.redraw.sync();
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-      expect(root.textContent).toContain('OA');
-    });
-    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/provider-1/runtime');
-    expect(fetchMock.mock.calls.some(([url]) =>
-      String(url).includes('/provider-1/activate')
-    )).toBe(false);
-  });
-
-  it('resets active analysis identity as soon as the runtime mutation succeeds', async () => {
-    const onActivate = vi.fn();
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse(
-        providerPayload('DeepSeek Work', {
-          isActive: true,
-          agentRuntime: 'claude-agent-sdk',
-        }),
-      ))
-      .mockResolvedValueOnce(jsonResponse({success: true}))
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-        json: async () => ({error: 'reload failed'}),
-      } as Response);
-
-    m.mount(root, {
-      view: () => m(ProviderQuickSwitcher, {
-        backendUrl: 'http://backend',
-        onActivate,
-      }),
-    });
+    m.mount(root, {view: () => m(ProviderQuickSwitcher, {backendUrl: 'http://backend'})});
     await flushAsyncWork();
     m.redraw.sync();
 
@@ -229,19 +159,13 @@ describe('Provider catalog change events', () => {
       new MouseEvent('click', {bubbles: true}),
     );
     m.redraw.sync();
-    const openAiButton = Array.from(root.querySelectorAll('button')).find(
-      (button) => button.textContent === 'OpenAI',
-    );
-    if (!openAiButton) throw new Error('OpenAI runtime button missing');
-    openAiButton.dispatchEvent(new MouseEvent('click', {bubbles: true}));
 
-    await vi.waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-      expect(onActivate).toHaveBeenCalledTimes(1);
-    });
-    expect(fetchMock.mock.calls.some(([url]) =>
-      String(url).includes('/provider-1/activate')
-    )).toBe(false);
+    const labels = Array.from(root.querySelectorAll('button')).map(
+      (button) => button.textContent,
+    );
+    expect(labels).not.toContain('OpenAI');
+    expect(labels).not.toContain('Claude');
+    expect(labels).not.toContain('Pi');
   });
 
   it('resets identity after quick activation before the provider reload completes', async () => {
@@ -308,103 +232,6 @@ describe('Provider catalog change events', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(onActivate).toHaveBeenCalledTimes(1);
     reload.resolve(jsonResponse(providerPayload('DeepSeek Work')));
-  });
-
-  it('finishes the identity reset when the analysis lock starts in flight', async () => {
-    const onActivate = vi.fn();
-    let resolveRuntimeMutation: ((response: Response) => void) | undefined;
-    const runtimeMutation = new Promise<Response>((resolve) => {
-      resolveRuntimeMutation = resolve;
-    });
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse(
-        providerPayload('DeepSeek Work', {
-          isActive: true,
-          agentRuntime: 'claude-agent-sdk',
-        }),
-      ))
-      .mockReturnValueOnce(runtimeMutation)
-      .mockResolvedValueOnce(jsonResponse(
-        providerPayload('DeepSeek Work', {
-          isActive: true,
-          agentRuntime: 'openai-agents-sdk',
-        }),
-      ));
-
-    m.mount(root, {
-      view: () => m(ProviderQuickSwitcher, {
-        backendUrl: 'http://backend',
-        onActivate,
-      }),
-    });
-    await flushAsyncWork();
-    m.redraw.sync();
-
-    root.querySelector('button')?.dispatchEvent(
-      new MouseEvent('click', {bubbles: true}),
-    );
-    m.redraw.sync();
-    const openAiButton = Array.from(root.querySelectorAll('button')).find(
-      (button) => button.textContent === 'OpenAI',
-    );
-    if (!openAiButton) throw new Error('OpenAI runtime button missing');
-    openAiButton.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-
-    updateAISharedState({status: 'analyzing'});
-    resolveRuntimeMutation?.(jsonResponse({success: true}));
-
-    await vi.waitFor(() => {
-      expect(onActivate).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-    });
-  });
-
-  it('does not activate an inactive provider when the lock starts in flight', async () => {
-    const onActivate = vi.fn();
-    let resolveRuntimeMutation: ((response: Response) => void) | undefined;
-    const runtimeMutation = new Promise<Response>((resolve) => {
-      resolveRuntimeMutation = resolve;
-    });
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse(
-        providerPayload('DeepSeek Work', {
-          isActive: false,
-          agentRuntime: 'claude-agent-sdk',
-        }),
-      ))
-      .mockReturnValueOnce(runtimeMutation)
-      .mockResolvedValueOnce(jsonResponse({success: true}));
-
-    m.mount(root, {
-      view: () => m(ProviderQuickSwitcher, {
-        backendUrl: 'http://backend',
-        onActivate,
-      }),
-    });
-    await flushAsyncWork();
-    m.redraw.sync();
-
-    root.querySelector('button')?.dispatchEvent(
-      new MouseEvent('click', {bubbles: true}),
-    );
-    m.redraw.sync();
-    const openAiButton = Array.from(root.querySelectorAll('button')).find(
-      (button) => button.textContent === 'OpenAI',
-    );
-    if (!openAiButton) throw new Error('OpenAI runtime button missing');
-    openAiButton.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-
-    updateAISharedState({status: 'analyzing'});
-    resolveRuntimeMutation?.(jsonResponse({success: true}));
-    await flushAsyncWork();
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls.some(([url]) =>
-      String(url).includes('/provider-1/activate')
-    )).toBe(false);
-    expect(onActivate).not.toHaveBeenCalled();
   });
 
   it.each([

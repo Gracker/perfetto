@@ -5,16 +5,19 @@
 import {describe, expect, it} from 'vitest';
 
 import {
-  providerHasQoderSurface,
+  connectionWithEffectiveSurface,
+  providerApiSurface,
+  providerNeedsPiEndpoint,
   ProviderRequestError,
   providerRequestFailure,
   providerStoreUnreadable,
   providerStoreUnreadableMessage,
   providerRuntimeLabel,
   providerRuntimeShortLabel,
-  providerSupportsRuntime,
+  providerUsesPiCatalogRoute,
   resolveProviderRuntime,
   type ProviderConfig,
+  withPiRuntimeRecord,
 } from './provider_types';
 
 function makeProvider(overrides: Partial<ProviderConfig>): ProviderConfig {
@@ -32,76 +35,77 @@ function makeProvider(overrides: Partial<ProviderConfig>): ProviderConfig {
   };
 }
 
-describe('provider runtime short labels', () => {
-  it('keeps OpenCode distinct from Claude', () => {
-    expect(providerRuntimeShortLabel('opencode')).toBe('OC');
-    expect(providerRuntimeShortLabel('experimental-opencode')).toBe('OC');
-    expect(providerRuntimeShortLabel('claude-agent-sdk')).toBe('CL');
-  });
-
-  it('labels the Qoder runtime distinctly', () => {
-    expect(providerRuntimeShortLabel('qoder-agent-sdk')).toBe('QD');
+describe('provider runtime labels', () => {
+  it('labels recorded provenance and defaults to Pi', () => {
+    expect(providerRuntimeLabel('pi-agent-core')).toBe('Pi Agent Core');
+    expect(providerRuntimeLabel('claude-agent-sdk')).toBe('Claude SDK');
     expect(providerRuntimeLabel('qoder-agent-sdk')).toBe('Qoder SDK');
+    expect(providerRuntimeShortLabel('pi-agent-core')).toBe('PI');
+    expect(providerRuntimeShortLabel('experimental-pi-agent-core')).toBe('PI');
+    expect(providerRuntimeShortLabel('opencode')).toBe('OC');
+    expect(providerRuntimeShortLabel('qoder-agent-sdk')).toBe('QD');
   });
 });
 
 describe('resolveProviderRuntime', () => {
-  it('resolves qoder-agent-sdk when agentRuntime is set', () => {
-    const provider = makeProvider({
-      connection: {agentRuntime: 'qoder-agent-sdk'},
-    });
-    expect(resolveProviderRuntime(provider)).toBe('qoder-agent-sdk');
-  });
-
-  it('falls back to claude-agent-sdk when only qoderAccessToken is set without agentRuntime', () => {
-    const provider = makeProvider({
-      connection: {qoderAccessToken: 'qpat_123'},
-    });
-    // resolveProviderRuntime only checks explicit agentRuntime field;
-    // inference from qoderAccessToken is done via providerHasQoderSurface
-    expect(resolveProviderRuntime(provider)).toBe('claude-agent-sdk');
-    expect(providerHasQoderSurface(provider)).toBe(true);
-  });
-
-  it('does not resolve qoder for non-custom providers', () => {
-    const provider = makeProvider({
-      type: 'anthropic',
-      connection: {},
-    });
-    expect(resolveProviderRuntime(provider)).toBe('claude-agent-sdk');
+  it('reports Pi for a record without a label and keeps a retired label', () => {
+    expect(resolveProviderRuntime(makeProvider({type: 'anthropic'}))).toBe('pi-agent-core');
+    expect(
+      resolveProviderRuntime(makeProvider({connection: {agentRuntime: 'qoder-agent-sdk'}})),
+    ).toBe('qoder-agent-sdk');
   });
 });
 
-describe('providerHasQoderSurface', () => {
-  it('detects Qoder surface via agentRuntime', () => {
-    const provider = makeProvider({
-      connection: {agentRuntime: 'qoder-agent-sdk'},
-    });
-    expect(providerHasQoderSurface(provider)).toBe(true);
+describe('providerApiSurface', () => {
+  const dualTemplate = {piCatalogRouteSurfaces: ['openai'], defaultApiSurface: 'claude'};
+
+  it('uses the recorded surface only where a choice exists', () => {
+    expect(providerApiSurface('glm', {apiSurface: 'claude', agentRuntime: 'pi-agent-core'}, dualTemplate)).toBe('claude');
+    expect(providerApiSurface('custom', {apiSurface: 'openai'})).toBe('openai');
+    expect(providerApiSurface('openai', {apiSurface: 'claude'}, {defaultApiSurface: 'openai'})).toBe('openai');
+    expect(providerApiSurface('anthropic', {apiSurface: 'openai'})).toBe('claude');
   });
 
-  it('detects Qoder surface via qoderCliPath', () => {
-    const provider = makeProvider({
-      connection: {qoderCliPath: '/usr/bin/qodercli'},
-    });
-    expect(providerHasQoderSurface(provider)).toBe(true);
+  it('follows the template catalog route for a Pi record and the template default otherwise', () => {
+    expect(providerApiSurface('glm', {agentRuntime: 'pi-agent-core'}, dualTemplate)).toBe('openai');
+    expect(providerApiSurface('glm', {}, dualTemplate)).toBe('claude');
+    expect(providerApiSurface('qwen', {agentRuntime: 'pi-agent-core'}, {defaultApiSurface: 'claude'})).toBe('claude');
+    expect(providerApiSurface('minimax', {agentRuntime: 'pi-agent-core'},
+      {piCatalogRouteSurfaces: ['claude', 'openai'], defaultApiSurface: 'claude'})).toBe('claude');
+    expect(providerUsesPiCatalogRoute({agentRuntime: 'pi-agent-core'}, dualTemplate)).toBe(true);
+    expect(providerUsesPiCatalogRoute({agentRuntime: 'pi-agent-core', apiSurface: 'claude'}, dualTemplate)).toBe(false);
+    expect(providerUsesPiCatalogRoute({}, dualTemplate)).toBe(false);
   });
 
-  it('returns false for non-custom providers', () => {
-    const provider = makeProvider({
-      type: 'anthropic',
-      connection: {agentRuntime: 'qoder-agent-sdk'},
-    });
-    expect(providerHasQoderSurface(provider)).toBe(false);
+  it('with neither template field behaves as a surface with no catalog route', () => {
+    expect(providerUsesPiCatalogRoute({agentRuntime: 'pi-agent-core'}, {})).toBe(false);
+    expect(providerUsesPiCatalogRoute({agentRuntime: 'pi-agent-core'})).toBe(false);
+    expect(providerApiSurface('glm', {agentRuntime: 'pi-agent-core'}, {})).toBe('claude');
+    expect(providerApiSurface('custom', {openaiBaseUrl: 'u'})).toBe('claude');
+  });
+
+  it('ignores template values outside the two surfaces', () => {
+    expect(providerApiSurface('glm', {agentRuntime: 'pi-agent-core'},
+      {piCatalogRouteSurfaces: ['grpc'], defaultApiSurface: 'grpc'})).toBe('claude');
   });
 });
 
-describe('providerSupportsRuntime', () => {
-  it('supports qoder-agent-sdk for custom providers with Qoder surface', () => {
-    const provider = makeProvider({
-      connection: {qoderAccessToken: 'qpat_123'},
-    });
-    expect(providerSupportsRuntime(provider, 'qoder-agent-sdk')).toBe(true);
+describe('providerNeedsPiEndpoint', () => {
+  it('identifies state the migration could not convert', () => {
+    expect(providerNeedsPiEndpoint({agentRuntime: 'pi-agent-core', apiKey: 'k'})).toBe(false);
+    expect(providerNeedsPiEndpoint({})).toBe(false);
+    expect(providerNeedsPiEndpoint({agentRuntime: 'qoder-agent-sdk'})).toBe(true);
+    expect(providerNeedsPiEndpoint({agentRuntime: 'opencode'})).toBe(true);
+    expect(providerNeedsPiEndpoint({qoderCliPath: '/x'} as ProviderConfig['connection'])).toBe(true);
+  });
+
+  it('writes Pi and removes the retired fields, keeping the rest', () => {
+    const connection = withPiRuntimeRecord({
+      agentRuntime: 'opencode',
+      openCodeModelJson: '{}',
+      apiKey: 'k',
+    } as ProviderConfig['connection']);
+    expect(connection).toEqual({agentRuntime: 'pi-agent-core', apiKey: 'k'});
   });
 });
 
@@ -140,44 +144,16 @@ describe('providerRequestFailure', () => {
   });
 });
 
-describe('Pi Agent Core on catalog-backed provider types', () => {
-  it('follows the backend supportedRuntimes list for non-custom providers', () => {
-    const glm = makeProvider({
-      type: 'glm',
-      category: 'official',
-      connection: {agentRuntime: 'pi-agent-core', apiKey: 'k'},
-      supportedRuntimes: ['claude-agent-sdk', 'openai-agents-sdk', 'pi-agent-core'],
-    });
-    expect(providerSupportsRuntime(glm, 'pi-agent-core')).toBe(true);
-    expect(resolveProviderRuntime(glm)).toBe('pi-agent-core');
-    expect(providerSupportsRuntime(glm, 'opencode')).toBe(false);
-    expect(
-      providerSupportsRuntime({...glm, supportedRuntimes: undefined}, 'pi-agent-core'),
-    ).toBe(false);
-    // The backend list also decides Claude/OpenAI for non-custom types.
-    expect(
-      providerSupportsRuntime(
-        makeProvider({
-          type: 'anthropic',
-          category: 'official',
-          connection: {openaiBaseUrl: 'https://example.com/v1'},
-          supportedRuntimes: ['claude-agent-sdk'],
-        }),
-        'openai-agents-sdk',
-      ),
-    ).toBe(false);
-    expect(
-      providerSupportsRuntime(
-        makeProvider({type: 'qwen', category: 'official', supportedRuntimes: ['claude-agent-sdk', 'openai-agents-sdk']}),
-        'pi-agent-core',
-      ),
-    ).toBe(false);
-  });
+describe('connectionWithEffectiveSurface', () => {
+  const record = (over: Partial<ProviderConfig>): ProviderConfig => ({
+    id: 'p', name: 'p', category: 'custom', type: 'custom', isActive: false, createdAt: '', updatedAt: '',
+    models: {primary: 'm', light: 'm'}, connection: {}, ...over,
+  } as ProviderConfig);
 
-  it('keeps the explicit Pi fields rule for custom providers', () => {
-    expect(
-      providerSupportsRuntime(makeProvider({connection: {piAgentCoreModelJson: '{}'}}), 'pi-agent-core'),
-    ).toBe(true);
-    expect(providerSupportsRuntime(makeProvider({}), 'pi-agent-core')).toBe(false);
+  it('fills the surface only when none is recorded', () => {
+    expect(connectionWithEffectiveSurface(record({effectiveApiSurface: 'openai'})).apiSurface).toBe('openai');
+    expect(connectionWithEffectiveSurface(record({connection: {apiSurface: 'claude'}, effectiveApiSurface: 'openai'})).apiSurface)
+      .toBe('claude');
+    expect(connectionWithEffectiveSurface(record({})).apiSurface).toBeUndefined();
   });
 });

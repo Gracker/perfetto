@@ -4,6 +4,7 @@ import m from 'mithril';
 
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
 import {
+  connectionWithEffectiveSurface,
   type ProviderType,
   type ProviderTuning,
   type ProviderConfig,
@@ -11,14 +12,19 @@ import {
   type ProviderTemplate,
   type FormState,
   type BedrockAuthMethod,
-  type AgentRuntimeKind,
   type OpenAIProtocol,
+  type ProviderApiSurface,
+  type ProviderConnection,
   connectionFieldMetadata,
   buildHeaders,
   apiUrl,
   createEmptyForm,
+  isDualSurfaceProviderType,
+  providerApiSurface,
+  providerNeedsPiEndpoint,
   providerRequestFailure,
-  providerRuntimeLabel,
+  providerUsesPiCatalogRoute,
+  withPiRuntimeRecord,
 } from './provider_types';
 import {getTokens, STYLES as getStyles} from './provider_styles';
 import {uiText as text} from './ui_language';
@@ -34,49 +40,26 @@ export interface ProviderFormAttrs {
   onCancel: () => void;
 }
 
-const DUAL_SURFACE_PROVIDER_TYPES: ProviderType[] = [
-  'deepseek',
-  'glm',
-  'qwen',
-  'qwen_coding',
-  'kimi_code',
-  'kimi',
-  'doubao',
-  'minimax',
-  'xiaomi',
-  'tencent_token_plan',
-  'tencent_coding_plan',
-  'hunyuan',
-  'qianfan',
-  'stepfun',
-  'siliconflow',
-  'huawei',
-];
-
-function isDualSurfaceProviderType(type: ProviderType): boolean {
-  return DUAL_SURFACE_PROVIDER_TYPES.includes(type);
-}
-
 const CONNECTION_FIELD_HINTS: Partial<Record<string, [string, string]>> = {
   apiKey: [
-    '通常只需要此凭据。除非设置了下方的可选覆盖项，预设提供商会将它用于所选 SDK 运行时。',
-    'Usually this is the only credential you need. Preset providers reuse it for the selected SDK runtime unless an optional override below is set.',
+    '通常只需要此凭据。除非设置了下方的可选覆盖项，预设提供商会将它用于所选接口。',
+    'Usually this is the only credential you need. Preset providers reuse it for the selected endpoint unless an optional override below is set.',
   ],
   claudeApiKey: [
-    '用于 Claude SDK 路径，并以 x-api-key 发送。需要复用共享提供商密钥时请留空。',
-    'Used by the Claude SDK path and sent as x-api-key. Leave empty when the shared provider key should be reused.',
+    '用于 Anthropic 兼容接口，并以 x-api-key 发送。需要复用共享提供商密钥时请留空。',
+    'Used on the Anthropic-compatible endpoint and sent as x-api-key. Leave empty when the shared provider key should be reused.',
   ],
   claudeAuthToken: [
-    '仅用于在 Claude SDK 路径上要求 Authorization: Bearer <token> 的提供商。请勿包含 Bearer 前缀。',
-    'Only needed for providers that require Authorization: Bearer <token> on the Claude SDK path. Do not include the Bearer prefix.',
+    '仅用于在 Anthropic 兼容接口上要求 Authorization: Bearer <token> 的提供商。请勿包含 Bearer 前缀。',
+    'Only needed for providers that require Authorization: Bearer <token> on the Anthropic-compatible endpoint. Do not include the Bearer prefix.',
   ],
   claudeBaseUrl: [
     '提供商模板已预填。仅当提供商控制台给出不同的 Claude/Anthropic 兼容 URL 时修改。',
     'Prefilled by the provider template. Change only when your provider console shows a different Claude/Anthropic-compatible URL.',
   ],
   openaiApiKey: [
-    '用于 OpenAI SDK 路径。需要复用共享提供商密钥时请留空。',
-    'Used by the OpenAI SDK path. Leave empty when the shared provider key should be reused.',
+    '用于 OpenAI 兼容接口。需要复用共享提供商密钥时请留空。',
+    'Used on the OpenAI-compatible endpoint. Leave empty when the shared provider key should be reused.',
   ],
   openaiBaseUrl: [
     '提供商模板已预填。OpenAI 兼容网关通常使用以 /v1 结尾的 URL。',
@@ -87,24 +70,12 @@ const CONNECTION_FIELD_HINTS: Partial<Record<string, [string, string]>> = {
     'Optional explicit module path. Leave empty to load @earendil-works/pi-agent-core from the backend package.',
   ],
   piAgentCoreModelJson: [
-    '自定义提供商使用 Pi Agent Core 时必填；GLM、DeepSeek 等提供商留空即按 Pi 内置目录解析模型。请粘贴 Pi 运行时要求的模型 JSON 对象；此字段按敏感信息处理。',
-    'Required for a custom provider on Pi Agent Core; leave empty for GLM, DeepSeek and similar providers to resolve the model from the Pi builtin catalog. Paste the model JSON object expected by the Pi runtime. This field is treated as sensitive.',
+    '可选。留空时按上方的接口和密钥解析模型（GLM、DeepSeek 等提供商使用 Pi 内置目录）；填写后优先于上方设置。请粘贴 Pi 运行时要求的模型 JSON 对象；此字段按敏感信息处理。',
+    'Optional. Leave empty to resolve the model from the endpoint and key above (GLM, DeepSeek and similar providers use the Pi builtin catalog); when set, it takes precedence over them. Paste the model JSON object expected by the Pi runtime. This field is treated as sensitive.',
   ],
   piAgentCoreSystemPrompt: [
     'Pi Agent Core 的可选运行时系统提示词。SmartPerfetto 分析契约仍来自后端 Strategy。',
     'Optional runtime-level system prompt for Pi Agent Core. SmartPerfetto analysis contracts still come from backend strategies.',
-  ],
-  openCodeSdkModulePath: [
-    '可选的显式模块路径。留空时从后端包加载 @opencode-ai/sdk。',
-    'Optional explicit module path. Leave empty to load @opencode-ai/sdk from the backend package.',
-  ],
-  openCodeModelJson: [
-    '可选的 OpenCode 模型/提供商 JSON。省略时使用该提供商的 OpenAI 兼容字段和主模型。',
-    'Optional OpenCode model/provider JSON. If omitted, OpenCode uses the OpenAI-compatible fields and primary model from this provider.',
-  ],
-  openCodeSystemPrompt: [
-    'OpenCode 的可选运行时系统提示词。SmartPerfetto 分析契约仍来自后端 Strategy。',
-    'Optional runtime-level system prompt for OpenCode. SmartPerfetto analysis contracts still come from backend strategies.',
   ],
 };
 
@@ -119,10 +90,8 @@ const CONNECTION_FIELD_QUALIFIERS: Record<string, string> = {
   claudeBaseUrl: 'Preset',
   openaiBaseUrl: 'Preset',
   piAgentCoreModulePath: 'Optional',
+  piAgentCoreModelJson: 'Optional',
   piAgentCoreSystemPrompt: 'Optional',
-  openCodeSdkModulePath: 'Optional',
-  openCodeModelJson: 'Optional',
-  openCodeSystemPrompt: 'Optional',
   awsRegion: 'Preset',
   awsSessionToken: 'Optional',
   awsProfile: 'Optional',
@@ -136,6 +105,41 @@ function connectionFieldQualifier(field: string): string | undefined {
   return qualifier;
 }
 
+/**
+ * The shared field the backend reads when a custom provider leaves a surface
+ * field empty. Shown as a fallback, never copied into the surface field: saving
+ * it there would read as an endpoint change and ask for the keys again.
+ */
+// The keys the backend asks to confirm again when a key would go to another endpoint.
+const SAVED_NETWORK_CREDENTIAL_FIELDS: Array<keyof ProviderConnection> = [
+  'apiKey',
+  'claudeApiKey',
+  'claudeAuthToken',
+  'openaiApiKey',
+];
+
+function surfaceEndpointOrigin(
+  connection: ProviderConnection,
+  surface: ProviderApiSurface,
+): string | undefined {
+  const url =
+    (surface === 'openai' ? connection.openaiBaseUrl : connection.claudeBaseUrl) ||
+    connection.baseUrl;
+  if (!url?.trim()) return undefined;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+const CUSTOM_SHARED_FIELD_FALLBACK: Partial<Record<string, string>> = {
+  claudeApiKey: 'apiKey',
+  claudeBaseUrl: 'baseUrl',
+  openaiApiKey: 'apiKey',
+  openaiBaseUrl: 'baseUrl',
+};
+
 export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private form: FormState = createEmptyForm();
   private generatedName: string | undefined;
@@ -143,21 +147,26 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private saving = false;
   private isEdit = false;
   private editingId: string | null = null;
-  /** Runtimes the selected provider type may select, from its backend template. */
-  private runtimes: AgentRuntimeKind[] = [];
+  /** The record could not be converted to Pi and needs an endpoint before it can run. */
+  private needsPiEndpoint = false;
+  private templates: ProviderTemplate[] = [];
+  /** The saved connection under edit, to tell whether its endpoint is being switched. */
+  private savedConnection?: ProviderConnection;
 
   oninit(vnode: m.Vnode<ProviderFormAttrs>) {
     const {editingProvider, cloneSource, templates} = vnode.attrs;
+    this.templates = templates;
     if (editingProvider) {
       this.isEdit = true;
       this.editingId = editingProvider.id;
+      this.savedConnection = editingProvider.connection;
       this.form = {
         name: editingProvider.name,
         type: editingProvider.type,
         models: {...editingProvider.models},
         connection: this.normalizeConnectionForForm(
           editingProvider.type,
-          editingProvider.connection,
+          connectionWithEffectiveSurface(editingProvider),
         ),
         tuning: editingProvider.tuning ? {...editingProvider.tuning} : {},
         showTuning:
@@ -174,7 +183,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         name: text(`${src.name}（副本）`, `${src.name} (Copy)`),
         type: src.type,
         models: {...src.models},
-        connection: this.normalizeConnectionForForm(src.type, src.connection),
+        connection: this.normalizeConnectionForForm(src.type, connectionWithEffectiveSurface(src)),
         tuning: src.tuning ? {...src.tuning} : {},
         showTuning: !!src.tuning && Object.keys(src.tuning).length > 0,
         useBedrock: src.connection.useBedrock !== false,
@@ -199,6 +208,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     const useGeneratedName =
       !this.form.name.trim() || this.form.name === this.generatedName;
     this.form.type = type;
+    this.needsPiEndpoint = false;
     const template = templates.find((t) => t.type === type);
     if (template) {
       if (useGeneratedName) this.form.name = template.displayName;
@@ -225,42 +235,26 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     type: ProviderType,
     connection: FormState['connection'],
   ): FormState['connection'] {
-    const conn = {...connection};
+    this.needsPiEndpoint = providerNeedsPiEndpoint(connection);
+    const conn = this.needsPiEndpoint
+      ? withPiRuntimeRecord(connection)
+      : {...connection};
     if (type === 'anthropic') {
       conn.claudeApiKey ??= conn.apiKey;
       conn.claudeBaseUrl ??= conn.baseUrl;
     } else if (type === 'openai' || type === 'ollama') {
       conn.openaiApiKey ??= conn.apiKey;
       conn.openaiBaseUrl ??= conn.baseUrl;
-      conn.agentRuntime ??= 'openai-agents-sdk';
       conn.openaiProtocol ??=
         type === 'openai' ? 'responses' : 'chat_completions';
     } else if (isDualSurfaceProviderType(type)) {
       conn.claudeBaseUrl ??= conn.baseUrl;
       conn.openaiProtocol ??= 'chat_completions';
-      conn.agentRuntime ??= 'claude-agent-sdk';
-    } else if (type === 'custom') {
-      if (conn.agentRuntime === 'pi-agent-core') {
-        // Pi Agent Core uses explicit Pi fields; do not infer Claude/OpenAI
-        // connection fields from the legacy shared key.
-      } else if (conn.agentRuntime === 'qoder-agent-sdk') {
-        // Qoder uses explicit qoderAccessToken/qoderCliPath; do not infer
-        // Claude/OpenAI connection fields from the legacy shared key.
-      } else if (conn.agentRuntime === 'opencode') {
-        conn.openaiApiKey ??= conn.apiKey;
-        conn.openaiBaseUrl ??= conn.baseUrl;
-        conn.openaiProtocol ??= 'chat_completions';
-      } else if (
-        conn.agentRuntime === 'openai-agents-sdk' ||
-        conn.openaiProtocol
-      ) {
-        conn.openaiApiKey ??= conn.apiKey;
-        conn.openaiBaseUrl ??= conn.baseUrl;
-        conn.openaiProtocol ??= 'chat_completions';
-      } else {
-        conn.claudeApiKey ??= conn.apiKey;
-        conn.claudeBaseUrl ??= conn.baseUrl;
-      }
+    } else if (
+      type === 'custom' &&
+      providerApiSurface(type, conn, this.templateFor(type)) === 'openai'
+    ) {
+      conn.openaiProtocol ??= 'chat_completions';
     }
     return conn;
   }
@@ -276,6 +270,18 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.form.models.primary.trim() || template?.defaultModels.primary || '';
     if (!primary) {
       this.error = text('请输入主模型 ID。', 'Enter a primary model ID.');
+      return;
+    }
+    // Without an endpoint Pi would fall back to the default host, with whatever key was entered.
+    if (
+      this.needsPiEndpoint &&
+      !this.hasSelectedSurfaceEndpoint() &&
+      !connection.piAgentCoreModelJson?.trim()
+    ) {
+      this.error = text(
+        '请填写所选接口的基础 URL，或填写 Pi Agent Core 模型 JSON。',
+        'Enter a Base URL for the selected endpoint or a Pi Agent Core model JSON.',
+      );
       return;
     }
     const source = attrs.editingProvider || attrs.cloneSource;
@@ -343,8 +349,8 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     const t = getTokens();
     const s = getStyles(t);
     const {templates, availableModels, onCancel} = vnode.attrs;
-    const template = templates.find((tmpl) => tmpl.type === this.form.type);
-    this.runtimes = template?.supportedRuntimes ?? [];
+    this.templates = templates;
+    const template = this.templateFor(this.form.type);
 
     return m(
       'div',
@@ -378,12 +384,12 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
               {style: s.subtitle},
               this.isEdit
                 ? text(
-                    '修改提供商凭据、运行时和模型。',
-                    'Modify provider credentials, runtime, and models',
+                    '修改提供商凭据和模型。',
+                    'Modify provider credentials and models',
                   )
                 : text(
-                    '提供商模板会预填运行时 URL 和模型；通常只需填写 API 密钥。',
-                    'Provider templates prefill runtime URLs and models. Usually only the API key is required.',
+                    '提供商模板会预填接口 URL 和模型；通常只需填写 API 密钥。',
+                    'Provider templates prefill endpoint URLs and models. Usually only the API key is required.',
                   ),
             ),
           ]),
@@ -479,9 +485,75 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     ]);
   }
 
-  private primaryCredentialField(): string {
+  private templateFor(type: ProviderType): ProviderTemplate | undefined {
+    return this.templates.find((tmpl) => tmpl.type === type);
+  }
+
+  private currentSurface(): ProviderApiSurface {
+    return providerApiSurface(
+      this.form.type,
+      this.form.connection,
+      this.templateFor(this.form.type),
+    );
+  }
+
+  private usesPiCatalogRoute(): boolean {
+    return providerUsesPiCatalogRoute(
+      this.form.connection,
+      this.templateFor(this.form.type),
+    );
+  }
+
+  /** The endpoint the backend would call for the selected surface, ignoring blanks. */
+  private hasSelectedSurfaceEndpoint(): boolean {
     const conn = this.form.connection;
-    if (this.currentRuntime() === 'openai-agents-sdk') {
+    const selected =
+      this.currentSurface() === 'openai'
+        ? conn.openaiBaseUrl
+        : conn.claudeBaseUrl;
+    return Boolean(selected?.trim() || conn.baseUrl?.trim());
+  }
+
+  /**
+   * Switching a saved provider to an endpoint on another origin sends its key
+   * to a different host, so the backend asks for that key again and refuses
+   * the save until it is. An unset endpoint counts as another origin.
+   */
+  private surfaceSwitchNeedsCredential(): boolean {
+    const saved = this.savedConnection;
+    if (
+      !saved ||
+      !SAVED_NETWORK_CREDENTIAL_FIELDS.some((field) => Boolean(saved[field]))
+    ) {
+      return false;
+    }
+    const surface = this.currentSurface();
+    const savedSurface = providerApiSurface(
+      this.form.type,
+      saved,
+      this.templateFor(this.form.type),
+    );
+    if (surface === savedSurface) return false;
+    const savedOrigin = surfaceEndpointOrigin(saved, savedSurface);
+    if (savedOrigin && savedOrigin === surfaceEndpointOrigin(this.form.connection, surface)) {
+      return false;
+    }
+    const conn = this.form.connection as Record<string, string | undefined>;
+    const field =
+      this.form.type === 'custom'
+        ? surface === 'openai'
+          ? 'openaiApiKey'
+          : 'claudeApiKey'
+        : this.primaryCredentialField();
+    const value = conn[field]?.trim();
+    return !value || value.startsWith('****');
+  }
+
+  private primaryCredentialField(): string {
+    // The catalog route reads only the shared key.
+    if (this.usesPiCatalogRoute()) return 'apiKey';
+    const conn = this.form.connection;
+    if (this.currentSurface() === 'openai') {
       return conn.openaiApiKey ||
         this.form.type === 'openai' ||
         this.form.type === 'ollama'
@@ -571,31 +643,24 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   private renderAdvancedConnection(
     s: ReturnType<typeof getStyles>,
   ): m.Children {
-    // A runtime choice exists only when the backend lists more than one for this type.
-    const dual = this.runtimes.length > 1;
     const mainField = this.primaryCredentialField();
-    const runtime = this.currentRuntime();
-    const openai = runtime === 'openai-agents-sdk';
-    // Pi runs on the provider's own key and endpoint; an explicit model JSON is optional.
-    const fields =
-      runtime === 'pi-agent-core'
-        ? ['openaiBaseUrl', 'claudeBaseUrl', 'piAgentCoreModelJson']
-        : openai
-          ? ['openaiApiKey', 'openaiBaseUrl']
-          : ['claudeApiKey', 'claudeAuthToken', 'claudeBaseUrl'];
+    const openai = this.currentSurface() === 'openai';
+    const catalog = this.usesPiCatalogRoute();
+    const fields = catalog
+      ? [openai ? 'openaiBaseUrl' : 'claudeBaseUrl']
+      : openai
+        ? ['openaiApiKey', 'openaiBaseUrl']
+        : ['claudeApiKey', 'claudeAuthToken', 'claudeBaseUrl'];
     return m('div', [
-      dual ? this.renderRuntimeSelector(s) : null,
-      dual && mainField !== 'apiKey'
+      this.renderSurfaceSelector(s),
+      isDualSurfaceProviderType(this.form.type) && mainField !== 'apiKey'
         ? this.renderConnectionInput(s, 'apiKey')
         : null,
       ...fields
         .filter((field) => field !== mainField)
-        .map((field) =>
-          field.endsWith('Json')
-            ? this.renderConnectionTextarea(s, field)
-            : this.renderConnectionInput(s, field),
-        ),
-      openai ? this.renderOpenAIProtocolSelect(s) : null,
+        .map((field) => this.renderConnectionInput(s, field)),
+      this.renderConnectionTextarea(s, 'piAgentCoreModelJson'),
+      openai && !catalog ? this.renderOpenAIProtocolSelect(s) : null,
     ]);
   }
 
@@ -736,76 +801,62 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
     );
   }
 
-  private currentRuntime(): AgentRuntimeKind {
-    const runtime = this.form.connection.agentRuntime;
-    if (
-      runtime === 'openai-agents-sdk' ||
-      runtime === 'claude-agent-sdk' ||
-      runtime === 'pi-agent-core' ||
-      runtime === 'opencode' ||
-      runtime === 'qoder-agent-sdk'
-    ) {
-      return runtime;
-    }
-    if (this.form.type === 'openai' || this.form.type === 'ollama') {
-      return 'openai-agents-sdk';
-    }
-    return 'claude-agent-sdk';
+  /** A dual-surface type offers a choice only once both of its endpoints exist. */
+  private showsSurfaceChoice(): boolean {
+    const conn = this.form.connection;
+    return (
+      this.form.type === 'custom' ||
+      (isDualSurfaceProviderType(this.form.type) &&
+        !!conn.claudeBaseUrl &&
+        !!conn.openaiBaseUrl)
+    );
   }
 
   private renderCustomConnection(
     s: ReturnType<typeof getStyles>,
     advanced = false,
   ): m.Children {
-    const runtime = this.currentRuntime();
-    let fields: string[];
-    switch (runtime) {
-      case 'pi-agent-core':
-        fields = advanced
-          ? ['piAgentCoreModulePath', 'piAgentCoreSystemPrompt']
-          : ['piAgentCoreModelJson'];
-        break;
-      case 'qoder-agent-sdk':
-        fields = advanced
-          ? ['qoderModel', 'qoderSystemPrompt']
-          : ['qoderAccessToken', 'qoderCliPath'];
-        break;
-      case 'opencode':
-        fields = advanced
-          ? ['openCodeSdkModulePath', 'openCodeSystemPrompt']
-          : ['openaiApiKey', 'openaiBaseUrl', 'openCodeModelJson'];
-        break;
-      case 'openai-agents-sdk':
-        fields = advanced ? [] : ['openaiApiKey', 'openaiBaseUrl'];
-        break;
-      default:
-        fields = advanced
-          ? ['claudeAuthToken']
-          : ['claudeApiKey', 'claudeBaseUrl'];
+    const openai = this.currentSurface() === 'openai';
+    if (advanced) {
+      return m('div', [
+        !openai ? this.renderConnectionInput(s, 'claudeAuthToken') : null,
+        this.renderConnectionInput(s, 'piAgentCoreModulePath'),
+        this.renderConnectionTextarea(s, 'piAgentCoreSystemPrompt'),
+        openai ? this.renderOpenAIProtocolSelect(s) : null,
+      ]);
     }
+    const [endpointField, keyField] = openai
+      ? ['openaiBaseUrl', 'openaiApiKey']
+      : ['claudeBaseUrl', 'claudeApiKey'];
     return m('div', [
-      !advanced ? this.renderRuntimeSelector(s) : null,
-      ...fields.map((field) =>
-        field.endsWith('Json') || field.endsWith('SystemPrompt')
-          ? this.renderConnectionTextarea(s, field)
-          : this.renderConnectionInput(s, field),
-      ),
-      advanced && (runtime === 'openai-agents-sdk' || runtime === 'opencode')
-        ? this.renderOpenAIProtocolSelect(s)
+      this.needsPiEndpoint
+        ? m(
+            'div',
+            {style: s.formHint},
+            text(
+              '此提供商来自已移除的 Qoder 或 OpenCode 运行时，无法自动转换。请填写 Anthropic 或 OpenAI 兼容的基础 URL、API 密钥和模型，保存后将在 Pi Agent Core 上运行。',
+              'This provider came from the retired Qoder or OpenCode runtime and could not be converted automatically. Enter an Anthropic- or OpenAI-compatible Base URL, API key and model; saving moves it to Pi Agent Core.',
+            ),
+          )
         : null,
+      this.renderSurfaceSelector(s),
+      this.renderConnectionInput(s, endpointField, undefined, '', false),
+      this.renderConnectionInput(s, keyField, undefined, '', false),
+      this.renderConnectionTextarea(s, 'piAgentCoreModelJson'),
     ]);
   }
 
-  private renderRuntimeSelector(s: ReturnType<typeof getStyles>): m.Children {
+  private renderSurfaceSelector(s: ReturnType<typeof getStyles>): m.Children {
+    if (!this.showsSurfaceChoice()) return null;
     const t = getTokens();
-    const current = this.currentRuntime();
-    const options = this.runtimes.map((value) => ({
-      value,
-      label: providerRuntimeLabel(value),
-    }));
+    const current = this.currentSurface();
+    const options: Array<{value: ProviderApiSurface; label: string}> = [
+      {value: 'claude', label: text('Anthropic 兼容', 'Anthropic-compatible')},
+      {value: 'openai', label: text('OpenAI 兼容', 'OpenAI-compatible')},
+    ];
 
     return m('div', {style: s.formField}, [
-      m('label', {style: s.formLabel}, text('运行时', 'Runtime')),
+      m('label', {style: s.formLabel}, text('接口类型', 'API Type')),
       m(
         'div',
         {
@@ -832,14 +883,14 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
                 cursor: 'pointer',
                 fontSize: '12px',
                 fontWeight: active ? 600 : 500,
-                color: active ? 'var(--pf-color-text-on-primary)' : t.textSecondary,
+                color: active
+                  ? 'var(--pf-color-text-on-primary)'
+                  : t.textSecondary,
                 background: active ? t.accentGradient : 'transparent',
               },
               onclick: () => {
-                this.form.connection.agentRuntime = option.value;
-                if (option.value === 'pi-agent-core') {
-                  this.form.connection.openaiProtocol = undefined;
-                } else if (option.value === 'opencode') {
+                this.form.connection.apiSurface = option.value;
+                if (option.value === 'openai') {
                   this.form.connection.openaiProtocol ??= 'chat_completions';
                 }
               },
@@ -852,10 +903,20 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         'div',
         {style: s.formHint},
         text(
-          '大多数预设提供商无需修改。仅在明确需要使用另一套 SDK 接口时切换运行时。',
-          'Most preset providers work without changing this. Switch runtime only when you intentionally want the provider to use another SDK surface.',
+          'Pi Agent Core 调用此接口。大多数预设提供商无需修改。',
+          'Pi Agent Core calls this endpoint. Most preset providers work without changing this.',
         ),
       ),
+      this.surfaceSwitchNeedsCredential()
+        ? m(
+            'div',
+            {style: s.formHint, role: 'status', 'data-testid': 'surface-credential-reentry'},
+            text(
+              '切换接口后，密钥会发送到另一个地址。请重新填写该接口的 API 密钥，否则保存会被拒绝。',
+              'Switching the endpoint sends the key to a different host. Re-enter the API key for it, or saving is refused.',
+            ),
+          )
+        : null,
     ]);
   }
 
@@ -911,6 +972,10 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
   ): m.Children {
     const meta = connectionFieldMetadata(field);
     const conn = this.form.connection as Record<string, string>;
+    const sharedField =
+      this.form.type === 'custom'
+        ? CUSTOM_SHARED_FIELD_FALLBACK[field]
+        : undefined;
     return m('div', {style: s.formField}, [
       this.renderFieldLabel(
         s,
@@ -922,7 +987,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
         id: `provider-${field}`,
         name: field,
         style: s.formInput,
-        value: conn[field] || '',
+        value: conn[field] || (sharedField ? conn[sharedField] : '') || '',
         oninput: (e: Event) => {
           conn[field] = (e.target as HTMLInputElement).value;
         },

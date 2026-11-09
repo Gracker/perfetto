@@ -77,21 +77,6 @@ describe('AI Provider settings shortcut', () => {
       expect(modal.currentTab).toBe(lock === 'none' ? 'providers' : 'connection');
     }
   });
-
-  it('does not present Qoder local CLI auth as missing Provider setup', () => {
-    const vnode = {attrs: attrs({
-      initialStatus: {
-        connected: true,
-        configured: false,
-        runtime: 'qoder-agent-sdk',
-      },
-    })} as any;
-    const modal = new SettingsModal() as any;
-    modal.oninit(vnode);
-    const tree = modal.view(vnode);
-    expect(findStatusAction(tree)).toBeUndefined();
-    expect(JSON.stringify(tree)).toContain('local CLI login is verified during analysis');
-  });
 });
 
 function findStatusAction(node: any): any {

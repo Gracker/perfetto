@@ -5,8 +5,7 @@ export type ProviderCatalogChangeReason =
   | 'updated'
   | 'deleted'
   | 'activated'
-  | 'deactivated'
-  | 'runtime-switched';
+  | 'deactivated';
 
 export interface ProviderCatalogChange {
   readonly reason: ProviderCatalogChangeReason;
