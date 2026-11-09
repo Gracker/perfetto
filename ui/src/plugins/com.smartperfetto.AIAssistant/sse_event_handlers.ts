@@ -74,6 +74,8 @@ import {
   sourceVerificationFailed,
 } from './source_use_receipt';
 import {readAnswerDraftEvent, reduceAnswerDraft, type AnswerDraftEvent, type AnswerDraftOp} from './answer_draft';
+import {parseRunSupplementReceipt} from './run_supplement_state';
+import type {RunSupplementReceipt} from './generated/data_contract.types';
 
 /** Set to true for verbose SSE event logging during development. */
 const DEBUG_SSE = false;
@@ -332,6 +334,16 @@ function analysisCompletedRunStatus(
 ): NonNullable<AnalysisCompletedPayload['terminalRunStatus']> {
   return payload?.terminalRunStatus ??
     (payload?.success === false ? 'failed' : 'completed');
+}
+
+/** The run status an `analysis_completed` event reports; undefined for any other event. */
+export function analysisCompletedEventRunStatus(
+  eventType: string,
+  data: unknown,
+): NonNullable<AnalysisCompletedPayload['terminalRunStatus']> | undefined {
+  return eventType === 'analysis_completed'
+    ? analysisCompletedRunStatus(toAnalysisCompletedPayload(asRecord(data).data))
+    : undefined;
 }
 
 /** Transport completion does not establish that the delivered answer is complete. */
@@ -632,6 +644,9 @@ export interface SSEHandlerContext {
   streamingFlow: StreamingFlowState;
   /** Incremental final answer stream state */
   streamingAnswer: StreamingAnswerState;
+
+  /** Called with each validated receipt from a `run_supplement` event. */
+  onRunSupplementReceipt?: (receipt: RunSupplementReceipt) => void;
 
   // Track overlay - callback when overlay-eligible data arrives
   /** Called with columns+rows from skill steps that have timeline overlay configs */
@@ -6337,6 +6352,12 @@ function handleSSEEventInner(
   switch (eventType) {
     case 'connected':
       return {};
+
+    case 'run_supplement': {
+      const receipt = parseRunSupplementReceipt(eventData.data);
+      if (receipt) ctx.onRunSupplementReceipt?.(receipt);
+      return {};
+    }
 
     case 'conversation_step':
       return handleConversationStepEvent(eventData, ctx);

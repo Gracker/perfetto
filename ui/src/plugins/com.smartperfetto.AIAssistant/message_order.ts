@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {isRunSupplementMessage, startsConversationRound} from './run_supplement_state';
 import type {Message} from './types';
 
 function buildRoundIndexMap(messages: readonly Message[]): Map<string, number> {
@@ -42,7 +43,7 @@ export function orderMessagesForDisplay(
 
   filteredMessages.forEach((msg, index) => {
     originalIndexMap.set(msg.id, index);
-    if (msg.role !== 'user') return;
+    if (!startsConversationRound(msg)) return;
 
     const round = roundIndexMap.get(msg.id) ?? 0;
     const current = firstUserIndexByRound.get(round);
@@ -52,17 +53,19 @@ export function orderMessagesForDisplay(
   });
 
   // Within each round: pre-turn cards, the question, other cards, the analysis
-  // process, and finally the answer. Round boundaries take precedence, so a
-  // previous round's answer always stays before the next question.
+  // process, supplements sent during it (in send order), and finally the
+  // answer. Round boundaries take precedence, so a previous round's answer
+  // always stays before the next question.
   const phase = (msg: Message): number => {
     const round = roundIndexMap.get(msg.id) ?? 0;
     const index = originalIndexMap.get(msg.id) ?? 0;
     const firstUserIndex = firstUserIndexByRound.get(round);
 
     if (firstUserIndex !== undefined && index < firstUserIndex) return 0;
+    if (isRunSupplementMessage(msg)) return 4;
     if (msg.role === 'user') return 1;
     if (msg.flowTag === 'streaming_flow') return 3;
-    if (msg.flowTag === 'answer_stream') return 4;
+    if (msg.flowTag === 'answer_stream') return 5;
     return 2;
   };
 

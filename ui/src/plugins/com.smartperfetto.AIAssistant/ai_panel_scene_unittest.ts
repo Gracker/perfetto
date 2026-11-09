@@ -167,7 +167,7 @@ describe('AIPanel canonical scene flow', () => {
     await value.stopAndRedirectAnalysis();
     expect(value.state.storyState.status).toBe('cancelled');
     expect(value.focusChatInput).toHaveBeenCalledOnce();
-    expect(value.redirectAfterCancellation).toBe(false);
+    expect(value.redirectIntent).toBeUndefined();
   });
   it.each(['completed', 'failed', 'quota_exceeded'])('consumes redirect when %s wins the cancellation race', async status => {
     const value = panel();
@@ -176,17 +176,17 @@ describe('AIPanel canonical scene flow', () => {
     value.focusChatInput = vi.fn(); value.listenToAgentSSE = vi.fn(async () => {});
     await value.stopAndRedirectAnalysis();
     expect(value.focusChatInput).toHaveBeenCalledOnce();
-    expect(value.redirectAfterCancellation).toBe(false);
+    expect(value.redirectIntent).toBeUndefined();
     expect(value.listenToAgentSSE).toHaveBeenCalledWith('session-a', true);
   });
   it.each(['completed', 'failed'])('consumes a pending pre-receipt redirect when matching %s is recovered', async status => {
     const value = panel();
     value.state.storyState = {...value.state.storyState, traceId: 'trace-a', sessionId: 'session-a', runId: 'run-a', status: 'running'};
-    value.redirectAfterCancellation = true; value.focusChatInput = vi.fn();
+    value.redirectIntent = {kind: 'focus'}; value.focusChatInput = vi.fn();
     value.fetchBackend = vi.fn(async () => new Response(JSON.stringify({status,
       observability: {runId: 'run-a'}, result: {success: status === 'completed', partial: true, conclusion: 'Partial'}})));
     expect(await value.checkSessionStatus('session-a', new AbortController().signal)).toBe(true);
     expect(value.focusChatInput).toHaveBeenCalledOnce();
-    expect(value.redirectAfterCancellation).toBe(false);
+    expect(value.redirectIntent).toBeUndefined();
   });
 });

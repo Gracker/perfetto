@@ -45,6 +45,7 @@ import type {
 } from './generated/data_contract.types';
 import type {ServerRuntimeKind} from './provider_types';
 import type {AnalysisResultPrivateContext} from './analysis_result_snapshot_state';
+import type {RunSupplementEntry} from './run_supplement_state';
 import type {UiLanguagePreference} from './ui_language';
 
 export type {
@@ -72,7 +73,8 @@ export interface Message {
     | 'streaming_flow'
     | 'answer_stream'
     | 'progress_note'
-    | 'round_separator';
+    | 'round_separator'
+    | 'run_supplement';
   /** Model active when this user message was sent — used to show model-change badge */
   model?: string;
   sqlResult?: SqlQueryResult;
@@ -105,6 +107,8 @@ export interface Message {
   analysisReceipt?: AnalysisReceipt;
   /** Bounded terminal-run source-use metadata; never contains source references or text. */
   sourceUseReceipt?: SourceUseReceipt;
+  /** A user supplement to a running analysis: its tracked delivery state. */
+  runSupplement?: RunSupplementEntry;
   /** User turns only: the analysis context this question was sent with. */
   submittedAnalysisContext?: SubmittedAnalysisContext;
   /** Counts of selected knowledge delivered and cited; never paths or citations. */

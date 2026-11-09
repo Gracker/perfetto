@@ -220,6 +220,7 @@ import {
 import {formatPerfettoSql} from './sql_formatter';
 import {clearComparisonState} from './comparison_state_manager';
 import {
+  analysisCompletedEventRunStatus,
   handleSSEEvent as handleSSEEventExternal,
   isAgentSseTerminalEvent,
 } from './sse_event_handlers';
@@ -233,6 +234,26 @@ import {
 } from './track_overlay';
 import {traceLocationLabel} from './trace_location_label';
 import {copyTextToClipboard} from './clipboard';
+import {
+  canSubmitRunSupplement,
+  changedRunSupplementEntries,
+  createRunSupplementLedger,
+  isRunSupplementText,
+  reduceRunSupplementLedger,
+  runSupplementHttpResultAction,
+  runSupplementTerminalOutcome,
+  startsConversationRound,
+  type RunSupplementLedger,
+  type RunSupplementLedgerAction,
+} from './run_supplement_state';
+import {
+  renderRunSupplementStatus,
+  runSupplementComposerHint,
+  runSupplementComposerPlaceholder,
+  runSupplementRestartSubmission,
+  type RunSupplementRestartSubmission,
+} from './run_supplement_view';
+import {isPrivateQueryStoragePlaceholder} from './private_message_storage';
 import {
   clearPendingComposerDraft,
   subscribeClearChat,
@@ -350,6 +371,13 @@ import type {
 } from './types';
 
 const DEBUG_AI_PANEL = false;
+
+type RestartRedirectIntent = RunSupplementRestartSubmission & {
+  kind: 'restart';
+  supplementKey: string;
+};
+/** After a stop: hand the composer back, or resubmit a restart_required supplement. */
+type RedirectIntent = {kind: 'focus'} | RestartRedirectIntent;
 // Above the backend review-stop watchdog (15 s by default), which bounds the
 // only stop that blocks: a force stop waiting for the run to commit.
 const CONVERSATION_STOP_REQUEST_TIMEOUT_MS = 25_000;
@@ -751,7 +779,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private activeAgentRequest?: AnalysisRequestToken;
   private analysisCancellationPending = false;
   /** Set by "stop and redirect"; consumed when the run reaches a terminal state. */
-  private redirectAfterCancellation = false;
+  /** What to do once the stopped run is terminal. */
+  private redirectIntent?: RedirectIntent;
+  private runSupplementLedger: RunSupplementLedger = createRunSupplementLedger();
   /**
    * Sessions whose runtime reported it cannot record interactions.
    *
@@ -2870,15 +2900,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     //      so the new AIPanel's auto-restore brings the conversation back.
     //   3. Capture in-memory state — fields that don't live in sessions
     //      (input draft, collapsed tables, streaming state, dedup sets).
-    this.transientSaverRef = () => {
-      this.cancelSSEConnection();
-      this.saveCurrentSession();
-      if (this.saveSessionTimer) {
-        clearTimeout(this.saveSessionTimer);
-        this.saveSessionTimer = null;
-      }
-      return this.snapshotTransientState();
-    };
+    this.transientSaverRef = () => this.handOffTransientState();
     registerTransientSaver(this.transientSaverRef);
 
     // Consume any transient state left over from a mode switch — restores
@@ -3609,6 +3631,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const canSendFromCurrentSurface =
       isInRpcMode || this.state.analysisMode === 'conversation';
     const analysisInputLocked = this.isAnalysisInputLocked();
+    const runSupplementOpen = this.isRunSupplementComposerOpen();
+    const composerDisabled =
+      (analysisInputLocked && !runSupplementOpen) || !canSendFromCurrentSurface;
     const conversationRunning = this.conversationRunning();
     // Names for the context chip and the labels questions record.
     this.ensureAnalysisContextCodebaseLabels();
@@ -4752,6 +4777,24 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     m('span', ` ${analysisContextSummary(msg.submittedAnalysisContext)}`),
                                   ])
                                 : null,
+                              msg.runSupplement
+                                ? renderRunSupplementStatus(
+                                    msg.runSupplement,
+                                    {
+                                      windowOpen: runSupplementOpen,
+                                      textAvailable: !isPrivateQueryStoragePlaceholder(msg.content),
+                                      runActive: this.state.isLoading,
+                                      // Stopping an unrelated later run is not what this button offers.
+                                      supersededByActiveRun: this.state.isLoading &&
+                                        !this.runSupplementLedger.entries.some((entry) => entry.key === msg.id),
+                                    },
+                                    {
+                                      onRetry: () => void this.submitRunSupplement(msg.content),
+                                      onEdit: () => this.restoreRunSupplementToInput(msg.content),
+                                      onRestart: () => this.restartWithRunSupplement(msg),
+                                    },
+                                  )
+                                : null,
                             ]), // end ai-bubble-wrapper
 
                             // Message actions — available during normal input,
@@ -4929,25 +4972,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       ? m(
                           'div.ai-context-indicator',
                           uiText(
-                            `第 ${this.state.messages.filter((msg) => msg.role === 'user').length} 轮对话 | 会话 ${this.state.agentSessionId.substring(0, 8)}...`,
-                            `Turn ${this.state.messages.filter((msg) => msg.role === 'user').length} | Session ${this.state.agentSessionId.substring(0, 8)}...`,
+                            `第 ${this.state.messages.filter(startsConversationRound).length} 轮对话 | 会话 ${this.state.agentSessionId.substring(0, 8)}...`,
+                            `Turn ${this.state.messages.filter(startsConversationRound).length} | Session ${this.state.agentSessionId.substring(0, 8)}...`,
                           ),
                         )
                       : null,
-                    this.renderSliceCard(),
-                    this.renderAreaCard(),
+                    runSupplementOpen ? null : this.renderSliceCard(),
+                    runSupplementOpen ? null : this.renderAreaCard(),
                     m('div.ai-input-wrapper', [
                       m('textarea#ai-input.ai-input', {
-                        'class':
-                          analysisInputLocked ||
-                          !canSendFromCurrentSurface
-                            ? 'disabled'
-                            : '',
+                        'class': composerDisabled ? 'disabled' : '',
                         'aria-label': uiText(
                           '输入分析问题',
                           'Enter an analysis question',
                         ),
-                        'placeholder': this.state.analysisMode === 'conversation'
+                        'placeholder': runSupplementOpen
+                          ? runSupplementComposerPlaceholder()
+                          : this.state.analysisMode === 'conversation'
                           ? hasBackendTrace
                             ? uiText(
                                 '围绕当前 Trace 对话；需要时我会查询证据...',
@@ -4986,9 +5027,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         'oncompositionend': () => {
                           this.isInputComposing = false;
                         },
-                        'disabled':
-                          analysisInputLocked ||
-                          !canSendFromCurrentSurface,
+                        'disabled': composerDisabled,
                       }),
                       this.renderPresetQuestionButtons(isInRpcMode),
                       m('div.ai-input-controls', [
@@ -5014,6 +5053,21 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                         m('div.ai-input-divider'),
                         analysisInputLocked
                           ? [
+                              runSupplementOpen
+                                ? m(
+                                    'button.ai-send-btn',
+                                    {
+                                      onclick: () => void this.submitRunSupplement(),
+                                      disabled: !isRunSupplementText(this.state.input),
+                                      title: uiText(
+                                        '发送补充说明（Enter）',
+                                        'Send supplement (Enter)',
+                                      ),
+                                      'aria-label': uiText('发送补充说明', 'Send supplement'),
+                                    },
+                                    m('i.pf-icon', 'send'),
+                                  )
+                                : null,
                               m(
                                 'button.ai-send-btn.ai-redirect-btn',
                                 {
@@ -5071,7 +5125,9 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                     ]),
                     m(
                       'div.ai-input-hint',
-                      aiDisabled
+                      runSupplementOpen
+                        ? runSupplementComposerHint(this.state.input)
+                        : aiDisabled
                         ? uiText(
                             'AI 已被后端策略禁用；确定性命令仍可在本地或非 AI 后端 API 中运行。',
                             'AI is disabled by backend policy. Deterministic commands still run locally or through non-AI backend APIs.',
@@ -6841,9 +6897,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.state.settings.backendUrl,
       `/${encodeURIComponent(feedbackSessionId)}/feedback`,
     );
-    const turnIndex = this.state.messages.filter(
-      (msg) => msg.role === 'user',
-    ).length;
+    const turnIndex = this.state.messages.filter(startsConversationRound).length;
     this.fetchBackend(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -7586,7 +7640,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // 恢复命令历史
     this.state.commandHistory = this.state.messages
-      .filter((m) => m.role === 'user')
+      .filter(startsConversationRound)
       .map((m) => m.content);
 
     if (DEBUG_AI_PANEL) {
@@ -8089,7 +8143,11 @@ Click ⚙️ to configure backend connection.`,
     switch (action) {
       case 'submit':
         e.preventDefault();
-        this.sendMessage();
+        if (this.isRunSupplementComposerOpen()) {
+          void this.submitRunSupplement();
+        } else {
+          this.sendMessage();
+        }
         break;
       case 'history_previous':
         e.preventDefault();
@@ -8125,8 +8183,12 @@ Click ⚙️ to configure backend connection.`,
     }
   }
 
-  private async sendMessage() {
-    const input = this.state.input.trim();
+  /**
+   * `submission` sends text other than the composer's, leaving the draft in
+   * place. Resolves false when the message was refused before being added.
+   */
+  private async sendMessage(submission?: RunSupplementRestartSubmission): Promise<boolean> {
+    const input = (submission?.query ?? this.state.input).trim();
     if (DEBUG_AI_PANEL) {
       console.log(
         '[AIPanel] sendMessage called, input:',
@@ -8139,13 +8201,13 @@ Click ⚙️ to configure backend connection.`,
     if (
       !input ||
       this.isAnalysisInputLocked()
-    ) return;
+    ) return false;
     if (this.shouldBlockModelBackedRequest(input)) {
       this.addAiDisabledMessage(
         input.startsWith('/') ? input.split(/\s+/)[0] : 'analysis',
       );
       m.redraw();
-      return;
+      return false;
     }
 
     // Clear skill progress tracking and errors for new analysis session
@@ -8156,9 +8218,7 @@ Click ⚙️ to configure backend connection.`,
     // P2-1: Exclude welcome/system-generated assistant messages — only count as
     // prior results when there has been at least one user message (i.e., an analysis
     // round actually ran, not just a welcome message).
-    const hasUserMessages = this.state.messages.some(
-      (msg) => msg.role === 'user',
-    );
+    const hasUserMessages = this.state.messages.some(startsConversationRound);
     const hasPriorResults =
       hasUserMessages &&
       this.state.messages.some(
@@ -8166,7 +8226,7 @@ Click ⚙️ to configure backend connection.`,
       );
     if (hasPriorResults) {
       const roundNumber =
-        this.state.messages.filter((m) => m.role === 'user').length + 1;
+        this.state.messages.filter(startsConversationRound).length + 1;
       this.addMessage({
         id: this.generateId(),
         role: 'system',
@@ -8183,14 +8243,14 @@ Click ⚙️ to configure backend connection.`,
       content: input,
       timestamp: Date.now(),
       model: this.serverStatus.model,
-      ...(hasPrivateAnalysisContext(this.state.analysisContext)
+      ...(submission?.privateContent === true || hasPrivateAnalysisContext(this.state.analysisContext)
         ? {privateContent: true}
         : {}),
       // Local commands use no analysis context.
       ...(input.startsWith('/') ? {} : this.submittedContext()),
     });
 
-    this.state.input = '';
+    if (submission === undefined) this.state.input = '';
     this.state.commandHistory.push(input);
     this.state.historyIndex = -1;
 
@@ -8199,7 +8259,7 @@ Click ⚙️ to configure backend connection.`,
       await this.handleCommand(input);
     } else {
       if (await this.tryStartNaturalLanguageResultComparison(input)) {
-        return;
+        return true;
       }
       if (DEBUG_AI_PANEL) {
         console.log('[AIPanel] Calling handleChatMessage with:', input);
@@ -8207,6 +8267,7 @@ Click ⚙️ to configure backend connection.`,
       await this.handleChatMessage(input);
       if (DEBUG_AI_PANEL) console.log('[AIPanel] handleChatMessage completed');
     }
+    return true;
   }
 
   private resetStreamingFlow() {
@@ -8530,6 +8591,7 @@ Click ⚙️ to configure backend connection.`,
       backendUrl: this.state.settings.backendUrl,
       streamingFlow: this.state.streamingFlow,
       streamingAnswer: this.state.streamingAnswer,
+      onRunSupplementReceipt: (receipt) => this.dispatchRunSupplement({type: 'sse_receipt', receipt}),
       onSceneTimelineReceived: (timeline, terminal) => this.applyCanonicalSceneTimeline(timeline, terminal),
       // Canonical Story lanes are projected only from the accepted revision.
       onOverlayDataReceived: (overlayId, columns, rows) => {
@@ -8565,6 +8627,8 @@ Click ⚙️ to configure backend connection.`,
     ) {
       this.applySmartStoryEvent(eventType, data);
     }
+
+    this.settleRunSupplementsForTerminalEvent(eventType, data);
 
     const ctx = this.createSSEHandlerContext();
     const result = handleSSEEventExternal(eventType, data, ctx);
@@ -10965,6 +11029,12 @@ Click ⚙️ to configure backend connection.`,
         requestId: data.requestId || requestIdFromHeader,
       });
       this.analysisRequestCoordinator.finish(analysisRequest);
+      // Support is per run and comes only from this response.
+      this.dispatchRunSupplement({
+        type: 'run_started',
+        runId: responseRunId,
+        supported: data.runSupplement?.supported === true && Boolean(responseRunId),
+      });
       if (observabilityUpdated) {
         if (DEBUG_AI_PANEL) {
           console.log(
@@ -11412,6 +11482,11 @@ Click ⚙️ to configure backend connection.`,
       return;
     }
     this.analysisCancellationPending = false;
+    // The stream is already closed, so the backend's run_stopped receipts cannot arrive.
+    const supplementRunId = this.runSupplementLedger.runId;
+    if (status === 'cancelled' && supplementRunId) {
+      this.dispatchRunSupplement({type: 'terminal', runId: supplementRunId, outcome: 'cancelled'});
+    }
     this.setLoadingState(false);
     this.consumeRedirectIntent();
     if (status !== 'cancelled') {
@@ -11448,7 +11523,7 @@ Click ⚙️ to configure backend connection.`,
     this.analysisCancellationPending = false;
     // The stop did not take; the analysis may still be running, so do not
     // hand the composer back.
-    this.redirectAfterCancellation = false;
+    this.abandonRedirectIntent();
     if (!this.state.agentSessionId?.trim()) {
       this.state.agentSessionId = null;
     }
@@ -11519,8 +11594,8 @@ Click ⚙️ to configure backend connection.`,
    * later through the request coordinator. So the intent is recorded here and
    * consumed by whichever path settles the run.
    */
-  private async stopAndRedirectAnalysis(): Promise<void> {
-    this.redirectAfterCancellation = true;
+  private async stopAndRedirectAnalysis(intent: RedirectIntent = {kind: 'focus'}): Promise<void> {
+    this.redirectIntent ??= intent;
     await this.cancelAnalysis();
   }
 
@@ -11530,9 +11605,31 @@ Click ⚙️ to configure backend connection.`,
    * composer; only an outright stop failure leaves the analysis running.
    */
   private consumeRedirectIntent(): void {
-    if (!this.redirectAfterCancellation) return;
-    this.redirectAfterCancellation = false;
-    this.focusChatInput();
+    const intent = this.redirectIntent;
+    if (!intent) return;
+    this.redirectIntent = undefined;
+    if (intent.kind === 'focus') {
+      this.focusChatInput();
+      return;
+    }
+    // Resubmit from a clean stack: the terminal path is still unwinding.
+    setTimeout(() => void this.submitRestart(intent), 0);
+  }
+
+  /** The redirect will not happen, so a restart's one-shot action comes back. */
+  private abandonRedirectIntent(): void {
+    const intent = this.redirectIntent;
+    this.redirectIntent = undefined;
+    if (intent?.kind === 'restart') this.reopenRestart(intent.supplementKey);
+  }
+
+  private async submitRestart(restart: RestartRedirectIntent): Promise<void> {
+    if (!(await this.sendMessage(restart))) this.reopenRestart(restart.supplementKey);
+  }
+
+  private reopenRestart(supplementKey: string): void {
+    const entry = this.state.messages.find((msg) => msg.id === supplementKey)?.runSupplement;
+    if (entry) this.dispatchRunSupplement({type: 'restart_marked', entry, consumed: false});
   }
 
   private cancelAnalysis(): Promise<void> {
@@ -14082,6 +14179,18 @@ Click ⚙️ to configure backend connection.`,
    * streamingFlow/streamingAnswer/displayedSkillProgress state so the
    * new instance's handlers can dedupe replayed events.
    */
+  private handOffTransientState(): TransientState {
+    this.cancelSSEConnection();
+    // Before the save below: a redirect cannot complete from a departing instance.
+    this.abandonRedirectIntent();
+    this.saveCurrentSession();
+    if (this.saveSessionTimer) {
+      clearTimeout(this.saveSessionTimer);
+      this.saveSessionTimer = null;
+    }
+    return this.snapshotTransientState();
+  }
+
   private snapshotTransientState(): TransientState {
     // isLoading tracks active analysis more reliably than sseConnectionState
     // (which may be 'disconnected' briefly between connect retries).
@@ -14111,6 +14220,7 @@ Click ⚙️ to configure backend connection.`,
               // clone of collections that would otherwise be shared refs.
               streamingFlow: this.cloneStreamingFlow(),
               streamingAnswer: {...this.state.streamingAnswer},
+              runSupplementLedger: this.runSupplementLedger,
             }
           : null,
     };
@@ -14193,6 +14303,13 @@ Click ⚙️ to configure backend connection.`,
       const restoredAnswer = answerId ? this.state.messages.find(message => message.id === answerId) : undefined;
       if (a.completionHandled && restoredAnswer?.answerVerification === 'unfinished') {
         this.updateMessage(restoredAnswer.id, {answerVerification: 'pending'}, {persist: false});
+      }
+      // A pending supplement reads back settled from storage; the run is still live.
+      if (a.runSupplementLedger) {
+        this.runSupplementLedger = a.runSupplementLedger;
+        for (const entry of a.runSupplementLedger.entries) {
+          this.updateMessage(entry.key, {runSupplement: entry}, {persist: false});
+        }
       }
       // Mark loading + resume SSE. The resumeFromLastEventId flag tells
       // listenToAgentSSE to preserve sseLastEventId so the initial fetch
@@ -14594,7 +14711,12 @@ Click ⚙️ to configure backend connection.`,
     this.tracePairWorkspaceController.setSelectionLocked(loading);
     // A run that stops without its verdict (error, cancel, lost stream) never
     // leaves an answer looking as if verification were still running.
-    if (!loading) this.settlePendingAnswerCues();
+    if (!loading) {
+      this.settlePendingAnswerCues();
+      // Backstop for any path that ends the run without a terminal stream event.
+      const runId = this.runSupplementLedger.runId;
+      if (runId) this.dispatchRunSupplement({type: 'terminal', runId, outcome: 'unknown'});
+    }
   }
 
   private settlePendingAnswerCues(): void {
@@ -14623,6 +14745,102 @@ Click ⚙️ to configure backend connection.`,
 
   private isAnalysisInputLocked(): boolean {
     return this.isAnalysisIdentityLocked() && !this.isConversationExecutionActive();
+  }
+
+  /** Unlocks only the textarea during a run; Stop and Redirect keep following the input lock. */
+  private isRunSupplementComposerOpen(): boolean {
+    return canSubmitRunSupplement({
+      ledger: this.runSupplementLedger,
+      agentRunId: this.state.agentRunId,
+      isLoading: this.state.isLoading,
+      cancellationPending: this.analysisCancellationPending || this.redirectIntent !== undefined,
+    });
+  }
+
+  private dispatchRunSupplement(action: RunSupplementLedgerAction): void {
+    const previous = this.runSupplementLedger;
+    const next = reduceRunSupplementLedger(previous, action);
+    if (next === previous) return;
+    this.runSupplementLedger = next;
+    for (const entry of changedRunSupplementEntries(previous, next)) {
+      this.updateMessage(entry.key, {runSupplement: entry}, {persist: false});
+    }
+    // Coalesced: terminal stream handling, unmount and page unload all flush this.
+    this.debouncedSaveSession();
+    m.redraw();
+  }
+
+  private settleRunSupplementsForTerminalEvent(eventType: string, data: unknown): void {
+    const outcome = runSupplementTerminalOutcome(eventType, analysisCompletedEventRunStatus(eventType, data));
+    const runId = this.runSupplementLedger.runId;
+    if (outcome && runId) this.dispatchRunSupplement({type: 'terminal', runId, outcome});
+  }
+
+  /** Send to the running analysis. Errors settle the message; nothing here retries by itself. */
+  private async submitRunSupplement(resendText?: string): Promise<void> {
+    const text = (resendText ?? this.state.input).trim();
+    const sessionId = this.state.agentSessionId;
+    const runId = this.state.agentRunId;
+    if (!sessionId || !runId || !isRunSupplementText(text) || !this.isRunSupplementComposerOpen()) {
+      return;
+    }
+    const key = `supplement-${this.generateId()}`;
+    this.dispatchRunSupplement({type: 'submitted', key, runId});
+    this.addMessage({
+      id: key,
+      role: 'user',
+      content: text,
+      timestamp: Date.now(),
+      flowTag: 'run_supplement',
+      model: this.serverStatus.model,
+      runSupplement: {key, state: 'classifying'},
+      ...(hasPrivateAnalysisContext(this.state.analysisContext)
+        ? {privateContent: true}
+        : {}),
+    });
+    if (resendText === undefined) this.state.input = '';
+    this.state.historyIndex = -1;
+    m.redraw();
+
+    const url = buildAssistantApiV1Url(
+      this.state.settings.backendUrl,
+      `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/supplements`,
+    );
+    try {
+      const response = await this.fetchBackend(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({idempotencyKey: key, text}),
+      });
+      const body: unknown = await response.json().catch(() => undefined);
+      this.dispatchRunSupplement(runSupplementHttpResultAction(key, response.ok, body));
+    } catch {
+      this.dispatchRunSupplement(runSupplementHttpResultAction(key, false, undefined));
+    }
+  }
+
+  private restoreRunSupplementToInput(text: string): void {
+    const draft = this.state.input.trim();
+    this.state.input = draft ? `${draft}\n${text}` : text;
+    this.focusChatInput();
+    m.redraw();
+  }
+
+  /** The button press is the user's confirmation; the stop then resubmits through the redirect path. */
+  private restartWithRunSupplement(message: Message): void {
+    const entry = message.runSupplement;
+    if (this.redirectIntent || !entry) return;
+    const intent: RestartRedirectIntent = {
+      kind: 'restart',
+      supplementKey: message.id,
+      ...runSupplementRestartSubmission(this.state.messages, message),
+    };
+    this.dispatchRunSupplement({type: 'restart_marked', entry, consumed: true});
+    if (this.state.isLoading) {
+      void this.stopAndRedirectAnalysis(intent);
+      return;
+    }
+    void this.submitRestart(intent);
   }
 
   /**

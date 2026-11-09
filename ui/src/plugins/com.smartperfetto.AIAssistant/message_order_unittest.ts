@@ -126,4 +126,39 @@ describe('AI Assistant message display order', () => {
     expect(firstRound[1].content).toBe('answer-1');
     expect(firstRound[2].content).toBe('timeline-1');
   });
+  it('places supplements after the process so far, in send order, before the answer', () => {
+    const messages = [
+      message('user', 'user'),
+      message('timeline', 'assistant', 'streaming_flow'),
+      message('supplement-1', 'user', 'run_supplement'),
+      message('note', 'assistant', 'streaming_flow'),
+      message('supplement-2', 'user', 'run_supplement'),
+      message('answer', 'assistant', 'answer_stream'),
+    ];
+
+    expect(ids(orderMessagesForDisplay(messages))).toEqual([
+      'user',
+      'timeline',
+      'note',
+      'supplement-1',
+      'supplement-2',
+      'answer',
+    ]);
+  });
+
+  it('does not let a supplement start a round or redefine the first question', () => {
+    const messages = [
+      message('ready', 'assistant'),
+      message('supplement', 'user', 'run_supplement'),
+      message('user', 'user'),
+      message('timeline', 'assistant', 'streaming_flow'),
+    ];
+
+    expect(ids(orderMessagesForDisplay(messages))).toEqual([
+      'ready',
+      'supplement',
+      'user',
+      'timeline',
+    ]);
+  });
 });

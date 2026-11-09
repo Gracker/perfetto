@@ -49,6 +49,7 @@ import {
 } from './ai_floating_state';
 import {isAIAnalysisIdentityLocked} from './ai_shared_state';
 import {StreamingAnswerState, StreamingFlowState} from './types';
+import type {RunSupplementLedger} from './run_supplement_state';
 
 /**
  * Transient state snapshot captured during a mode switch.
@@ -106,6 +107,8 @@ export interface ActiveAnalysisSnapshot {
   streamingFlow: StreamingFlowState;
   /** Full incremental-answer stream state. */
   streamingAnswer: StreamingAnswerState;
+  /** In-flight supplements; stored messages read back as settled, so this re-opens them. */
+  runSupplementLedger?: RunSupplementLedger;
 }
 
 // ── Module state ────────────────────────────────────────────────────────

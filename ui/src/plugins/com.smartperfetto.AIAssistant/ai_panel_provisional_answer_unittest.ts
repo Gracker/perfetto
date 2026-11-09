@@ -72,10 +72,10 @@ describe('AIPanel deliver first, verify after', () => {
     expect(value.listenToAgentSSE).not.toHaveBeenCalled();
     expect(value.focusChatInput).not.toHaveBeenCalled();
     expect(value.state.isLoading).toBe(true);
-    expect(value.redirectAfterCancellation).toBe(true);
+    expect(value.redirectIntent).toEqual({kind: 'focus'});
     value.handleSSEEvent('analysis_completed', completedEvent);
     expect(value.focusChatInput).toHaveBeenCalledOnce();
-    expect(value.redirectAfterCancellation).toBe(false);
+    expect(value.redirectIntent).toBeUndefined();
     expect(answers(value)[0].answerVerification).toBeUndefined();
   });
 
