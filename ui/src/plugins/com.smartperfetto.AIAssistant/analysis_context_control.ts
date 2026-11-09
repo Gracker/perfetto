@@ -44,7 +44,13 @@ export interface AnalysisContextControlAttrs extends CatalogIdentity {
   /** The active provider's display name, when known. */
   providerName?: string;
   onChange(selection: AnalysisContextSelection): void;
-  onManage(): void;
+  /** Opens Settings, where a host has it. */
+  onManage?: () => void;
+  /** Called each time the popover opens. */
+  onOpen?: () => void;
+  /** Present when this backend can open a system folder dialog for this user. */
+  onAddFolder?: () => void;
+  addingFolder?: boolean;
 }
 
 /** "Turn everything off" turns source off and clears knowledge, which the source mode does not cover. */
@@ -144,7 +150,10 @@ export class AnalysisContextControl implements m.ClassComponent<AnalysisContextC
       this.escapeKey = null;
     }
     // Lists are read on every open: consent and indexes change in Settings.
-    if (open && attrs) void analysisCatalog.refresh(attrs);
+    if (open && attrs) {
+      void analysisCatalog.refresh(attrs);
+      attrs.onOpen?.();
+    }
   }
 
   private change(attrs: AnalysisContextControlAttrs, next: AnalysisContextSelection): void {
@@ -209,7 +218,7 @@ export class AnalysisContextControl implements m.ClassComponent<AnalysisContextC
         !catalog.featureEnabled
           ? m('div.ai-context-control-note', text('后端已关闭源码分析。', 'Source analysis is disabled on the backend.'))
           : catalog.codebases.length === 0 && !loading
-            ? m('div.ai-context-control-note', text('还没有源码库，可在“管理…”中添加。', 'No codebases yet; add one under Manage….'))
+            ? m('div.ai-context-control-note', (attrs.onAddFolder ? text('还没有源码库，可选择文件夹添加。', 'No codebases yet; choose a folder to add one.') : text('还没有源码库，可在“管理…”中添加。', 'No codebases yet; add one under Manage….')))
             : catalog.codebases.map(codebase => {
                 const usable = codebaseUsableInMode(codebase, mode);
                 return m('label.ai-context-control-item', {class: !usable || mode === 'off' ? 'disabled' : ''}, [
@@ -226,6 +235,16 @@ export class AnalysisContextControl implements m.ClassComponent<AnalysisContextC
                   m('span.ai-context-control-status', this.codebaseStatus(codebase, mode)),
                 ]);
               }),
+        attrs.onAddFolder && catalog.featureEnabled
+          ? m('button.ai-context-control-add', {
+              type: 'button',
+              disabled: attrs.disabled || attrs.addingFolder === true,
+              onclick: () => {
+                this.setOpen(false);
+                attrs.onAddFolder!();
+              },
+            }, attrs.addingFolder ? text('等待选择…', 'Waiting…') : text('选择文件夹…', 'Choose folder…'))
+          : null,
       ]),
       m('div.ai-context-control-section', [
         m('div.ai-context-control-heading', text('源码深度', 'Source depth')),
@@ -271,13 +290,15 @@ export class AnalysisContextControl implements m.ClassComponent<AnalysisContextC
           disabled: attrs.disabled || (mode === 'off' && selection.knowledgeSourceIds.length === 0),
           onclick: () => this.change(attrs, analysisContextAllOff(selection)),
         }, text('全部关闭', 'Turn all off')),
-        m('button.ai-context-control-button', {
-          type: 'button',
-          onclick: () => {
-            this.setOpen(false);
-            attrs.onManage();
-          },
-        }, text('管理…', 'Manage…')),
+        attrs.onManage
+          ? m('button.ai-context-control-button', {
+              type: 'button',
+              onclick: () => {
+                this.setOpen(false);
+                attrs.onManage!();
+              },
+            }, text('管理…', 'Manage…'))
+          : null,
       ]),
     ]);
   }

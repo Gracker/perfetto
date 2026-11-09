@@ -276,6 +276,89 @@ export function saveAnalysisContext(
   }
 }
 
+const SESSION_STORAGE_KEY = 'smartperfetto-analysis-context-by-session-v1';
+const MAX_SESSION_CONTEXTS_PER_SCOPE = 200;
+
+interface SessionAnalysisContextEntry {
+  selection: AnalysisContextSelection;
+  touchedAt: number;
+}
+
+type SessionAnalysisContexts = Record<string, Record<string, SessionAnalysisContextEntry>>;
+
+function loadSessionPartitions(): SessionAnalysisContexts {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed as SessionAnalysisContexts : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSessionPartitions(partitions: SessionAnalysisContexts): void {
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(partitions));
+  } catch {
+    // Storage is a convenience: the selection still applies to this page.
+  }
+}
+
+/**
+ * The selection a conversation last used, or undefined for one that predates
+ * per-conversation contexts. The scope-wide selection stays the default a new
+ * conversation starts from.
+ */
+export function loadSessionAnalysisContext(
+  backendUrl: string,
+  context: SmartPerfettoRequestContext,
+  sessionId: string,
+): AnalysisContextSelection | undefined {
+  const entry = loadSessionPartitions()[analysisContextScopeKey(backendUrl, context)]?.[sessionId];
+  return entry ? normalizeAnalysisContext(entry.selection) : undefined;
+}
+
+export function saveSessionAnalysisContext(
+  backendUrl: string,
+  context: SmartPerfettoRequestContext,
+  sessionId: string,
+  selection: AnalysisContextSelection,
+  now: number = Date.now(),
+): void {
+  const partitions = loadSessionPartitions();
+  const scopeKey = analysisContextScopeKey(backendUrl, context);
+  const entries = {...(partitions[scopeKey] ?? {}), [sessionId]: {selection: normalizeAnalysisContext(selection), touchedAt: now}};
+  const oldestFirst = Object.entries(entries).sort(([, left], [, right]) => left.touchedAt - right.touchedAt);
+  for (const [id] of oldestFirst.slice(0, -MAX_SESSION_CONTEXTS_PER_SCOPE)) {
+    delete entries[id];
+  }
+  partitions[scopeKey] = entries;
+  saveSessionPartitions(partitions);
+}
+
+export function clearSessionAnalysisContext(
+  backendUrl: string,
+  context: SmartPerfettoRequestContext,
+  sessionId: string,
+): void {
+  const partitions = loadSessionPartitions();
+  const scopeKey = analysisContextScopeKey(backendUrl, context);
+  if (!partitions[scopeKey]?.[sessionId]) return;
+  delete partitions[scopeKey][sessionId];
+  saveSessionPartitions(partitions);
+}
+
+/** A changed backend credential ends every selection made under it. */
+export function clearScopeSessionAnalysisContexts(
+  backendUrl: string,
+  context: SmartPerfettoRequestContext,
+): void {
+  const partitions = loadSessionPartitions();
+  const scopeKey = analysisContextScopeKey(backendUrl, context);
+  if (!partitions[scopeKey]) return;
+  delete partitions[scopeKey];
+  saveSessionPartitions(partitions);
+}
+
 export function sameAnalysisContext(
   left: AnalysisContextSelection,
   right: AnalysisContextSelection,

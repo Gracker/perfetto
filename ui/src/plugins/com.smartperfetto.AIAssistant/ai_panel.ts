@@ -338,6 +338,10 @@ import {
   analysisContextRequestFields,
   analysisContextRequiresFullMode as hasPrivateAnalysisContext,
   analysisContextScopeKey,
+  clearScopeSessionAnalysisContexts,
+  clearSessionAnalysisContext,
+  loadSessionAnalysisContext,
+  saveSessionAnalysisContext,
   bumpAnalysisContextAuthorizationEpoch,
   EMPTY_ANALYSIS_CONTEXT,
   loadAnalysisContext,
@@ -359,6 +363,7 @@ import {
   isTransientRunConflict,
 } from './analysis_run_conflict';
 import {analysisCatalog, catalogIdentityKey, type CatalogIdentity} from './analysis_catalog';
+import {ComposerSourceFolder} from './composer_source_folder';
 import type {
   SmartDisplayedScene,
   SmartScenePreviewPayload,
@@ -798,6 +803,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private analysisModeMenuClickHandler: ((event: MouseEvent) => void) | null =
     null;
   private isInputComposing = false;
+  private readonly sourceFolder = new ComposerSourceFolder({
+    identity: () => this.analysisCatalogIdentity(),
+    conversationKey: () => this.state.currentSessionId,
+    locked: () => this.isAnalysisIdentityLocked(),
+    selection: () => this.state.analysisContext,
+    apply: (selection) => this.onAnalysisContextChange(selection),
+  });
   /** Fails toward private: set by restoring private text, cleared only when the composer is sent. */
   private composerHoldsPrivateText = false;
   private conversationHistoryHydrated = false;
@@ -4966,6 +4978,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                       : null,
                     runSupplementOpen ? null : this.renderSliceCard(),
                     runSupplementOpen ? null : this.renderAreaCard(),
+                    runSupplementOpen ? null : this.sourceFolder.render(this.state.input),
                     m('div.ai-input-wrapper', [
                       m('textarea#ai-input.ai-input', {
                         'class': composerDisabled ? 'disabled' : '',
@@ -5028,6 +5041,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                           onChange: (selection: AnalysisContextSelection) =>
                             this.onAnalysisContextChange(selection),
                           onManage: () => this.openSettings('codebases'),
+                          ...this.sourceFolder.contextControlAttrs(),
                         }),
                         m(ProviderQuickSwitcher, {
                           backendUrl: this.state.settings.backendUrl,
@@ -7043,6 +7057,10 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
         getSmartPerfettoRequestContext(),
         this.state.analysisContext,
       );
+      clearScopeSessionAnalysisContexts(
+        this.state.settings.backendUrl,
+        getSmartPerfettoRequestContext(),
+      );
     } else if (backendUrlChanged) {
       this.loadAnalysisContextSelection();
     }
@@ -7086,6 +7104,23 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   /** Names for the chip and the labels questions record: load the catalog once a codebase is selected. */
+  /**
+   * A new conversation starts from the most recent selection, not from
+   * whichever older conversation happens to be open.
+   */
+  private startSessionFromDefaultAnalysisContext(sessionId: string): void {
+    const backendUrl = this.state.settings.backendUrl;
+    const context = getSmartPerfettoRequestContext();
+    const selection = loadAnalysisContext(backendUrl, context);
+    if (!sameAnalysisContext(selection, this.state.analysisContext)) {
+      const authorizationChanged = !sameAnalysisAuthorization(selection, this.state.analysisContext);
+      this.state.analysisContext = selection;
+      if (authorizationChanged) this.resetConversationSession(false);
+      this.ensureAnalysisContextCodebaseLabels();
+    }
+    saveSessionAnalysisContext(backendUrl, context, sessionId, selection);
+  }
+
   private ensureAnalysisContextCodebaseLabels(): void {
     const selection = normalizeAnalysisContext(this.state.analysisContext);
     if (selection.codeAwareMode === 'off' || selection.codebaseIds.length === 0) return;
@@ -7099,15 +7134,40 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     if (sameAnalysisAuthorization(normalized, this.state.analysisContext)) {
       // Source depth is a per-run budget: keep the session, save the preference.
       this.state.analysisContext = normalized;
-      saveAnalysisContext(
-        this.state.settings.backendUrl,
-        getSmartPerfettoRequestContext(),
-        normalized,
-      );
+      this.persistAnalysisContext(normalized);
       m.redraw();
       return;
     }
     this.applyAnalysisContextSelection(normalized);
+  }
+
+  /** The conversation's own selection, and the default the next new conversation starts from. */
+  private persistAnalysisContext(selection: AnalysisContextSelection): void {
+    const backendUrl = this.state.settings.backendUrl;
+    const context = getSmartPerfettoRequestContext();
+    saveAnalysisContext(backendUrl, context, selection);
+    if (this.state.currentSessionId) {
+      saveSessionAnalysisContext(backendUrl, context, this.state.currentSessionId, selection);
+    }
+  }
+
+  /**
+   * Back to a saved conversation: use the selection it last had. Nothing is
+   * announced and the default is untouched, because the user changed nothing;
+   * the backend still checks the restored selection's authorization. A
+   * conversation saved before selections were per-conversation has no entry.
+   */
+  private rebindAnalysisContextToSession(sessionId: string): void {
+    const stored = loadSessionAnalysisContext(
+      this.state.settings.backendUrl,
+      getSmartPerfettoRequestContext(),
+      sessionId,
+    );
+    if (!stored || sameAnalysisContext(stored, this.state.analysisContext)) return;
+    const authorizationChanged = !sameAnalysisAuthorization(stored, this.state.analysisContext);
+    this.state.analysisContext = stored;
+    if (authorizationChanged) this.resetConversationSession(false);
+    this.ensureAnalysisContextCodebaseLabels();
   }
 
   private applyAnalysisContextSelection(normalized: AnalysisContextSelection): void {
@@ -7116,11 +7176,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       loadConversationStore(this.state.settings.backendUrl).sessionId,
     );
     this.state.analysisContext = normalized;
-    saveAnalysisContext(
-      this.state.settings.backendUrl,
-      getSmartPerfettoRequestContext(),
-      normalized,
-    );
+    this.persistAnalysisContext(normalized);
     this.resetConversationSession(false);
     this.ensureAnalysisContextCodebaseLabels();
     if (hadSession) {
@@ -7492,6 +7548,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
     // 更新当前 session ID
     this.state.currentSessionId = session.sessionId;
+    this.startSessionFromDefaultAnalysisContext(session.sessionId);
     // A draft handed over for the previous session does not carry over.
     clearPendingComposerDraft();
 
@@ -7621,6 +7678,8 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       this.retireBackendAgentSession();
     }
 
+    this.rebindAnalysisContextToSession(session.sessionId);
+
     // 恢复命令历史
     this.state.commandHistory = this.state.messages
       .filter(startsConversationRound)
@@ -7665,6 +7724,11 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     }
     const deleted = sessionManager.deleteSession(sessionId);
     if (deleted) {
+      clearSessionAnalysisContext(
+        this.state.settings.backendUrl,
+        getSmartPerfettoRequestContext(),
+        sessionId,
+      );
       // 如果删除的是当前 session，重置状态
       if (sessionId === this.state.currentSessionId) {
         this.state.currentSessionId = null;

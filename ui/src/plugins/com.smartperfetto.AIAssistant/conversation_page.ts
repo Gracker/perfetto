@@ -15,7 +15,9 @@ import {isSmartPerfettoOidcMode} from '../../core/smartperfetto_auth';
 import {
   analysisAuthorizationKey,
   analysisContextRequiresFullMode,
+  analysisContextScopeKey,
   loadAnalysisContext,
+  saveAnalysisContext,
 } from './analysis_context';
 import {formatMessage} from './data_formatter';
 import {resolveChatInputKeyAction} from './chat_input';
@@ -63,6 +65,9 @@ import {
   type PageAuthorityToken,
 } from './page_auth_lifecycle';
 import type {AnalysisContextSelection} from './types';
+import type {CatalogIdentity} from './analysis_catalog';
+import {AnalysisContextControl} from './analysis_context_control';
+import {ComposerSourceFolder} from './composer_source_folder';
 import {TracePairWorkspace} from './trace_pair_workspace';
 import {TracePairWorkspaceController} from './trace_pair_workspace_state';
 import {
@@ -120,6 +125,13 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
   private readonly tracePairWorkspaceController =
     new TracePairWorkspaceController();
   private unsubscribeTracePair?: () => void;
+  private readonly sourceFolder = new ComposerSourceFolder({
+    identity: () => this.catalogIdentity(),
+    conversationKey: () => this.store.sessionId ?? null,
+    locked: () => this.contextLocked(),
+    selection: () => this.currentSelection(),
+    apply: (selection) => this.applySelection(selection),
+  });
   private store: StoredConversation = {backendUrl: this.settings.backendUrl, messages: [], updatedAt: Date.now()};
   private restorePromise?: Promise<void>;
   private restoreOrdinal = 0;
@@ -206,6 +218,29 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       clearConversationRuntimeIdentities();
     }
     this.authLifecycle.dispose();
+  }
+
+  private catalogIdentity(): CatalogIdentity {
+    return {
+      backendUrl: this.settings.backendUrl,
+      apiKey: this.settings.backendApiKey || undefined,
+      scopeKey: analysisContextScopeKey(this.settings.backendUrl, getSmartPerfettoRequestContext()),
+    };
+  }
+
+  private currentSelection(): AnalysisContextSelection {
+    return loadAnalysisContext(this.settings.backendUrl, getSmartPerfettoRequestContext());
+  }
+
+  private contextLocked(): boolean {
+    return Boolean(this.activeReceipt);
+  }
+
+  /** The next send starts a new conversation when this changes what it may read. */
+  private applySelection(selection: AnalysisContextSelection): void {
+    if (this.contextLocked()) return;
+    saveAnalysisContext(this.settings.backendUrl, getSmartPerfettoRequestContext(), selection);
+    m.redraw();
   }
 
   view({attrs}: m.Vnode<{app: App}>): m.Children {
@@ -296,6 +331,14 @@ export class ConversationPage implements m.ClassComponent<{app: App}> {
       this.controlNotice ? m('div.ai-conversation-control-notice', {role: 'status'}, this.controlNotice) : null,
       this.controlError ? m('div.ai-conversation-page-error', {role: 'alert'}, this.controlError) : null,
       this.error ? m('div.ai-conversation-page-error', this.error) : null,
+      this.sourceFolder.render(this.input),
+      m('div.ai-conversation-page-context', m(AnalysisContextControl, {
+        ...this.catalogIdentity(),
+        selection: this.currentSelection(),
+        disabled: this.contextLocked(),
+        onChange: (selection: AnalysisContextSelection) => this.applySelection(selection),
+        ...this.sourceFolder.contextControlAttrs(),
+      })),
       m('footer.ai-conversation-page-composer', [
         m('textarea', {
           value: this.input,

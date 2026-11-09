@@ -11,11 +11,15 @@ import {
   analysisContextRequiresFullMode,
   analysisContextScopeKey,
   bumpAnalysisContextAuthorizationEpoch,
+  clearScopeSessionAnalysisContexts,
+  clearSessionAnalysisContext,
   loadAnalysisContext,
+  loadSessionAnalysisContext,
   normalizeAnalysisContext,
   sameAnalysisAuthorization,
   sameAnalysisContext,
   saveAnalysisContext,
+  saveSessionAnalysisContext,
   selectedCodebaseLabels,
   submittedAnalysisContext,
 } from './analysis_context';
@@ -205,5 +209,51 @@ describe('analysis context source depth', () => {
     });
     expect(submittedAnalysisContext({codeAwareMode: 'off', codebaseIds: ['cb-a'], knowledgeSourceIds: ['kb']}, []))
       .toEqual({codeAwareMode: 'off', codebaseLabels: [], knowledgeSourceCount: 1, sourceDepth: 'auto'});
+  });
+});
+
+describe('per-conversation analysis context', () => {
+  const backendUrl = 'http://localhost:3000';
+  const owner = {tenantId: 't', workspaceId: 'w', userId: 'u', windowId: 'window'};
+  const source = (codebaseId: string): AnalysisContextSelection =>
+    ({codeAwareMode: 'metadata_only', codebaseIds: [codebaseId], knowledgeSourceIds: []});
+
+  it('keeps each conversation apart from the shared default', () => {
+    localStorage.clear();
+    saveAnalysisContext(backendUrl, owner, source('default'));
+    saveSessionAnalysisContext(backendUrl, owner, 'a', source('cb-a'));
+    saveSessionAnalysisContext(backendUrl, owner, 'b', source('cb-b'));
+    expect(loadSessionAnalysisContext(backendUrl, owner, 'a')?.codebaseIds).toEqual(['cb-a']);
+    expect(loadSessionAnalysisContext(backendUrl, owner, 'b')?.codebaseIds).toEqual(['cb-b']);
+    expect(loadAnalysisContext(backendUrl, owner).codebaseIds).toEqual(['default']);
+  });
+
+  it('has no entry for a conversation saved before contexts were per conversation', () => {
+    localStorage.clear();
+    expect(loadSessionAnalysisContext(backendUrl, owner, 'old')).toBeUndefined();
+  });
+
+  it('does not reach across owners', () => {
+    localStorage.clear();
+    saveSessionAnalysisContext(backendUrl, owner, 'a', source('cb-a'));
+    expect(loadSessionAnalysisContext(backendUrl, {...owner, userId: 'other'}, 'a')).toBeUndefined();
+  });
+
+  it('forgets a deleted conversation and everything under a changed credential', () => {
+    localStorage.clear();
+    saveSessionAnalysisContext(backendUrl, owner, 'a', source('cb-a'));
+    saveSessionAnalysisContext(backendUrl, owner, 'b', source('cb-b'));
+    clearSessionAnalysisContext(backendUrl, owner, 'a');
+    expect(loadSessionAnalysisContext(backendUrl, owner, 'a')).toBeUndefined();
+    expect(loadSessionAnalysisContext(backendUrl, owner, 'b')).toBeDefined();
+    clearScopeSessionAnalysisContexts(backendUrl, owner);
+    expect(loadSessionAnalysisContext(backendUrl, owner, 'b')).toBeUndefined();
+  });
+
+  it('keeps only the most recently used conversations', () => {
+    localStorage.clear();
+    for (let i = 0; i <= 200; i++) saveSessionAnalysisContext(backendUrl, owner, `s${i}`, source(`cb-${i}`), i);
+    expect(loadSessionAnalysisContext(backendUrl, owner, 's0')).toBeUndefined();
+    expect(loadSessionAnalysisContext(backendUrl, owner, 's200')).toBeDefined();
   });
 });

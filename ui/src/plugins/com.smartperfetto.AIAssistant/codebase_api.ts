@@ -203,6 +203,8 @@ export interface RegisterCodebaseInput {
   symbolMapPaths?: string[];
   licenseTag?: string;
   sendToProvider: boolean;
+  /** Answer with the registration this picked folder already has, instead of adding a second one. */
+  reuseExisting?: boolean;
 }
 
 /** Complete replacement of the two repeatable source-selection fields. */
@@ -419,13 +421,15 @@ export async function selectDirectory(
   apiKey?: string,
   /** The scope an operation pinned when it started; headers name it, not a later global scope. */
   context?: SmartPerfettoRequestContext,
+  /** Only where the dialog opens: the folder the user picks there is what counts. */
+  defaultPath?: string,
 ): Promise<CodebaseDirectoryPickerResult> {
   const res = await smartPerfettoFetch(
     buildCodebaseApiUrl(backendUrl, '/codebases/directory-picker'),
     {
       method: 'POST',
       headers: buildHeaders(apiKey, context),
-      body: JSON.stringify({purpose}),
+      body: JSON.stringify(defaultPath ? {purpose, defaultPath} : {purpose}),
     },
   );
   return readJsonOrThrow<CodebaseDirectoryPickerResult>(res);

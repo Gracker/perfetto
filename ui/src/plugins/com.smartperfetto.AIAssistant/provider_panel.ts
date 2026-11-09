@@ -29,6 +29,7 @@ import {
   subscribeProviderCatalogChanged,
   type ProviderCatalogChangeReason,
 } from './provider_events';
+import {LocalAiImportDialog, loadLocalAiImportCapability, type LocalAiImportCapability} from './local_ai_import';
 import {uiText as text} from './ui_language';
 
 export type {ProviderPanelAttrs};
@@ -68,6 +69,8 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     createProviderCatalogEventSource('provider-panel');
   private unsubscribeProviderCatalogChanged: (() => void) | null = null;
   private onProviderSelectionChange?: () => void;
+  private localImport: LocalAiImportCapability | null = null;
+  private localImportOpen = false;
 
   oninit(vnode: m.Vnode<ProviderPanelAttrs>) {
     this.backendUrl = vnode.attrs.backendUrl;
@@ -82,6 +85,7 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       },
     );
     this.loadData();
+    void this.loadLocalImportCapability();
   }
 
   onupdate(vnode: m.Vnode<ProviderPanelAttrs>) {
@@ -95,7 +99,25 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
       this.backendUrl = vnode.attrs.backendUrl;
       this.apiKey = vnode.attrs.apiKey;
       this.loadData();
+      void this.loadLocalImportCapability();
     }
+  }
+
+  private async loadLocalImportCapability(): Promise<void> {
+    const backendUrl = this.backendUrl;
+    const apiKey = this.apiKey;
+    const capability = await loadLocalAiImportCapability(backendUrl, apiKey).catch(() => null);
+    if (backendUrl !== this.backendUrl || apiKey !== this.apiKey) return;
+    this.localImport = capability;
+    m.redraw();
+  }
+
+  private onLocalImportDone(providerId: string): void {
+    this.localImportOpen = false;
+    this.success = text('已导入，正在测试连接。确认可用后再启用。', 'Imported; testing the connection. Activate it once it works.');
+    this.publishProviderCatalogChanged('created');
+    void this.loadData();
+    void this.testConnection(providerId);
   }
 
   onremove() {
@@ -471,6 +493,12 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
     const t = getTokens();
     const s = getStyles(t);
     const hasActive = this.providers.some((p) => p.isActive);
+    const addButtonAttrs = {
+      style: this.storeUnreadable
+        ? {...s.addBtn, opacity: 0.5, cursor: 'not-allowed'}
+        : s.addBtn,
+      disabled: this.storeUnreadable,
+    };
 
     return m(
       'div',
@@ -518,18 +546,41 @@ export class ProviderPanel implements m.ClassComponent<ProviderPanelAttrs> {
               ),
             ),
           ]),
-          m(
-            'button',
-            {
-              style: this.storeUnreadable
-                ? {...s.addBtn, opacity: 0.5, cursor: 'not-allowed'}
-                : s.addBtn,
-              disabled: this.storeUnreadable,
-              onclick: () => this.startAdd(),
-            },
-            text('+ 添加提供商', '+ Add Provider'),
-          ),
+          m('div', {style: {display: 'flex', gap: '8px'}}, [
+            this.localImport?.available
+              ? m(
+                  'button',
+                  {
+                    ...addButtonAttrs,
+                    onclick: () => {
+                      this.localImportOpen = true;
+                    },
+                  },
+                  text('从本机 AI 工具导入', 'Import from local AI tools'),
+                )
+              : null,
+            m(
+              'button',
+              {
+                ...addButtonAttrs,
+                onclick: () => this.startAdd(),
+              },
+              text('+ 添加提供商', '+ Add Provider'),
+            ),
+          ]),
         ]),
+
+        this.localImportOpen && this.localImport?.sources
+          ? m(LocalAiImportDialog, {
+              backendUrl: this.backendUrl,
+              apiKey: this.apiKey,
+              sources: this.localImport.sources,
+              onImported: (providerId: string) => this.onLocalImportDone(providerId),
+              onClose: () => {
+                this.localImportOpen = false;
+              },
+            })
+          : null,
 
         this.renderProviderGuide(),
         this.isAiDisabled()
