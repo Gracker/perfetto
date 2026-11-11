@@ -2621,7 +2621,7 @@ export interface AnalysisCompletion extends AnalysisCandidateIdentity {
     /** The engine that produced the run; a stored completion may name a removed engine. */
     runtimeKind: RecordedProductionRuntimeKind;
     status: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'unknown';
-    reason?: 'output_limit' | 'turn_limit' | 'timeout' | 'budget_limit' | 'provider_error' | 'cancelled';
+    reason?: "output_limit" | "turn_limit" | "context_limit" | "timeout" | "budget_limit" | "provider_error" | "cancelled";
     sdkFinishReason?: string;
 }
 
