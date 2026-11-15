@@ -792,6 +792,13 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
    */
   private readonly focusTrackingUnsupportedSessions = new Set<string>();
   private analysisCancellationRequest: Promise<void> | null = null;
+  private summaryRequest?: {
+    sessionId: string;
+    runId: string;
+    backendUrl: string;
+    controller: AbortController;
+    status: 'pending' | 'accepted' | 'unsupported';
+  };
   private renderedMessageContent = new WeakMap<HTMLElement, string>();
   private copiedMessageIds = new Set<string>();
   private formattedSqlCache = new Map<string, CachedSqlFormat>();
@@ -2920,6 +2927,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   }
 
   onremove() {
+    this.clearSummaryRequest();
     this.selectionCardRemoved = true;
     this.selectionCardContext = undefined;
     this.selectionCardMemo.invalidate();
@@ -5069,6 +5077,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
                                     m('i.pf-icon', 'send'),
                                   )
                                 : null,
+                              this.renderSummaryButton(),
                               m(
                                 'button.ai-send-btn.ai-redirect-btn',
                                 {
@@ -14092,6 +14101,7 @@ Click ⚙️ to configure backend connection.`,
    * new instance's handlers can dedupe replayed events.
    */
   private handOffTransientState(): TransientState {
+    this.clearSummaryRequest();
     this.cancelSSEConnection();
     // Before the save below: a redirect cannot complete from a departing instance.
     this.abandonRedirectIntent();
@@ -14616,6 +14626,7 @@ Click ⚙️ to configure backend connection.`,
     this.state.loadingPhase = '';
     this.tracePairWorkspaceController.setSelectionLocked(loading);
     if (!loading) {
+      this.clearSummaryRequest();
       // Backstop for any path that ends the run without a terminal stream event.
       const runId = this.runSupplementLedger.runId;
       if (runId) this.dispatchRunSupplement({type: 'terminal', runId, outcome: 'unknown'});
@@ -14624,6 +14635,81 @@ Click ⚙️ to configure backend connection.`,
 
   private isAnalysisIdentityLocked(): boolean {
     return this.state.isLoading || this.analysisCancellationPending;
+  }
+
+  private clearSummaryRequest(): void {
+    this.summaryRequest?.controller.abort();
+    this.summaryRequest = undefined;
+  }
+
+  private canSummarizeCurrentRun(): boolean {
+    return this.state.isLoading && Boolean(this.state.agentSessionId && this.state.agentRunId)
+      && !this.analysisCancellationPending && !this.redirectIntent && !this.isConversationExecutionActive()
+      && this.state.storyState.status !== 'running';
+  }
+
+  private currentSummaryRequest() {
+    const request = this.summaryRequest;
+    return request && request.sessionId === this.state.agentSessionId && request.runId === this.state.agentRunId
+      && request.backendUrl === this.state.settings.backendUrl ? request : undefined;
+  }
+
+  private renderSummaryButton(): m.Children {
+    if (!this.canSummarizeCurrentRun()) return null;
+    const request = this.currentSummaryRequest();
+    return m('button.ai-send-btn.ai-redirect-btn', {
+      onclick: () => void this.requestCurrentRunSummary(),
+      disabled: Boolean(request),
+      title: request?.status === 'unsupported'
+        ? uiText('当前运行不支持提前总结', 'This run does not support an early summary')
+        : uiText('结束分析并总结现有结果', 'Finish the analysis and summarize current results'),
+      'aria-label': uiText('总结现有结果', 'Summarize current results'),
+    }, m('i.pf-icon', 'summarize'));
+  }
+
+  /** The stream retains ownership until its matching terminal result arrives. */
+  private async requestCurrentRunSummary(): Promise<void> {
+    if (!this.canSummarizeCurrentRun() || this.currentSummaryRequest()) return;
+    this.clearSummaryRequest();
+    const request = {sessionId: this.state.agentSessionId!, runId: this.state.agentRunId!,
+      backendUrl: this.state.settings.backendUrl, controller: new AbortController(), status: 'pending' as const};
+    this.summaryRequest = request;
+    const current = () => this.summaryRequest === request && this.currentSummaryRequest() === request
+      && this.canSummarizeCurrentRun();
+    m.redraw();
+    // Bounds this control handshake, not the analysis itself. A retry is idempotent for the same run.
+    const timer = setTimeout(() => request.controller.abort(), 10_000);
+    try {
+      const response = await this.fetchBackend(buildAssistantApiV1Url(request.backendUrl,
+        `/${encodeURIComponent(request.sessionId)}/summarize`), {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({runId: request.runId}), signal: request.controller.signal,
+      });
+      const body: unknown = await response.json().catch(() => undefined);
+      if (!current()) return;
+      const result = body && typeof body === 'object' ? body as Record<string, unknown> : undefined;
+      if (response.ok && result?.success === true && result.sessionId === request.sessionId
+        && result.runId === request.runId && result.outcome === 'accepted') {
+        this.summaryRequest!.status = 'accepted';
+        this.state.loadingPhase = uiText('正在总结现有结果…', 'Summarizing current results…');
+      } else if (response.status === 409 && result?.code === 'SUMMARY_UNSUPPORTED'
+        && result.runId === request.runId) {
+        this.summaryRequest!.status = 'unsupported';
+        this.state.loadingPhase = uiText('当前运行不支持提前总结，分析仍在进行',
+          'This run does not support an early summary; the analysis is still running');
+      } else {
+        throw new Error('Summary request was not accepted');
+      }
+    } catch {
+      if (!current()) return;
+      this.summaryRequest = undefined;
+      this.state.loadingPhase = uiText('总结请求未成功，分析仍在进行，可重试',
+        'The summary request was not accepted; the analysis is still running. Try again.');
+      m.redraw();
+    } finally {
+      clearTimeout(timer);
+      if (current()) m.redraw();
+    }
   }
 
   private isConversationExecutionActive(): boolean {

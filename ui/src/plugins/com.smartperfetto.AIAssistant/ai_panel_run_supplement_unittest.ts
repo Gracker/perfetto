@@ -41,6 +41,113 @@ function supplement(value: PanelInternals): Message {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+describe('AIPanel summarize current run', () => {
+  afterEach(() => {vi.restoreAllMocks(); resetAISharedState();});
+
+  function activePanel(): PanelInternals {
+    const value = panel();
+    value.state.agentSessionId = 'summary-session';
+    value.state.agentRunId = 'summary-run';
+    value.state.isLoading = true;
+    value.cancelSSEConnection = vi.fn();
+    value.cancelAnalysis = vi.fn();
+    value.activeAgentRequest = {};
+    return value;
+  }
+  const accepted = (runId = 'summary-run') => new Response(JSON.stringify({
+    success: true, sessionId: 'summary-session', runId, outcome: 'accepted',
+  }));
+
+  it('requests the matching run once and keeps its stream and cancel action available', async () => {
+    const value = activePanel();
+    let resolve!: (response: Response) => void;
+    value.fetchBackend = vi.fn(() => new Promise(done => {resolve = done;}));
+    const button = value.renderSummaryButton();
+    expect(button.attrs['aria-label']).toBe('Summarize current results');
+    button.attrs.onclick();
+    await value.requestCurrentRunSummary();
+    expect(value.fetchBackend).toHaveBeenCalledOnce();
+    expect(value.fetchBackend.mock.calls[0][0]).toContain('/summary-session/summarize');
+    expect(JSON.parse(value.fetchBackend.mock.calls[0][1].body)).toEqual({runId: 'summary-run'});
+    expect(value.renderSummaryButton().attrs.disabled).toBe(true);
+    resolve(accepted()); await flush();
+    expect(value.summaryRequest.status).toBe('accepted');
+    expect(value.state.isLoading).toBe(true);
+    expect(value.state.agentRunId).toBe('summary-run');
+    expect(value.cancelSSEConnection).not.toHaveBeenCalled();
+    expect(value.cancelAnalysis).not.toHaveBeenCalled();
+    await value.requestCurrentRunSummary();
+    expect(value.fetchBackend).toHaveBeenCalledOnce();
+    value.setLoadingState(false);
+    expect(value.summaryRequest).toBeUndefined();
+  });
+
+  it.each(['new_run', 'backend_changed', 'terminal', 'handoff', 'cancel'] as const)
+  ('ignores a late summary response after %s', async reason => {
+    const value = activePanel();
+    let resolve!: (response: Response) => void;
+    value.fetchBackend = vi.fn(() => new Promise(done => {resolve = done;}));
+    const pending = value.requestCurrentRunSummary();
+    if (reason === 'new_run') value.state.agentRunId = 'successor';
+    if (reason === 'backend_changed') value.state.settings.backendUrl = 'http://127.0.0.1:9999';
+    if (reason === 'terminal') value.setLoadingState(false);
+    if (reason === 'handoff') value.clearSummaryRequest();
+    if (reason === 'cancel') value.analysisCancellationPending = true;
+    value.state.loadingPhase = 'new owner phase';
+    resolve(accepted()); await pending;
+    expect(value.state.loadingPhase).toBe('new owner phase');
+    value.clearSummaryRequest();
+  });
+
+  it.each(['http_error', 'invalid_receipt', 'network'] as const)('allows a retry after %s', async failure => {
+    const value = activePanel();
+    value.fetchBackend = vi.fn().mockImplementationOnce(() => failure === 'network'
+      ? Promise.reject(new Error('offline')) : Promise.resolve(failure === 'http_error'
+        ? new Response('{}', {status: 409}) : accepted('foreign-run'))).mockResolvedValue(accepted());
+    await value.requestCurrentRunSummary();
+    expect(value.summaryRequest).toBeUndefined();
+    expect(value.state.isLoading).toBe(true);
+    expect(value.state.loadingPhase).toContain('still running');
+    await value.requestCurrentRunSummary();
+    expect(value.summaryRequest.status).toBe('accepted');
+    value.clearSummaryRequest();
+  });
+
+  it('times out only the control handshake and leaves the analysis running', async () => {
+    vi.useFakeTimers();
+    const value = activePanel();
+    value.fetchBackend = vi.fn((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('request aborted')), {once: true});
+    }));
+    try {
+      const pending = value.requestCurrentRunSummary();
+      await vi.advanceTimersByTimeAsync(10_000); await pending;
+      expect(value.summaryRequest).toBeUndefined();
+      expect(value.state.isLoading).toBe(true);
+      expect(value.state.agentRunId).toBe('summary-run');
+      expect(value.cancelAnalysis).not.toHaveBeenCalled();
+      expect(value.cancelSSEConnection).not.toHaveBeenCalled();
+    } finally {vi.useRealTimers(); value.clearSummaryRequest();}
+  });
+
+  it('disables only the unsupported run and hides the control outside a normal active analysis', async () => {
+    const value = activePanel();
+    value.fetchBackend = vi.fn(async () => new Response(JSON.stringify({runId: 'summary-run', code: 'SUMMARY_UNSUPPORTED'}), {status: 409}));
+    await value.requestCurrentRunSummary();
+    expect(value.renderSummaryButton().attrs.disabled).toBe(true);
+    value.state.agentRunId = 'next-run';
+    expect(value.renderSummaryButton().attrs.disabled).toBe(false);
+    value.state.storyState.status = 'running';
+    expect(value.renderSummaryButton()).toBeNull();
+    value.state.storyState.status = 'idle'; value.activeAgentRequest = undefined;
+    value.activeConversationRun = {runId: 'conversation-run'};
+    expect(value.renderSummaryButton()).toBeNull();
+    value.activeConversationRun = undefined; value.state.isLoading = false;
+    expect(value.renderSummaryButton()).toBeNull();
+    value.clearSummaryRequest();
+  });
+});
+
 describe('AIPanel run supplement restart', () => {
   afterEach(() => {
     vi.restoreAllMocks();
