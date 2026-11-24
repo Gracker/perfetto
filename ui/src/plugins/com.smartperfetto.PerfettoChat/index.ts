@@ -6,12 +6,13 @@ import m from 'mithril';
 import type {App} from '../../public/app';
 import type {PerfettoPlugin} from '../../public/plugin';
 import type {Trace} from '../../public/trace';
+import type {TraceInfo} from '../../public/trace_info';
 import {ChatClient, type Capabilities} from './client';
 import {Conversation} from './conversation';
+import {CHAT_PAGE, openPerfettoChat} from './navigation';
 import {ChatPanel, title} from './panel';
 
 const id = 'com.smartperfetto.PerfettoChat';
-const page = '/perfetto_chat';
 const tab = id + '#Chat';
 let capabilityQuery: {key: string; promise: Promise<Capabilities | undefined>} | undefined;
 
@@ -23,6 +24,40 @@ function capabilities(): Promise<Capabilities | undefined> {
   });
   capabilityQuery = {key: client.scope.key, promise};
   return promise;
+}
+
+const pendingTabs = new WeakMap<TraceInfo, Promise<boolean>>();
+
+function ensureTraceChatTab(trace: Trace): Promise<boolean> {
+  const pending = pendingTabs.get(trace.traceInfo);
+  if (pending) return pending;
+  let disposed = false;
+  trace.trash.defer(() => { disposed = true; });
+  const register = capabilities().then(result => {
+    if (!result?.enabled || disposed) return false;
+    const conversation = new Conversation(trace, result);
+    trace.trash.defer(() => conversation.dispose());
+    trace.trash.use(trace.sidePanel.registerTab({
+      uri: tab,
+      title: title(),
+      icon: 'chat',
+      render: () => m(ChatPanel, {conversation}),
+    }));
+    m.redraw();
+    return true;
+  });
+  pendingTabs.set(trace.traceInfo, register);
+  return register;
+}
+
+class ReturnToViewer implements m.ClassComponent<{app: App}> {
+  oncreate({attrs: {app}}: m.VnodeDOM<{app: App}>): void {
+    void openPerfettoChat(app, ensureTraceChatTab, tab);
+  }
+
+  view() {
+    return null;
+  }
 }
 
 class StandalonePage implements m.ClassComponent {
@@ -43,8 +78,8 @@ export default class implements PerfettoPlugin {
 
   static onActivate(app: App): void {
     app.pages.registerPage({
-      route: page,
-      render: () => m(StandalonePage),
+      route: CHAT_PAGE,
+      render: () => app.trace ? m(ReturnToViewer, {app}) : m(StandalonePage),
     });
     void capabilities().then(result => {
       if (!result?.enabled) return;
@@ -52,38 +87,21 @@ export default class implements PerfettoPlugin {
         section: 'trace_files',
         text: title,
         icon: 'chat',
-        href: '#!' + page,
+        action: () => openPerfettoChat(app, ensureTraceChatTab, tab),
       });
       m.redraw();
     });
   }
 
   async onTraceLoad(trace: Trace): Promise<void> {
-    // Registration is scoped to trace disposal, and never blocks Viewer load.
-    let disposed = false;
-    trace.trash.defer(() => { disposed = true; });
-    void capabilities().then(result => {
-      if (!result?.enabled || disposed) return;
-      const conversation = new Conversation(trace, result);
-      trace.trash.defer(() => conversation.dispose());
-      trace.trash.use(trace.sidePanel.registerTab({
-        uri: tab,
-        title: title(),
-        icon: 'chat',
-        render: () => m(ChatPanel, {conversation}),
-      }));
+    // Availability is read without delaying timeline load.
+    void ensureTraceChatTab(trace).then(registered => {
+      if (!registered) return;
       trace.commands.registerCommand({
         id: id + '#Show',
         name: title(),
-        callback: () => trace.sidePanel.showTab(tab),
+        callback: () => openPerfettoChat(trace, ensureTraceChatTab, tab),
       });
-      trace.sidebar.addMenuItem({
-        section: 'current_trace',
-        text: title,
-        icon: 'chat',
-        action: () => trace.sidePanel.showTab(tab),
-      });
-      m.redraw();
     });
   }
 }
