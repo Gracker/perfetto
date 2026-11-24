@@ -68,7 +68,10 @@ import {getSmartPerfettoBackendCspSources} from '../core/smartperfetto_backend_u
 import {getBackendUploader} from '../core/backend_uploader';
 import {isSmartPerfettoOidcMode} from '../core/smartperfetto_auth';
 import type {Route} from '../public/app';
-import {parseWorkspaceTraceLaunch} from '../core/workspace_trace_launch';
+import {
+  parseWorkspaceTraceLaunch,
+  workspaceViewerDocumentUrl,
+} from '../core/workspace_trace_launch';
 
 // =============================================================================
 // UI INITIALIZATION STAGES
@@ -288,11 +291,10 @@ function setupContentSecurityPolicy() {
       'https://ssl.gstatic.com',
     ],
     'style-src': [`'self'`, `'unsafe-inline'`],
-    // Only the Google Drive plugin's dialogs may be framed, and only their
-    // paths rather than the whole hosts, which also serve embeddable user
-    // content. Connecting to a Google account needs no entry here: it happens
-    // in a popup, which frame-src does not govern.
+    // Dual Trace uses the explicit same-origin app document. The Google Drive
+    // dialogs retain their narrow third-party path rules.
     'frame-src': [
+      workspaceViewerDocumentUrl(window.location.href),
       // The Google Drive picker dialog.
       'https://docs.google.com/picker',
       'https://docs.google.com/picker/',

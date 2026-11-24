@@ -4,6 +4,7 @@
 
 import m from 'mithril';
 
+import {workspaceViewerDocumentUrl} from '../../core/workspace_trace_launch';
 import {Select} from '../../widgets/select';
 import type {TracePairLayout, TracePairTraceSide} from './types';
 import type {
@@ -48,7 +49,7 @@ function buildFrameUrl(
     smartperfettoDualTrace: 'true',
     smartperfettoPane: traceSide,
   });
-  return `${window.location.origin}${window.location.pathname}#!/viewer?${params.toString()}`;
+  return `${workspaceViewerDocumentUrl(window.location.href)}#!/viewer?${params.toString()}`;
 }
 
 function renderTraceSelector(

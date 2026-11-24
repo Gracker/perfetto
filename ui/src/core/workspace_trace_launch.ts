@@ -5,6 +5,15 @@
 export const WORKSPACE_TRACE_LAUNCH_ARG = 'smartperfettoWorkspaceTrace';
 export const WORKSPACE_TRACE_ID_ARG = 'smartperfettoWorkspaceTraceId';
 
+export function workspaceViewerDocumentUrl(href: string): string {
+  // An explicit filename allows frame-src to match one document. Resolving
+  // against the current document preserves the directory of a mounted UI.
+  const url = new URL('index.html', href);
+  // These characters separate CSP directives or policies. Their URL-encoded
+  // forms still match the same path under CSP's percent-decoding rules.
+  return url.href.replace(/;/g, '%3B').replace(/,/g, '%2C');
+}
+
 export interface WorkspaceTraceLaunch {
   readonly traceId: string;
   readonly traceFileName: string;
