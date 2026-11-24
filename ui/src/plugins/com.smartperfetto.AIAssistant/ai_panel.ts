@@ -860,12 +860,19 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       'ai-message-content-summary',
       msg.sourceContext?.kind === 'summary' || msg.sourceContext?.kind === 'metric',
     );
+    const content = this.messageMarkdown(msg);
     const lastRenderedContent = this.renderedMessageContent.get(dom);
-    if (lastRenderedContent === msg.content) return;
+    if (lastRenderedContent === content) return;
 
-    dom.innerHTML = formatMessage(msg.content);
-    this.renderedMessageContent.set(dom, msg.content);
+    dom.innerHTML = formatMessage(content);
+    this.renderedMessageContent.set(dom, content);
     void this.renderMermaidInElement(dom);
+  }
+
+  private messageMarkdown(msg: Message): string {
+    return msg.conclusionEvidenceMarkdown
+      ? `${msg.conclusionEvidenceMarkdown}\n\n## ${uiText('模型分析', 'Model analysis')}\n\n${msg.content}`
+      : msg.content;
   }
 
   private copyTextToClipboard(text: string): Promise<boolean> {
@@ -875,7 +882,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
   private async copyMessageContent(msg: Message): Promise<void> {
     const copyableContent = [
       msg.serverVerificationNotice,
-      msg.content,
+      this.messageMarkdown(msg),
       msg.serverVerificationDetails,
     ]
       .filter((part): part is string => Boolean(part?.trim()))

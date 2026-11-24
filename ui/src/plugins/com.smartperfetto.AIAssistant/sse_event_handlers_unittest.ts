@@ -5486,6 +5486,29 @@ describe('conclusion delivery', () => {
     expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
   });
 
+  it('replaces the measurements and model analysis together on the current answer', () => {
+    const ctx = createMockContext();
+    const early = {
+      schemaVersion: 'scrolling_conclusion@1',
+      markdown: 'Early measurements',
+    };
+    handleSSEEvent('conclusion', {runId: 'run-a', data: {
+      conclusion: 'Model body', conclusionEvidence: early,
+    }}, ctx);
+    const messageId = ctx.messages[0].id;
+    expect(ctx.messages[0].conclusionEvidenceMarkdown).toBe(early.markdown);
+    handleSSEEvent('analysis_completed', {runId: 'run-a', data: {
+      success: true, conclusion: 'Updated model body', findings: [],
+      conclusionEvidence: {...early, markdown: 'Final measurements'},
+    }}, ctx);
+    expect(ctx.messages).toHaveLength(1);
+    expect(ctx.messages[0]).toMatchObject({
+      id: messageId, conclusionEvidenceMarkdown: 'Final measurements',
+    });
+    expect(ctx.messages[0].content).toContain('Updated model body');
+    expect(ctx.messages[0].content).not.toContain('Final measurements');
+  });
+
   // A stored or restored message can still carry a cue from before the review ended.
   const restoredCue = (ctx: ReturnType<typeof createMockContext>) => {
     ctx.addMessage({id: 'restored-answer', role: 'assistant', content: 'Trace duration is 12.3 s.',

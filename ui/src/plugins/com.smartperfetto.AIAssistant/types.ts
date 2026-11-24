@@ -118,6 +118,8 @@ export interface Message {
   conversationEvidence?: Array<{id: string; label: string; source?: string}>;
   /** Server-owned verification text, rendered separately from the canonical answer. */
   serverVerificationDetails?: string;
+  /** Product-authored measurements from the same run as the canonical answer. */
+  conclusionEvidenceMarkdown?: string;
   /** Server-owned partial/failure notice shown before the canonical answer. */
   serverVerificationNotice?: string;
   /** Exact finalized candidate identity that owns serverVerificationDetails. */

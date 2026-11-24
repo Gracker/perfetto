@@ -14,6 +14,7 @@ export interface PrivateMessageStorageMarker {
   content: string;
   privateContent?: boolean;
   serverVerificationDetails?: string;
+  conclusionEvidenceMarkdown?: string;
   serverVerificationNotice?: string;
   serverVerificationBinding?: unknown;
   answerVerification?: 'unfinished';
@@ -47,6 +48,7 @@ export function projectMessageForStorage<T extends PrivateMessageStorageMarker>(
         ...message,
         content: privateQueryStoragePlaceholder(),
         serverVerificationDetails: undefined,
+        conclusionEvidenceMarkdown: undefined,
         serverVerificationNotice: undefined,
         serverVerificationBinding: undefined,
       }

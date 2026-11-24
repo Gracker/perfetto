@@ -86,6 +86,7 @@ type AnalysisHypothesisItem = {
 };
 
 type AnalysisCompletedPayload = {
+  conclusionEvidenceMarkdown?: string;
   success?: boolean;
   summary?: string;
   conclusionContract?: ConclusionContract | Record<string, unknown>;
@@ -143,6 +144,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
+}
+
+function conclusionEvidenceMarkdown(value: unknown): string | undefined {
+  const evidence = asRecord(value);
+  return evidence.schemaVersion === 'scrolling_conclusion@1'
+    ? readStringField(evidence, 'markdown') || undefined
+    : undefined;
 }
 
 function readOptionalNumberField(
@@ -214,6 +222,7 @@ function toAnalysisCompletedPayload(
 
   const conclusion = readStringField(source, 'conclusion');
   if (conclusion) payload.conclusion = conclusion;
+  payload.conclusionEvidenceMarkdown = conclusionEvidenceMarkdown(source.conclusionEvidence);
 
   const confidence = readOptionalNumberField(source, 'confidence');
   if (confidence !== undefined) payload.confidence = confidence;
@@ -4731,6 +4740,7 @@ export function handleAnalysisCompletedEvent(
             ...(canonicalContent
               ? {
                   content: canonicalContent,
+                  conclusionEvidenceMarkdown: payload?.conclusionEvidenceMarkdown,
                   answerDraft: undefined,
                   serverVerificationDetails,
                   serverVerificationNotice,
@@ -4766,6 +4776,7 @@ export function handleAnalysisCompletedEvent(
             id: messageId,
             role: 'assistant',
             content: canonicalContent,
+            conclusionEvidenceMarkdown: payload?.conclusionEvidenceMarkdown,
             serverVerificationDetails,
             serverVerificationNotice,
             serverVerificationBinding: payload?.serverVerificationBinding,
@@ -4878,6 +4889,7 @@ export function handleAnalysisCompletedEvent(
         streamedAnswerMessageId,
         {
           content,
+          conclusionEvidenceMarkdown: payload?.conclusionEvidenceMarkdown,
           answerDraft: undefined,
           answerVerification: verdictCue,
           serverVerificationDetails,
@@ -4900,6 +4912,7 @@ export function handleAnalysisCompletedEvent(
           id: messageId,
           role: 'assistant',
           content: content,
+          conclusionEvidenceMarkdown: payload?.conclusionEvidenceMarkdown,
           serverVerificationDetails,
           serverVerificationNotice,
           serverVerificationBinding: payload?.serverVerificationBinding,
@@ -6496,6 +6509,7 @@ function handleSSEEventInner(
       // metadata; a legacy stream that ends without it stops on `end`.
       const conclusionPayload = eventPayload(eventData);
       const conclusionText = readStringField(conclusionPayload, 'conclusion');
+      const measurements = conclusionEvidenceMarkdown(conclusionPayload.conclusionEvidence);
       if (DEBUG_SSE) console.log('[SSEHandlers] CONCLUSION event received');
 
       if (conclusionText) {
@@ -6517,6 +6531,7 @@ function handleSSEEventInner(
             streamedAnswerMessageId,
             {
               content,
+              conclusionEvidenceMarkdown: measurements,
               answerDraft: undefined,
               serverVerificationDetails: undefined,
               serverVerificationNotice: undefined,
@@ -6532,6 +6547,7 @@ function handleSSEEventInner(
             id: messageId,
             role: 'assistant',
             content,
+            conclusionEvidenceMarkdown: measurements,
             serverVerificationDetails: undefined,
             serverVerificationNotice: undefined,
             serverVerificationBinding: undefined,
