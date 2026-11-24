@@ -193,6 +193,42 @@ export async function agentStatus(
   return parseJsonResponse(response, AgentStatusSchema);
 }
 
+// Observe the public, run-scoped replay. The Pi SDK emits this progress
+// event on native agent_start, after the run has reached its provider phase.
+export async function waitForPiRunStart(runId: string): Promise<void> {
+  const encoded = encodeURIComponent(AgentRunIdSchema.parse(runId));
+  const apiKey = process.env.SMARTPERFETTO_E2E_BACKEND_API_KEY;
+  if (!apiKey) throw new Error('Dual Trace E2E backend API key is unavailable');
+  const response = await fetch(workspaceResourceUrl(`agent/runs/${encoded}/stream`), {
+    headers: {Authorization: `Bearer ${apiKey}`, Accept: 'text/event-stream'},
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Agent run stream returned HTTP ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) throw new Error('Agent run stream closed before Pi started');
+      buffer += decoder.decode(value, {stream: true});
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
+        const data = frame.split('\n').find(line => line.startsWith('data: '));
+        if (!data) continue;
+        const event = JSON.parse(data.slice(6));
+        if (event.runId === runId && event.type === 'progress' &&
+            event.data === 'Pi agent-core run started') return;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
 export async function cancelAgent(
   request: APIRequestContext,
   sessionId: string,

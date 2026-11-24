@@ -26,6 +26,7 @@ import {
   expectTraceSelectors,
 } from './dual_trace_assertions';
 import {DualTraceScenario} from './dual_trace_scenario';
+import {waitForPiRunStart} from './smartperfetto_e2e_helper';
 
 const ANALYZE_ROUTE = '**/api/workspaces/*/agent/analyze';
 const CANCELLATION_NOTICE = '分析已取消。';
@@ -207,6 +208,7 @@ test('keeps heavy/light analysis stable through window operations and confirms s
       'analysis',
     ]);
     await assertRunningIdentity(request, analysis);
+    await waitForPiRunStart(analysis.runId);
     await expectTraceSelectors(page, true);
     await expect(
       page.locator('select.ai-trace-pair-selector').first(),

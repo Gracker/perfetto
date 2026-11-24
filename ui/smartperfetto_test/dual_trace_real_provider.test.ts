@@ -5,11 +5,12 @@
 import {expect, test} from '@playwright/test';
 import {z} from 'zod';
 
-import {agentStatus} from './smartperfetto_e2e_helper';
+import {agentStatus, waitForPiRunStart} from './smartperfetto_e2e_helper';
 import {
   parseAnalyzeRequest,
   parseAnalyzeResponse,
   parseCancelResponse,
+  statusRunId,
 } from './dual_trace_contract';
 import {aiStatusLocator, sendAnalysis} from './dual_trace_browser_harness';
 import {DualTraceScenario} from './dual_trace_scenario';
@@ -17,6 +18,7 @@ import {DualTraceScenario} from './dual_trace_scenario';
 const ResultSchema = z.object({
   answer: z.string().min(1),
   claimVerificationResult: z.object({status: z.literal('passed')}),
+  analysisReceipt: z.object({runtime: z.literal('pi-agent-core'), runId: z.string()}),
   partial: z.boolean().optional(),
 });
 
@@ -25,7 +27,7 @@ test.skip(
   'requires the opt-in real provider runner',
 );
 
-test('keeps a real DeepSeek comparison alive through window operations', async ({
+test('keeps a real provider comparison alive through window operations', async ({
   page,
   request,
 }, testInfo) => {
@@ -49,6 +51,7 @@ test('keeps a real DeepSeek comparison alive through window operations', async (
     runId = analysis.runId;
     expect(analyzeRequest.traceId).toBe(scenario.heavyHistoryTrace?.id);
     expect(analyzeRequest.referenceTraceId).toBe(scenario.lightTrace?.id);
+    await waitForPiRunStart(analysis.runId);
 
     await expect(page.locator('button.ai-stop-btn')).toBeVisible();
     await page.getByTitle('上下排列').click();
@@ -84,6 +87,8 @@ test('keeps a real DeepSeek comparison alive through window operations', async (
       .toBe('completed');
     const completed = await agentStatus(request, analysis.sessionId);
     const result = ResultSchema.parse(completed.result);
+    expect(statusRunId(completed)).toBe(analysis.runId);
+    expect(result.analysisReceipt.runId).toBe(analysis.runId);
     expect(result.partial).not.toBe(true);
     expect(result.answer.length).toBeGreaterThan(100);
     await scenario.expectFramesStable();
@@ -97,11 +102,6 @@ test('keeps a real DeepSeek comparison alive through window operations', async (
     expect(completedNoticeCount).toBeGreaterThan(0);
     await expect(aiStatusLocator(page)).toHaveText('AI: Done');
     await expect(page.locator('textarea#ai-input')).toBeEnabled();
-    const providerStartNotices = page.getByText(
-      'AI 分析引擎分析中 (deepseek-v4-pro)...',
-      {exact: true},
-    );
-    const providerStartCount = await providerStartNotices.count();
     const resumeResponsePromise = page.waitForResponse((response) => {
       const pathname = new URL(response.url()).pathname;
       return (
@@ -122,9 +122,7 @@ test('keeps a real DeepSeek comparison alive through window operations', async (
     expect(cancellableAnalysis.sessionId).toBe(analysis.sessionId);
     expect(cancellableAnalysis.runId).not.toBe(analysis.runId);
     await expect(page.locator('button.ai-stop-btn')).toBeVisible();
-    await expect
-      .poll(() => providerStartNotices.count(), {timeout: 120_000})
-      .toBeGreaterThan(providerStartCount);
+    await waitForPiRunStart(cancellableAnalysis.runId);
     await scenario.expectFramesStable();
 
     const cancelResponsePromise = page.waitForResponse(
