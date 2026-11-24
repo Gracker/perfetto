@@ -9512,6 +9512,9 @@ Click ⚙️ to configure backend connection.`,
               !panel.ownsSelectionCardContext(context);
           },
         };
+        // AsyncMemo can start compute inline. Defer SQL until the render can
+        // finish and an immediate replacement or removal can revoke ownership.
+        await Promise.resolve();
         if (signal.isCancelled) return TASK_CANCELLED;
         if (query.kind === 'slice') {
           const info = await this.querySliceCardInfo(query.eventId, context.engine);
