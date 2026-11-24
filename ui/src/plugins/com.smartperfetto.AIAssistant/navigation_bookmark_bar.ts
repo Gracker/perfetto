@@ -235,13 +235,9 @@ export class NavigationBookmarkBar
     trace: Trace,
     onBookmarkClick?: (bookmark: NavigationBookmark, index: number) => void,
   ): void {
-    if (index < 0 || index >= bookmarks.length) {
-      return;
-    }
-
-    this.currentIndex = index;
     const bookmark = bookmarks[index];
     if (!bookmark) return;
+    this.currentIndex = index;
 
     // 使用 Perfetto API 跳转
     trace.scrollTo({
