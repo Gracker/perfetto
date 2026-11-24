@@ -54,6 +54,7 @@ export const defaultPlugins = [
   'dev.perfetto.AutoPinAndExpandTracks',
   'dev.perfetto.BookmarkletApi',
   'com.smartperfetto.AIAssistant',
+  'com.smartperfetto.PerfettoChat',
   'dev.perfetto.CoarseCpu',
   'dev.perfetto.CoreCommands',
   'dev.perfetto.CpuFreq',

@@ -277,7 +277,8 @@ export function buildSmartPerfettoWorkspaceApiUrl(
     | 'windows'
     | 'comparisons'
     | 'trace-config'
-    | 'critical-path',
+    | 'critical-path'
+    | 'perfetto-chat/v1',
   path = '',
 ): string {
   const {workspaceId} = getSmartPerfettoRequestContext();

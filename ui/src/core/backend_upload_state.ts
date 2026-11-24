@@ -5,6 +5,7 @@ export type BackendUploadPhase = 'idle' | 'uploading' | 'ready' | 'failed';
 export interface BackendUploadSnapshot {
   backendIdentityKey?: string;
   traceId?: string;
+  assetTraceId?: string;
   uploadToken?: string;
   sourceKey?: string;
   port?: number;
@@ -45,6 +46,7 @@ export function setBackendUploadState(next: BackendUploadSnapshot): void {
   snapshot = {
     backendIdentityKey: next.backendIdentityKey,
     traceId: next.traceId,
+    assetTraceId: next.assetTraceId,
     uploadToken: next.uploadToken,
     sourceKey: next.sourceKey,
     port: next.port,

@@ -67,6 +67,10 @@ import {
 } from './backend_uploader';
 export {backendUploadSourceKey} from './backend_uploader';
 import {
+  captureTraceAssetSource,
+  rememberTraceUploadOperation,
+} from './trace_asset_source';
+import {
   getBackendUploadState,
   isBackendUploadOperationCurrent,
   setBackendUploadState,
@@ -226,9 +230,11 @@ async function createEngine(
       currentUploadState.sourceKey === sourceKey &&
       currentUploadState.backendIdentityKey === backendIdentityKey
     ) {
+      rememberTraceUploadOperation(traceSource, currentUploadState.uploadToken);
       console.log('[AutoRPC] Upload already in progress, skipping duplicate');
     } else {
       const uploadToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      rememberTraceUploadOperation(traceSource, uploadToken);
       setBackendUploadState({
         backendIdentityKey,
         uploadToken,
@@ -237,7 +243,7 @@ async function createEngine(
       });
 
       const uploader = getBackendUploader();
-      const notifyUploadFailed = (error: string, errorCode?: string): void => {
+      const notifyUploadFailed = (error: string, errorCode?: string, assetTraceId?: string): void => {
         if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) return;
         setBackendUploadState({
           backendIdentityKey,
@@ -246,6 +252,7 @@ async function createEngine(
           state: 'failed',
           error,
           errorCode,
+          assetTraceId,
         });
       };
 
@@ -291,7 +298,7 @@ async function createEngine(
           } else {
             const error = result.error ?? 'Background upload failed';
             console.warn('[AutoRPC] Background upload failed:', error);
-            notifyUploadFailed(error, result.errorCode ?? 'UPLOAD_FAILED');
+            notifyUploadFailed(error, result.errorCode ?? 'UPLOAD_FAILED', result.assetTraceId);
           }
         } catch (error) {
           if (!isBackendUploadOperationCurrent(uploadToken, backendIdentityKey, sourceKey)) {
@@ -421,6 +428,7 @@ async function loadTraceIntoEngine(
   }
 
   const traceDetails = await getTraceInfo(engine, app, traceSource);
+  if (!isSmartPerfettoDualTracePane(app)) captureTraceAssetSource(traceDetails, traceSource);
   const trace = new TraceImpl(app, engine, traceDetails);
   app.setActiveTrace(trace);
 

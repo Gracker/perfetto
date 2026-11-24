@@ -150,6 +150,7 @@ export function backendUploadSourceKey(traceSource: TraceSource): string {
 export interface BackendUploadResult {
   success: boolean;
   traceId?: string;
+  assetTraceId?: string;
   port?: number;
   leaseId?: string;
   leaseMode?: string;
@@ -338,6 +339,7 @@ export class BackendUploader {
         return {
           success: false,
           error: data.error ?? 'Unknown upload error',
+          assetTraceId: typeof data.assetTraceId === 'string' ? data.assetTraceId : undefined,
         };
       }
 
