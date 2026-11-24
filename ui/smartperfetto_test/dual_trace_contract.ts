@@ -71,6 +71,42 @@ const StatusObservabilitySchema = z.object({
   }),
 });
 
+const CompletedComparisonSchema = z.object({
+  success: z.literal(true),
+  answer: z.string().min(101),
+  partial: z.literal(false).optional(),
+  completion: z.object({
+    runId: z.string().min(1),
+    runtimeKind: z.literal('pi-agent-core'),
+    status: z.literal('completed'),
+    sdkFinishReason: z.literal('stop'),
+  }),
+  deliveryAssurance: z.object({
+    completion: z.literal('passed'),
+    claims: z.enum(['passed', 'not_applicable']),
+  }),
+  claimVerificationResult: z.object({status: z.literal('passed')}).optional(),
+  reportUrl: z.string().regex(/^\/api\/reports\/[\w-]+$/),
+  resultSnapshotId: z.string().min(1),
+  analysisReceipt: z.object({
+    runId: z.string().min(1),
+    runManifestId: z.string().min(1),
+    traceEvidence: z.object({
+      skillCount: z.number().int().positive(),
+      evidenceRefCount: z.number().int().positive(),
+    }),
+    qualityGates: z.object({claimVerification: z.enum(['passed', 'not_applicable'])}),
+    outputs: z.object({reportUrl: z.string(), resultSnapshotId: z.string()}),
+  }),
+}).superRefine((result, ctx) => {
+  const claims = result.deliveryAssurance.claims;
+  if (result.analysisReceipt.qualityGates.claimVerification !== claims ||
+      (claims === 'passed') !== (result.claimVerificationResult !== undefined)) {
+    ctx.addIssue({code: 'custom', path: ['claimVerificationResult'],
+      message: 'Claim verdict and both delivery receipts must agree'});
+  }
+});
+
 export type AnalyzeRequest = Readonly<z.infer<typeof AnalyzeRequestSchema>>;
 export type AnalyzeResponse = Readonly<z.infer<typeof AnalyzeResponseSchema>>;
 export type UploadResponse = Readonly<z.infer<typeof UploadResponseSchema>>;
@@ -104,6 +140,10 @@ export function parseAnalyzePayload(payload: unknown): AnalyzeResponse {
 
 export function statusRunId(payload: unknown): string {
   return StatusObservabilitySchema.parse(payload).observability.runId;
+}
+
+export function parseCompletedComparison(payload: unknown) {
+  return CompletedComparisonSchema.parse(payload);
 }
 
 async function parseResponse<T>(

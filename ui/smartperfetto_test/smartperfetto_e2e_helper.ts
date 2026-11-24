@@ -229,6 +229,26 @@ export async function waitForPiRunStart(runId: string): Promise<void> {
   }
 }
 
+export async function readCompletedComparisonArtifacts(
+  request: APIRequestContext,
+  reportPath: string,
+  snapshotId: string,
+): Promise<void> {
+  const reportUrl = new URL(reportPath, getEnvironment().backendUrl);
+  const [report, snapshot] = await Promise.all([
+    request.get(reportUrl.href),
+    request.get(workspaceResourceUrl(`analysis-results/${encodeURIComponent(snapshotId)}`)),
+  ]);
+  if (!report.ok() || !report.headers()['content-type']?.startsWith('text/html') ||
+      !(await report.text()).includes('<html')) {
+    throw new Error(`Comparison report was not served as HTML (HTTP ${report.status()})`);
+  }
+  await parseJsonResponse(snapshot, z.object({
+    success: z.literal(true),
+    snapshot: z.object({id: z.literal(snapshotId)}),
+  }));
+}
+
 export async function cancelAgent(
   request: APIRequestContext,
   sessionId: string,

@@ -3,24 +3,20 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 import {expect, test} from '@playwright/test';
-import {z} from 'zod';
-
-import {agentStatus, waitForPiRunStart} from './smartperfetto_e2e_helper';
+import {
+  agentStatus,
+  readCompletedComparisonArtifacts,
+  waitForPiRunStart,
+} from './smartperfetto_e2e_helper';
 import {
   parseAnalyzeRequest,
   parseAnalyzeResponse,
   parseCancelResponse,
+  parseCompletedComparison,
   statusRunId,
 } from './dual_trace_contract';
 import {aiStatusLocator, sendAnalysis} from './dual_trace_browser_harness';
 import {DualTraceScenario} from './dual_trace_scenario';
-
-const ResultSchema = z.object({
-  answer: z.string().min(1),
-  claimVerificationResult: z.object({status: z.literal('passed')}),
-  analysisReceipt: z.object({runtime: z.literal('pi-agent-core'), runId: z.string()}),
-  partial: z.boolean().optional(),
-});
 
 test.skip(
   process.env.SMARTPERFETTO_E2E_REAL_PROVIDER !== '1',
@@ -86,11 +82,14 @@ test('keeps a real provider comparison alive through window operations', async (
       })
       .toBe('completed');
     const completed = await agentStatus(request, analysis.sessionId);
-    const result = ResultSchema.parse(completed.result);
+    const result = parseCompletedComparison(completed.result);
     expect(statusRunId(completed)).toBe(analysis.runId);
+    expect(result.completion.runId).toBe(analysis.runId);
     expect(result.analysisReceipt.runId).toBe(analysis.runId);
-    expect(result.partial).not.toBe(true);
-    expect(result.answer.length).toBeGreaterThan(100);
+    expect(result.analysisReceipt.outputs).toEqual({
+      reportUrl: result.reportUrl, resultSnapshotId: result.resultSnapshotId,
+    });
+    await readCompletedComparisonArtifacts(request, result.reportUrl, result.resultSnapshotId);
     await scenario.expectFramesStable();
     await page.screenshot({path: testInfo.outputPath('real-completed.png')});
 
