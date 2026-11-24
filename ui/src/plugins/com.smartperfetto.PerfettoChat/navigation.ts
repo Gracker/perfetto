@@ -8,13 +8,16 @@ import type {Trace} from '../../public/trace';
 export const CHAT_PAGE = '/perfetto_chat';
 
 export async function openPerfettoChat(
-  app: Pick<App, 'trace' | 'navigate'>,
+  app: Pick<App, 'trace' | 'navigate' | 'getCurrentRoute'>,
   showTraceChat: (trace: Trace) => Promise<boolean>,
   tab: string,
 ): Promise<void> {
   const trace = app.trace;
   if (!trace) {
-    app.navigate('#!' + CHAT_PAGE);
+    // Perfetto preserves cache keys across bare navigation. A recently
+    // closed trace must stay closed when opening a stand-alone chat.
+    const clearCacheKey = app.getCurrentRoute().args.local_cache_key ? '?local_cache_key=' : '';
+    app.navigate('#!' + CHAT_PAGE + clearCacheKey);
     return;
   }
   app.navigate('#!/viewer');
