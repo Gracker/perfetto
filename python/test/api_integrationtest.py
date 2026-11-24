@@ -29,6 +29,7 @@ from perfetto.batch_trace_processor.api import BatchTraceProcessorConfig
 from perfetto.batch_trace_processor.api import FailureHandling
 from perfetto.batch_trace_processor.api import Metadata
 from perfetto.batch_trace_processor.api import TraceListReference
+from perfetto.common.query_result_iterator import HAS_PYARROW
 from perfetto.trace_processor.protos import ProtoFactory
 from perfetto.trace_processor.api import PLATFORM_DELEGATE
 from perfetto.trace_processor.api import TraceProcessor
@@ -149,6 +150,14 @@ class TestApi(unittest.TestCase):
         expected_regex='.*Trace Processor RPC API version:.*'):
       TraceProcessor(trace=io.BytesIO(b''), config=config)
 
+  def test_startup_does_not_leave_status_temp_file(self):
+    config = TraceProcessorConfig(bin_path=os.environ["SHELL_PATH"])
+    with tempfile.TemporaryDirectory() as directory:
+      with mock.patch.object(tempfile, 'tempdir', directory):
+        with TraceProcessor(config=config):
+          pass
+        self.assertEqual(os.listdir(directory), [])
+
   def test_close_stops_shell(self):
     tp = create_tp(trace=example_android_trace_path())
     shell = tp.subprocess
@@ -182,6 +191,26 @@ class TestApi(unittest.TestCase):
     self.assertEqual(count, expected_count)
 
     tp.close()
+
+  @unittest.skipUnless(HAS_PYARROW, 'pyarrow not installed')
+  def test_query_as_arrow_table(self):
+    import pyarrow as pa
+    with create_tp(trace=example_android_trace_path()) as tp:
+      # Five root slices, whose parent_id is NULL, then five child slices.
+      sql = ('select * from (select id, ts, dur, name, parent_id from slice '
+             'where parent_id is null order by id limit 5) union all '
+             'select * from (select id, ts, dur, name, parent_id from slice '
+             'where parent_id is not null order by id limit 5)')
+      table = tp.query(sql).as_arrow_table()
+      self.assertEqual(table.schema.field('ts').type, pa.int64())
+      self.assertEqual(table.schema.field('name').type, pa.string())
+      # A column with some NULLs is still typed from its non-NULL values.
+      self.assertEqual(table.schema.field('parent_id').type, pa.int64())
+      expected = tp.query(sql).as_pandas_dataframe()
+      self.assertEqual(table.column('dur').to_pylist(), list(expected['dur']))
+      self.assertEqual(
+          table.column('parent_id').to_pylist(), list(expected['parent_id']))
+      self.assertEqual(pa.table(tp.query(sql)), table)
 
   def test_trace_byteio(self):
     f = io.BytesIO(
@@ -601,6 +630,20 @@ class TestApi(unittest.TestCase):
                   ['metric_one', 'metric_two'])
     tp.close()
 
+  def test_metadata_without_loaded_trace(self):
+    # Remote processors do not resolve a local trace URI.
+    with TraceProcessor(remote='127.0.0.1:1') as first:
+      with TraceProcessor(addr='127.0.0.1:1') as second:
+        self.assertEqual(first.metadata, {})
+        self.assertEqual(second.metadata, {})
+        first.metadata['source'] = 'first'
+        self.assertEqual(second.metadata, {})
+
+  def test_metadata_without_loaded_local_trace(self):
+    config = TraceProcessorConfig(bin_path=os.environ["SHELL_PATH"])
+    with TraceProcessor(config=config) as tp:
+      self.assertEqual(tp.metadata, {})
+
   def test_metadata_from_path(self):
     # When loading a trace directly from a path, metadata should be empty
     with create_tp(trace=example_android_trace_path()) as tp:
@@ -709,6 +752,23 @@ class TestApi(unittest.TestCase):
       }
       self.assertEqual(tp.metadata, expected_metadata)
 
+  def test_export_invalid_format_preserves_destination(self):
+    with tempfile.TemporaryDirectory() as directory:
+      with TraceProcessor(remote='127.0.0.1:1') as tp:
+        for exists in (False, True):
+          with self.subTest(exists=exists):
+            path = os.path.join(directory, str(exists))
+            if exists:
+              with open(path, 'wb') as f:
+                f.write(b'existing data')
+            with self.assertRaisesRegex(ValueError, 'Unknown export format'):
+              tp.export(path, 'invalid')
+            if exists:
+              with open(path, 'rb') as f:
+                self.assertEqual(f.read(), b'existing data')
+            else:
+              self.assertFalse(os.path.exists(path))
+
   def test_export_perfetto(self):
     import json
     import tarfile
@@ -748,10 +808,46 @@ class TestApi(unittest.TestCase):
               f for f in manifest['files'] if '__exported_table_schema' in f
           ]
           self.assertGreater(len(table_files), 0)
-          for f in table_files:
-            self.assertEqual(f['__exported_table_schema']['format'], 1)
+          formats = {
+              f['__exported_table_schema']['format'] for f in table_files
+          }
+          self.assertEqual(len(formats), 1)
+          self.assertIsInstance(formats.pop(), int)
           manifest_paths = {f['path'] for f in table_files}
           self.assertEqual(manifest_paths, set(arrow_names))
+      finally:
+        os.unlink(output_path)
+
+  @unittest.skipUnless(HAS_PYARROW, 'pyarrow not installed')
+  def test_export_arrow_tar_reads_with_pyarrow(self):
+    import io
+    import tarfile
+    import pyarrow as pa
+    with create_tp(trace=example_android_trace_path()) as tp:
+      with tempfile.NamedTemporaryFile(suffix='.tar', delete=False) as f:
+        output_path = f.name
+      try:
+        tp.export(output_path, 'arrow_tar')
+        null_columns = 0
+        with tarfile.open(output_path) as tf:
+          names = tf.getnames()
+          self.assertGreater(len(names), 0)
+          for name in names:
+            with self.subTest(name=name):
+              data = tf.extractfile(name).read()
+              table = pa.ipc.open_file(io.BytesIO(data)).read_all()
+              count = tp.query(
+                  f'SELECT COUNT(*) AS c FROM {name[:-len(".arrow")]}'
+              ).as_pandas_dataframe()['c'][0]
+              self.assertEqual(table.num_rows, count)
+              for field in table.schema:
+                if field.type == pa.null():
+                  null_columns += 1
+                  self.assertEqual(
+                      table.column(field.name).to_pylist(),
+                      [None] * table.num_rows)
+        # Columns null in every row are written as Arrow Null.
+        self.assertGreater(null_columns, 0)
       finally:
         os.unlink(output_path)
 
@@ -760,6 +856,16 @@ class TestApiUnixSession(unittest.TestCase):
   """Tests TraceProcessor(remote=...) against a real `server unix` session."""
 
   SESSION_NAME = 'test-session'
+  SLICE_COUNT_SPEC = '''metric_spec: {
+      id: "slice_count"
+      value: "cnt"
+      query: {
+        sql {
+          sql: "SELECT COUNT(*) AS cnt FROM slice"
+          column_names: "cnt"
+        }
+      }
+    }'''
 
   @classmethod
   def setUpClass(cls):
@@ -824,6 +930,39 @@ class TestApiUnixSession(unittest.TestCase):
         tp.query('select * from no_such_table')
       # The error response must be fully consumed, leaving the connection
       # usable for the next query.
+      self.assertEqual(next(tp.query('select 1 as x')).x, 1)
+
+  def test_metric(self):
+    with TraceProcessor(remote=self.SESSION_NAME) as tp:
+      startups = tp.metric(['android_startup']).android_startup.startup
+      self.assertEqual(
+          [s.package_name for s in startups],
+          ['com.android.chrome', 'com.google.android.GoogleCamera'])
+      self.assertEqual(startups[0].startup_type, 'cold')
+      self.assertEqual(startups[0].to_first_frame.dur_ns, 373584672)
+
+  def test_metric_error_then_recovers(self):
+    with TraceProcessor(remote=self.SESSION_NAME) as tp:
+      with self.assertRaisesRegex(TraceProcessorException, 'Unknown metric'):
+        tp.metric(['no_such_metric'])
+      # The error comes back inside the single reply message, leaving the
+      # connection usable for the next request.
+      self.assertEqual(next(tp.query('select 1 as x')).x, 1)
+
+  def test_trace_summary(self):
+    with TraceProcessor(remote=self.SESSION_NAME) as tp:
+      summary = tp.trace_summary([self.SLICE_COUNT_SPEC], ['slice_count'])
+      bundle = summary.metric_bundles[0]
+      self.assertEqual(bundle.bundle_id, 'slice_count')
+      self.assertEqual([row.values[0].double_value for row in bundle.row],
+                       [20746])
+
+  def test_trace_summary_error_then_recovers(self):
+    with TraceProcessor(remote=self.SESSION_NAME) as tp:
+      with self.assertRaisesRegex(TraceProcessorException, 'no_such_metric'):
+        tp.trace_summary([self.SLICE_COUNT_SPEC], ['no_such_metric'])
+      # The error comes back inside the single reply message, leaving the
+      # connection usable for the next request.
       self.assertEqual(next(tp.query('select 1 as x')).x, 1)
 
   def test_missing_session(self):

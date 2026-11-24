@@ -128,6 +128,10 @@ nullability; do not rely on unsafe assertions or implicit conversions.
   exhaustive switches with `assertUnreachable()`. Match surrounding style and
   use the existing `base/` utilities for time, assertions and resource cleanup.
 
+With `noUncheckedIndexedAccess`, read and narrow an indexed value before
+using it. Prefer iteration or tuples when appropriate, and use
+`ensureDefined()` to assert an invariant when needed.
+
 ## Theme and Review
 
 - Use stylesheets, `pf-` CSS classes and the established BEM-like naming.

@@ -574,7 +574,7 @@ export default class GpuPlugin implements PerfettoPlugin {
       .map(([id]) => id);
     const groupSortOrder = new Map<number, number>();
     for (let i = 0; i < sortedGroupIds.length; i++) {
-      groupSortOrder.set(sortedGroupIds[i], CUSTOM_GROUP_SORT_BASE + i);
+      groupSortOrder.set(sortedGroupIds[i]!, CUSTOM_GROUP_SORT_BASE + i);
     }
 
     // Count ungrouped tracks per type to decide if a sub-group is needed,
@@ -765,7 +765,7 @@ export default class GpuPlugin implements PerfettoPlugin {
       const gpu =
         gpuId !== null
           ? new Gpu(
-              ugpu ?? trackIds[0],
+              ugpu ?? trackIds[0]!,
               gpuId,
               machineId,
               gpuName ?? undefined,

@@ -94,9 +94,9 @@ MODULE_TAGS = {
     # Android - Memory
     'android.memory.heap_graph.dominator_tree': ['android', 'memory'],
     'android.memory.heap_graph.helpers': ['android', 'memory'],
+    'android.memory.heap_graph.class_classification': ['android', 'memory'],
     'android.memory.heap_graph.excluded_refs': ['android', 'memory'],
     'android.memory.heap_graph.dominator_class_tree': ['android', 'memory'],
-    'android.memory.heap_graph.raw_dominator_tree': ['android', 'memory'],
     'android.memory.heap_graph.class_relationship': ['android', 'memory'],
     'android.memory.heap_graph.class_summary_tree': ['android', 'memory'],
     'android.memory.heap_graph.heap_graph_class_aggregation': [
@@ -116,6 +116,9 @@ MODULE_TAGS = {
     'android.frames.jank_type': ['android', 'ui'],
     'android.frame_blocking_calls.blocking_calls_aggregation': [
         'android', 'ui'
+    ],
+    'android.frame_blocking_calls.instructions': [
+        'android', 'ui', 'performance'
     ],
     'android.cujs.base': ['android', 'ui'],
     'android.cujs.sysui_cujs': ['android', 'ui'],

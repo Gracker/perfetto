@@ -102,3 +102,9 @@ verification are separate evidence.
 - Match local naming/style and use clear names for cross-file interfaces.
   Commit summaries conventionally use `tp:`, `ui:` or `perfetto:` according to
   the changed area; follow the user's requested landing workflow.
+
+## CHANGELOG
+
+Add user-facing features and fixes for bugs in released versions to
+`Unreleased:` in `CHANGELOG`. Fixes for bugs introduced during the current
+release cycle do not need a changelog entry.

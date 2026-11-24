@@ -237,7 +237,7 @@ export class Router {
     const now = Date.now();
     while (
       this.recentChanges.length > 0 &&
-      now - this.recentChanges[0] > WINDOW_MS
+      now - this.recentChanges[0]! > WINDOW_MS
     ) {
       this.recentChanges.shift();
     }
