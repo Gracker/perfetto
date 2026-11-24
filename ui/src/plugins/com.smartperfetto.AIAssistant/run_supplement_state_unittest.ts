@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {describe, expect, it} from 'vitest';
 
 import type {
@@ -50,7 +51,7 @@ function withSubmission(): RunSupplementLedger {
 }
 
 function entry(ledger: RunSupplementLedger) {
-  return ledger.entries[0];
+  return ensureDefined(ledger.entries[0]);
 }
 
 describe('reduceRunSupplementLedger', () => {
@@ -118,7 +119,7 @@ describe('reduceRunSupplementLedger', () => {
       type: 'sse_receipt',
       receipt: receipt('queued'),
     });
-    expect(ledger.unbound['sup-1'].state).toBe('delivered');
+    expect(ensureDefined(ledger.unbound['sup-1']).state).toBe('delivered');
   });
 
   it('never moves a state backwards', () => {
@@ -168,7 +169,7 @@ describe('reduceRunSupplementLedger', () => {
       'not_applied',
       'not_applied',
     ]);
-    expect(ledger.entries[0].reason).toBe('run_stopped');
+    expect(ensureDefined(ledger.entries[0]).reason).toBe('run_stopped');
     expect(ledger.entries.some(isRunSupplementPending)).toBe(false);
   });
 

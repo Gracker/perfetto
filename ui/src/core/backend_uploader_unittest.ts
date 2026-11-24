@@ -1,5 +1,6 @@
 // Copyright (C) 2024 SmartPerfetto
 
+import {ensureDefined} from '../base/assert';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {MockedFunction} from 'vitest';
 
@@ -24,7 +25,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function requestHeaders(callIndex: number): Headers {
-  const init = fetchMock.mock.calls[callIndex][1] as RequestInit;
+  const init = ensureDefined(fetchMock.mock.calls[callIndex])[1] as RequestInit;
   return new Headers(init.headers);
 }
 
@@ -97,7 +98,7 @@ describe('BackendUploader request context', () => {
 
     await expect(new BackendUploader().checkAvailable()).resolves.toBe(true);
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain(
+    expect(String(ensureDefined(fetchMock.mock.calls[0])[0])).toContain(
       'http://localhost:3300/',
     );
   });
@@ -110,7 +111,7 @@ describe('BackendUploader request context', () => {
 
     await expect(new BackendUploader().checkAvailable()).resolves.toBe(true);
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain(
+    expect(String(ensureDefined(fetchMock.mock.calls[0])[0])).toContain(
       'https://proxy.example/base/',
     );
   });
@@ -159,15 +160,15 @@ describe('BackendUploader request context', () => {
         websocketCapabilityExpiresAt: 654321,
       },
     });
-    expect(String(fetchMock.mock.calls[0][0])).toContain(
+    expect(String(ensureDefined(fetchMock.mock.calls[0])[0])).toContain(
       '/traces/trace-existing/viewer',
     );
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+    expect(ensureDefined(fetchMock.mock.calls[0])[1]).toMatchObject({
       method: 'POST',
       cache: 'no-cache',
       body: JSON.stringify({sessionId: 'pane-current'}),
     });
-    expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include');
+    expect(ensureDefined(fetchMock.mock.calls[0])[1]?.credentials).toBe('include');
     const headers = requestHeaders(0);
     expect(headers.get('Authorization')).toBe('Bearer spak_test-secret');
     expect(headers.get('Content-Type')).toBe('application/json');

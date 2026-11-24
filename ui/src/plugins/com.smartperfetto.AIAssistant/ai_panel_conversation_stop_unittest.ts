@@ -3,6 +3,7 @@
 // This file is part of SmartPerfetto. See LICENSE for details.
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- tests drive private AIPanel state. */
+import {ensureDefined} from '../../base/assert';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type * as ConversationClient from './conversation_client';
 import type * as ConversationStore from './conversation_store';
@@ -59,7 +60,7 @@ describe('AIPanel agent answer delivery', () => {
     expect(value.state.isLoading).toBe(true);
     expect(value.setLoadingState).not.toHaveBeenCalledWith(false);
     expect(answers(value)).toHaveLength(1);
-    expect(answers(value)[0].answerVerification).toBeUndefined();
+    expect(ensureDefined(answers(value)[0]).answerVerification).toBeUndefined();
     value.handleSSEEvent('analysis_completed', completedEvent);
     expect(answers(value)).toHaveLength(1);
     expect(value.state.isLoading).toBe(false);
@@ -73,12 +74,12 @@ describe('AIPanel agent answer delivery', () => {
     value.handleSSEEvent('answer_segment_reset', {runId: 'run-a', data: {runId: 'run-a', attempt: 1}});
     expect(answers(value)).toEqual([]);
     value.handleSSEEvent('answer_token', draftEvent('Trace duration', 1));
-    const draftId = answers(value)[0].id;
+    const draftId = ensureDefined(answers(value)[0]).id;
     value.handleSSEEvent('conclusion', conclusionEvent);
     expect(answers(value)).toHaveLength(1);
     expect(answers(value)[0]).toMatchObject({id: draftId});
-    expect(answers(value)[0].answerVerification).toBeUndefined();
-    expect(answers(value)[0].answerDraft).toBeUndefined();
+    expect(ensureDefined(answers(value)[0]).answerVerification).toBeUndefined();
+    expect(ensureDefined(answers(value)[0]).answerDraft).toBeUndefined();
   });
 
   it('renders a stored old pending cue as unfinished', () => {

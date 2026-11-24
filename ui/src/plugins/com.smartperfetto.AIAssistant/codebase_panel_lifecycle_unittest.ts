@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import m from 'mithril';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
@@ -95,7 +96,7 @@ describe('CodebasePanel with its knowledge section, mounted', () => {
     expect(root.textContent).not.toMatch(/Add knowledge source|新增知识源|Register external knowledge source/);
     const cards = [...root.querySelectorAll('div')].filter(div =>
       [...div.children].some(child => child.textContent === 'Old Wiki'));
-    const wikiCard = cards[cards.length - 1];
+    const wikiCard = ensureDefined(cards[cards.length - 1]);
     expect(wikiCard.textContent).toMatch(/Re-register the Wiki's src\/ folder|请将 Wiki 的 src\/ 目录重新注册/);
     const labels = [...wikiCard.querySelectorAll('button')].map(button => button.textContent);
     expect(labels).toHaveLength(1);

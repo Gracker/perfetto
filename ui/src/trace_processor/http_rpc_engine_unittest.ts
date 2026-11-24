@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {ensureDefined} from '../base/assert';
 import {HttpRpcEngine} from './http_rpc_engine';
 import type {MockedFunction} from 'vitest';
 
@@ -56,7 +57,7 @@ function setNavigatorOnline(value: boolean): void {
 }
 
 function heartbeatBody(callIndex: number): unknown {
-  const init = fetchMock.mock.calls[callIndex][1] as RequestInit;
+  const init = ensureDefined(fetchMock.mock.calls[callIndex])[1] as RequestInit;
   return JSON.parse(String(init.body));
 }
 
@@ -128,7 +129,7 @@ describe('HttpRpcEngine target selection', () => {
       .toMatchObject({connected: true});
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(candidate.statusUrl);
+    expect(ensureDefined(fetchMock.mock.calls[0])[0]).toBe(candidate.statusUrl);
     expect(HttpRpcEngine.getCurrentTarget()).toMatchObject({
       mode: 'direct-port',
       port: '9001',
@@ -168,8 +169,8 @@ describe('HttpRpcEngine target selection', () => {
     await flushAsyncWork();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe('http://backend/api/tp/lease-a/heartbeat');
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(ensureDefined(fetchMock.mock.calls[0])[0]).toBe('http://backend/api/tp/lease-a/heartbeat');
+    const init = ensureDefined(fetchMock.mock.calls[0])[1] as RequestInit;
     expect(init.method).toBe('post');
     expect(init.credentials).toBe('include');
     expect((init.headers as Headers).get('X-Window-Id')).toBe('window-a');

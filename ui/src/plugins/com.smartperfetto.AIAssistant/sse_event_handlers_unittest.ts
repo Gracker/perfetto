@@ -28,6 +28,7 @@
  * - Terminal events (analysis_completed, analysis_cancelled, error)
  */
 
+import {ensureDefined} from '../../base/assert';
 import {describe, it, expect, beforeEach} from 'vitest';
 
 import {
@@ -107,7 +108,7 @@ function createMockContext(
         const index = list.findIndex((msg) => msg.id === messageId);
         if (index !== -1) {
           list[index] = {
-            ...list[index],
+            ...ensureDefined(list[index]),
             ...updates,
           };
           return;
@@ -117,7 +118,7 @@ function createMockContext(
     generateId: () => `test-msg-${++idCounter}`,
     getMessages: () => [...messages, ...flowMessages],
     removeLastMessageIf: (predicate: (msg: Message) => boolean) => {
-      if (messages.length > 0 && predicate(messages[messages.length - 1])) {
+      if (messages.length > 0 && predicate(ensureDefined(messages[messages.length - 1]))) {
         messages.pop();
         return true;
       }
@@ -163,8 +164,8 @@ describe('handleProgressEvent', () => {
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('Analyzing frames...');
-    expect(ctx.flowMessages[0].role).toBe('assistant');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('Analyzing frames...');
+    expect(ensureDefined(ctx.flowMessages[0]).role).toBe('assistant');
     expect(result).toEqual({loadingPhase: 'Analyzing frames...'});
   });
 
@@ -181,9 +182,9 @@ describe('handleProgressEvent', () => {
     handleProgressEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('⏳ Previous progress');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('⏳ Previous progress');
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('New progress');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('New progress');
   });
 
   it('should not remove non-progress messages', () => {
@@ -199,7 +200,7 @@ describe('handleProgressEvent', () => {
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('Progress update');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('Progress update');
   });
 
   it('should handle null data gracefully', () => {
@@ -239,10 +240,10 @@ describe('handleProgressEvent', () => {
     handleProgressEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('🧭 分析计划已确认');
-    expect(ctx.messages[0].content).toContain('证据采集');
-    expect(ctx.messages[0].content).toContain('证据清单');
-    expect(ctx.messages[0].content.startsWith('⏳')).toBe(false);
+    expect(ensureDefined(ctx.messages[0]).content).toContain('🧭 分析计划已确认');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('证据采集');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('证据清单');
+    expect(ensureDefined(ctx.messages[0]).content.startsWith('⏳')).toBe(false);
   });
 });
 
@@ -273,10 +274,10 @@ describe('handleSqlExecutedEvent', () => {
     handleSqlExecutedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('1');
-    expect(ctx.messages[0].sqlResult).toBeDefined();
-    expect(ctx.messages[0].sqlResult!.columns).toEqual(['id', 'name', 'dur']);
-    expect(ctx.messages[0].sqlResult!.rowCount).toBe(1);
+    expect(ensureDefined(ctx.messages[0]).content).toContain('1');
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toBeDefined();
+    expect(ensureDefined(ctx.messages[0]).sqlResult!.columns).toEqual(['id', 'name', 'dur']);
+    expect(ensureDefined(ctx.messages[0]).sqlResult!.rowCount).toBe(1);
   });
 
   it('should handle zero row count', () => {
@@ -293,7 +294,7 @@ describe('handleSqlExecutedEvent', () => {
     handleSqlExecutedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('0');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('0');
   });
 
   it('should handle missing result', () => {
@@ -331,8 +332,8 @@ describe('handleSkillSectionEvent', () => {
     handleSkillSectionEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult).toBeDefined();
-    expect(ctx.messages[0].sqlResult!.sectionTitle).toBe(
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toBeDefined();
+    expect(ensureDefined(ctx.messages[0]).sqlResult!.sectionTitle).toBe(
       'Frame Analysis (1/3)',
     );
   });
@@ -352,11 +353,11 @@ describe('handleSkillSectionEvent', () => {
     handleSkillSectionEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult).toBeDefined();
-    expect(ctx.messages[0].sqlResult?.columns).toEqual(['col1']);
-    expect(ctx.messages[0].sqlResult?.rows).toEqual([]);
-    expect(ctx.messages[0].sqlResult?.rowCount).toBe(0);
-    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toBeDefined();
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.columns).toEqual(['col1']);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.rows).toEqual([]);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.rowCount).toBe(0);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       source: 'skill_section',
       rowCount: 0,
@@ -379,9 +380,9 @@ describe('handleSkillSectionEvent', () => {
     handleSkillSectionEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('No Columns Section');
-    expect(ctx.messages[0].content).toContain('未返回可展示列');
-    expect(ctx.messages[0].sqlResult).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).content).toContain('No Columns Section');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('未返回可展示列');
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toBeUndefined();
   });
 });
 
@@ -410,9 +411,9 @@ describe('handleSkillDiagnosticsEvent', () => {
     handleSkillDiagnosticsEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('High frame drop rate');
-    expect(ctx.messages[0].content).toContain('Elevated CPU usage');
-    expect(ctx.messages[0].content).toContain('Normal memory allocation');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('High frame drop rate');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Elevated CPU usage');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Normal memory allocation');
   });
 
   it('should include suggestions for critical issues', () => {
@@ -430,7 +431,7 @@ describe('handleSkillDiagnosticsEvent', () => {
 
     handleSkillDiagnosticsEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('Move work off main thread');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Move work off main thread');
   });
 
   it('should handle empty diagnostics', () => {
@@ -467,9 +468,9 @@ describe('handleHypothesisGeneratedEvent', () => {
     handleHypothesisGeneratedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('3 个分析假设');
-    expect(ctx.messages[0].content).toContain('Main thread is blocked');
-    expect(ctx.messages[0].content).toContain('RenderThread is CPU');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('3 个分析假设');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Main thread is blocked');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('RenderThread is CPU');
   });
 
   it('should display evidence-based hypothesis message', () => {
@@ -490,9 +491,9 @@ describe('handleHypothesisGeneratedEvent', () => {
     handleHypothesisGeneratedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('基于证据形成了 2 个待验证假设');
-    expect(ctx.messages[0].content).toContain('首轮证据摘要');
-    expect(ctx.messages[0].content).toContain('Main thread blocked');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('基于证据形成了 2 个待验证假设');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('首轮证据摘要');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Main thread blocked');
   });
 
   it('should handle empty hypotheses array', () => {
@@ -535,8 +536,8 @@ describe('handleRoundStartEvent', () => {
     handleRoundStartEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('2/5');
-    expect(ctx.messages[0].content).toContain('Analyzing CPU scheduling');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('2/5');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Analyzing CPU scheduling');
   });
 
   it('should ignore empty payloads', () => {
@@ -571,9 +572,9 @@ describe('handleAgentTaskDispatchedEvent', () => {
     handleAgentTaskDispatchedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('frameAgent');
-    expect(ctx.messages[0].content).toContain('cpuAgent');
-    expect(ctx.messages[0].content).toContain('memoryAgent');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('frameAgent');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('cpuAgent');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('memoryAgent');
   });
 
   it('should handle empty agents list', () => {
@@ -588,7 +589,7 @@ describe('handleAgentTaskDispatchedEvent', () => {
     handleAgentTaskDispatchedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).not.toContain('派发给');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('派发给');
   });
 });
 
@@ -615,8 +616,8 @@ describe('handleSynthesisCompleteEvent', () => {
     handleSynthesisCompleteEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('5 个发现');
-    expect(ctx.messages[0].content).toContain('2 个假设');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('5 个发现');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('2 个假设');
   });
 
   it('should ignore empty payloads', () => {
@@ -651,8 +652,8 @@ describe('handleStrategyDecisionEvent', () => {
     handleStrategyDecisionEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('✅');
-    expect(ctx.messages[0].content).toContain('85%');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('✅');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('85%');
   });
 
   it('should display deep_dive strategy with magnifier emoji', () => {
@@ -666,7 +667,7 @@ describe('handleStrategyDecisionEvent', () => {
 
     handleStrategyDecisionEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('🔍');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('🔍');
   });
 
   it('should display pivot strategy with arrow emoji', () => {
@@ -680,7 +681,7 @@ describe('handleStrategyDecisionEvent', () => {
 
     handleStrategyDecisionEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('↩️');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('↩️');
   });
 });
 
@@ -705,7 +706,7 @@ describe('handleAnalysisCompletedEvent', () => {
     const result = handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Main thread is blocked');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Main thread is blocked');
     expect(result.isTerminal).toBe(true);
     expect(result.stopLoading).toBe(true);
   });
@@ -721,7 +722,7 @@ describe('handleAnalysisCompletedEvent', () => {
 
     expect(result.isTerminal).toBe(true);
     expect(result.stopLoading).toBe(true);
-    expect(ctx.messages[0].content).toContain('Primary trace conclusion');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Primary trace conclusion');
     expect(ctx.messages[0]).not.toHaveProperty('analysisSourceEnrichment');
   });
 
@@ -735,7 +736,7 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Legacy conclusion');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Legacy conclusion');
   });
 
   it('should add report URL if available', () => {
@@ -748,7 +749,7 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].reportUrl).toBe(
+    expect(ensureDefined(ctx.messages[0]).reportUrl).toBe(
       'http://localhost:3000/reports/123.html',
     );
   });
@@ -838,21 +839,21 @@ describe('handleAnalysisCompletedEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[0].quickRun).toEqual(
+    expect(ensureDefined(ctx.messages[0]).quickRun).toEqual(
       expect.objectContaining({
         profile: 'extended',
         actualTurns: 7,
         verifierStatus: 'passed',
       }),
     );
-    expect(ctx.messages[0].analysisReceipt).toEqual(
+    expect(ensureDefined(ctx.messages[0]).analysisReceipt).toEqual(
       expect.objectContaining({
         schemaVersion: 1,
         runId: 'run-1',
         traceId: 'trace-1',
       }),
     );
-    expect(ctx.messages[0].uiActionProposals).toEqual([
+    expect(ensureDefined(ctx.messages[0]).uiActionProposals).toEqual([
       expect.objectContaining({
         id: 'ui-navigate_timeline-test',
         kind: 'navigate_timeline',
@@ -871,9 +872,9 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toBe('Analysis complete.');
-    expect(ctx.messages[0].content).not.toContain('Result ID');
-    expect(ctx.messages[0].content).not.toContain('Snapshot');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Analysis complete.');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Result ID');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Snapshot');
   });
 
   it('should not add snapshot reference lines even when conclusion mentions the short ref', () => {
@@ -887,10 +888,10 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain(
+    expect(ensureDefined(ctx.messages[0]).content).toContain(
       'Mentioned AR-12345678 in narrative.',
     );
-    expect(ctx.messages[0].content).not.toContain('Snapshot:');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Snapshot:');
   });
 
   it('should append code references and patch status without rendering raw diff text', () => {
@@ -922,15 +923,15 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toBe('Analysis complete.');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('## Code references');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('`chunk-main`');
-    expect(ctx.messages[0].serverVerificationDetails).toContain(
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Analysis complete.');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('## Code references');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('`chunk-main`');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain(
       'app/src/main/MainActivity.kt:L10-18',
     );
-    expect(ctx.messages[0].serverVerificationDetails).toContain('## Patch proposals');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('sketch only; no copyable diff');
-    expect(ctx.messages[0].serverVerificationDetails).not.toContain(
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('## Patch proposals');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('sketch only; no copyable diff');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).not.toContain(
       'SECRET_RAW_DIFF_SHOULD_NOT_RENDER',
     );
   });
@@ -954,9 +955,9 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toBe('Earlier conclusion.');
-    expect(ctx.messages[0].content).not.toContain('Result ID');
-    expect(ctx.messages[0].reportUrl).toBe(
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Earlier conclusion.');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Result ID');
+    expect(ensureDefined(ctx.messages[0]).reportUrl).toBe(
       'http://localhost:3000/reports/123.html',
     );
   });
@@ -987,7 +988,7 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.flowMessages).toHaveLength(1);
-    const flowContent = ctx.flowMessages[0].content;
+    const flowContent = ensureDefined(ctx.flowMessages[0]).content;
     expect(flowContent).toContain('🧭 分析过程');
     expect(flowContent).toContain('进入 discovery');
     expect(flowContent).toContain('执行 SQL');
@@ -1009,9 +1010,9 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toBe('Analysis complete.');
-    expect(ctx.messages[0].content).not.toContain('分析元数据');
-    expect(ctx.messages[0].content).not.toContain('Main thread blocked');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Analysis complete.');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('分析元数据');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Main thread blocked');
   });
 
   it('should render conclusionContract when narrative text is absent', () => {
@@ -1042,11 +1043,11 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('## 结论（按可能性排序）');
-    expect(ctx.messages[0].content).toContain('## 聚类（先看大头）');
-    expect(ctx.messages[0].content).not.toContain('## 掉帧聚类（先看大头）');
-    expect(ctx.messages[0].content).toContain('滑动过程存在明显卡顿');
-    expect(ctx.messages[0].content).toContain('对K1聚类下钻');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 结论（按可能性排序）');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 聚类（先看大头）');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('## 掉帧聚类（先看大头）');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('滑动过程存在明显卡顿');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('对K1聚类下钻');
   });
 
   it('preserves all structured fallback output beyond the former 3/12/6/6 limits', () => {
@@ -1067,7 +1068,7 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent({data: payload}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    const output = ctx.messages[0].content;
+    const output = ensureDefined(ctx.messages[0]).content;
     for (const expected of [
       conclusions.map(item => item.statement), evidenceChain.map(item => item.text), uncertainties, nextSteps,
     ]) {
@@ -1093,7 +1094,7 @@ describe('handleAnalysisCompletedEvent', () => {
       nextSteps: [null, '', '有效下一步'],
     }}}, ctx);
 
-    const output = ctx.messages[0].content;
+    const output = ensureDefined(ctx.messages[0]).content;
     expect(output).toContain('1. 有效结论');
     expect(output).toContain('有效证据');
     expect(output).toContain('有效不确定性');
@@ -1114,8 +1115,8 @@ describe('handleAnalysisCompletedEvent', () => {
     }}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe(narrative);
-    expect(ctx.messages[0].content).not.toContain('FALLBACK_');
+    expect(ensureDefined(ctx.messages[0]).content).toBe(narrative);
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('FALLBACK_');
   });
 
   it('should use jank cluster heading when scene id is jank', () => {
@@ -1135,7 +1136,7 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('## 掉帧聚类（先看大头）');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 掉帧聚类（先看大头）');
   });
 
   it('should render cluster frame refs and omission hint from contract fields', () => {
@@ -1162,10 +1163,10 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain(
+    expect(ensureDefined(ctx.messages[0]).content).toContain(
       '帧: 1435500 / 1435508 / 1435517',
     );
-    expect(ctx.messages[0].content).toContain('其余 9 帧省略');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('其余 9 帧省略');
   });
 
   it('should not hard-cap cluster rendering at five items', () => {
@@ -1190,7 +1191,7 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('K6: 簇6');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('K6: 簇6');
   });
 
   it('should normalize camelCase aliases and apply cluster policy maxClusters', () => {
@@ -1230,13 +1231,13 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('## 掉帧聚类（先看大头）');
-    expect(ctx.messages[0].content).toContain('K1: 主要簇');
-    expect(ctx.messages[0].content).not.toContain('K2: 次要簇');
-    expect(ctx.messages[0].content).toContain('帧: 111 / 222');
-    expect(ctx.messages[0].content).toContain('其余 6 帧省略');
-    expect(ctx.messages[0].content).toContain('置信度: 90%');
-    expect(ctx.messages[0].content).toContain('分析轮次: 4');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 掉帧聚类（先看大头）');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('K1: 主要簇');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('K2: 次要簇');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('帧: 111 / 222');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('其余 6 帧省略');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('置信度: 90%');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('分析轮次: 4');
   });
 
   it('should apply snake_case cluster policy max_clusters', () => {
@@ -1260,8 +1261,8 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('K1: 保留簇');
-    expect(ctx.messages[0].content).not.toContain('K2: 被裁剪簇');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('K1: 保留簇');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('K2: 被裁剪簇');
   });
 
   it('should preserve metadata sections from the canonical visible conclusion', () => {
@@ -1277,7 +1278,7 @@ describe('handleAnalysisCompletedEvent', () => {
 
     handleAnalysisCompletedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toBe(
+    expect(ensureDefined(ctx.messages[0]).content).toBe(
       '## 结论（按可能性排序）\n1. 示例\n\n## 分析元数据\n- 置信度: 90%\n- 分析轮次: 3',
     );
   });
@@ -1299,7 +1300,7 @@ describe('handleAnalysisCompletedEvent', () => {
     handleAnalysisCompletedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[1].content).toBe('New conclusion.');
+    expect(ensureDefined(ctx.messages[1]).content).toBe('New conclusion.');
   });
 
   it('should prevent duplicate handling', () => {
@@ -1325,8 +1326,8 @@ describe('handleAnalysisCompletedEvent', () => {
 
     // Should have conclusion + error summary
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[1].content).toContain('错误');
-    expect(ctx.messages[1].content).toContain('test_skill');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('错误');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('test_skill');
   });
 
   it('should handle malformed analysis_completed payload gracefully', () => {
@@ -1390,8 +1391,8 @@ describe('per-run source-use receipt projection', () => {
     handleAnalysisCompletedEvent(terminalEvent, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.streamingAnswer.messageId).toBe(ctx.messages[0].id);
-    expect(ctx.messages[0].sourceUseReceipt).toEqual({
+    expect(ctx.streamingAnswer.messageId).toBe(ensureDefined(ctx.messages[0]).id);
+    expect(ensureDefined(ctx.messages[0]).sourceUseReceipt).toEqual({
       schemaVersion: 'source_use_receipt@1',
       codeAwareMode: 'provider_send',
       selectedCodebaseIds: ['cb-a'],
@@ -1403,7 +1404,7 @@ describe('per-run source-use receipt projection', () => {
       bindingVerificationStatus: 'not_checked',
       mechanismStatuses: [],
     });
-    expect(JSON.stringify(ctx.messages[0].sourceUseReceipt)).not.toContain(
+    expect(JSON.stringify(ensureDefined(ctx.messages[0]).sourceUseReceipt)).not.toContain(
       'PRIVATE_/Users/me/Main.kt',
     );
   });
@@ -1443,18 +1444,18 @@ describe('per-run source-use receipt projection', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[0].sourceUseReceipt).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sourceUseReceipt).toMatchObject({
       claimVerifier: 'source_claim_verifier@2',
       referenceCounts: {located: 2, read: 2},
       claimStatusCounts: {trace_linked: 1},
       citationStatusCounts: {verified_body: 1},
       depth: {requested: 'auto', effective: 'mechanism', origin: 'intent'},
     });
-    expect(ctx.messages[0].knowledgeUseReceipt).toEqual({
+    expect(ensureDefined(ctx.messages[0]).knowledgeUseReceipt).toEqual({
       schemaVersion: 'knowledge_use_receipt@1', sourceCount: 1, deliveredReferenceCount: 3,
       citationStatusCounts: {unmatched: 1},
     });
-    const stored = JSON.stringify([ctx.messages[0].sourceUseReceipt, ctx.messages[0].knowledgeUseReceipt]);
+    const stored = JSON.stringify([ensureDefined(ctx.messages[0]).sourceUseReceipt, ensureDefined(ctx.messages[0]).knowledgeUseReceipt]);
     expect(stored).not.toMatch(/Secret|私有|ref-hit|ref-body|kb-a|C1/);
   });
 
@@ -1474,7 +1475,7 @@ describe('per-run source-use receipt projection', () => {
     }, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sourceUseReceipt).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).sourceUseReceipt).toBeUndefined();
   });
 
   it('fails closed when the decision payload is malformed', () => {
@@ -1496,7 +1497,7 @@ describe('per-run source-use receipt projection', () => {
       },
     }, ctx);
 
-    expect(ctx.messages[0].sourceUseReceipt).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).sourceUseReceipt).toBeUndefined();
   });
 });
 
@@ -1521,7 +1522,7 @@ describe('handleErrorEvent', () => {
     const result = handleErrorEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Failed to connect');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Failed to connect');
     expect(result.isTerminal).toBe(true);
     expect(result.stopLoading).toBe(true);
   });
@@ -1573,9 +1574,9 @@ describe('handleSkillErrorEvent', () => {
     handleSkillErrorEvent(data, ctx);
 
     expect(ctx.collectedErrors).toHaveLength(1);
-    expect(ctx.collectedErrors[0].skillId).toBe('frame_analysis');
-    expect(ctx.collectedErrors[0].stepId).toBe('step1');
-    expect(ctx.collectedErrors[0].error).toBe('No data found for time range');
+    expect(ensureDefined(ctx.collectedErrors[0]).skillId).toBe('frame_analysis');
+    expect(ensureDefined(ctx.collectedErrors[0]).stepId).toBe('step1');
+    expect(ensureDefined(ctx.collectedErrors[0]).error).toBe('No data found for time range');
   });
 
   it('should handle missing fields gracefully', () => {
@@ -1584,7 +1585,7 @@ describe('handleSkillErrorEvent', () => {
     handleSkillErrorEvent(data, ctx);
 
     expect(ctx.collectedErrors).toHaveLength(1);
-    expect(ctx.collectedErrors[0].skillId).toBe('unknown');
+    expect(ensureDefined(ctx.collectedErrors[0]).skillId).toBe('unknown');
   });
 });
 
@@ -1610,10 +1611,10 @@ describe('handleCircuitBreakerEvent', () => {
     handleCircuitBreakerEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].role).toBe('system');
-    expect(ctx.messages[0].content).toContain('分析保护机制触发');
-    expect(ctx.messages[0].content).toContain('Iteration budget reached');
-    expect(ctx.flowMessages[0].content).toContain('保护机制触发');
+    expect(ensureDefined(ctx.messages[0]).role).toBe('system');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('分析保护机制触发');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Iteration budget reached');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('保护机制触发');
   });
 });
 
@@ -1641,9 +1642,9 @@ describe('handleStrategySelectedEvent', () => {
     handleStrategySelectedEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('🧠');
-    expect(ctx.messages[0].content).toContain('scrolling_analysis');
-    expect(ctx.messages[0].content).toContain('90%');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('🧠');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('scrolling_analysis');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('90%');
   });
 
   it('should display selected strategy with keyword method', () => {
@@ -1658,7 +1659,7 @@ describe('handleStrategySelectedEvent', () => {
 
     handleStrategySelectedEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('🔑');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('🔑');
   });
 });
 
@@ -1679,8 +1680,8 @@ describe('handleStrategyFallbackEvent', () => {
     handleStrategyFallbackEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('假设驱动分析');
-    expect(ctx.messages[0].content).toContain('No matching strategy');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('假设驱动分析');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('No matching strategy');
   });
 
   it('should use default reason if payload is present without a reason', () => {
@@ -1688,7 +1689,7 @@ describe('handleStrategyFallbackEvent', () => {
 
     handleStrategyFallbackEvent(data, ctx);
 
-    expect(ctx.messages[0].content).toContain('未命中预设策略');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('未命中预设策略');
   });
 });
 
@@ -1756,7 +1757,7 @@ describe('handleSkillLayeredResultEvent', () => {
     handleSkillLayeredResultEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext).toMatchObject({
       ref: '摘要 1',
       title: '分析摘要',
       kind: 'summary',
@@ -1772,9 +1773,9 @@ describe('handleSkillLayeredResultEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toBe('摘要已生成。');
-    expect(ctx.messages[1].content).not.toContain('数据来源索引');
-    expect(ctx.messages[1].content).not.toContain('摘要 1: 分析摘要');
+    expect(ensureDefined(ctx.messages[1]).content).toBe('摘要已生成。');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('数据来源索引');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('摘要 1: 分析摘要');
   });
 
   it('should deduplicate repeated skill results', () => {
@@ -1834,7 +1835,7 @@ describe('handleSkillLayeredResultEvent', () => {
     handleSkillLayeredResultEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    const sqlResult = ctx.messages[0].sqlResult!;
+    const sqlResult = ensureDefined(ctx.messages[0]).sqlResult!;
     expect(sqlResult.columns).toEqual([
       'start_ts',
       'dur_ns',
@@ -1868,7 +1869,7 @@ describe('handleSkillLayeredResultEvent', () => {
     handleSkillLayeredResultEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    const sqlResult = ctx.messages[0].sqlResult!;
+    const sqlResult = ensureDefined(ctx.messages[0]).sqlResult!;
     expect(sqlResult.columns).toEqual(['start_ts', 'dur_ms']);
     expect(sqlResult.rows[0]).toEqual(['123', 16.67]);
   });
@@ -1921,7 +1922,7 @@ describe('handleSkillLayeredResultEvent', () => {
     handleSkillLayeredResultEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    const sqlResult = ctx.messages[0].sqlResult!;
+    const sqlResult = ensureDefined(ctx.messages[0]).sqlResult!;
     expect(sqlResult.columns).toEqual(['start_ts', 'dur_ns', 'dur_ms']);
     expect(sqlResult.columnDefinitions).toEqual(
       expect.arrayContaining([
@@ -1975,7 +1976,7 @@ describe('handleSkillLayeredResultEvent', () => {
     handleSkillLayeredResultEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    const sqlResult = ctx.messages[0].sqlResult!;
+    const sqlResult = ensureDefined(ctx.messages[0]).sqlResult!;
     // dur_ns must be preserved for click range calculation.
     expect(sqlResult.columns).toContain('dur_ns');
     expect(sqlResult.columnDefinitions).toEqual(
@@ -2020,9 +2021,9 @@ describe('handleSkillLayeredResultEvent', () => {
 
     expect(() => handleSkillLayeredResultEvent(data, ctx)).not.toThrow();
     expect(ctx.messages).toHaveLength(1);
-    const sqlResult = ctx.messages[0].sqlResult!;
+    const sqlResult = ensureDefined(ctx.messages[0]).sqlResult!;
     expect(sqlResult.expandableData).toHaveLength(1);
-    expect(sqlResult.expandableData?.[0].item).toEqual(
+    expect(ensureDefined(sqlResult.expandableData?.[0]).item).toEqual(
       expect.objectContaining({frame_id: '42'}),
     );
   });
@@ -2059,7 +2060,7 @@ describe('handleDataEvent', () => {
     }, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    const message = ctx.messages[0];
+    const message = ensureDefined(ctx.messages[0]);
     const container = document.createElement('div');
     container.innerHTML = formatMessage(message.content);
     expect(container.querySelectorAll('table')).toHaveLength(1);
@@ -2146,8 +2147,8 @@ describe('handleDataEvent', () => {
     handleDataEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult).toBeDefined();
-    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toBeDefined();
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       title: 'Test Data',
       source: 'test_skill:step1',
@@ -2158,7 +2159,7 @@ describe('handleDataEvent', () => {
       paneSide: 'left',
       traceId: 'trace-a',
     });
-    expect(ctx.messages[0].sqlResult?.queryReview).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.queryReview).toMatchObject({
       id: 'qr-1',
       allowedUse: 'review_metadata_only',
       purpose: 'Explain why this query ran',
@@ -2194,12 +2195,12 @@ describe('handleDataEvent', () => {
     handleDataEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toMatchObject({
       columns: ['frame_id', 'dur_ms'],
       rows: [[1435508, 45.6]],
       rowCount: 1,
     });
-    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       title: 'Object Row Data',
       evidenceRefId: 'data:skill:object_rows',
@@ -2261,9 +2262,9 @@ describe('handleDataEvent', () => {
     handleDataEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult?.query).toBe(sql);
-    expect(ctx.messages[0].sqlResult?.hideQuery).toBe(true);
-    expect(ctx.messages[0].sqlResult?.sectionTitle).toBe('SQL 结果 · 数据验证');
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.query).toBe(sql);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.hideQuery).toBe(true);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sectionTitle).toBe('SQL 结果 · 数据验证');
   });
 
   it('should deduplicate execute_sql envelopes by SQL text', () => {
@@ -2282,8 +2283,8 @@ describe('handleDataEvent', () => {
     handleDataEvent(makeData('SELECT 1;'), ctx);
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[0].sqlResult?.query).toBe('SELECT 1;');
-    expect(ctx.messages[1].sqlResult?.query).toBe('SELECT 2;');
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.query).toBe('SELECT 1;');
+    expect(ensureDefined(ctx.messages[1]).sqlResult?.query).toBe('SELECT 2;');
   });
 
   it('should handle null data gracefully', () => {
@@ -2306,7 +2307,7 @@ describe('handleDataEvent', () => {
     handleDataEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('This is a text message');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('This is a text message');
   });
 
   it('renders diagnostic text envelopes as non-evidence diagnostics', () => {
@@ -2340,15 +2341,15 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('失败诊断');
-    expect(ctx.messages[0].sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).content).toContain('失败诊断');
+    expect(ensureDefined(ctx.messages[0]).sourceContext).toMatchObject({
       ref: '诊断 1',
       kind: 'diagnostic',
       reason: expect.stringContaining('不能作为结论证据'),
       meaning: expect.stringContaining('不证明性能结论'),
       sourceToolCallId: 'execute_sql:7:params',
     });
-    expect(ctx.streamingFlow.dataSourceRefs[0].ref).toBe('诊断 1');
+    expect(ensureDefined(ctx.streamingFlow.dataSourceRefs[0]).ref).toBe('诊断 1');
   });
 
   it('should ignore malformed envelopes in a mixed envelope batch', () => {
@@ -2367,7 +2368,7 @@ describe('handleDataEvent', () => {
 
     expect(() => handleDataEvent(data, ctx)).not.toThrow();
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult?.columns).toEqual(['k']);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.columns).toEqual(['k']);
   });
 
   it('should normalize excessive blank lines in summary format', () => {
@@ -2415,12 +2416,12 @@ describe('handleDataEvent', () => {
     handleDataEvent(data, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('## 📊 洞见摘要');
-    expect(ctx.messages[0].content).toContain(
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 📊 洞见摘要');
+    expect(ensureDefined(ctx.messages[0]).content).toContain(
       '（无显式洞见，见指标）\n\n### 关键指标',
     );
-    expect(ctx.messages[0].content).not.toMatch(/\n{3,}/);
-    expect(ctx.messages[0].sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).content).not.toMatch(/\n{3,}/);
+    expect(ensureDefined(ctx.messages[0]).sourceContext).toMatchObject({
       ref: '摘要 1',
       kind: 'summary',
       evidenceRefId: 'data:sql_summary:current:trace-a:query-a:tool-a',
@@ -2473,9 +2474,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[1].content).toBe('最终结论引用了 45.6ms 的帧耗时。');
-    expect(ctx.messages[1].content).not.toContain('## 数据来源索引');
-    expect(ctx.messages[1].content).not.toContain('表 1: 掉帧帧列表');
+    expect(ensureDefined(ctx.messages[1]).content).toBe('最终结论引用了 45.6ms 的帧耗时。');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('## 数据来源索引');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('表 1: 掉帧帧列表');
   });
 
   it('numbers data source refs per kind so summaries do not shift table refs', () => {
@@ -2537,12 +2538,12 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[0].sourceContext?.ref).toBe('摘要 1');
-    expect(ctx.messages[1].sqlResult?.sourceContext?.ref).toBe('表 1');
-    expect(ctx.messages[2].content).toBe('最终结论引用帧耗时表。');
-    expect(ctx.messages[2].content).not.toContain('摘要 1: 概览摘要');
-    expect(ctx.messages[2].content).not.toContain('表 1: 帧耗时表');
-    expect(ctx.messages[2].content).not.toContain('表 2: 帧耗时表');
+    expect(ensureDefined(ctx.messages[0]).sourceContext?.ref).toBe('摘要 1');
+    expect(ensureDefined(ctx.messages[1]).sqlResult?.sourceContext?.ref).toBe('表 1');
+    expect(ensureDefined(ctx.messages[2]).content).toBe('最终结论引用帧耗时表。');
+    expect(ensureDefined(ctx.messages[2]).content).not.toContain('摘要 1: 概览摘要');
+    expect(ensureDefined(ctx.messages[2]).content).not.toContain('表 1: 帧耗时表');
+    expect(ensureDefined(ctx.messages[2]).content).not.toContain('表 2: 帧耗时表');
   });
 
   it('keeps all registered data source appendix details out of the visible conclusion', () => {
@@ -2581,7 +2582,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    const conclusion = ctx.messages[85].content;
+    const conclusion = ensureDefined(ctx.messages[85]).content;
     expect(conclusion).toBe('最终结论需要核对全部证据表。');
     expect(conclusion).not.toContain('表 1: 证据表 1');
     expect(conclusion).not.toContain('表 85: 证据表 85');
@@ -2624,7 +2625,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    const conclusion = ctx.messages[125].content;
+    const conclusion = ensureDefined(ctx.messages[125]).content;
     expect(conclusion).toBe('最终结论需要核对大量证据表。');
     expect(conclusion).not.toContain('本轮共有 125 个数据来源');
     expect(conclusion).not.toContain('省略中间 5 个');
@@ -2660,12 +2661,12 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toMatchObject({
       columns: ['id', 'name'],
       rows: [],
       rowCount: 0,
     });
-    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       title: '空结果 SQL',
       rowCount: 0,
@@ -2701,8 +2702,8 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('Primitive Chart');
-    expect(ctx.messages[0].sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Primitive Chart');
+    expect(ensureDefined(ctx.messages[0]).sourceContext).toMatchObject({
       ref: '图 1',
       evidenceRefId: 'data:chart:current:trace-a:primitive',
     });
@@ -2738,10 +2739,10 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[0].sqlResult?.sourceContext?.sourceToolCallId).toBe(
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext?.sourceToolCallId).toBe(
       'execute_sql_on:1:params-a',
     );
-    expect(ctx.messages[1].sqlResult?.sourceContext?.sourceToolCallId).toBe(
+    expect(ensureDefined(ctx.messages[1]).sqlResult?.sourceContext?.sourceToolCallId).toBe(
       'execute_sql_on:2:params-a',
     );
   });
@@ -2806,9 +2807,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[1].content).toContain('## 逐句数据引用');
-    expect(ctx.messages[1].content).toContain('Q1 / C1: 帧耗时 45.6ms');
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain('## 逐句数据引用');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('Q1 / C1: 帧耗时 45.6ms');
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '表 1，row 0，列 dur_ms，已核对',
     );
   });
@@ -2865,7 +2866,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '表1: 帧耗时表，row 0，列 dur_ms，已核对',
     );
   });
@@ -2923,7 +2924,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '表 1，row 0，列 帧耗时(ms)，已核对',
     );
   });
@@ -2980,7 +2981,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '表 1，row 0，列 dur_ms，已核对（含近似匹配）',
     );
   });
@@ -3037,7 +3038,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '未通过: 值不匹配，实际 45.6',
     );
   });
@@ -3093,10 +3094,10 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '表 1，row 0，列 dur_ms，未核验: 未提供期望值',
     );
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain(
       '表 1，row 0，列 dur_ms，已核对',
     );
   });
@@ -3170,13 +3171,13 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[2].content).toContain(
+    expect(ensureDefined(ctx.messages[2]).content).toContain(
       '表 1，row 0，列 dur_ms，已核对',
     );
-    expect(ctx.messages[2].content).toContain(
+    expect(ensureDefined(ctx.messages[2]).content).toContain(
       'source_ref 已按系统来源校正',
     );
-    expect(ctx.messages[2].content).not.toContain(
+    expect(ensureDefined(ctx.messages[2]).content).not.toContain(
       '表 2，row 0，列 dur_ms，已核对',
     );
   });
@@ -3233,7 +3234,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       'row -0.4，列 dur_ms，未通过: 行号无效',
     );
   });
@@ -3307,10 +3308,10 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[2].content).toContain('Q1: 帧耗时 45.6ms');
-    expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
-    expect(ctx.messages[2].content).toContain('Q2: 第二次帧耗时 99ms');
-    expect(ctx.messages[2].content).toContain(
+    expect(ensureDefined(ctx.messages[2]).content).toContain('Q1: 帧耗时 45.6ms');
+    expect(ensureDefined(ctx.messages[2]).content).toContain('未核验: 来源不唯一');
+    expect(ensureDefined(ctx.messages[2]).content).toContain('Q2: 第二次帧耗时 99ms');
+    expect(ensureDefined(ctx.messages[2]).content).toContain(
       '表 2，row 0，列 dur_ms，已核对',
     );
   });
@@ -3365,8 +3366,8 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[2].content).toContain('未核验: 来源不唯一');
-    expect(ctx.messages[2].content).not.toContain('值 45.6，已核对');
+    expect(ensureDefined(ctx.messages[2]).content).toContain('未核验: 来源不唯一');
+    expect(ensureDefined(ctx.messages[2]).content).not.toContain('值 45.6，已核对');
   });
 
   it('preserves preview totals without claiming missing rows failed verification', () => {
@@ -3376,8 +3377,8 @@ describe('handleDataEvent', () => {
       display: {layer: 'list', format: 'table', title: 'Preview',
         preview: {totalRows: 1000, returnedRows: 1, reason: 'row_limit'}},
     }}, ctx);
-    expect(ctx.messages[0].sqlResult?.rowCount).toBe(1000);
-    expect(ctx.messages[0].sqlResult?.rows).toHaveLength(1);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.rowCount).toBe(1000);
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.rows).toHaveLength(1);
     expect(ctx.streamingFlow.outputs.join('\n')).toContain('共 1000 行，预览 1 行');
     handleAnalysisCompletedEvent({data: {conclusionContract: {
       conclusion: [{rank: 1, statement: '核对完整证据'}],
@@ -3387,10 +3388,10 @@ describe('handleDataEvent', () => {
         {id: 'selector-missing', text: 'selector absent', references: [{evidence_ref_id: 'preview-evidence', row_selector: {frame_id: 456}, column: 'dur_ms', value: 45.6}]},
       ],
     }}}, ctx);
-    expect(ctx.messages[1].content).toContain('未核验: 预览数据不足');
-    expect(ctx.messages[1].content).not.toContain('行不存在');
-    expect(ctx.messages[1].content).not.toContain('rowSelector 未命中');
-    expect(ctx.messages[1].content).not.toContain('已核对');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('未核验: 预览数据不足');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('行不存在');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('rowSelector 未命中');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('已核对');
   });
 
   it('verifies claim rows by rowSelector when no row_index is provided', () => {
@@ -3448,7 +3449,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       'rowSelector frame_id=123 -> row 0，列 dur_ms，已核对',
     );
   });
@@ -3508,7 +3509,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       'rowSelector frame_id=123, thread=main -> row 0，列 dur_ms，已核对',
     );
   });
@@ -3577,7 +3578,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    const conclusion = ctx.messages[125].content;
+    const conclusion = ensureDefined(ctx.messages[125]).content;
     expect(conclusion).toContain('已有结论');
     expect(conclusion).not.toContain('并额外保留 1 个被逐句引用命中的来源');
     expect(conclusion).not.toContain('表 105: Middle pinned table');
@@ -3638,10 +3639,10 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       'Q1: claim 1（表 1，row 0，列 value，已核对）',
     );
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '其余 1 条 claim 未展开；完整结构化引用仍保留在结果快照中。',
     );
   });
@@ -3700,10 +3701,10 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain('## 数据来源索引');
-    expect(ctx.messages[1].content).toContain('模型写的来源');
-    expect(ctx.messages[1].content).toContain('## 逐句数据引用');
-    expect(ctx.messages[1].content).toContain('模型写的引用');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('## 数据来源索引');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('模型写的来源');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('## 逐句数据引用');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('模型写的引用');
   });
 
   it('does not infer hidden metadata from canonical conclusion headings', () => {
@@ -3726,9 +3727,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('关键数据来源');
-    expect(ctx.messages[0].content).toContain('Verifier');
-    expect(ctx.messages[0].content).toContain('Result ID');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('关键数据来源');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Verifier');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Result ID');
   });
 
   it('preserves canonical appendix subheadings and bold lines', () => {
@@ -3755,12 +3756,12 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('真实结论正文。');
-    expect(ctx.messages[0].content).toContain('## 后续行动');
-    expect(ctx.messages[0].content).toContain('这段仍然应该展示。');
-    expect(ctx.messages[0].content).toContain('关键数据来源');
-    expect(ctx.messages[0].content).toContain('逐句明细');
-    expect(ctx.messages[0].content).toContain('隐藏引用');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('真实结论正文。');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 后续行动');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('这段仍然应该展示。');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('关键数据来源');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('逐句明细');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('隐藏引用');
   });
 
   it('preserves snapshot reference lines in the canonical body', () => {
@@ -3782,10 +3783,10 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain('最终结论正文。');
-    expect(ctx.messages[0].content).toContain('AR-hidden');
-    expect(ctx.messages[0].content).toContain('analysis-result-hidden');
-    expect(ctx.messages[0].content).toContain('快照');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('最终结论正文。');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('AR-hidden');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('analysis-result-hidden');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('快照');
   });
 
   it('keeps late conclusionContract claim refs when conclusion arrived first', () => {
@@ -3851,9 +3852,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[1].content).toContain('已有结论');
-    expect(ctx.messages[1].content).not.toContain('## 逐句数据引用');
-    expect(ctx.messages[1].content).not.toContain('已核对');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('已有结论');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('## 逐句数据引用');
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain('已核对');
   });
 
   it('keeps canonical body intact and exposes server verification separately', () => {
@@ -3948,29 +3949,29 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('最终结论');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('最终结论');
     expect(ctx.streamingFlow.status).toBe('completed');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('## 服务器核验详情');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('blocked_ms 为 120');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('supportLevel=unsupported');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('- status: not_checked');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('relationEvaluation=missing');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('claim_reference_value_mismatch');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('column=blocked_ms');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('version=evidence_anchor@1');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('actualValue=90');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('displayValue=90 ms');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('unit=ms');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('isSqlNull=false');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('identity identity:test');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('traceId=trace-a');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('artifactId=artifact:blocked');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('relation:blocked-owner');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('artifactId=artifact:subject');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('sourceRef=object row');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('filePath=Blocked.java');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('operator=eq, value=120, unit=ms');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('核验提示');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('## 服务器核验详情');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('blocked_ms 为 120');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('supportLevel=unsupported');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('- status: not_checked');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('relationEvaluation=missing');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('claim_reference_value_mismatch');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('column=blocked_ms');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('version=evidence_anchor@1');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('actualValue=90');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('displayValue=90 ms');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('unit=ms');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('isSqlNull=false');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('identity identity:test');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('traceId=trace-a');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('artifactId=artifact:blocked');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('relation:blocked-owner');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('artifactId=artifact:subject');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('sourceRef=object row');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('filePath=Blocked.java');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('operator=eq, value=120, unit=ms');
   });
 
   it('keeps final conclusion values and server evidence beyond both table previews', () => {
@@ -3998,7 +3999,7 @@ describe('handleDataEvent', () => {
         claimResults: [], issues: [{severity: 'warning', code: 'claim_not_fully_verified',
           message: 'Complete proof is unavailable'}]},
     }}, ctx);
-    const message = ctx.messages[2];
+    const message = ensureDefined(ctx.messages[2]);
     expect(message.content).toBe(conclusion);
     expect(message.serverVerificationDetails).toContain('evidence:current');
     expect(message.serverVerificationDetails).toContain('evidence:reference');
@@ -4026,7 +4027,7 @@ describe('handleDataEvent', () => {
         issues: [],
       },
     }}, ctx);
-    const details = ctx.messages[0].serverVerificationDetails || '';
+    const details = ensureDefined(ctx.messages[0]).serverVerificationDetails || '';
     expect(details).toContain('### support-only\n- 结论文本: Support only\n- status: not_checked');
     expect(details).toContain('supportLevel=verified');
     expect(details).toContain('reference cell 1: evidenceRefId=cell-ref');
@@ -4043,7 +4044,7 @@ describe('handleDataEvent', () => {
         notCheckedDetail: 'invalid_relation_proposal:invalid_kind,invalid_semantics',
       },
     }}, ctx);
-    expect(ctx.messages[0].serverVerificationDetails || '').toContain(
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails || '').toContain(
       'notCheckedReason=invalid_declarations, notCheckedDetail=invalid_relation_proposal:invalid_kind,invalid_semantics');
   });
 
@@ -4065,7 +4066,7 @@ describe('handleDataEvent', () => {
           {claimId: 'Q6', status: 'verified'},
         ], issues},
     }}, ctx);
-    const details = ctx.messages[0].serverVerificationDetails || '';
+    const details = ensureDefined(ctx.messages[0]).serverVerificationDetails || '';
     expect(details).toContain('Claim text 6');
     expect(details).toContain('Issue detail 6');
     expect(details).toContain('duplicate_or_conflicting_claim_id');
@@ -4145,16 +4146,16 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       '## 逐句数据引用（结构化来源）',
     );
-    expect(ctx.messages[1].content).not.toContain(
+    expect(ensureDefined(ctx.messages[1]).content).not.toContain(
       '## 逐句数据引用（系统核对结果）',
     );
-    expect(ctx.messages[1].content).toContain(
+    expect(ensureDefined(ctx.messages[1]).content).toContain(
       'source_ref=表 1; row_index=0; column=dur_ms; value=45.6',
     );
-    expect(ctx.messages[1].content).toContain('## 不确定性与反例');
+    expect(ensureDefined(ctx.messages[1]).content).toContain('## 不确定性与反例');
   });
 
   it.each([
@@ -4191,14 +4192,14 @@ describe('handleDataEvent', () => {
       expect(ctx.messages.map((message) => message.id)).toEqual(messageIds);
       expect(ctx.messages).toHaveLength(2);
       sources.forEach((source, index) => {
-        const context = ctx.messages[index].sqlResult?.sourceContext;
+        const context = ensureDefined(ctx.messages[index]).sqlResult?.sourceContext;
         expect(context).toMatchObject({
           ref: `表 ${index + 1}`,
           title: '掉帧帧列表',
           traceId: source.traceId,
           traceSide: source.traceSide,
-          evidenceRefId: events[index].envelope.meta.evidenceRefId,
-          sourceToolCallId: events[index].envelope.meta.sourceToolCallId,
+          evidenceRefId: ensureDefined(events[index]).envelope.meta.evidenceRefId,
+          sourceToolCallId: ensureDefined(events[index]).envelope.meta.sourceToolCallId,
         });
         expect(context?.paneSide).toBe(source.paneSide);
       });
@@ -4262,14 +4263,14 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(2);
-    expect(ctx.messages[0].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[0]).sqlResult?.sourceContext).toMatchObject({
       ref: '表 1',
       traceSide: 'current',
       paneSide: 'left',
       evidenceRefId:
         'data:skill:scrolling_analysis:jank_frames:current:trace-a:hash',
     });
-    expect(ctx.messages[1].sqlResult?.sourceContext).toMatchObject({
+    expect(ensureDefined(ctx.messages[1]).sqlResult?.sourceContext).toMatchObject({
       ref: '表 2',
       traceSide: 'reference',
       paneSide: 'right',
@@ -4286,7 +4287,7 @@ describe('handleDataEvent', () => {
       ctx,
     );
 
-    const conclusion = ctx.messages[2].content;
+    const conclusion = ensureDefined(ctx.messages[2]).content;
     expect(conclusion).toBe('当前 Trace 掉帧更重。');
     expect(conclusion).not.toContain('数据来源索引');
     expect(conclusion).not.toContain('表 1: 当前 Trace · 掉帧帧列表');
@@ -4336,9 +4337,9 @@ describe('handleDataEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].sqlResult).toBeDefined();
-    expect(ctx.messages[0].content).toBe('');
-    expect(ctx.messages[0].reportUrl).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).sqlResult).toBeDefined();
+    expect(ensureDefined(ctx.messages[0]).content).toBe('');
+    expect(ensureDefined(ctx.messages[0]).reportUrl).toBeUndefined();
   });
 });
 
@@ -4359,10 +4360,10 @@ describe('handleAnswerTokenEvent', () => {
     handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].flowTag).toBe('answer_stream');
-    expect(ctx.messages[0].content).toBe('你好，世界');
+    expect(ensureDefined(ctx.messages[0]).flowTag).toBe('answer_stream');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('你好，世界');
     // The end of the draft does not confirm it; only a conclusion does.
-    expect(ctx.messages[0].answerDraft).toBe(true);
+    expect(ensureDefined(ctx.messages[0]).answerDraft).toBe(true);
     expect(ctx.streamingAnswer.status).toBe('streaming');
   });
 
@@ -4394,9 +4395,9 @@ describe('handleAnswerTokenEvent', () => {
     handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].flowTag).toBe('answer_stream');
+    expect(ensureDefined(ctx.messages[0]).flowTag).toBe('answer_stream');
     expect(ctx.flowMessages).toHaveLength(1);
-    const timeline = ctx.flowMessages[0].content;
+    const timeline = ensureDefined(ctx.flowMessages[0]).content;
     expect(timeline).toContain('🧭 分析过程');
     expect(timeline).toContain('开始流式输出分析结果');
     expect(timeline).not.toContain('最终回答已输出');
@@ -4433,7 +4434,7 @@ describe('handleAnswerTokenEvent', () => {
     );
     handleAnswerTokenEvent({data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
-    const timeline = ctx.flowMessages[0].content;
+    const timeline = ensureDefined(ctx.flowMessages[0]).content;
     // Answer checkpoints sort after every backend step rather than
     // interleaving with the backend ordinal sequence, and the answer body
     // itself stays out of the process view.
@@ -4473,7 +4474,7 @@ describe('handleConversationStepEvent', () => {
     );
 
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).not.toContain('第二步');
+    expect(ensureDefined(ctx.flowMessages[0]).content).not.toContain('第二步');
 
     handleConversationStepEvent(
       {
@@ -4489,14 +4490,14 @@ describe('handleConversationStepEvent', () => {
     );
 
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('第一步');
-    expect(ctx.flowMessages[0].content).not.toContain('第二步');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('第一步');
+    expect(ensureDefined(ctx.flowMessages[0]).content).not.toContain('第二步');
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
 
     // End event forces timeline flush, including buffered out-of-order step #2.
     handleSSEEvent('end', {}, ctx);
 
-    const content = ctx.flowMessages[0].content;
+    const content = ensureDefined(ctx.flowMessages[0]).content;
     expect(content).toContain('第一步');
     expect(content).toContain('第二步');
     expect(content.indexOf('第一步')).toBeLessThan(content.indexOf('第二步'));
@@ -4532,7 +4533,7 @@ describe('handleConversationStepEvent', () => {
     );
     handleSSEEvent('end', {}, ctx);
 
-    const lines = ctx.flowMessages[0].content.split('\n');
+    const lines = ensureDefined(ctx.flowMessages[0]).content.split('\n');
     expect(lines.find((line) => line.includes('进入阶段'))).toBe('- ▸ **进入阶段「概览」**');
     expect(lines.find((line) => line.includes('scrolling_analysis'))?.startsWith('- 🔧 ')).toBe(true);
   });
@@ -4548,7 +4549,7 @@ describe('handleConversationStepEvent', () => {
     }
     handleSSEEvent('end', {}, ctx);
 
-    const content = ctx.flowMessages[0].content;
+    const content = ensureDefined(ctx.flowMessages[0]).content;
     expect(content).not.toContain('进入阶段「概览」');
     expect(content.split('\n').filter((line) => line.startsWith('  - '))).toEqual([]);
   });
@@ -4557,8 +4558,8 @@ describe('handleConversationStepEvent', () => {
     handleConversationStepEvent(step(1, 'update_plan_phase 失败：summary 太短', {phase: 'error'}), ctx);
     handleSSEEvent('end', {}, ctx);
 
-    expect(ctx.flowMessages[0].content).toContain('⚠');
-    expect(ctx.flowMessages[0].content).toContain('update_plan_phase 失败');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('⚠');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('update_plan_phase 失败');
   });
 
   it('does not let a sub-agent step consume a backend ordinal', () => {
@@ -4572,7 +4573,7 @@ describe('handleConversationStepEvent', () => {
     handleConversationStepEvent(step(2, '第二步'), ctx);
     handleSSEEvent('end', {}, ctx);
 
-    const content = ctx.flowMessages[0].content;
+    const content = ensureDefined(ctx.flowMessages[0]).content;
     expect(content).toContain('第一步');
     expect(content).toContain('第二步');
     expect(content).toContain('frame-expert');
@@ -4598,7 +4599,7 @@ describe('handleConversationStepEvent', () => {
     handleConversationStepEvent(step, ctx);
 
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content.match(/唯一步骤/g)?.length || 0).toBe(1);
+    expect(ensureDefined(ctx.flowMessages[0]).content.match(/唯一步骤/g)?.length || 0).toBe(1);
     expect(ctx.streamingFlow.conversationLastOrdinal).toBe(1);
   });
 });
@@ -4620,7 +4621,7 @@ describe('handleSSEEvent', () => {
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('Testing');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('Testing');
   });
 
   it('should route error events and return terminal result', () => {
@@ -4666,7 +4667,7 @@ describe('handleSSEEvent', () => {
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('Starting stage 1');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('Starting stage 1');
   });
 
   it('should route circuit breaker events correctly', () => {
@@ -4681,7 +4682,7 @@ describe('handleSSEEvent', () => {
       ctx,
     );
 
-    expect(ctx.messages[0].content).toContain('Too many failures');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Too many failures');
   });
 
   it('should skip finding events', () => {
@@ -4694,8 +4695,8 @@ describe('handleSSEEvent', () => {
     handleSSEEvent('conclusion', {data: {conclusion: 'Final conclusion'}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('Final conclusion');
-    expect(ctx.messages[0].flowTag).toBe('answer_stream');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Final conclusion');
+    expect(ensureDefined(ctx.messages[0]).flowTag).toBe('answer_stream');
   });
 
   it.each(['streamed', 'conclusion', 'completed', 'recovered'])(
@@ -4719,7 +4720,7 @@ describe('handleSSEEvent', () => {
           getMessages: () => transcript,
           updateMessage: (id, updates) => {
             const index = transcript.findIndex((msg) => msg.id === id);
-            if (index !== -1) transcript[index] = {...transcript[index], ...updates};
+            if (index !== -1) transcript[index] = {...ensureDefined(transcript[index]), ...updates};
           },
         });
         handleSSEEvent('conversation_step', {data: {
@@ -4754,10 +4755,10 @@ describe('handleSSEEvent', () => {
       }
 
       expect(orderMessagesForDisplay(transcript).map((msg) => msg.id)).toEqual([
-        'user-1', timelines[0], answers[0].id,
-        'round-2', 'user-2', timelines[1], answers[1].id,
+        'user-1', timelines[0], ensureDefined(answers[0]).id,
+        'round-2', 'user-2', timelines[1], ensureDefined(answers[1]).id,
       ]);
-      expect(transcript.find((msg) => msg.id === answers[0].id)).toEqual(answers[0]);
+      expect(transcript.find((msg) => msg.id === ensureDefined(answers[0]).id)).toEqual(answers[0]);
     },
   );
 
@@ -4779,9 +4780,9 @@ describe('handleSSEEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].flowTag).toBe('answer_stream');
-    expect(ctx.messages[0].content).toContain('## 综合结论');
-    expect(ctx.messages[0].content).not.toContain('Interim pre-plan text');
+    expect(ensureDefined(ctx.messages[0]).flowTag).toBe('answer_stream');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('## 综合结论');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Interim pre-plan text');
 
     handleSSEEvent(
       'analysis_completed',
@@ -4797,12 +4798,12 @@ describe('handleSSEEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toContain(
+    expect(ensureDefined(ctx.messages[0]).content).toContain(
       'Final report body with snapshot.',
     );
-    expect(ctx.messages[0].content).not.toContain('Result ID');
-    expect(ctx.messages[0].content).not.toContain('Snapshot:');
-    expect(ctx.messages[0].reportUrl).toBe(
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Result ID');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Snapshot:');
+    expect(ensureDefined(ctx.messages[0]).reportUrl).toBe(
       'http://localhost:3000/reports/123.html',
     );
   });
@@ -4844,9 +4845,9 @@ describe('handleSSEEvent', () => {
     expect(result.stopLoading).toBe(true);
     expect(getAISharedState().status).toBe(expected);
     expect(ctx.streamingFlow.status).toBe(flow);
-    expect(ctx.messages[0].content).toBe(payload.conclusion);
+    expect(ensureDefined(ctx.messages[0]).content).toBe(payload.conclusion);
     if (expected === 'partial') {
-      expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
+      expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('结果完整性提示');
     }
     expect(payload).toEqual(originalPayload);
     if (expected === 'error') expect(ctx.streamingAnswer.status).toBe('finalized');
@@ -4866,12 +4867,12 @@ describe('handleSSEEvent', () => {
     handleSSEEvent('analysis_completed', {data: payload}, ctx);
     expect(ctx.streamingFlow.status).toBe('completed');
     expect(getAISharedState().status).toBe('completed');
-    expect(ctx.messages[0].content).toBe(payload.conclusion);
-    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('存在疑点或尚未核验');
-    expect(ctx.messages[0].serverVerificationNotice).not.toContain('结果完整性提示');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('status=unsupported');
-    expect(ctx.messages[0].serverVerificationDetails).toContain('Independent verification mismatch');
+    expect(ensureDefined(ctx.messages[0]).content).toBe(payload.conclusion);
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('核验提示');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('存在疑点或尚未核验');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).not.toContain('结果完整性提示');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('status=unsupported');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('Independent verification mismatch');
     expect(payload).toEqual(original);
   });
 
@@ -4890,8 +4891,8 @@ describe('handleSSEEvent', () => {
     expect(getAISharedState().status).toBe('partial');
     expect(rendered).toContain('流程已结束');
     expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
-    expect(ctx.messages[0].content).toBe('保留当前有依据的输出');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('保留当前有依据的输出');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('结果完整性提示');
   });
 
   it.each([
@@ -4922,9 +4923,9 @@ describe('handleSSEEvent', () => {
     expect(ctx.streamingFlow.status).toBe('completed');
     expect(getAISharedState().status).toBe('completed');
     expect(rendered).toContain('流程完成，结论已生成');
-    expect(ctx.messages[0].content).toBe('保留当前有依据的输出');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
-    expect(ctx.messages[0].serverVerificationNotice).not.toContain('结果完整性提示');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('保留当前有依据的输出');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('核验提示');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).not.toContain('结果完整性提示');
   });
 
   it('waits for final verification after conclusion and corrects a late incomplete verdict idempotently', () => {
@@ -4942,8 +4943,8 @@ describe('handleSSEEvent', () => {
     expect(getAISharedState().status).toBe('partial');
     expect(rendered).not.toMatch(/最终结论已生成|流程完成，结论已生成/);
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('先显示可读结论');
-    expect(ctx.messages[0].serverVerificationNotice?.match(/结果完整性提示/g)).toHaveLength(1);
+    expect(ensureDefined(ctx.messages[0]).content).toBe('先显示可读结论');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice?.match(/结果完整性提示/g)).toHaveLength(1);
   });
 
   it('binds verification to the exact candidate and clears it on body replacement', () => {
@@ -4963,7 +4964,7 @@ describe('handleSSEEvent', () => {
     };
     handleSSEEvent('analysis_completed', {data: {conclusion: 'First body', completion: completion('one'), ...verification}}, ctx);
     const messageId = ctx.streamingAnswer.messageId!;
-    expect(ctx.messages[0].serverVerificationDetails).toContain('Late claim');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toContain('Late claim');
 
     handleSSEEvent('analysis_completed', {data: {conclusion: 'Second body', completion: completion('two')}}, ctx);
     expect(ctx.streamingAnswer.messageId).toBe(messageId);
@@ -4974,18 +4975,18 @@ describe('handleSSEEvent', () => {
         attemptId: 'attempt-two', conclusionFingerprint: 'fingerprint-two',
       },
     });
-    expect(ctx.messages[0].serverVerificationDetails).toBeUndefined();
-    expect(ctx.messages[0].serverVerificationNotice).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toBeUndefined();
 
     handleSSEEvent('analysis_completed', {data: {completion: completion('one'), ...verification}}, ctx);
-    expect(ctx.messages[0].serverVerificationDetails).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toBeUndefined();
     handleSSEEvent('analysis_completed', {data: {completion: completion('two'), ...verification}}, ctx);
-    const exactDetails = ctx.messages[0].serverVerificationDetails;
+    const exactDetails = ensureDefined(ctx.messages[0]).serverVerificationDetails;
     expect(exactDetails).toContain('Late claim');
     handleSSEEvent('analysis_completed', {data: {completion: completion('two'), ...verification}}, ctx);
-    expect(ctx.messages[0].serverVerificationDetails).toBe(exactDetails);
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toBe(exactDetails);
     handleSSEEvent('analysis_completed', {data: {completion: completion('two')}}, ctx);
-    expect(ctx.messages[0].serverVerificationDetails).toBe(exactDetails);
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toBe(exactDetails);
   });
 
   it('does not attach metadata-only verification without a current message identity', () => {
@@ -5014,8 +5015,8 @@ describe('handleSSEEvent', () => {
     handleSSEEvent('analysis_completed', {data: {
       completion: {schemaVersion: 1, status: 'completed', ...binding},
     }}, ctx);
-    expect(ctx.messages[0].serverVerificationNotice).toBe('Retained notice');
-    expect(ctx.messages[0].serverVerificationDetails).toBe('Retained details');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toBe('Retained notice');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationDetails).toBe('Retained details');
   });
 
   it.each([
@@ -5037,7 +5038,7 @@ describe('handleSSEEvent', () => {
       expect(ctx.flowMessages.map(message => message.content).join('\n')).not.toContain('流程完成，结论已生成');
     }
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].reportUrl).toBe('http://localhost:3000/reports/late.html');
+    expect(ensureDefined(ctx.messages[0]).reportUrl).toBe('http://localhost:3000/reports/late.html');
     if (state === 'failed') expect(ctx.streamingAnswer.status).toBe('finalized');
   });
 
@@ -5092,7 +5093,7 @@ describe('handleSSEEvent', () => {
     expect(ctx.streamingFlow.status).toBe('completed');
     expect(getAISharedState().status).toBe('completed');
     expect(ctx.flowMessages.map(message => message.content).join('\n')).toContain('流程完成，结论已生成');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('核验提示');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('核验提示');
   });
 
   it('shows investigation deficits after an early conclusion without downgrading native completion', () => {
@@ -5105,7 +5106,7 @@ describe('handleSSEEvent', () => {
         investigation: 'coverage_incomplete', investigationEvidence: 'unavailable'},
     }}, ctx);
     expect(ctx.streamingFlow.status).toBe('completed');
-    expect(ctx.messages[0].content).toBe('保留已生成的结论');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('保留已生成的结论');
     const flow = ctx.flowMessages.map(message => message.content).join('\n');
     expect(flow).toContain('系统调查覆盖: 仍有必需维度缺失');
     expect(flow).toContain('系统证据覆盖: 核验不可用');
@@ -5126,7 +5127,7 @@ describe('handleSSEEvent', () => {
     }}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('Final failed body');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Final failed body');
     expect(ctx.streamingAnswer.status).toBe('finalized');
     expect(ctx.streamingFlow.status).toBe('failed');
     expect(getAISharedState().status).toBe('error');
@@ -5137,7 +5138,7 @@ describe('handleSSEEvent', () => {
       conclusion: 'Legacy retained answer', success: false, terminalRunStatus: 'unknown',
     }}, ctx);
     expect(getAISharedState().status).toBe('error');
-    expect(ctx.messages[0].content).toBe('Legacy retained answer');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('Legacy retained answer');
   });
 
   it('routes analysis_cancelled as a non-error terminal event', () => {
@@ -5245,9 +5246,9 @@ describe('handleSSEEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].smartScenePreview?.reportId).toBe('report-smart-1');
-    expect(ctx.messages[0].smartScenePreview?.scenes).toHaveLength(2);
-    expect(ctx.messages[0].smartScenePreview?.eligibleSceneCount).toBe(1);
+    expect(ensureDefined(ctx.messages[0]).smartScenePreview?.reportId).toBe('report-smart-1');
+    expect(ensureDefined(ctx.messages[0]).smartScenePreview?.scenes).toHaveLength(2);
+    expect(ensureDefined(ctx.messages[0]).smartScenePreview?.eligibleSceneCount).toBe(1);
   });
 
   it('surfaces partial analysis_completed warning and shared partial status', () => {
@@ -5265,9 +5266,9 @@ describe('handleSSEEvent', () => {
     );
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].content).toBe('## 综合结论\n\n降级结论');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('结果完整性提示');
-    expect(ctx.messages[0].serverVerificationNotice).toContain('最终结果质量闸门');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('## 综合结论\n\n降级结论');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('结果完整性提示');
+    expect(ensureDefined(ctx.messages[0]).serverVerificationNotice).toContain('最终结果质量闸门');
     expect(getAISharedState().status).toBe('partial');
     expect(getAISharedState().lastAnalysisTime).not.toBeNull();
   });
@@ -5287,8 +5288,8 @@ describe('handleSSEEvent', () => {
 
     expect(result.loadingPhase).toBe('结果已标记为部分完成');
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('结果完整性提示');
-    expect(ctx.flowMessages[0].content).toContain('结果已标记 partial');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('结果完整性提示');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('结果已标记 partial');
   });
 
   it('should route answer_token events to incremental answer stream', () => {
@@ -5297,8 +5298,8 @@ describe('handleSSEEvent', () => {
     handleSSEEvent('answer_token', {data: {runId: 'run-1', attempt: 0, done: true}}, ctx);
 
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].flowTag).toBe('answer_stream');
-    expect(ctx.messages[0].content).toBe('AB');
+    expect(ensureDefined(ctx.messages[0]).flowTag).toBe('answer_stream');
+    expect(ensureDefined(ctx.messages[0]).content).toBe('AB');
   });
 
   it('should route conversation_step events to ordered timeline flow', () => {
@@ -5318,8 +5319,8 @@ describe('handleSSEEvent', () => {
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('🧭 分析过程');
-    expect(ctx.flowMessages[0].content).toContain('开始分析');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('🧭 分析过程');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('开始分析');
   });
 });
 
@@ -5365,7 +5366,7 @@ describe('Error Handling', () => {
 
     expect(ctx.messages).toHaveLength(0);
     expect(ctx.flowMessages).toHaveLength(1);
-    expect(ctx.flowMessages[0].content).toContain('Valid');
+    expect(ensureDefined(ctx.flowMessages[0]).content).toContain('Valid');
   });
 });
 
@@ -5457,8 +5458,8 @@ describe('conclusion delivery', () => {
     expect(result.isTerminal).toBeUndefined();
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0]).toMatchObject({flowTag: 'answer_stream'});
-    expect(ctx.messages[0].answerVerification).toBeUndefined();
-    expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
+    expect(ensureDefined(ctx.messages[0]).answerVerification).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Trace duration is 12.3 s.');
     expect(ctx.completionHandled).toBe(true);
   });
 
@@ -5468,22 +5469,22 @@ describe('conclusion delivery', () => {
     const result = handleSSEEvent('conclusion', replayed, ctx);
     expect(result).toEqual({});
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].answerVerification).toBeUndefined();
-    expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
+    expect(ensureDefined(ctx.messages[0]).answerVerification).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Trace duration is 12.3 s.');
   });
 
   it('replaces the verdict on the same message when analysis_completed arrives', () => {
     const ctx = createMockContext();
     handleSSEEvent('conclusion', plainConclusion(), ctx);
-    const messageId = ctx.messages[0].id;
+    const messageId = ensureDefined(ctx.messages[0]).id;
     const result = handleSSEEvent('analysis_completed', {runId: 'run-a', data: {
       success: true, conclusion: 'Trace duration is 12.3 s.', findings: [],
     }}, ctx);
     expect(result).toMatchObject({isTerminal: true, stopLoading: true});
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].id).toBe(messageId);
-    expect(ctx.messages[0].answerVerification).toBeUndefined();
-    expect(ctx.messages[0].content).toContain('Trace duration is 12.3 s.');
+    expect(ensureDefined(ctx.messages[0]).id).toBe(messageId);
+    expect(ensureDefined(ctx.messages[0]).answerVerification).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Trace duration is 12.3 s.');
   });
 
   it('replaces the measurements and model analysis together on the current answer', () => {
@@ -5495,8 +5496,8 @@ describe('conclusion delivery', () => {
     handleSSEEvent('conclusion', {runId: 'run-a', data: {
       conclusion: 'Model body', conclusionEvidence: early,
     }}, ctx);
-    const messageId = ctx.messages[0].id;
-    expect(ctx.messages[0].conclusionEvidenceMarkdown).toBe(early.markdown);
+    const messageId = ensureDefined(ctx.messages[0]).id;
+    expect(ensureDefined(ctx.messages[0]).conclusionEvidenceMarkdown).toBe(early.markdown);
     handleSSEEvent('analysis_completed', {runId: 'run-a', data: {
       success: true, conclusion: 'Updated model body', findings: [],
       conclusionEvidence: {...early, markdown: 'Final measurements'},
@@ -5505,8 +5506,8 @@ describe('conclusion delivery', () => {
     expect(ctx.messages[0]).toMatchObject({
       id: messageId, conclusionEvidenceMarkdown: 'Final measurements',
     });
-    expect(ctx.messages[0].content).toContain('Updated model body');
-    expect(ctx.messages[0].content).not.toContain('Final measurements');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Updated model body');
+    expect(ensureDefined(ctx.messages[0]).content).not.toContain('Final measurements');
   });
 
   // A stored or restored message can still carry a cue from before the review ended.
@@ -5523,7 +5524,7 @@ describe('conclusion delivery', () => {
     handleSSEEvent('analysis_completed', {runId: 'run-a', data: {success: true,
       conclusion: 'Trace duration is 12.3 s.', findings: []}}, ctx);
     expect(ctx.messages).toHaveLength(1);
-    expect(ctx.messages[0].answerVerification).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).answerVerification).toBeUndefined();
   });
 
   it('does not upgrade an unfinished cue on a later error', () => {
@@ -5537,8 +5538,8 @@ describe('conclusion delivery', () => {
   it('renders a final conclusion without a cue but keeps the run active until analysis_completed', () => {
     const ctx = createMockContext();
     expect(handleSSEEvent('conclusion', {data: {conclusion: 'Final answer'}}, ctx)).toEqual({});
-    expect(ctx.messages[0].answerVerification).toBeUndefined();
-    expect(ctx.messages[0].content).toContain('Final answer');
+    expect(ensureDefined(ctx.messages[0]).answerVerification).toBeUndefined();
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Final answer');
     expect(handleSSEEvent('analysis_completed', {runId: 'run-a', data: {success: true, conclusion: 'Final answer',
       findings: []}}, ctx)).toMatchObject({isTerminal: true, stopLoading: true});
   });
@@ -5547,7 +5548,7 @@ describe('conclusion delivery', () => {
     const ctx = createMockContext();
     handleSSEEvent('conclusion', {data: {conclusion: 'Legacy answer'}}, ctx);
     expect(handleSSEEvent('end', {}, ctx)).toEqual({stopLoading: true});
-    expect(ctx.messages[0].content).toContain('Legacy answer');
+    expect(ensureDefined(ctx.messages[0]).content).toContain('Legacy answer');
   });
 });
 
@@ -5579,18 +5580,18 @@ describe('display-only answer draft', () => {
   it('lets the conclusion replace the draft on the same message', () => {
     const ctx = createMockContext();
     handleSSEEvent('answer_token', token('Draft body'), ctx);
-    const draftId = answers(ctx)[0].id;
+    const draftId = ensureDefined(answers(ctx)[0]).id;
     handleSSEEvent('conclusion', {runId: 'run-a', data: {conclusion: 'Final body'}}, ctx);
     expect(answers(ctx)).toHaveLength(1);
-    expect(answers(ctx)[0].id).toBe(draftId);
-    expect(answers(ctx)[0].answerDraft).toBeUndefined();
-    expect(answers(ctx)[0].answerVerification).toBeUndefined();
-    expect(answers(ctx)[0].content).toContain('Final body');
+    expect(ensureDefined(answers(ctx)[0]).id).toBe(draftId);
+    expect(ensureDefined(answers(ctx)[0]).answerDraft).toBeUndefined();
+    expect(ensureDefined(answers(ctx)[0]).answerVerification).toBeUndefined();
+    expect(ensureDefined(answers(ctx)[0]).content).toContain('Final body');
     // A late draft event cannot reopen or clear the finalized answer.
     handleSSEEvent('answer_token', token(' LATE'), ctx);
     handleSSEEvent('answer_segment_reset', reset(5), ctx);
     expect(answers(ctx)).toHaveLength(1);
-    expect(answers(ctx)[0].content).not.toContain('LATE');
+    expect(ensureDefined(answers(ctx)[0]).content).not.toContain('LATE');
   });
 
   it('replaces a draft with the cancelled notice when the run is stopped', () => {

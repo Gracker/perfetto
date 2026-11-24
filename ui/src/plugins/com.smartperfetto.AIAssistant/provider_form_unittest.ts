@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {ensureDefined} from '../../base/assert';
 import m from 'mithril';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {smartPerfettoFetch} from '../../core/smartperfetto_auth';
@@ -133,7 +134,7 @@ describe('ProviderForm', () => {
     await Promise.resolve();
     await Promise.resolve();
     return JSON.parse(
-      String(vi.mocked(smartPerfettoFetch).mock.calls[0][1]?.body),
+      String(ensureDefined(vi.mocked(smartPerfettoFetch).mock.calls[0])[1]?.body),
     );
   }
   it.each([
@@ -148,7 +149,7 @@ describe('ProviderForm', () => {
     'renders %s connection surface and exposes required settings',
     (type) => {
       const template: ProviderTemplate = {
-        ...templates[0],
+        ...ensureDefined(templates[0]),
         type,
         displayName: type,
         requiredFields:
@@ -252,7 +253,7 @@ describe('ProviderForm', () => {
     expect(body.tuning).toEqual(provider.tuning);
     expect(body.custom).toEqual(provider.custom);
     expect(body.models.light).toBe('legacy-light');
-    expect(vi.mocked(smartPerfettoFetch).mock.calls[0][1]?.method).toBe(
+    expect(ensureDefined(vi.mocked(smartPerfettoFetch).mock.calls[0])[1]?.method).toBe(
       'PATCH',
     );
   });
@@ -273,7 +274,7 @@ describe('ProviderForm', () => {
     expect(body.name).toBe('Personal provider (Copy)');
     expect(body.models).toEqual(provider.models);
     expect(body.custom).toEqual(provider.custom);
-    expect(vi.mocked(smartPerfettoFetch).mock.calls[0][1]?.method).toBe('POST');
+    expect(ensureDefined(vi.mocked(smartPerfettoFetch).mock.calls[0])[1]?.method).toBe('POST');
   });
   it('uses primary as light fallback for custom models and rejects an empty primary', async () => {
     mount();

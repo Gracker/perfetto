@@ -77,7 +77,10 @@ const SCENE_ICONS: Record<string, string> = {
 };
 
 // Performance thresholds
-const PERF_THRESHOLDS: Record<string, { good: number; acceptable: number }> = {
+type PerfThreshold = {good: number; acceptable: number};
+const PERF_THRESHOLDS: Record<string, PerfThreshold> & {
+  scroll_fps: PerfThreshold;
+} = {
   'cold_start': { good: 500, acceptable: 1000 },
   'warm_start': { good: 300, acceptable: 600 },
   'hot_start': { good: 100, acceptable: 200 },
@@ -233,10 +236,10 @@ export class SceneNavigationBar implements m.ClassComponent<SceneNavigationBarAt
     trace: Trace,
     onSceneClick?: (scene: DetectedScene, index: number) => void
   ): void {
-    if (index < 0 || index >= scenes.length) return;
+    const scene = scenes[index];
+    if (!scene) return;
 
     this.currentIndex = index;
-    const scene = scenes[index];
     this.currentId = scene.id;
 
     // Navigate to scene time range

@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {describe, expect, it} from 'vitest';
 
 import {
@@ -279,7 +280,7 @@ describe('source receipt binding admission', () => {
     const contract = sourceContract();
     contract.sourceUseDecision.codeAwareMode = 'metadata_only';
     contract.sourceUseDecision.status = 'located';
-    contract.sourceUseDecision.references[0].lookupKind = 'metadata';
+    ensureDefined(contract.sourceUseDecision.references[0]).lookupKind = 'metadata';
     const parsed = parseLegacy(contract, {
       schemaVersion: 'source_claim_verifier@1', status: 'passed', bindings: contract.sourceClaimBindings,
     });
@@ -289,7 +290,7 @@ describe('source receipt binding admission', () => {
     expect(sourceUseReceiptPresentation(parsed!)?.summary).toBe('Source locations found');
     expect(sourceUseReceiptPresentation(parsed!)?.details.join(' ')).toContain('no source text is sent');
     // A body reference is not admitted in metadata_only, so the binding names nothing this run returned.
-    contract.sourceUseDecision.references[0].lookupKind = 'body';
+    ensureDefined(contract.sourceUseDecision.references[0]).lookupKind = 'body';
     expect(parseLegacy(contract, {
       schemaVersion: 'source_claim_verifier@1', status: 'passed', bindings: contract.sourceClaimBindings,
     })?.mechanismStatuses).toEqual([]);

@@ -420,10 +420,10 @@ const RANGE_REFERENCE_PATTERNS = [
 // Metric card palette keyed by status. Extracted from a triple-ternary that
 // repeated the four intent mappings three times (bg / fg / icon name). The
 // `info` entry doubles as the default for unknown status values.
-const METRIC_STATUS_STYLES: Record<
-  string,
-  {bg: string; fg: string; icon: string}
-> = {
+type MetricStatusStyle = {bg: string; fg: string; icon: string};
+const METRIC_STATUS_STYLES: Record<string, MetricStatusStyle> & {
+  info: MetricStatusStyle;
+} = {
   good: {
     bg: 'var(--chat-metric-bg-good)',
     fg: 'var(--chat-success)',
@@ -446,11 +446,7 @@ const METRIC_STATUS_STYLES: Record<
   },
 };
 
-function metricStatusStyle(status: string | undefined): {
-  bg: string;
-  fg: string;
-  icon: string;
-} {
+function metricStatusStyle(status: string | undefined): MetricStatusStyle {
   return (
     (status ? METRIC_STATUS_STYLES[status] : undefined) ??
     METRIC_STATUS_STYLES.info
@@ -2186,16 +2182,17 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
           (b.lastActiveAt || b.createdAt) - (a.lastActiveAt || a.createdAt),
       );
 
-    if (restorable.length > 0) {
+    const recent = restorable[0];
+    if (recent) {
       if (DEBUG_AI_PANEL) {
         console.log(
           '[AIPanel] Auto-restoring recent session:',
-          restorable[0].sessionId,
+          recent.sessionId,
         );
       }
       // Preserve backendTraceId from upload state — loadSession may clear it
       const savedBackendTraceId = this.state.backendTraceId;
-      this.loadSession(restorable[0].sessionId, {preserveLiveTracePair: true});
+      this.loadSession(recent.sessionId, {preserveLiveTracePair: true});
       if (savedBackendTraceId && !this.state.backendTraceId) {
         this.state.backendTraceId = savedBackendTraceId;
         this.saveCurrentSession();
@@ -5464,7 +5461,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
 
   private getSmartPreviewPayload(): SmartScenePreviewPayload | undefined {
     for (let i = this.state.messages.length - 1; i >= 0; i--) {
-      const payload = this.state.messages[i].smartScenePreview;
+      const payload = this.state.messages[i]?.smartScenePreview;
       if (payload && Array.isArray(payload.scenes)) return payload;
     }
     const report = this.state.storyState.cachedReport;
@@ -8238,11 +8235,7 @@ Click ⚙️ to configure backend connection.`,
       );
     }
 
-    if (this.state.historyIndex >= 0) {
-      this.state.input = history[this.state.historyIndex];
-    } else {
-      this.state.input = '';
-    }
+    this.state.input = history[this.state.historyIndex] ?? '';
   }
 
   /**
@@ -8587,9 +8580,8 @@ Click ⚙️ to configure backend connection.`,
       ime_hide: ['键盘收起', 'IME hide'],
       window_transition: ['窗口转场', 'window transition'],
     };
-    const typeName = typeNames[scene.type]
-      ? uiText(...typeNames[scene.type])
-      : scene.type;
+    const localizedType = typeNames[scene.type];
+    const typeName = localizedType ? uiText(...localizedType) : scene.type;
     const appHint = scene.appPackage ? ` (${scene.appPackage})` : '';
     const durHint =
       scene.durationMs > 0
@@ -9013,9 +9005,8 @@ Click ⚙️ to configure backend connection.`,
   }
 
   private async handleCommand(input: string) {
-    const parts = input.split(/\s+/);
-    const cmd = parts[0].toLowerCase();
-    const args = parts.slice(1);
+    const [command = '', ...args] = input.split(/\s+/);
+    const cmd = command.toLowerCase();
 
     switch (cmd) {
       case '/sql':
@@ -9191,7 +9182,7 @@ Click ⚙️ to configure backend connection.`,
     m.redraw();
   }
 
-  private async handleGotoCommand(ts: string) {
+  private async handleGotoCommand(ts: string | undefined) {
     if (!ts) {
       this.addMessage({
         id: this.generateId(),
@@ -11745,8 +11736,8 @@ Click ⚙️ to configure backend connection.`,
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
 
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
             if (!line) continue;
             if (line.startsWith(':')) continue; // Skip keep-alive comments
 
@@ -12341,14 +12332,15 @@ Click ⚙️ to configure backend connection.`,
           `\`${content.keySlices.join('`, `')}\``,
         );
       }
-      if (content.mermaidBlocks?.length) {
+      const firstMermaid = content.mermaidBlocks?.[0];
+      if (firstMermaid !== undefined) {
         lines.push(
           '',
           uiText('#### 时序图', '#### Sequence diagram'),
           '',
           '```mermaid',
         );
-        lines.push(content.mermaidBlocks[0]);
+        lines.push(firstMermaid);
         lines.push('```');
       }
     }
@@ -13260,9 +13252,10 @@ Click ⚙️ to configure backend connection.`,
     options: {persist?: boolean} = {},
   ) {
     const index = this.state.messages.findIndex((m) => m.id === messageId);
-    if (index !== -1) {
+    const message = this.state.messages[index];
+    if (message) {
       this.state.messages[index] = {
-        ...this.state.messages[index],
+        ...message,
         ...updates,
       };
       if (options.persist !== false) {
@@ -13850,12 +13843,12 @@ Click ⚙️ to configure backend connection.`,
       const lastActive = this.formatRelativeTime(session.lastActiveAt);
 
       // 获取 session 摘要（取第一条用户消息或自动生成）
-      const userMessages = session.messages.filter((m) => m.role === 'user');
+      const firstUserMessage = session.messages.find((m) => m.role === 'user');
       const summary = isCurrent
         ? uiText('当前对话', 'Current chat')
         : session.summary ||
-          (userMessages.length > 0
-            ? userMessages[0].content.slice(0, 30)
+          (firstUserMessage
+            ? firstUserMessage.content.slice(0, 30)
             : uiText('新对话', 'New chat'));
 
       return m(
@@ -14368,9 +14361,7 @@ Click ⚙️ to configure backend connection.`,
       // Get filename from Content-Disposition header or generate one
       const contentDisp = response.headers.get('Content-Disposition') || '';
       const filenameMatch = contentDisp.match(/filename="(.+)"/);
-      const filename = filenameMatch
-        ? filenameMatch[1]
-        : `result-${Date.now()}.${format}`;
+      const filename = filenameMatch?.[1] ?? `result-${Date.now()}.${format}`;
 
       // Download file
       const blob = await response.blob();
@@ -14462,9 +14453,7 @@ Click ⚙️ to configure backend connection.`,
 
       const contentDisp = response.headers.get('Content-Disposition') || '';
       const filenameMatch = contentDisp.match(/filename="(.+)"/);
-      const filename = filenameMatch
-        ? filenameMatch[1]
-        : `session-${Date.now()}.${format}`;
+      const filename = filenameMatch?.[1] ?? `session-${Date.now()}.${format}`;
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);

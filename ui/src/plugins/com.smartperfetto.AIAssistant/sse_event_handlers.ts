@@ -2815,10 +2815,11 @@ function buildMetricData(
   }
 
   // If single key-value pair, use first entry
-  if (keys.length === 1) {
+  const [firstKey] = keys;
+  if (keys.length === 1 && firstKey !== undefined) {
     return {
       title: title,
-      value: String(firstRow[keys[0]]),
+      value: String(firstRow[firstKey]),
     };
   }
 
@@ -3109,10 +3110,11 @@ function processListLayer(
 
     // Extract metadata for header display
     const extractedMetadata: Record<string, unknown> = {};
-    if (metadataColumns.length > 0 && items.length > 0) {
+    const [firstItem] = items;
+    if (firstItem) {
       for (const col of metadataColumns) {
-        if (items[0][col] !== undefined) {
-          extractedMetadata[col] = items[0][col];
+        if (firstItem[col] !== undefined) {
+          extractedMetadata[col] = firstItem[col];
         }
       }
     }
@@ -3286,7 +3288,8 @@ function normalizeClaimSourceRef(value: string): string {
   const english = text.match(
     /^(table|summary|metric|chart|figure|text|timeline|diagnostic|diagnosis)\s*#?\s*([0-9]+)/,
   );
-  if (english) {
+  const englishPrefix = english?.[1];
+  if (english && englishPrefix !== undefined) {
     const prefixMap: Record<string, string> = {
       table: '表',
       summary: '摘要',
@@ -3298,7 +3301,7 @@ function normalizeClaimSourceRef(value: string): string {
       diagnostic: '诊断',
       diagnosis: '诊断',
     };
-    return `${prefixMap[english[1]]} ${Number(english[2])}`;
+    return `${prefixMap[englishPrefix]} ${Number(english[2])}`;
   }
   return text;
 }
@@ -3339,13 +3342,13 @@ function parseClaimNumberLiteral(
   const match = raw.match(
     /^([+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:e[+-]?\d+)?)\s*(?:%|ms|s|ns|us|µs|fps|hz|mhz|ghz|帧|次|行)?$/i,
   );
-  if (!match) return undefined;
-  const parsed = Number(match[1]);
+  const numericLiteral = match?.[1];
+  if (numericLiteral === undefined) return undefined;
+  const parsed = Number(numericLiteral);
   if (!Number.isFinite(parsed)) return undefined;
 
-  const literal = match[1].toLowerCase();
-  const mantissa = literal.split('e')[0];
-  const decimalPart = mantissa.includes('.') ? mantissa.split('.')[1] : '';
+  const [mantissa = ''] = numericLiteral.toLowerCase().split('e');
+  const [, decimalPart = ''] = mantissa.split('.');
   const integerLiteral = decimalPart.length === 0;
   const tolerance =
     decimalPart.length > 0
@@ -3461,10 +3464,11 @@ function parseClaimRowSelectorString(value: string): Record<string, unknown> {
   const selector: Record<string, unknown> = {};
   for (const part of text.split(/[,，]/)) {
     const match = part.trim().match(/^([^=：:]+)\s*(?:=|:|：)\s*(.+)$/);
-    if (!match) continue;
-    const key = normalizeFlowLine(match[1]);
+    const [, rawKey, value] = match ?? [];
+    if (rawKey === undefined || value === undefined) continue;
+    const key = normalizeFlowLine(rawKey);
     if (!key) continue;
-    selector[key] = parseClaimSelectorScalar(match[2]);
+    selector[key] = parseClaimSelectorScalar(value);
   }
   return selector;
 }
@@ -3494,8 +3498,9 @@ function resolveClaimColumn(
     .filter(
       ({name}) => normalizeClaimColumnName(String(name)) === normalizedColumn,
     );
-  if (normalizedMatches.length === 1) {
-    return {index: normalizedMatches[0].index};
+  const [firstNameMatch] = normalizedMatches;
+  if (normalizedMatches.length === 1 && firstNameMatch) {
+    return {index: firstNameMatch.index};
   }
   if (normalizedMatches.length > 1) return {status: '未核验: 列名不唯一'};
 
@@ -3507,8 +3512,9 @@ function resolveClaimColumn(
         normalizeClaimColumnName(definition.label) === normalizedColumn &&
         sqlResult.columns.includes(definition.name),
     );
-  if (labelMatches.length === 1) {
-    return {index: sqlResult.columns.indexOf(labelMatches[0].definition.name)};
+  const [firstLabelMatch] = labelMatches;
+  if (labelMatches.length === 1 && firstLabelMatch) {
+    return {index: sqlResult.columns.indexOf(firstLabelMatch.definition.name)};
   }
   if (labelMatches.length > 1) return {status: '未核验: 列标签不唯一'};
 
@@ -3564,15 +3570,16 @@ function resolveClaimRow(
     .map((row, idx) => ({row, idx}))
     .filter(({row}) => rowMatchesSelector(row, sqlResult, rowSelector));
   const selectorLabel = `rowSelector ${selectorEntries.map(([key, value]) => `${key}=${String(value)}`).join(', ')}`;
-  if (matches.length === 0) {
+  const [firstMatch] = matches;
+  if (!firstMatch) {
     return {rowLabel: selectorLabel, status: '未通过: rowSelector 未命中'};
   }
   if (matches.length > 1) {
     return {rowLabel: selectorLabel, status: '未核验: rowSelector 不唯一'};
   }
   return {
-    row: matches[0].row,
-    rowLabel: `${selectorLabel} -> row ${matches[0].idx}`,
+    row: firstMatch.row,
+    rowLabel: `${selectorLabel} -> row ${firstMatch.idx}`,
   };
 }
 
@@ -4092,10 +4099,11 @@ function renderServerVerificationDetails(
     lines.push('', `### ${claimId}`);
     lines.push(`- ${uiText('结论文本', 'Claim text')}: ${texts.length === 1
       ? texts[0] : uiText('服务器投影中不可唯一确定', 'not uniquely available from server projection')}`);
+    const [firstResult] = claimResults;
     const status = duplicate || conflicting
       ? 'unverified'
-      : claimResults.length === 1
-        ? readStringField(claimResults[0], 'status', 'not_checked')
+      : claimResults.length === 1 && firstResult
+        ? readStringField(firstResult, 'status', 'not_checked')
         : 'not_checked';
     lines.push(`- status: ${status}`);
     if (duplicate || conflicting) {
@@ -4800,6 +4808,7 @@ export function handleAnalysisCompletedEvent(
           for (let i = messages.length - 1; i >= 0; i--) {
             const message = messages[i];
             if (
+              !message ||
               message.role !== 'assistant' ||
               message.flowTag === 'streaming_flow' ||
               message.sqlResult ||

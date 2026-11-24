@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {beforeEach, describe, expect, it} from 'vitest';
 
 import {
@@ -358,7 +359,7 @@ describe('SessionManager OIDC storage isolation', () => {
       }),
     );
     const restored = new SessionManager().loadSessionsStorage();
-    const restoredMessage = restored.byTrace['trace-oidc'][0].messages[0] as unknown as Record<string, unknown>;
+    const restoredMessage = ensureDefined(restored.byTrace['trace-oidc']?.[0]).messages[0] as unknown as Record<string, unknown>;
     expect(restoredMessage).not.toHaveProperty('smartScenePreview.reportId');
     expect(restoredMessage).not.toHaveProperty('teachingPipeline.observedFlow.context.traceId');
     expect(restoredMessage).not.toHaveProperty('sqlResult.sourceContext');
@@ -399,7 +400,7 @@ describe('SessionManager OIDC storage isolation', () => {
 
     const loaded = new SessionManager().loadSessionsStorage();
 
-    expect(loaded.byTrace['trace-legacy'][0].messages).toEqual([
+    expect(ensureDefined(loaded.byTrace['trace-legacy']?.[0]).messages).toEqual([
       ordinaryMessage,
     ]);
     const persisted = JSON.parse(
@@ -455,7 +456,7 @@ describe('SessionManager safe source-use receipt storage', () => {
 
     manager.saveHistory([message], null, 'trace-a');
 
-    expect(manager.loadLegacyHistory()?.messages[0].sourceUseReceipt).toEqual(
+    expect(ensureDefined(manager.loadLegacyHistory()?.messages[0]).sourceUseReceipt).toEqual(
       message.sourceUseReceipt,
     );
   });
@@ -540,10 +541,10 @@ describe('SessionManager session storage CAS', () => {
     secondWindow.saveSessionsStorage(secondSnapshot);
 
     const merged = new SessionManager().loadSessionsStorage();
-    expect(merged.byTrace['trace-a'].map((s) => s.sessionId)).toEqual([
+    expect(ensureDefined(merged.byTrace['trace-a']).map((s) => s.sessionId)).toEqual([
       'session-a',
     ]);
-    expect(merged.byTrace['trace-b'].map((s) => s.sessionId)).toEqual([
+    expect(ensureDefined(merged.byTrace['trace-b']).map((s) => s.sessionId)).toEqual([
       'session-b',
     ]);
 

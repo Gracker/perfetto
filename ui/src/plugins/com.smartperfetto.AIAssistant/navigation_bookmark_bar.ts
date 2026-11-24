@@ -241,6 +241,7 @@ export class NavigationBookmarkBar
 
     this.currentIndex = index;
     const bookmark = bookmarks[index];
+    if (!bookmark) return;
 
     // 使用 Perfetto API 跳转
     trace.scrollTo({

@@ -28,6 +28,7 @@
  * - Translation helpers
  */
 
+import {ensureDefined} from '../../base/assert';
 import {
   type FullAnalysis,
   type ExpandableSections,
@@ -56,7 +57,7 @@ markdownRenderer.renderer.rules.link_open = (
   env,
   self,
 ) => {
-  const token = tokens[idx];
+  const token = ensureDefined(tokens[idx]);
   const hrefIdx = token.attrIndex('href');
   const href = hrefIdx >= 0 ? token.attrs?.[hrefIdx]?.[1] || '' : '';
   if (!href.startsWith(TIMESTAMP_LINK_SCHEME)) {
@@ -71,7 +72,7 @@ const defaultImageRenderer =
   ((tokens, idx, options, _env, self) =>
     self.renderToken(tokens, idx, options));
 markdownRenderer.renderer.rules.image = (tokens, idx, options, env, self) => {
-  tokens[idx].attrJoin('class', 'ai-markdown-image');
+  ensureDefined(tokens[idx]).attrJoin('class', 'ai-markdown-image');
   return defaultImageRenderer(tokens, idx, options, env, self);
 };
 
@@ -86,7 +87,7 @@ markdownRenderer.renderer.rules.table_open = (
   env,
   self,
 ) => {
-  tokens[idx].attrJoin('class', 'ai-md-table');
+  ensureDefined(tokens[idx]).attrJoin('class', 'ai-md-table');
   return defaultTableOpenRenderer(tokens, idx, options, env, self);
 };
 
@@ -95,11 +96,10 @@ const defaultFenceRenderer =
   ((tokens, idx, options, _env, self) =>
     self.renderToken(tokens, idx, options));
 markdownRenderer.renderer.rules.fence = (tokens, idx, options, env, self) => {
-  const token = tokens[idx];
+  const token = ensureDefined(tokens[idx]);
   const info = String(token.info || '')
     .trim()
-    .split(/\s+/)[0]
-    .toLowerCase();
+    .split(/\s+/)[0]?.toLowerCase();
   if (info !== 'mermaid') {
     return defaultFenceRenderer(tokens, idx, options, env, self);
   }
@@ -465,10 +465,11 @@ export function parseSummaryToTable(
   for (const part of parts) {
     // Match "key: value" pattern
     const match = part.match(/^([^:]+):\s*(.+)$/);
-    if (match) {
+    const [, key, value] = match ?? [];
+    if (key !== undefined && value !== undefined) {
       keyValuePairs.push({
-        key: match[1].trim(),
-        value: match[2].trim(),
+        key: key.trim(),
+        value: value.trim(),
       });
     }
   }

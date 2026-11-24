@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
@@ -130,8 +131,8 @@ describe('codebase content consent and selection preview API', () => {
     expect(preview).toEqual({status: 'partial', selectionPolicyRevision: 4, preview: {acceptedFileCount: 12}});
     await updateCodebaseSelection('http://backend', 'codebase/a',
       {pathFilters: ['app'], excludeGlobs: [], expectedSelectionPolicyRevision: 4});
-    expect(fetchMock.mock.calls[0][0]).toBe('http://backend/api/rag/codebases/codebase%2Fa/selection/preview');
-    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+    expect(ensureDefined(fetchMock.mock.calls[0])[0]).toBe('http://backend/api/rag/codebases/codebase%2Fa/selection/preview');
+    expect(JSON.parse(String(ensureDefined(fetchMock.mock.calls[1])[1]?.body))).toEqual({
       pathFilters: ['app'], excludeGlobs: [], expectedSelectionPolicyRevision: 4,
     });
   });

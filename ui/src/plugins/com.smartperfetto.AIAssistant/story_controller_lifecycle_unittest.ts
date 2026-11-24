@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2024-2026 Gracker (Chris)
+import {ensureDefined} from '../../base/assert';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {StoryController, StoryControllerCancelledError, StoryControllerInvalidatedError, type StoryControllerContext} from './story_controller';
 
@@ -35,11 +36,11 @@ describe('StoryController lifecycle', () => {
       ? Promise.resolve(cancelled()) : new Promise<Response>(done => { resolve = done; }));
     const ctrl = new StoryController(context(fetch)); const run = ctrl.start();
     await ctrl.cancel(); expect(fetch).toHaveBeenCalledOnce();
-    expect(fetch.mock.calls[0][1]?.signal).toBeUndefined();
+    expect(ensureDefined(fetch.mock.calls[0])[1]?.signal).toBeUndefined();
     resolve(receipt()); await expect(run).rejects.toBeInstanceOf(StoryControllerCancelledError);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch.mock.calls[1][0]).toContain('/session-a/cancel');
-    expect(JSON.parse(fetch.mock.calls[1][1]?.body as string)).toEqual({runId: 'run-a'});
+    expect(ensureDefined(fetch.mock.calls[1])[0]).toContain('/session-a/cancel');
+    expect(JSON.parse(ensureDefined(fetch.mock.calls[1])[1]?.body as string)).toEqual({runId: 'run-a'});
   });
   it('on disposal still collects the old receipt and cancels without touching a new UI', async () => {
     let resolve!: (response: Response) => void;

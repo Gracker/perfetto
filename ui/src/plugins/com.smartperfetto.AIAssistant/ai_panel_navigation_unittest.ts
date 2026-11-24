@@ -16,6 +16,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, beforeEach, describe, it, expect, vi} from 'vitest';
 import type {Mock} from 'vitest';
 import m from 'mithril';
@@ -1820,7 +1821,7 @@ describe('AIPanel per-turn analysis mode', () => {
       await stops[0].attrs.onclick();
 
       expect(cancelBodies(fetch)).toEqual(['chat-run']);
-      expect(String(fetch.mock.calls[0][0])).toContain('/conversation/chat-session/cancel');
+      expect(String(ensureDefined(fetch.mock.calls[0])[0])).toContain('/conversation/chat-session/cancel');
       expect(controller.signal.aborted).toBe(true);
       expect(panel.isConversationExecutionActive()).toBe(false);
       expect(stopButtons(panel.view({attrs: {}}))).toHaveLength(0);
@@ -1883,7 +1884,7 @@ describe('AIPanel per-turn analysis mode', () => {
           init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
         }));
       const stop = panel.cancelConversationAnalysis();
-      expect(fetch.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(ensureDefined(fetch.mock.calls[0])[1]?.signal).toBeInstanceOf(AbortSignal);
       await vi.advanceTimersByTimeAsync(25_000);
       expect(panel.conversationStopPending()).toBe(false);
       await stop;
@@ -1933,7 +1934,7 @@ describe('cancelConversationRun', () => {
     const controller = new AbortController();
     const request = cancelConversationRun({backendUrl: 'http://backend'}, 'chat-session', 'chat-run', controller.signal);
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-    expect(fetch.mock.calls[0][1]?.signal).toBe(controller.signal);
+    expect(ensureDefined(fetch.mock.calls[0])[1]?.signal).toBe(controller.signal);
     controller.abort();
     await expect(request).rejects.toThrow('aborted');
   });
@@ -2712,7 +2713,7 @@ describe('AIPanel /goto navigation', () => {
 
     expect(result).toEqual({ok: true});
     expect(scrollTo).toHaveBeenCalledTimes(1);
-    const arg = scrollTo.mock.calls[0][0] as any;
+    const arg = ensureDefined(scrollTo.mock.calls[0])[0] as any;
     expect(arg.time.start).toBe(0n);
     expect(arg.time.end).toBe(5000001n);
   });
@@ -3454,7 +3455,7 @@ describe('AIPanel trace-pair session restore', () => {
     await panel.handleChatMessage('对比上方和下方 Trace 的启动速度差异');
 
     expect(fetchBackend).toHaveBeenCalledTimes(1);
-    const init = fetchBackend.mock.calls[0][1];
+    const init = ensureDefined(fetchBackend.mock.calls[0])[1];
     const requestBody = JSON.parse(String(init?.body));
     expect(requestBody).toMatchObject({
       query: '对比上方和下方 Trace 的启动速度差异',
@@ -3569,12 +3570,12 @@ describe('AIPanel trace-pair session restore', () => {
     await Promise.all([analysisPromise, cancellationPromise]);
 
     expect(fetchBackend).toHaveBeenCalledTimes(3);
-    expect(fetchBackend.mock.calls[1][0]).toContain('/agent-late/cancel');
-    expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
+    expect(ensureDefined(fetchBackend.mock.calls[1])[0]).toContain('/agent-late/cancel');
+    expect(JSON.parse(String(ensureDefined(fetchBackend.mock.calls[1])[1]?.body))).toEqual({
       runId: 'run-late',
     });
-    expect(fetchBackend.mock.calls[2][0]).toContain('/agent-late');
-    expect(fetchBackend.mock.calls[2][1]?.method).toBe('DELETE');
+    expect(ensureDefined(fetchBackend.mock.calls[2])[0]).toContain('/agent-late');
+    expect(ensureDefined(fetchBackend.mock.calls[2])[1]?.method).toBe('DELETE');
     expect(panel.listenToAgentSSE).not.toHaveBeenCalled();
     expect(panel.state.agentSessionId).toBeNull();
     expect(panel.state.isLoading).toBe(false);
@@ -3635,7 +3636,7 @@ describe('AIPanel trace-pair session restore', () => {
 
     const analysisPromise = panel.handleChatMessage('continued analysis');
     await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(1));
-    const continuationBody = JSON.parse(String(fetchBackend.mock.calls[0][1]?.body));
+    const continuationBody = JSON.parse(String(ensureDefined(fetchBackend.mock.calls[0])[1]?.body));
     expect(continuationBody.sessionId).toBe('agent-existing');
     expect(continuationBody.options.analysisMode).toBe('full');
 
@@ -3657,11 +3658,11 @@ describe('AIPanel trace-pair session restore', () => {
     await Promise.all([analysisPromise, cancellationPromise]);
 
     expect(fetchBackend).toHaveBeenCalledTimes(3);
-    expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
+    expect(JSON.parse(String(ensureDefined(fetchBackend.mock.calls[1])[1]?.body))).toEqual({
       runId: 'run-current',
     });
-    expect(fetchBackend.mock.calls[2][0]).toContain('/agent-existing');
-    expect(fetchBackend.mock.calls[2][1]?.method).toBe('DELETE');
+    expect(ensureDefined(fetchBackend.mock.calls[2])[0]).toContain('/agent-existing');
+    expect(ensureDefined(fetchBackend.mock.calls[2])[1]?.method).toBe('DELETE');
     expect(
       panel.state.messages.find(
         (message: {id: string}) => message.id === 'prior-progress',
@@ -3733,7 +3734,7 @@ describe('AIPanel trace-pair session restore', () => {
 
     const cancellationPromise = panel.cancelAnalysis();
     await vi.waitFor(() => expect(fetchBackend).toHaveBeenCalledTimes(2));
-    expect(JSON.parse(String(fetchBackend.mock.calls[1][1]?.body))).toEqual({
+    expect(JSON.parse(String(ensureDefined(fetchBackend.mock.calls[1])[1]?.body))).toEqual({
       runId: 'run-running',
     });
 
@@ -3770,16 +3771,16 @@ describe('AIPanel trace-pair session restore', () => {
     await panel.handleStoryCancel();
 
     expect(panel.fetchBackend).toHaveBeenCalledTimes(2);
-    expect(panel.fetchBackend.mock.calls[0][0]).toContain(
+    expect(ensureDefined(panel.fetchBackend.mock.calls[0])[0]).toContain(
       '/agent-story/cancel',
     );
     expect(
-      JSON.parse(String(panel.fetchBackend.mock.calls[0][1]?.body)),
+      JSON.parse(String(ensureDefined(panel.fetchBackend.mock.calls[0])[1]?.body)),
     ).toEqual({
       runId: 'run-story',
     });
-    expect(panel.fetchBackend.mock.calls[1][0]).toContain('/agent-story');
-    expect(panel.fetchBackend.mock.calls[1][1]?.method).toBe('DELETE');
+    expect(ensureDefined(panel.fetchBackend.mock.calls[1])[0]).toContain('/agent-story');
+    expect(ensureDefined(panel.fetchBackend.mock.calls[1])[1]?.method).toBe('DELETE');
     expect(panel.state.agentSessionId).toBeNull();
     expect(panel.state.agentRunId).toBeNull();
     expect(getAISharedState().status).toBe('cancelled');
@@ -4000,9 +4001,9 @@ describe('AIPanel conversation restoration', () => {
     await newRestore;
     await panel.handleConversationMessage('continue the restored question');
     expect(fetch).toHaveBeenCalledTimes(4);
-    expect(new Headers(fetch.mock.calls[1][1]?.headers).get('x-api-key'))
+    expect(new Headers(ensureDefined(fetch.mock.calls[1])[1]?.headers).get('x-api-key'))
       .toBe(change === 'credential' ? 'new-test-key' : 'old-test-key');
-    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body))).toMatchObject({sessionId: 'saved-chat'});
+    expect(JSON.parse(String(ensureDefined(fetch.mock.calls[2])[1]?.body))).toMatchObject({sessionId: 'saved-chat'});
     expect(loadConversationStoreForUpdate('http://restoration-backend').messages.some(message =>
       message.content === 'authorized restored answer' && message.turn?.partial === true)).toBe(true);
     expect(loadConversationStore('http://restoration-backend').messages.some(message =>
@@ -4022,7 +4023,7 @@ describe('AIPanel conversation restoration', () => {
     expect(panel.activeConversationRun?.runId).toBe('active-run');
     expect(panel.state.isLoading).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(String(fetch.mock.calls[1][0])).toContain('/conversation/saved-chat/stream?runId=active-run');
+    expect(String(ensureDefined(fetch.mock.calls[1])[0])).toContain('/conversation/saved-chat/stream?runId=active-run');
     expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
     stream.enqueue(new TextEncoder().encode('event: run_completed\ndata: {"outcome":{"kind":"answered","message":"resumed answer"}}\n\n'));
     stream.close();
@@ -4063,8 +4064,8 @@ describe('AIPanel conversation restoration', () => {
     expect(panel.state.loadingPhase).not.toBe('stale-phase');
     expect(panel.state.messages.some((message: any) => /stale-answer|stale-source|old stream failed/.test(message.content))).toBe(false);
     await panel.cancelConversationAnalysis();
-    expect(String(fetch.mock.calls[2][0])).toContain('/conversation/saved-chat/cancel');
-    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body))).toEqual({runId: 'active-run'});
+    expect(String(ensureDefined(fetch.mock.calls[2])[0])).toContain('/conversation/saved-chat/cancel');
+    expect(JSON.parse(String(ensureDefined(fetch.mock.calls[2])[1]?.body))).toEqual({runId: 'active-run'});
     newStream.close();
     await newRun;
   });

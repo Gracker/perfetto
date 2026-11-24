@@ -318,10 +318,10 @@ export const SCENE_PIN_MAPPING: Record<string, ScenePinInstruction[]> = {
 /**
  * Performance rating thresholds for scenes
  */
-export const SCENE_THRESHOLDS: Record<
-  string,
-  {good: number; acceptable: number}
-> = {
+type SceneThreshold = {good: number; acceptable: number};
+export const SCENE_THRESHOLDS: Record<string, SceneThreshold> & {
+  scroll_fps: SceneThreshold;
+} = {
   cold_start: {good: 500, acceptable: 1000},
   warm_start: {good: 300, acceptable: 600},
   hot_start: {good: 100, acceptable: 200},

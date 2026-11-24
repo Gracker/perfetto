@@ -407,8 +407,8 @@ export class SessionManager {
 
     const sanitized: SessionsStorage = {byTrace: {}};
     let changed = false;
-    for (const fingerprint in parsed.storage.byTrace) {
-      sanitized.byTrace[fingerprint] = parsed.storage.byTrace[fingerprint].map(
+    for (const [fingerprint, sessions] of Object.entries(parsed.storage.byTrace)) {
+      sanitized.byTrace[fingerprint] = sessions.map(
         (session) => {
           const projected = projectOidcSessionForStorage(session);
           if (JSON.stringify(projected) !== JSON.stringify(session)) changed = true;
@@ -488,23 +488,20 @@ export class SessionManager {
     incoming: SessionsStorage,
   ): SessionsStorage {
     const merged: SessionsStorage = {byTrace: {}};
-    for (const fingerprint in base.byTrace) {
-      merged.byTrace[fingerprint] = [...base.byTrace[fingerprint]];
+    for (const [fingerprint, sessions] of Object.entries(base.byTrace)) {
+      merged.byTrace[fingerprint] = [...sessions];
     }
 
-    for (const fingerprint in incoming.byTrace) {
-      if (!merged.byTrace[fingerprint]) {
-        merged.byTrace[fingerprint] = [];
-      }
-
-      for (const session of incoming.byTrace[fingerprint]) {
-        const index = merged.byTrace[fingerprint].findIndex(
+    for (const [fingerprint, sessions] of Object.entries(incoming.byTrace)) {
+      const mergedSessions = (merged.byTrace[fingerprint] ??= []);
+      for (const session of sessions) {
+        const index = mergedSessions.findIndex(
           (existing) => existing.sessionId === session.sessionId,
         );
         if (index === -1) {
-          merged.byTrace[fingerprint].push(session);
+          mergedSessions.push(session);
         } else {
-          merged.byTrace[fingerprint][index] = session;
+          mergedSessions[index] = session;
         }
       }
     }
@@ -548,10 +545,8 @@ export class SessionManager {
 
       // F4: Create a trimmed copy to reduce storage size
       const trimmedStorage: SessionsStorage = {byTrace: {}};
-      for (const fingerprint in storageToSave.byTrace) {
-        trimmedStorage.byTrace[fingerprint] = storageToSave.byTrace[
-          fingerprint
-        ].map((session) => {
+      for (const [fingerprint, sessions] of Object.entries(storageToSave.byTrace)) {
+        trimmedStorage.byTrace[fingerprint] = sessions.map((session) => {
           const projected = isSmartPerfettoOidcMode()
             ? projectOidcSessionForStorage(session)
             : session;
@@ -583,8 +578,8 @@ export class SessionManager {
           sessionId: string;
           lastActiveAt: number;
         }> = [];
-        for (const fingerprint in trimmedStorage.byTrace) {
-          trimmedStorage.byTrace[fingerprint].forEach((session) => {
+        for (const [fingerprint, sessions] of Object.entries(trimmedStorage.byTrace)) {
+          sessions.forEach((session) => {
             allSessions.push({
               fingerprint,
               sessionId: session.sessionId,
@@ -700,11 +695,12 @@ export class SessionManager {
     if (!sessions) return false;
 
     const sessionIndex = sessions.findIndex((s) => s.sessionId === sessionId);
-    if (sessionIndex === -1) return false;
+    const session = sessions[sessionIndex];
+    if (!session) return false;
 
     // Update session data
     sessions[sessionIndex] = {
-      ...sessions[sessionIndex],
+      ...session,
       ...updates,
       lastActiveAt: Date.now(),
     };
@@ -722,8 +718,7 @@ export class SessionManager {
     const storage = this.loadSessionsStorage();
 
     // Search all traces for the session
-    for (const fingerprint in storage.byTrace) {
-      const sessions = storage.byTrace[fingerprint];
+    for (const sessions of Object.values(storage.byTrace)) {
       const session = sessions.find((s) => s.sessionId === sessionId);
       if (session) {
         return session;
@@ -740,8 +735,7 @@ export class SessionManager {
   deleteSession(sessionId: string): boolean {
     const storage = this.loadSessionsStorage();
 
-    for (const fingerprint in storage.byTrace) {
-      const sessions = storage.byTrace[fingerprint];
+    for (const sessions of Object.values(storage.byTrace)) {
       const index = sessions.findIndex((s) => s.sessionId === sessionId);
       if (index !== -1) {
         sessions.splice(index, 1);
@@ -912,8 +906,7 @@ export class SessionManager {
     const now = Date.now();
     let deletedCount = 0;
 
-    for (const fingerprint in storage.byTrace) {
-      const sessions = storage.byTrace[fingerprint];
+    for (const [fingerprint, sessions] of Object.entries(storage.byTrace)) {
       const originalLength = sessions.length;
 
       // Filter out old sessions
@@ -943,9 +936,9 @@ export class SessionManager {
   getSessionSummary(session: AISession): string {
     if (session.summary) return session.summary;
 
-    const userMessages = session.messages.filter((m) => m.role === 'user');
-    if (userMessages.length > 0) {
-      const firstMessage = userMessages[0].content;
+    const firstUserMessage = session.messages.find((m) => m.role === 'user');
+    if (firstUserMessage) {
+      const firstMessage = firstUserMessage.content;
       return firstMessage.length > 30
         ? firstMessage.slice(0, 30) + '...'
         : firstMessage;

@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {defer} from '../../base/deferred';
@@ -57,7 +58,7 @@ describe('MermaidRenderer', () => {
 
     expect(callsWhileBlocked).toBe(1);
     expect(render).toHaveBeenCalledTimes(2);
-    expect(render.mock.calls[1][1]).toContain('B99');
+    expect(ensureDefined(render.mock.calls[1])[1]).toContain('B99');
     expect(oldHost.innerHTML).toBe('');
     expect(latestHost.querySelector('svg')).not.toBeNull();
   });
@@ -111,7 +112,7 @@ describe('MermaidRenderer', () => {
     await Promise.all([pending, latest]);
 
     expect(render).toHaveBeenCalledTimes(2);
-    expect(render.mock.calls[1][1]).toContain('C --> D');
+    expect(ensureDefined(render.mock.calls[1])[1]).toContain('C --> D');
     expect(host.textContent).not.toContain('stale');
   });
 

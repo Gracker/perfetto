@@ -1,5 +1,6 @@
 // Copyright (C) 2024 SmartPerfetto
 
+import {ensureDefined} from '../base/assert';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {
@@ -82,7 +83,7 @@ describe('SmartPerfetto browser authentication', () => {
 
     await smartPerfettoFetch('http://backend/api/resource', {method: 'DELETE'});
 
-    const init = fetchMock.mock.calls[0][1];
+    const init = ensureDefined(fetchMock.mock.calls[0])[1];
     expect(init?.credentials).toBe('include');
     expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe(
       'csrf-token-a',

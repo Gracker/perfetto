@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {describe, expect, it} from 'vitest';
 
 import {orderMessagesForDisplay} from './message_order';
@@ -113,8 +114,8 @@ describe('AI Assistant message display order', () => {
     ]);
 
     messages.push(message('answer-2', 'assistant', 'answer_stream'));
-    secondRound[2].content = 'Updated second-round steps';
-    secondRound[2].timestamp = 2000;
+    ensureDefined(secondRound[2]).content = 'Updated second-round steps';
+    ensureDefined(secondRound[2]).timestamp = 2000;
     messages.push(message('late-data-2', 'assistant'));
     const originalOrder = ids(messages);
 
@@ -123,8 +124,8 @@ describe('AI Assistant message display order', () => {
       'round-2', 'user-2', 'late-data-2', 'timeline-2', 'answer-2',
     ]);
     expect(ids(messages)).toEqual(originalOrder);
-    expect(firstRound[1].content).toBe('answer-1');
-    expect(firstRound[2].content).toBe('timeline-1');
+    expect(ensureDefined(firstRound[1]).content).toBe('answer-1');
+    expect(ensureDefined(firstRound[2]).content).toBe('timeline-1');
   });
   it('places supplements after the process so far, in send order, before the answer', () => {
     const messages = [

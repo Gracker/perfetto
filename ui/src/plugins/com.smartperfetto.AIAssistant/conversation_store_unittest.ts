@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {
@@ -52,9 +53,9 @@ describe('conversation store private message persistence', () => {
     const allStorage = Array.from({length: localStorage.length}, (_, index) => (
       localStorage.getItem(localStorage.key(index) || '') || ''
     )).join('\n');
-    expect(inMemory.messages[0].content).toBe(privateCanary);
+    expect(ensureDefined(inMemory.messages[0]).content).toBe(privateCanary);
     expect(allStorage).not.toContain(privateCanary);
-    expect(persisted.messages[0].content).toContain('PRIVATE_QUERY_REFERENCE');
+    expect(ensureDefined(persisted.messages[0]).content).toContain('PRIVATE_QUERY_REFERENCE');
   });
 
   it('persists only a scoped logical locator while keeping active OIDC bindings in memory', () => {
@@ -241,12 +242,12 @@ describe('conversation restoration authority', () => {
     vi.stubGlobal('fetch', fetch);
     const restored = await restoreConversationStore({backendUrl: 'http://backend'});
     expect(fetch).toHaveBeenCalledOnce();
-    expect(String(fetch.mock.calls[0][0])).toContain('/conversation/logical-conversation');
+    expect(String(ensureDefined(fetch.mock.calls[0])[0])).toContain('/conversation/logical-conversation');
     expect(restored).toMatchObject({sessionId: 'logical-conversation', recoveryStatus: 'interrupted'});
-    expect(conversationMessageContent(restored.messages[0])).toContain('turn_limit');
-    expect(conversationMessageContent(restored.messages[0])).toContain('GPU fence unavailable');
-    expect(conversationMessageContent(restored.messages[0])).toContain('authorized private answer');
-    const cached = loadConversationStore('http://backend').messages[0];
+    expect(conversationMessageContent(ensureDefined(restored.messages[0]))).toContain('turn_limit');
+    expect(conversationMessageContent(ensureDefined(restored.messages[0]))).toContain('GPU fence unavailable');
+    expect(conversationMessageContent(ensureDefined(restored.messages[0]))).toContain('authorized private answer');
+    const cached = ensureDefined(loadConversationStore('http://backend').messages[0]);
     expect(cached.content).toContain('PRIVATE_QUERY_REFERENCE');
     expect(cached.turn).toBeUndefined();
   });
@@ -271,7 +272,7 @@ describe('conversation restoration authority', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(restoredResponse()));
     await expect(restoreConversationStore({backendUrl: 'http://backend'}, () => false))
       .rejects.toThrow('invalidated');
-    expect(loadConversationStore('http://backend').messages[0].content).toBe('cached text');
+    expect(ensureDefined(loadConversationStore('http://backend').messages[0]).content).toBe('cached text');
   });
 });
 
@@ -332,7 +333,7 @@ describe('restored conversation mutation and projection', () => {
       id: 'follow-up', role: 'user', content: 'follow up', timestamp: 2,
     }, restored.sessionId);
     expect(appended.messages[0]).toMatchObject({content: 'authorized private answer', turn: {partial: true}});
-    expect(loadConversationStore('http://backend').messages[0].content).toContain('PRIVATE_QUERY_REFERENCE');
+    expect(ensureDefined(loadConversationStore('http://backend').messages[0]).content).toContain('PRIVATE_QUERY_REFERENCE');
   });
 
   it('hydrates the backend boolean recommendation separately from its handoff object', async () => {
@@ -342,8 +343,8 @@ describe('restored conversation mutation and projection', () => {
     snapshot.fullHandoff = {question: 'check scheduling', scope: 'main thread', assumptions: ['trace required'], evidence: []};
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(snapshot), {status: 200})));
     const restored = await restoreConversationStore({backendUrl: 'http://backend'});
-    expect(restored.messages[0].fullHandoff).toEqual(snapshot.fullHandoff);
-    expect(restored.messages[0].fullHandoff?.assumptions.join('; ')).toBe('trace required');
+    expect(ensureDefined(restored.messages[0]).fullHandoff).toEqual(snapshot.fullHandoff);
+    expect(ensureDefined(restored.messages[0]).fullHandoff?.assumptions.join('; ')).toBe('trace required');
   });
 
   it('keeps completeness notices off user questions and localizes a known interruption', () => {

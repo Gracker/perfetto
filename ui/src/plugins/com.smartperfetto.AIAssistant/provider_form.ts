@@ -194,7 +194,7 @@ export class ProviderForm implements m.ClassComponent<ProviderFormAttrs> {
       this.editingId = null;
       this.form = createEmptyForm();
       const firstTemplate = templates[0];
-      if (templates.length > 0) {
+      if (firstTemplate) {
         this.form.name = firstTemplate.displayName;
         this.generatedName = firstTemplate.displayName;
         this.form.type = firstTemplate.type;

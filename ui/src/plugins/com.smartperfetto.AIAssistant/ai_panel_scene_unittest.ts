@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import {ensureDefined} from '../../base/assert';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {AIPanel} from './ai_panel';
 import {resetAISharedState} from './ai_shared_state';
@@ -93,14 +94,14 @@ describe('AIPanel canonical scene flow', () => {
         contentFingerprint: 'a', dependencyFingerprint: 'a', issuedRevision: 1,
         referencesResolved: false, semanticStatus: 'unverified', checks: [], diagnostics: []}]};
     value.applyCanonicalSceneTimeline(candidate, false);
-    const candidateIsCurrent = create.mock.calls[0][4]!;
+    const candidateIsCurrent = ensureDefined(create.mock.calls[0])[4]!;
     expect(candidateIsCurrent()).toBe(true);
     value.applyCanonicalSceneTimeline({...candidate, segments: [],
       diagnostics: [{code: 'scene_output_projection_restricted'}]}, true);
     expect(candidateIsCurrent()).toBe(false);
     expect(value.state.detectedScenes).toEqual([]);
-    expect(create.mock.calls[1][3]).toEqual([]);
-    expect(create.mock.calls[1][4]!()).toBe(true);
+    expect(ensureDefined(create.mock.calls[1])[3]).toEqual([]);
+    expect(ensureDefined(create.mock.calls[1])[4]!()).toBe(true);
   });
   it('rejects mismatched status scopes before recovering a terminal or clearing loading', async () => {
     const value = panel(); value.handleSSEEvent = vi.fn();

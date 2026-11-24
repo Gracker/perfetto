@@ -13,6 +13,7 @@
  * shows up on live data has somewhere to fail.
  */
 
+import {ensureDefined} from '../../base/assert';
 import {describe, expect, it} from 'vitest';
 
 import {handleSSEEvent, type SSEHandlerContext} from './sse_event_handlers';
@@ -44,7 +45,7 @@ function replay(run: CapturedRun): string {
       for (const list of [messages, flowMessages]) {
         const index = list.findIndex((msg) => msg.id === messageId);
         if (index !== -1) {
-          list[index] = {...list[index], ...updates};
+          list[index] = {...ensureDefined(list[index]), ...updates};
           return;
         }
       }
@@ -62,7 +63,7 @@ function replay(run: CapturedRun): string {
   handleSSEEvent('end', {}, ctx);
 
   expect(flowMessages).toHaveLength(1);
-  return flowMessages[0].content;
+  return ensureDefined(flowMessages[0]).content;
 }
 
 /**
@@ -139,10 +140,10 @@ describe.each(Object.entries(RUNS))('process view on a real run: %s', (_name, ru
   it('keeps the steps in the order they happened', () => {
     const ordinals = run.events.map((e) => Number(e.data.ordinal));
     const firstText = String(
-      (run.events[0].data.content as {text: string}).text,
+      (ensureDefined(run.events[0]).data.content as {text: string}).text,
     ).slice(0, 20);
     const lastText = String(
-      (run.events[run.events.length - 1].data.content as {text: string}).text,
+      (ensureDefined(run.events[run.events.length - 1]).data.content as {text: string}).text,
     ).slice(0, 20);
     expect(ordinals).toEqual([...ordinals].sort((a, b) => a - b));
     expect(rendered.indexOf(firstText)).toBeLessThan(rendered.indexOf(lastText));
@@ -201,7 +202,7 @@ describe('process view on a real run: failures stay visible', () => {
   it('marks the Claude run failed tool calls as errors', () => {
     // That run hit tool-budget exhaustion, two failed AOSP lookups and a
     // rejected plan-phase advance. Those were unreadable JSON before.
-    const rendered = replay(RUNS.claudeScrolling);
+    const rendered = replay(ensureDefined(RUNS.claudeScrolling));
     const errorLines = rendered
       .split('\n')
       .filter((line) => line.includes('⚠'));

@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {
@@ -190,7 +191,7 @@ describe('getConversation', () => {
     await expect(getConversation({backendUrl: 'http://backend', apiKey: 'test-key'}, 'logical-id'))
       .rejects.toMatchObject({status});
     expect(fetch).toHaveBeenCalledOnce();
-    expect(fetch.mock.calls[0][1].headers).toMatchObject({'x-api-key': 'test-key'});
+    expect(ensureDefined(fetch.mock.calls[0])[1].headers).toMatchObject({'x-api-key': 'test-key'});
   });
 
   it('rejects a response for a different logical conversation', async () => {
@@ -222,8 +223,8 @@ describe('conversation control client', () => {
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(payload)));
     vi.stubGlobal('fetch', fetchMock);
     await appendConversationContext({backendUrl: 'http://backend'}, 's', input);
-    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual(input);
+    expect(ensureDefined(fetchMock.mock.calls[0])[1]?.method).toBe('POST');
+    expect(JSON.parse(String(ensureDefined(fetchMock.mock.calls[0])[1]?.body))).toEqual(input);
     payload.receipt.id = 'foreign';
     await expect(appendConversationContext({backendUrl: 'http://backend'}, 's', input)).rejects.toThrow('Invalid supplemental');
   });

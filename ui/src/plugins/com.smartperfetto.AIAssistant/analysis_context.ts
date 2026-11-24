@@ -73,7 +73,7 @@ export function shortCodebaseId(value: unknown): string {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) return 'unknown';
   const parts = raw.split(/[\\/]/).filter(Boolean);
-  const leaf = parts.length > 0 ? parts[parts.length - 1] : raw;
+  const leaf = parts.at(-1) ?? raw;
   return compactLabel(leaf, SHORT_CODEBASE_ID_LENGTH);
 }
 

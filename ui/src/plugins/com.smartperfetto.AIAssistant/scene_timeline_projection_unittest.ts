@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import {ensureDefined} from '../../base/assert';
 import {describe, expect, it} from 'vitest';
 import type {SceneTimelineView} from './generated/data_contract.types';
 import {agentStreamEventMatchesScope, projectSceneTimeline, sceneTimelineNavigation, sceneTimelineOverlayRows} from './scene_timeline_projection';
@@ -35,11 +36,11 @@ describe('canonical scene timeline projection', () => {
   it('allows only a consistent candidate-to-final upgrade at the same revision', () => {
     const current = projectSceneTimeline(null, timeline(), scope, false)!;
     expect(projectSceneTimeline(current, timeline(), scope, false)).toBe(current);
-    const changed = timeline(); changed.segments[0].segment.userAction = 'A different claim';
+    const changed = timeline(); ensureDefined(changed.segments[0]).segment.userAction = 'A different claim';
     expect(projectSceneTimeline(current, changed, scope, true)).toBe(current);
     for (const patch of [{checks: []}, {referencesResolved: false}, {issuedRevision: 2},
       {diagnostics: [{code: 'changed'}]}]) {
-      const altered = timeline(); Object.assign(altered.segments[0], patch);
+      const altered = timeline(); Object.assign(ensureDefined(altered.segments[0]), patch);
       expect(projectSceneTimeline(current, altered, scope, true)).toBe(current);
     }
     const final = projectSceneTimeline(current, timeline(), scope, true)!;
@@ -48,7 +49,7 @@ describe('canonical scene timeline projection', () => {
   });
   it('accepts a final restricted subset only when content is unchanged and dependencies remain present', () => {
     const candidate = timeline();
-    const a = candidate.segments[0];
+    const a = ensureDefined(candidate.segments[0]);
     const b = {...a, segment: {...a.segment, id: 'segment-b', dependencies: ['segment-a']}};
     const c = {...a, segment: {...a.segment, id: 'segment-c'}};
     candidate.segments = [a, b, c];
@@ -79,11 +80,13 @@ describe('canonical scene timeline projection', () => {
       durationMs: 0.000001, metadata: {semanticStatus: 'unverified', contradicted: false}});
   });
   it('retains the last segment of a 2000-segment timeline', () => {
-    const value = timeline(); value.segments = Array.from({length: 2000}, (_, i) => ({...value.segments[0],
-      segment: {...value.segments[0].segment, id: `segment-${i}`}}));
+    const value = timeline();
+    const base = ensureDefined(value.segments[0]);
+    value.segments = Array.from({length: 2000}, (_, i) => ({...base,
+      segment: {...base.segment, id: `segment-${i}`}}));
     expect(sceneTimelineNavigation(value)).toHaveLength(2000);
     expect(sceneTimelineOverlayRows(value)).toHaveLength(6000);
-    expect(sceneTimelineOverlayRows(value)[5999][4]).toBe('segment-1999');
+    expect(ensureDefined(sceneTimelineOverlayRows(value)[5999])[4]).toBe('segment-1999');
   });
   it('rejects stale completed/error event scope before any observable stream mutation', () => {
     for (const type of ['analysis_completed', 'error', 'scene_timeline_updated']) {

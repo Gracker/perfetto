@@ -16,8 +16,8 @@ const DEVICE_ROOT = /^\/(?:data\/(?:app|data|local|misc|user|vendor)|system|syst
 function candidatePaths(input: string): string[] {
   const found: string[] = [];
   for (const match of input.matchAll(PATH_TOKEN)) {
-    const value = match[1].replace(/[.:：]+$/, '');
-    if (value.length > 1) found.push(value);
+    const value = match[1]?.replace(/[.:：]+$/, '');
+    if (value && value.length > 1) found.push(value);
   }
   return found;
 }

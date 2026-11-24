@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {describe, expect, it} from 'vitest';
 
 import {
@@ -102,7 +103,7 @@ describe('buildTracePairContext', () => {
       minimizedTraceSides: new Set<TracePairTraceSide>(),
     });
 
-    expect(context?.panes[1].traceName).toBe('Comparison Trace');
+    expect(ensureDefined(context?.panes[1]).traceName).toBe('Comparison Trace');
   });
 
   it('marks both panes live when the same-page workspace is open', () => {

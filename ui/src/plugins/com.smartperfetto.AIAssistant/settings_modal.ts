@@ -465,13 +465,13 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
       ),
     );
-    if (focusable.length === 0) {
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) {
       event.preventDefault();
       this.dialogElement.focus();
       return;
     }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
     if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
       last.focus();
@@ -500,7 +500,9 @@ export class SettingsModal implements m.ClassComponent<SettingsModalAttrs> {
               (event.key === 'ArrowRight' ? 1 : -1) +
               tabs.length) %
             tabs.length;
-    this.currentTab = tabs[nextIndex];
+    const nextTab = tabs[nextIndex];
+    if (nextTab === undefined) return;
+    this.currentTab = nextTab;
     setTimeout(
       () =>
         document

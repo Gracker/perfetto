@@ -16,6 +16,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {ensureDefined} from '../../base/assert';
 import {describe, it, expect, vi} from 'vitest';
 import m from 'mithril';
 
@@ -152,7 +153,7 @@ describe('SqlResultTable unit handling', () => {
 
     expect(trace.scrollTo).toHaveBeenCalledTimes(1);
     expect(onInteraction).toHaveBeenCalledTimes(1);
-    const interaction = onInteraction.mock.calls[0][0] as UserInteraction;
+    const interaction = ensureDefined(onInteraction.mock.calls[0])[0] as UserInteraction;
     expect(interaction.target.timeRange).toEqual({
       start: '123',
       end: '1500123',
@@ -190,7 +191,7 @@ describe('SqlResultTable unit handling', () => {
 
     expect(trace.scrollTo).toHaveBeenCalledTimes(1);
     expect(onInteraction).toHaveBeenCalledTimes(1);
-    const interaction = onInteraction.mock.calls[0][0] as UserInteraction;
+    const interaction = ensureDefined(onInteraction.mock.calls[0])[0] as UserInteraction;
     expect(interaction.target.timeRange).toEqual({
       start: '1500000',
       end: '1500000',

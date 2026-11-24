@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2024-2026 Gracker (Chris)
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {THREAD_STATE_TRACK_KIND} from '../../public/track_kinds';
@@ -215,7 +216,7 @@ describe('critical path drawer contract', () => {
         context: 'between_slices', enclosingSlice: null},
       longestEventWait: {utid: 41, processName: 'com.secret.app', threadName: 'SecretWorker', state: 'S',
         durationMs: 46, wakeSourceClass: 'timer_or_device_wake'},
-      wakeupChain: [{...analysisFixture().wakeupChain[0], pathRole: 'event_wait'}],
+      wakeupChain: [{...ensureDefined(analysisFixture().wakeupChain[0]), pathRole: 'event_wait'}],
     });
     const root = document.createElement('div');
     root.innerHTML = renderCriticalPathDrawerBody(analysis, null);

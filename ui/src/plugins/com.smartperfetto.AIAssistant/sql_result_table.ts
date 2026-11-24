@@ -233,7 +233,10 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
 
     // Classify columns for styling (use column definitions if available)
     const columnClasses = columnDefinitions
-      ? columns.map((_, idx) => getColumnClasses(effectiveColumnDefs[idx]))
+      ? columns.map((_, idx) => {
+          const definition = effectiveColumnDefs[idx];
+          return definition ? getColumnClasses(definition) : '';
+        })
       : this.classifyColumns(columns);
 
     // Limit displayed rows: collapsed shows 10, expanded shows up to 50
@@ -497,7 +500,7 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
                         this.renderCellPerfetto(
                           cell,
                           cellIndex,
-                          columnClasses[cellIndex],
+                          columnClasses[cellIndex] ?? '',
                           trace,
                           row,
                           columns,
@@ -1392,6 +1395,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     const detected: TimestampColumn[] = [];
 
     columnDefs.forEach((def, idx) => {
+      const columnName = columns[idx];
+      if (columnName === undefined) return;
       // Check if this column has a navigate_timeline or navigate_range click action
       if (
         def.type === 'timestamp' &&
@@ -1400,8 +1405,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
       ) {
         const tsColumn: TimestampColumn = {
           columnIndex: idx,
-          columnName: columns[idx],
-          unit: this.resolveTimeUnit(def.unit, columns[idx]),
+          columnName,
+          unit: this.resolveTimeUnit(def.unit, columnName),
         };
 
         // If durationColumn is specified, find its index
@@ -1840,9 +1845,8 @@ export class SqlResultTable implements m.ClassComponent<SqlResultTableAttrs> {
     if (key === 'process_name') {
       // com.example.app -> app
       const parts = str.split('.');
-      if (parts.length > 2) {
-        return parts[parts.length - 1];
-      }
+      const leaf = parts.at(-1);
+      if (parts.length > 2 && leaf !== undefined) return leaf;
     }
 
     // 如果太长，截断

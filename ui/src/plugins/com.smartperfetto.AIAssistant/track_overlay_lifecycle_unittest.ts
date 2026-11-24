@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2024-2026 Gracker (Chris)
 
+import {ensureDefined} from '../../base/assert';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 const {addDebugSliceTrackMock} = vi.hoisted(() => ({
@@ -122,7 +123,7 @@ describe('canonical scene overlay capacity', () => {
     const rows = Array.from({length: 6000}, (_, i) => [String(9007199254740993n + BigInt(i)), '1', `observation-${i}`,
       ['userAction', 'deviceState', 'appResponse'][i % 3], `segment-${Math.floor(i / 3)}`]);
     await createOverlayTrack(trace, 'scene_canonical', ['ts', 'dur', 'event', 'dimension', 'segment_id'], rows);
-    const request = addDebugSliceTrackMock.mock.calls[0][0];
+    const request = ensureDefined(addDebugSliceTrackMock.mock.calls[0])[0];
     expect(request.data.sqlSource).toContain('observation-5999');
     expect(request.data.sqlSource).toContain('9007199254740993');
     expect(request.pivotOn).toBe('dimension');

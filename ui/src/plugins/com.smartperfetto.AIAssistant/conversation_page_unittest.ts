@@ -2,6 +2,7 @@
 // Copyright (C) 2024-2026 Gracker (Chris)
 // This file is part of SmartPerfetto. See LICENSE for details.
 
+import {ensureDefined} from '../../base/assert';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import m from 'mithril';
 import type {App} from '../../public/app';
@@ -434,7 +435,7 @@ describe('ConversationPage authorized restoration', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     restore.resolve(restoredPageConversation());
     await send;
-    expect(JSON.parse(String(fetch.mock.calls[1][1].body))).toMatchObject({sessionId: 'saved-conversation'});
+    expect(JSON.parse(String(ensureDefined(fetch.mock.calls[1])[1].body))).toMatchObject({sessionId: 'saved-conversation'});
     expect(page.store.messages[0]).toMatchObject({content: 'restored answer', turn: {partial: true}});
     page.onremove();
   });
@@ -455,7 +456,7 @@ describe('ConversationPage authorized restoration', () => {
     await Promise.resolve();
     expect(page.store.sessionId).toBe('new-conversation');
     expect(page.store.messages.some((message: any) => message.content === 'restored answer')).toBe(false);
-    expect(JSON.parse(String(fetch.mock.calls[1][1].body)).sessionId).toBeUndefined();
+    expect(JSON.parse(String(ensureDefined(fetch.mock.calls[1])[1].body)).sessionId).toBeUndefined();
     page.onremove();
   });
 
@@ -503,7 +504,7 @@ describe('ConversationPage authorized restoration', () => {
     const page = createPage();
     await vi.waitFor(() => expect(page.activeReceipt?.runId).toBe('old-run'));
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(String(fetch.mock.calls[1][0])).toContain('/stream?runId=old-run');
+    expect(String(ensureDefined(fetch.mock.calls[1])[0])).toContain('/stream?runId=old-run');
     stream.enqueue(new TextEncoder().encode('event: run_completed\ndata: {"outcome":{"kind":"answered","message":"restored answer"}}\n\n'));
     stream.close();
     await vi.waitFor(() => expect(page.activeReceipt).toBeUndefined());
@@ -546,7 +547,7 @@ describe('ConversationPage authorized restoration', () => {
     expect(page.error).toBe('');
     expect(page.store.messages).toEqual([]);
     await page.startNewConversation();
-    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body))).toEqual({runId: 'active-run'});
+    expect(JSON.parse(String(ensureDefined(fetch.mock.calls[2])[1]?.body))).toEqual({runId: 'active-run'});
     newStream.close();
     await newRun;
     page.onremove();

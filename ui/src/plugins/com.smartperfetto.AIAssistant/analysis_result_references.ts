@@ -89,15 +89,16 @@ export function findAnalysisResultByRef(
     );
     if (exactCompactMatches.length === 1) return exactCompactMatches[0]!;
   }
+  const shortPrefix = shortMatch?.[1];
   const matches = results.filter((item) => {
     const itemId = item.id.toLowerCase();
     const compactId = compactSnapshotId(item.id).toLowerCase();
     return (
       itemId === normalized ||
-      (shortMatch ? compactId.startsWith(shortMatch[1]) : false)
+      (shortPrefix !== undefined && compactId.startsWith(shortPrefix))
     );
   });
-  return matches.length === 1 ? matches[0] : null;
+  return matches.length === 1 ? (matches[0] ?? null) : null;
 }
 
 function uniqueIds(ids: Array<string | undefined>): string[] {
