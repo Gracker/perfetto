@@ -6483,28 +6483,22 @@ function handleSSEEventInner(
       return handleStrategyDecisionEvent(eventData, ctx);
 
     case 'architecture_detected': {
-      const archPayload = eventPayload(eventData);
-      const arch = asRecord(archPayload.architecture);
-      if (Object.keys(arch).length > 0) {
-        const archType = readStringField(arch, 'type', 'unknown');
-        const flutter = asRecord(arch.flutter);
-        const compose = readBooleanField(arch, 'compose', false);
-        const webview = asRecord(arch.webview);
-        const archDesc =
-          archType +
-          (Object.keys(flutter).length > 0
-            ? ` (Flutter ${readStringField(flutter, 'engine', '')})`
-            : '') +
-          (compose ? ' (Compose)' : '') +
-          (Object.keys(webview).length > 0
-            ? ` (WebView ${readStringField(webview, 'engine', '')})`
-            : '');
-        const confidence = readNumberField(arch, 'confidence', 0);
+      const arch = asRecord(eventPayload(eventData).architecture);
+      const info = asRecord(arch.additionalInfo);
+      const basis = readStringField(info, 'primaryBasis');
+      const pipelineId = readStringField(info, 'pipelineId');
+      // Older snapshots ranked thread/slice hints without an observed output path.
+      if (
+        asRecord(arch.detectorScope).version === 1 &&
+        basis && basis !== 'unknown' &&
+        pipelineId && pipelineId !== 'UNKNOWN'
+      ) {
+        const label = readStringField(info, 'pipelineLabel') || pipelineId;
         pushStreamingPhase(
           ctx,
           uiText(
-            `检测到渲染架构: ${archDesc} (置信度: ${Math.round(confidence * 100)}%)`,
-            `Detected rendering architecture: ${archDesc} (confidence: ${Math.round(confidence * 100)}%)`,
+            `目标应用的出图路径为 ${label}`,
+            `Observed app output path: ${pipelineId}`,
           ),
         );
       }

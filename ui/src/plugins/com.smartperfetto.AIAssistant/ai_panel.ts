@@ -472,11 +472,16 @@ function formatTeachingMs(value: number | undefined): string {
   return `${(value * 1000).toFixed(0)}µs`;
 }
 
-function teachingPrimaryPipelineId(result: TeachingPipelineResult): string {
-  return (
-    result.detection?.primary_pipeline?.id ||
-    result.detection?.primaryPipelineId ||
-    'UNKNOWN_PIPELINE'
+function teachingPrimaryPipelineId(result: TeachingPipelineResult): string | undefined {
+  const detection = result.detection;
+  const id = detection?.primary_pipeline?.id || detection?.primaryPipelineId;
+  return detection?.detected === false || id === 'UNKNOWN' ? undefined : id;
+}
+
+function missingOutputPathMessage(): string {
+  return uiText(
+    '现有出图证据不足以识别目标应用的管线。',
+    'There is insufficient output evidence to identify the app’s rendering path.',
   );
 }
 
@@ -486,15 +491,6 @@ function teachingPrimaryRenderingTypeId(
   return (
     result.detection?.primaryRenderingTypeId ||
     result.detection?.renderingType?.id
-  );
-}
-
-function teachingPrimaryConfidence(
-  result: TeachingPipelineResult,
-): number | undefined {
-  return (
-    result.detection?.primary_pipeline?.confidence ??
-    result.detection?.primaryConfidence
   );
 }
 
@@ -1033,7 +1029,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
               'div.sp-teaching-eyebrow',
               uiText('出图教学', 'Rendering Tutorial'),
             ),
-            m('h3', content?.title || pipelineId),
+            (content?.title || pipelineId) && m('h3', content?.title || pipelineId),
           ]),
           m('div.sp-teaching-actions', [
             m(
@@ -1069,6 +1065,7 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
     const subvariants = detection.subvariants || {};
     const renderingTypeId = teachingPrimaryRenderingTypeId(result);
     const pipelineId = teachingPrimaryPipelineId(result);
+    if (!pipelineId) return m('p.sp-teaching-summary', missingOutputPathMessage());
     const identityChips: Array<{
       label: string;
       value: string | undefined;
@@ -1086,10 +1083,6 @@ export class AIPanel implements m.ClassComponent<AIPanelAttrs> {
       : [{label: uiText('管线', 'Pipeline'), value: pipelineId}];
     const chips: Array<{label: string; value: string | undefined}> = [
       ...identityChips,
-      {
-        label: uiText('置信度', 'Confidence'),
-        value: formatTeachingConfidence(teachingPrimaryConfidence(result)),
-      },
       {label: uiText('缓冲区', 'Buffer'), value: subvariants.buffer_mode},
       {label: 'Flutter', value: subvariants.flutter_engine},
       {label: 'WebView', value: subvariants.webview_mode},
@@ -12067,19 +12060,18 @@ Click ⚙️ to configure backend connection.`,
     const detection = result.detection;
     const pipelineId = teachingPrimaryPipelineId(result);
     const renderingTypeId = teachingPrimaryRenderingTypeId(result);
-    const confidence = formatTeachingConfidence(
-      teachingPrimaryConfidence(result),
-    );
     const lines: string[] = [
       uiText('## 🎓 渲染管线教学', '## 🎓 Rendering pipeline tutorial'),
       '',
       uiText('### 检测结果', '### Detection result'),
     ];
-    if (renderingTypeId) {
+    if (!pipelineId) {
+      lines.push(missingOutputPathMessage());
+    } else if (renderingTypeId) {
       lines.push(
         uiText(
-          `- **出图类型**：\`${renderingTypeId}\`（置信度：${confidence}）`,
-          `- **Rendering type**: \`${renderingTypeId}\` (confidence: ${confidence})`,
+          `- **出图类型**：\`${renderingTypeId}\``,
+          `- **Rendering type**: \`${renderingTypeId}\``,
         ),
         uiText(
           `- **检测子路径**：\`${pipelineId}\``,
@@ -12089,8 +12081,8 @@ Click ⚙️ to configure backend connection.`,
     } else {
       lines.push(
         uiText(
-          `- **管线类型**：\`${pipelineId}\`（置信度：${confidence}）`,
-          `- **Pipeline type**: \`${pipelineId}\` (confidence: ${confidence})`,
+          `- **管线类型**：\`${pipelineId}\``,
+          `- **Pipeline type**: \`${pipelineId}\``,
         ),
       );
     }

@@ -2985,10 +2985,25 @@ describe('AIPanel teaching pipeline compatibility view', () => {
     expect(markdown).not.toContain(
       '**管线类型**: `FLUTTER_SURFACEVIEW_IMPELLER`',
     );
+    expect(markdown).not.toContain('置信度');
+    expect(renderedSummary).not.toContain('置信度');
     expect(renderedSummary).toContain('出图类型');
     expect(renderedSummary).toContain('S10_FLUTTER');
     expect(renderedSummary).toContain('检测子路径');
     expect(renderedSummary).toContain('伴随出图类型');
+  });
+
+  it('explains missing output evidence and retains observed events in teaching exports', () => {
+    const panel = new AIPanel() as any;
+    const result = {
+      detection: {detected: false, primaryPipelineId: 'UNKNOWN', primaryConfidence: 0},
+      observedFlow: {events: [{name: 'observed slice', stage: 'app', ts: 50}]},
+    };
+    const markdown = panel.buildTeachingPipelineMarkdown(result);
+    expect(markdown).toContain('出图证据不足');
+    expect(markdown).toContain('observed slice');
+    expect(markdown).not.toContain('UNKNOWN');
+    expect(JSON.stringify(panel.renderTeachingPipelineSummary(result))).toContain('出图证据不足');
   });
 
   it('returns explicit pin execution failure when trace context is absent', async () => {

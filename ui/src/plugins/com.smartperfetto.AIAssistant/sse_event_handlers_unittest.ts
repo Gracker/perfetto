@@ -4624,6 +4624,37 @@ describe('handleSSEEvent', () => {
     expect(ensureDefined(ctx.flowMessages[0]).content).toContain('Testing');
   });
 
+  it('shows the observed output path without presenting its share as confidence', () => {
+    const architecture = {
+      type: 'STANDARD',
+      confidence: 0.85,
+      detectorScope: {version: 1},
+      additionalInfo: {
+        primaryBasis: 'hwui',
+        pipelineId: 'AOSP_STANDARD',
+        pipelineLabel: '标准 Android View',
+      },
+    };
+    handleSSEEvent('architecture_detected', {data: {architecture}}, ctx);
+    expect(ctx.streamingFlow.phases).toEqual(['目标应用的出图路径为 标准 Android View']);
+
+    setUiLanguagePreference('en');
+    const english = createMockContext();
+    handleSSEEvent('architecture_detected', {data: {architecture}}, english);
+    expect(english.streamingFlow.phases).toEqual(['Observed app output path: AOSP_STANDARD']);
+  });
+
+  it('keeps unclassified output and old architecture guesses out of the opening', () => {
+    for (const architecture of [
+      {type: 'CAMERA', confidence: 0.7},
+      {type: 'UNKNOWN', detectorScope: {version: 1},
+        additionalInfo: {primaryBasis: 'unknown', pipelineId: 'UNKNOWN'}},
+    ]) {
+      handleSSEEvent('architecture_detected', {data: {architecture}}, ctx);
+    }
+    expect(ctx.streamingFlow.phases).toEqual([]);
+  });
+
   it('should route error events and return terminal result', () => {
     const result = handleSSEEvent('error', {data: {error: 'Test error'}}, ctx);
 
