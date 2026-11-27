@@ -179,6 +179,7 @@ import {
 import {sessionManager} from './session_manager';
 import {mermaidRenderer} from './mermaid_renderer';
 import {buildAssistantApiV1Url} from './assistant_api_v1';
+import {AREA_SELECTION_TRACK_LIMITS} from './generated/data_contract.types';
 import type {
   ExternalIssueContributionKind,
   ExternalIssueDecision,
@@ -9721,6 +9722,12 @@ Click ⚙️ to configure backend connection.`,
       m('div.sp-sel-card-meta', [
         m('span.sp-meta-pill', ['⏱ ', m('strong', dur)]),
         m('span.sp-meta-pill', ['📍 ', `${startMs}ms – ${endMs}ms`]),
+        sel.trackUris.length > AREA_SELECTION_TRACK_LIMITS.count
+          ? m('span.sp-meta-pill', uiText(
+              `已选 ${sel.trackUris.length} 条轨道 · 最多附带 ${AREA_SELECTION_TRACK_LIMITS.count} 条轨道详情`,
+              `${sel.trackUris.length} tracks selected · up to ${AREA_SELECTION_TRACK_LIMITS.count} track details included`,
+            ))
+          : null,
         info.sliceStatsStatus === 'observed'
           ? m('span.sp-meta-pill', [
               '📋 ',
@@ -9894,19 +9901,21 @@ Click ⚙️ to configure backend connection.`,
       const endNs = Number(sel.end);
       const durationNs = timeSpan ? Number(timeSpan.duration) : endNs - startNs;
 
-      const tracks: SelectionTrackInfo[] = sel.tracks.map((track) => ({
-        uri: track.uri,
-        ...(track.tags?.utid !== undefined
-          ? {utid: track.tags.utid as number}
-          : {}),
-        ...(track.tags?.upid !== undefined
-          ? {upid: track.tags.upid as number}
-          : {}),
-        ...(track.tags?.cpu !== undefined
-          ? {cpu: track.tags.cpu as number}
-          : {}),
-        ...(track.tags?.type ? {kind: track.tags.type as string} : {}),
-      }));
+      const tracks: SelectionTrackInfo[] = [];
+      for (const {uri, tags} of sel.tracks) {
+        if (tracks.length === AREA_SELECTION_TRACK_LIMITS.count) break;
+        // Unrepresentable URIs cannot identify a track. Never shorten one into another identity.
+        const identity = typeof uri === 'string' ? uri.trim() : '';
+        if (!identity || identity.length > AREA_SELECTION_TRACK_LIMITS.uriLength) continue;
+        const hint: SelectionTrackInfo = {uri: identity};
+        for (const key of ['utid', 'upid', 'cpu'] as const) {
+          const value = tags?.[key];
+          if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) hint[key] = value;
+        }
+        const kind = typeof tags?.type === 'string' ? tags.type.trim() : undefined;
+        if (kind && kind.length <= AREA_SELECTION_TRACK_LIMITS.kindLength) hint.kind = kind;
+        tracks.push(hint);
+      }
 
       return {
         kind: 'area',

@@ -1793,6 +1793,8 @@ export interface RunSupplementEvent {
   timestamp: number;
 }
 
+export const AREA_SELECTION_TRACK_LIMITS = {"count":256,"uriLength":512,"kindLength":128} as const;
+
 // =============================================================================
 // Column Definition System
 // =============================================================================

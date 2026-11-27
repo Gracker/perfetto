@@ -23,6 +23,7 @@ import m from 'mithril';
 import {defer} from '../../base/deferred';
 
 import {AIPanel} from './ai_panel';
+import {AREA_SELECTION_TRACK_LIMITS} from './generated/data_contract.types';
 import {getAISharedState, resetAISharedState, updateAISharedState} from './ai_shared_state';
 import {getFloatingState, updateFloatingState} from './ai_floating_state';
 import {
@@ -375,6 +376,27 @@ describe('AIPanel conversation selection context', () => {
       '分析当前选择的这一段',
       selectionContext,
     );
+  });
+
+  it('bounds area track hints while retaining the exact range and full selected count', async () => {
+    const panel = new AIPanel() as any;
+    const {count, uriLength, kindLength} = AREA_SELECTION_TRACK_LIMITS;
+    const tracks = [
+      {uri: 'x'.repeat(uriLength + 1)},
+      {uri: '/first', tags: {utid: -1, cpu: 0, type: 'x'.repeat(kindLength + 1)}},
+      ...Array.from({length: count}, (_, i) => ({uri: `/slice_${i}`, tags: {upid: i}})),
+    ];
+    panel.trace = {selection: {
+      selection: {kind: 'area', start: 2482581900000n, end: 2501801400000n,
+        trackUris: tracks.map(track => track.uri), tracks},
+      getTimeSpanOfSelection: () => ({duration: 19219500000n}),
+    }};
+    const context = await panel.captureSelectionContext();
+    expect(context).toMatchObject({source: 'area_selection', startNs: 2482581900000, endNs: 2501801400000,
+      durationNs: 19219500000, trackCount: tracks.length});
+    expect(context.tracks).toHaveLength(count);
+    expect(context.tracks[0]).toEqual({uri: '/first', cpu: 0});
+    expect(context.tracks.at(-1)).toEqual({uri: `/slice_${count - 2}`, upid: count - 2});
   });
 
   it('captures only stable area and track-tag identities without querying the trace', async () => {
